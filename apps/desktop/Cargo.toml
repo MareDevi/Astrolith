@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+astrolith-gpui = { path = "../../crates/astrolith-gpui" }
 gpui-kit = { workspace = true, features = ["tree-sitter-markdown", "tree-sitter-markdown-inline"] }
 
 [dev-dependencies]

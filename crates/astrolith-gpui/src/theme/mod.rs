@@ -7,7 +7,8 @@ use gpui_kit::{App, WindowAppearance, component::Theme};
 pub use tokens::ThemeTokens;
 
 /// User appearance preference; System remains distinct from its resolved mode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
     Light,
     Dark,

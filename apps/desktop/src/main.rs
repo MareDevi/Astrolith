@@ -3,23 +3,7 @@ mod spikes {
     pub mod layout;
 }
 
-use gpui_kit::component::ActiveTheme;
-use gpui_kit::{AppContext, Context, IntoElement, Render, Window, WindowOptions, div, prelude::*};
-
-struct Astrolith;
-
-impl Render for Astrolith {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child("Astrolith")
-    }
-}
+use gpui_kit::{AppContext, WindowOptions};
 
 fn main() {
     let editor_spike = std::env::args().any(|argument| argument == "--spike=editor");
@@ -62,12 +46,6 @@ fn main() {
                 return;
             }
 
-            if let Err(error) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
-                window.set_window_title("Astrolith");
-                cx.new(|_| Astrolith)
-            }) {
-                eprintln!("Could not open the Astrolith window: {error:#}");
-                std::process::exit(1);
-            }
+            astrolith_gpui::open(cx);
         });
 }
