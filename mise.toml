@@ -34,3 +34,11 @@ run = [{ task = "check" }]
 [tasks.dev]
 description = "Open the native desktop window"
 run = "cargo run --locked --package astrolith-desktop"
+
+[tasks."dev:editor"]
+description = "Open the disposable M00.2 Markdown editor spike"
+run = "cargo run --locked --package astrolith-desktop -- --spike=editor"
+
+[tasks."test:editor-perf"]
+description = "Measure bounded editor workloads on the headless test platform"
+run = "cargo test --release --locked --package astrolith-desktop large_document_workload -- --ignored --nocapture"
