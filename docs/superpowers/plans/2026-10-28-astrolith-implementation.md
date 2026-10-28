@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkboxes for tracking.
 
-**Status:** Ready for review  
+**Status:** In progress — M00 feasibility; M01 gate remains open
 **Version:** 1.0  
 **Date:** 2026-10-28  
 **Project:** Astrolith  
@@ -203,13 +203,13 @@ GitHub Actions must:
 - Produces: `astrolith-desktop` binary.
 - Produces: `mise run doctor`, `build`, `test`, `fmt`, `lint`.
 
-- [ ] Create the repository and Rust Workspace.
-- [ ] Define and install the Mise toolchain.
-- [ ] Verify GPUI Kit resolves with the selected Rust version.
-- [ ] Pin exact tool versions following compatibility verification.
-- [ ] Verify that `mise run doctor` succeeds.
-- [ ] Verify `mise run build` and `mise run test`.
-- [ ] Commit the bootstrap environment.
+- [x] Create the repository and Rust Workspace.
+- [x] Define and install the Mise toolchain.
+- [x] Verify GPUI Kit resolves with the selected Rust version.
+- [x] Pin exact tool versions following compatibility verification.
+- [x] Verify that `mise run doctor` succeeds.
+- [x] Verify `mise run build` and `mise run test`.
+- [x] Commit the bootstrap environment.
 
 **Acceptance:** A new developer or CI runner can recreate the Rust development environment using Mise and the documented native system dependencies.
 
@@ -222,15 +222,15 @@ GitHub Actions must:
 **Interfaces**
 - Produces: a temporary editor prototype and an API capability report.
 
-- [ ] Open a GPUI window containing the GPUI Kit Editor.
+- [x] Open a GPUI window containing the GPUI Kit Editor.
 - [ ] Verify Markdown syntax highlighting.
-- [ ] Verify selection and cursor APIs.
-- [ ] Verify undo/redo and programmatic content updates.
+- [x] Verify selection and cursor APIs.
+- [x] Verify undo/redo and programmatic content updates.
 - [ ] Verify Chinese and Japanese IME composition.
 - [ ] Verify clipboard handling and keyboard shortcuts.
 - [ ] Test large-document responsiveness.
-- [ ] Record API limitations and a go/no-go recommendation.
-- [ ] Commit the results without promoting the spike to product architecture.
+- [x] Record API limitations and a go/no-go recommendation.
+- [x] Commit the results without promoting the spike to product architecture.
 
 **Acceptance:** Critical editing operations work on Linux Wayland, or a documented replacement strategy is approved before M01.
 
@@ -240,13 +240,13 @@ GitHub Actions must:
 - Create: `apps/desktop/src/spikes/layout.rs`
 - Create: `docs/technical/design-system-spike.md`
 
-- [ ] Create a three-panel layout using GPUI Kit.
-- [ ] Test resizing and hiding panels.
-- [ ] Test centralized theme customization.
-- [ ] Test overlay/dialog behavior.
+- [x] Create a three-panel layout using GPUI Kit.
+- [x] Test resizing and hiding panels.
+- [x] Test centralized theme customization.
+- [x] Test overlay/dialog behavior.
 - [ ] Test HiDPI and fractional scaling.
-- [ ] Record theme and component API limitations.
-- [ ] Commit verification results.
+- [x] Record theme and component API limitations.
+- [x] Commit verification results.
 
 **Acceptance:** GPUI Kit can reproduce the intended Zed-inspired application shell without replacing major foundational controls.
 
