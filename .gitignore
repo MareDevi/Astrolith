@@ -1,0 +1,8 @@
+/target/
+/.superpowers/
+/.worktrees/
+/.mise.local.toml
+/.env
+/.env.*
+!/.env.example
+**/node_modules/
