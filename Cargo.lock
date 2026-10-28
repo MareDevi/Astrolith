@@ -274,6 +274,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrolith-core"
+version = "0.1.0"
+
+[[package]]
 name = "astrolith-desktop"
 version = "0.1.0"
 dependencies = [

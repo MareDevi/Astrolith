@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkboxes for tracking.
 
-**Status:** M00 manually accepted by the user; M01 implementation and review fixes complete
+**Status:** M00 manually accepted by the user; M01 complete; M02.1 domain models complete
 **Version:** 1.0  
 **Date:** 2026-10-28  
 **Project:** Astrolith  
@@ -350,6 +350,13 @@ pub struct ProjectId(pub String);
 ```
 
 **Tests:** Stable ID handling, invalid paths and collection identity.
+
+- [x] Add a dependency-free core crate with validated project, collection and entry identities.
+- [x] Preserve logical entry identity separately from explicit source-file mappings (review R2).
+- [x] Test custom IDs, overlapping collections, invalid paths and stable identity.
+- [x] Run `mise run check`, complete independent review and commit.
+
+See `docs/technical/m02-progress.md` for the model contract, verification and remaining M02 scope.
 
 ### Task M02.2 — Project Discovery
 
