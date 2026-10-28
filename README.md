@@ -19,6 +19,8 @@ If Mise requests trust, review `mise.toml` and use `mise trust` in this director
 
 `Cargo.lock` fixes the full Rust dependency graph. The UI depends on the pinned `gpui-kit = "=0.8.1"` facade; its default assets/components and matching GPUI 0.3.10 platform snapshot are enabled. The shell also uses Serde/JSON and Tempfile for application preferences. No JavaScript fixtures or package installation are needed yet. Future Astro fixtures must use project-local Bun tooling and committed lockfiles.
 
+The shell owns one Tokio service runtime; GPUI retains native UI and background CPU execution. Filesystem jobs use a bounded blocking lane, and preference changes coalesce for 250 ms before writing. Selected editor/layout/parser dependencies are optimized in development builds while application code keeps debug information and normal development compilation. See [concurrency boundaries and performance evidence](docs/technical/concurrency-and-responsiveness.md).
+
 ### Native prerequisites
 
 Mise does not install operating system development packages or GPU drivers. GPUI Kit's [installation guide](https://gpui-kit.com/docs/installation) describes platform requirements; the bootstrap uses the following build dependencies.
@@ -54,6 +56,10 @@ Install the Vulkan driver for your GPU as well (for example `vulkan-radeon`, `vu
 | `mise run check` | Run doctor, fmt, lint, build, and test in order; later milestones extend this gate. |
 | `mise run ci` | Run the same check composition in CI. |
 | `mise run dev` | Open the native desktop window. |
+| `mise run test:shell-perf` | Measure readonly file read/validation, editor installation and first headless frame in the dev profile. |
+| `mise run test:shell-perf:release` | Measure the same shell workloads in release. |
+| `mise run test:editor-perf:dev` | Measure editor load/input/frame CPU work with dev dependency optimizations. |
+| `mise run test:editor-perf` | Measure the disposable editor workloads in release. |
 
 The CI workflow configures Linux, macOS, and Windows builds/tests with the same Mise pins. Hosted runner results are separate evidence from local verification. Headless checks do not establish native IME, visual layout, focus, theme, or display scaling acceptance; those remain explicit M00 spike checks.
 ## M01 shell

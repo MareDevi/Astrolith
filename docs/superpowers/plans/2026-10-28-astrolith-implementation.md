@@ -2,8 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkboxes for tracking.
 
-**Status:** M00 manually accepted by the user; M01 complete; M02.1 domain models complete
-**Version:** 1.0  
+**Status:** M00 manually accepted by the user; M01 complete; M02.1 domain models and M02.R runtime/responsiveness repairs complete; native latency acceptance remains open
+**Version:** 1.1
 **Date:** 2026-10-28  
 **Project:** Astrolith  
 **Methodology:** Superpowers — TDD, task-based execution, review gates
@@ -12,7 +12,7 @@
 
 **Architecture:** Rust modular monolith with a GPUI Kit desktop shell, independent domain and document services, an Astro tooling adapter, and a replaceable preview surface.
 
-**Tech Stack:** Rust, GPUI Kit 0.8.1 (initial candidate), Cargo, Mise, Node.js, Bun, Tree-sitter, Astro CLI, Wry-based experimental WebView.
+**Tech Stack:** Rust, GPUI Kit 0.8.1 (pinned), Tokio service runtime, GPUI background executor, Cargo, Mise, Node.js, Bun, Tree-sitter, Astro CLI, Wry-based experimental WebView.
 
 **Spec:** `docs/superpowers/specs/2026-10-28-astrolith-design.md` (still absent). On 2026-10-28, the user explicitly authorized the existing M01 plan as this stage's design authority after reporting all M00 manual acceptance complete. See `docs/technical/m01-authority.md`.
 
@@ -55,6 +55,17 @@
 - No silent document data loss or unsafe type conversion.
 - Favor GPUI Kit components over custom replacements.
 - Preserve the ability to run the core test suites without launching the GUI.
+
+### 1.4 Concurrency and Responsiveness Amendment
+
+The user authorized this amendment on 2026-10-28 after reporting sluggish development UI and slow file opening. The binding execution boundaries, Zed source references, task ownership, queue limits and performance procedure are in [Concurrency and responsiveness](../../technical/concurrency-and-responsiveness.md). This authority covers the amendment and confirmed responsiveness repairs; it does not fill the missing original specification.
+
+- GPUI owns UI entities and presentation. One application-owned Tokio runtime (two async workers) owns service I/O; synchronous filesystem operations use a lane capped at two running jobs. GPUI's existing background executor remains available for bounded CPU work.
+- No UI `block_on`, synchronous service wait, filesystem operation, or large derived-data rebuild in `render`. An `async fn` declaration is not proof of background execution.
+- Retain cancellable task handles. Carry project generation, document identity and revision across asynchronous boundaries; reject obsolete results even after cancellation.
+- Bound admission and output queues. Merge watcher bursts, debounce settings writes, and serialize document saves independently of settings.
+- Explicitly coordinate task draining, document integrity, child-process termination and reaping on project switch and application exit.
+- Native responsiveness requires measured file-to-present and interaction latency; headless CPU timing and successful build are separate evidence.
 
 ---
 
@@ -360,6 +371,16 @@ See `docs/technical/m02-progress.md` for the model contract, verification and re
 
 ### Task M02.2 — Project Discovery
 
+**Prerequisite: M02.R — Runtime and Responsiveness**
+
+- [x] Add and test the application-owned Tokio/GPUI bridge, including queued cancellation and blocking concurrency after cancellation.
+- [x] Measure the existing readonly file-to-frame path and debug/release editor workloads before changing behavior.
+- [x] Remove redundant readonly full-buffer replacement work, coalesce preference writes, and optimize measured development dependency hotspots.
+- [x] Record before/after CPU measurements, run `mise run check`, and perform a bounded native smoke. Keep native latency acceptance separately open until measured or explicitly accepted by the user.
+- [x] Commit the repair and retain the original review documents.
+
+M02.2 discovery must use the runtime/executor contract above and expose cancellation and obsolete-project rejection.
+
 **Files**
 - Create: `crates/astrolith-astro/src/discovery.rs`
 - Create: `crates/astrolith-astro/src/config.rs`
@@ -390,6 +411,8 @@ pub async fn scan_collections(
 
 **Tests:** Nested directories, duplicate paths, ignored files, create/delete/rename events and path traversal.
 
+Also test bounded scan admission, watcher burst merging/overflow rescan, duplicate source-load coalescing and results arriving after project switch. Limits and ownership are defined in the concurrency amendment.
+
 ### Task M02.4 — Document Editing Integration
 
 **Files**
@@ -404,6 +427,8 @@ pub struct DocumentRevision(pub u64);
 ```
 
 **Tests:** Text edits increase revision, opening a different document restores the intended buffer, and undo/redo does not corrupt dirty-state tracking.
+
+Keep mutable sessions retained across tab switches. Test out-of-order load/parse results and project/document/revision validation. The M01 readonly snapshot initialization optimization is not an editable-session refresh strategy.
 
 **M02 Gate:** A real Astro project can be opened; its local Markdown files can be discovered and edited.
 
@@ -508,6 +533,8 @@ pub async fn save_snapshot(
 
 **Tests:** Concurrent edits, external modification, interrupted writes, stale revisions, symlink replacement and I/O failure.
 
+Use one writer per document and immutable snapshots. Test exit while save N is running and revision N+1 remains dirty, cancellation during admission, and bounded shutdown without abandoning document-integrity operations.
+
 ### Task M04.3 — Recovery
 
 **Files**
@@ -542,6 +569,8 @@ pub enum ServerStatus {
 ```
 
 **Tests:** Startup, failed command, port conflict, cancellation, process exit and child-process ownership.
+
+Implement runtime-owned stdout/stderr draining with capped retention, startup/stop deadlines and platform process-tree cleanup. Test output flooding and project switch/exit without orphaned descendants; see the concurrency amendment for limits.
 
 ### Task M05.2 — Entry Route Resolver
 
@@ -696,4 +725,4 @@ No application code should be implemented before this plan is approved.
 
 ---
 
-**End of Implementation Plan v1.0**
+**End of Implementation Plan v1.1**

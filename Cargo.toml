@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 gpui-kit = "=0.8.1"
+tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "sync", "time", "net", "process", "io-util"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -20,3 +21,14 @@ todo = "deny"
 
 [profile.dev]
 debug = 1
+
+# Keep application code easy to debug while the editor's hot paths stay usable.
+# These overrides also apply to tests, so dev benchmarks exercise the same code.
+[profile.dev.package]
+gpui-base = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-pre = { opt-level = 3 }
+ropey = { opt-level = 3 }
+gpui-pre-sum-tree = { opt-level = 3 }
+tree-sitter = { opt-level = 3 }
+taffy = { opt-level = 3 }

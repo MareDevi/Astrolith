@@ -19,7 +19,7 @@ pub(crate) struct WorkspacePanel {
 impl WorkspacePanel {
     pub fn show_source(
         &mut self,
-        source: &crate::file::DocumentSource,
+        source: crate::file::DocumentSource,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -30,10 +30,14 @@ impl WorkspacePanel {
             .to_string_lossy()
             .into_owned()
             .into();
-        if let Some(editor) = &self.editor {
-            editor.update(cx, |editor, cx| {
-                editor.set_value(source.source.clone(), window, cx)
-            });
+        if self.editor.is_some() {
+            // A readonly file is a new snapshot, not an edit of the previous
+            // document. Initial content avoids the full replacement edit path.
+            self.editor = Some(cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .language("markdown")
+                    .default_value(source.source)
+            }));
         }
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();

@@ -10,6 +10,7 @@ use crate::{
         panels::WorkspacePanel,
         state::{LayoutState, PanelKind},
     },
+    runtime,
     settings::{Settings, SettingsStore, settings_path},
     theme::{self, ThemeMode},
 };
@@ -21,23 +22,29 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, PathPromptOptions,
-    Render, Subscription, Window, WindowOptions, div, prelude::*, px, size,
+    Render, Subscription, Task, Window, WindowOptions, div, prelude::*, px, size,
 };
 
 type LatestSettings = Arc<Mutex<(u64, Settings)>>;
 
 /// Open the shell after background preference loading; bootstrap owns no services.
 pub fn open(cx: &mut App) {
+    if let Err(error) = runtime::init(cx) {
+        eprintln!("Could not start background services: {error}");
+        cx.quit();
+        return;
+    }
     commands::bind_keys(cx);
     cx.spawn(async move |cx| {
-        let loaded = cx
-            .background_spawn(async {
-                settings_path().map(|path| {
-                    let (store, settings, warning) = SettingsStore::load(path);
-                    (Arc::new(store), settings, warning)
-                })
+        let loaded = runtime::blocking(cx, || {
+            settings_path().map(|path| {
+                let (store, settings, warning) = SettingsStore::load(path);
+                (Arc::new(store), settings, warning)
             })
-            .await;
+        })
+        .await
+        .map_err(std::io::Error::other)
+        .and_then(|result| result);
         cx.update(|cx| {
             let (store, settings, warning) = match loaded {
                 Ok((store, settings, warning)) => (Some(store), settings, warning),
@@ -73,12 +80,14 @@ pub(crate) struct Shell {
     palette: Entity<CommandState>,
     palette_focus: FocusHandle,
     opening: bool,
+    opening_task: Option<Task<()>>,
     file_status: String,
     _skin: Rc<DockSkin>,
     settings: Settings,
     store: Option<Arc<SettingsStore>>,
     latest: LatestSettings,
     revision: u64,
+    settings_task: Option<Task<()>>,
     warning: Option<String>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -187,12 +196,17 @@ impl Shell {
             App::on_app_quit(cx, move |cx| {
                 let store = store.clone();
                 let latest = latest.clone();
-                cx.background_executor().spawn(async move {
+                let flush = runtime::flush_on_quit(cx, move || {
                     let snapshot = latest.lock().ok().map(|snapshot| snapshot.clone());
                     if let Some((revision, settings)) = snapshot
                         && let Err(error) = store.save(revision, &settings)
                     {
                         eprintln!("Could not save preferences on exit: {error}");
+                    }
+                });
+                cx.background_executor().spawn(async move {
+                    if let Err(error) = flush.await {
+                        eprintln!("Could not finish preference flush: {error}");
                     }
                 })
             })
@@ -208,12 +222,14 @@ impl Shell {
             palette,
             palette_focus: cx.focus_handle().tab_stop(true),
             opening: false,
+            opening_task: None,
             file_status: "Readonly · No file open".into(),
             _skin: skin,
             settings,
             store,
             latest,
             revision: 0,
+            settings_task: None,
             warning,
             focus,
             _subscriptions: subscriptions,
@@ -278,10 +294,15 @@ impl Shell {
         let Some(store) = self.store.clone() else {
             return;
         };
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move { store.save(revision, &settings) })
-                .await;
+        let timer = cx
+            .background_executor()
+            .timer(std::time::Duration::from_millis(250));
+        self.settings_task = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            let result = runtime::blocking(cx, move || store.save(revision, &settings))
+                .await
+                .map_err(std::io::Error::other)
+                .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 if this.revision == revision {
                     this.warning = result
@@ -290,8 +311,7 @@ impl Shell {
                     cx.notify();
                 }
             });
-        })
-        .detach();
+        }));
     }
 
     fn toggle_panel(&mut self, kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -403,13 +423,13 @@ impl Shell {
             multiple: false,
             prompt: Some("Open UTF-8 text file".into()),
         });
-        cx.spawn_in(window, async move |this, cx| {
+        self.opening_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = match selected.await {
                 Ok(Ok(Some(paths))) => match paths.into_iter().next() {
                     Some(path) => Some(
-                        cx.background_spawn(async move { read_document(path) })
+                        runtime::blocking(cx, move || read_document(path))
                             .await
-                            .map_err(|error| error.to_string()),
+                            .and_then(|result| result.map_err(|error| error.to_string())),
                     ),
                     None => None,
                 },
@@ -426,8 +446,7 @@ impl Shell {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        }));
     }
 
     fn show_document(
@@ -436,8 +455,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.document
-            .update(cx, |panel, cx| panel.show_source(&source, window, cx));
         self.navigator.update(cx, |panel, cx| {
             panel.set_content(source.path.display().to_string(), cx)
         });
@@ -454,6 +471,8 @@ impl Shell {
             source.source.len(),
             source.path.display()
         );
+        self.document
+            .update(cx, |panel, cx| panel.show_source(source, window, cx));
         self.document.read(cx).focus_handle(cx).focus(window, cx);
     }
 }
@@ -573,6 +592,7 @@ mod tests {
     fn mount(cx: &mut TestAppContext, settings: Settings) -> (WindowHandle<Root>, Entity<Shell>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
+            runtime::init(cx).unwrap();
             commands::bind_keys(cx);
             let (handle, view) = gpui_kit::open_window(
                 WindowOptions {
@@ -783,7 +803,10 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn file_picker_opens_readonly_source_and_cancel_preserves_the_buffer(cx: &mut TestAppContext) {
+    async fn file_picker_opens_readonly_source_and_cancel_preserves_the_buffer(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("中文.mdx");
         let source = "# 日本語\n<Example>{42}</Example> 🦀\n";
@@ -800,7 +823,7 @@ mod tests {
             assert!(options.files && !options.directories && !options.multiple);
             Some(vec![selected])
         });
-        cx.run_until_parked();
+        cx.condition(&view, |shell, _| !shell.opening).await;
         cx.update_window(handle.into(), |_, window, cx| {
             let editor = view.read(cx).document.read(cx).editor.clone().unwrap();
             assert_eq!(editor.read(cx).value(), source);
@@ -830,5 +853,76 @@ mod tests {
             );
         });
         assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    }
+
+    #[gpui_kit::test]
+    async fn settings_burst_does_not_write_intermediate_drag_positions(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preferences.json");
+        let (store, settings, _) = SettingsStore::load(path.clone());
+        let (_, view) = mount(cx, settings);
+        view.update(cx, |shell, cx| {
+            shell.store = Some(Arc::new(store));
+            shell.settings.layout.sidebar_width = 230.;
+            shell.persist(cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(200));
+        assert!(
+            !path.exists(),
+            "dragging must not sync every intermediate width"
+        );
+        view.update(cx, |shell, cx| {
+            shell.settings.layout.sidebar_width = 275.;
+            shell.persist(cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(200));
+        assert!(!path.exists(), "a new change must restart the debounce");
+        cx.executor().advance_clock(Duration::from_millis(50));
+        cx.executor().allow_parking();
+        cx.condition(&view, |_, _| path.exists()).await;
+        let (_, restored, warning) = SettingsStore::load(path);
+        assert!(warning.is_none());
+        assert_eq!(restored.layout.sidebar_width, 275.);
+    }
+
+    #[gpui_kit::test]
+    #[ignore = "bounded shell measurements; run mise run test:shell-perf"]
+    fn readonly_file_open_workload(cx: &mut TestAppContext) {
+        use std::time::Instant;
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = mount(cx, Settings::default());
+        for (bytes, long_line) in [
+            (1024, false),
+            (100 * 1024, false),
+            (1024 * 1024, false),
+            (100 * 1024, true),
+        ] {
+            let unit = if long_line {
+                "中文 🦀 **hello** "
+            } else {
+                "# 中文 🦀\nA multilingual paragraph with **emphasis**, `inline code`, 日本語, and enough ordinary words to represent real article content.\n"
+            };
+            let text = unit.repeat(bytes / unit.len() + 1);
+            let path = directory.path().join("measurement.md");
+            std::fs::write(&path, &text).unwrap();
+            let start = Instant::now();
+            let source = read_document(path).unwrap();
+            let read_ms = start.elapsed().as_secs_f64() * 1000.;
+            cx.update_window(handle.into(), |_, window, cx| {
+                let start = Instant::now();
+                view.update(cx, |shell, cx| shell.show_document(source, window, cx));
+                let install_ms = start.elapsed().as_secs_f64() * 1000.;
+                let start = Instant::now();
+                window.render_frame(cx);
+                let frame_ms = start.elapsed().as_secs_f64() * 1000.;
+                println!("SHELL_OPEN bytes={} lines={} long_line={long_line} read_ms={read_ms:.3} install_ms={install_ms:.3} frame_ms={frame_ms:.3}", text.len(), text.lines().count());
+                let editor = view.read(cx).document.read(cx).editor.as_ref().unwrap();
+                assert_eq!(editor.read(cx).value(), text);
+                assert!(editor.read(cx).focus_handle(cx).is_focused(window));
+            }).unwrap();
+        }
     }
 }

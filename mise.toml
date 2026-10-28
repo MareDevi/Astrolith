@@ -46,3 +46,15 @@ run = "cargo test --release --locked --package astrolith-desktop large_document_
 [tasks."dev:layout"]
 description = "Open the disposable M00.3 theme and dock spike"
 run = "cargo run --locked --package astrolith-desktop -- --spike=layout"
+
+[tasks."test:shell-perf"]
+description = "Measure bounded readonly file-to-frame CPU work in the development profile"
+run = "cargo test --workspace --locked readonly_file_open_workload -- --ignored --nocapture"
+
+[tasks."test:shell-perf:release"]
+description = "Measure the same readonly file-to-frame CPU workload in release"
+run = "cargo test --workspace --release --locked readonly_file_open_workload -- --ignored --nocapture"
+
+[tasks."test:editor-perf:dev"]
+description = "Measure the editor workloads with the same dependency optimizations as dev"
+run = "cargo test --workspace --locked large_document_workload -- --ignored --nocapture"
