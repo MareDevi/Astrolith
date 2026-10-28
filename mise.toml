@@ -1,2 +1,36 @@
 [tools]
-rust = "latest"
+rust = { version = "1.99.1", profile = "minimal", components = ["rust-analyzer", "rust-src", "clippy", "rustfmt"] }
+node = "26.12.1"
+bun = "1.4.4"
+
+[tasks.doctor]
+description = "Check the selected tools and native build prerequisites"
+run = "node scripts/doctor.mjs"
+
+[tasks.build]
+description = "Build the native desktop binary"
+run = "cargo build --workspace --locked"
+
+[tasks.test]
+description = "Run workspace tests without opening a native window"
+run = "cargo test --workspace --locked"
+
+[tasks.fmt]
+description = "Check Rust formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.lint]
+description = "Lint every workspace target"
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
+[tasks.check]
+description = "Run the current milestone's automated checks"
+run = [{ task = "doctor" }, { task = "fmt" }, { task = "lint" }, { task = "build" }, { task = "test" }]
+
+[tasks.ci]
+description = "Run the same checks in continuous integration"
+run = [{ task = "check" }]
+
+[tasks.dev]
+description = "Open the native desktop window"
+run = "cargo run --locked --package astrolith-desktop"
