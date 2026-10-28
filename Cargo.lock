@@ -281,6 +281,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrolith-gpui"
+version = "0.1.0"
+dependencies = [
+ "gpui-kit",
+]
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
