@@ -1,5 +1,6 @@
 mod spikes {
     pub mod editor;
+    pub mod layout;
 }
 
 use gpui_kit::component::ActiveTheme;
@@ -22,6 +23,7 @@ impl Render for Astrolith {
 
 fn main() {
     let editor_spike = std::env::args().any(|argument| argument == "--spike=editor");
+    let layout_spike = std::env::args().any(|argument| argument == "--spike=layout");
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
@@ -32,6 +34,19 @@ fn main() {
                 }
             })
             .detach();
+
+            if layout_spike {
+                if let Err(error) =
+                    gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                        window.set_window_title("Astrolith · Layout spike");
+                        cx.new(|cx| spikes::layout::LayoutSpike::new(window, cx))
+                    })
+                {
+                    eprintln!("Could not open the layout spike: {error:#}");
+                    std::process::exit(1);
+                }
+                return;
+            }
 
             if editor_spike {
                 spikes::editor::EditorSpike::bind_keys(cx);

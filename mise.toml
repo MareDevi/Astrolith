@@ -42,3 +42,7 @@ run = "cargo run --locked --package astrolith-desktop -- --spike=editor"
 [tasks."test:editor-perf"]
 description = "Measure bounded editor workloads on the headless test platform"
 run = "cargo test --release --locked --package astrolith-desktop large_document_workload -- --ignored --nocapture"
+
+[tasks."dev:layout"]
+description = "Open the disposable M00.3 theme and dock spike"
+run = "cargo run --locked --package astrolith-desktop -- --spike=layout"
