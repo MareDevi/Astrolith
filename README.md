@@ -1,6 +1,8 @@
 # Astrolith
 
-Astrolith is a planned native desktop application built with Rust, GPUI, and GPUI Kit. The repository currently contains the M00 feasibility bootstrap: one real native window. Product architecture and editor features are pending the feasibility gate. The implementation plan's referenced design specification is missing; the plan is provisional for M00.
+Astrolith is a native Rust/GPUI Kit application for the planned Astro Content Collections editor. M01 provides a persistent dock layout, system/light/dark appearance, a searchable command palette, and readonly local UTF-8 file navigation. Astro project discovery, editing, safe document saving, and preview services remain later milestones.
+
+M00 manual acceptance was confirmed by the user. The original design specification remains absent; the user authorized the existing M01 plan as this stage's authority. See [the decision record](docs/technical/m01-authority.md) and [M01 verification](docs/technical/m01-progress.md).
 
 ## Development environment
 
@@ -15,7 +17,7 @@ mise run dev
 
 If Mise requests trust, review `mise.toml` and use `mise trust` in this directory. Tool installation needs network access. The exact project versions are Rust **1.99.1** (with `rust-analyzer`, `rust-src`, `clippy`, and `rustfmt`), Node.js **26.12.1**, and Bun **1.4.4**. `mise.toml` is authoritative; tools are scoped to this project. There is no competing Rust/Node version file. Mise **2026.10.19** is the tested task runner and the CI version.
 
-`Cargo.lock` fixes the full Rust dependency graph. The only direct application dependency is `gpui-kit = "=0.8.1"`; its default assets/components and matching GPUI 0.3.10 platform snapshot are enabled. No JavaScript fixtures or package installation are needed yet. Future Astro fixtures must use project-local Bun tooling and committed lockfiles.
+`Cargo.lock` fixes the full Rust dependency graph. The UI depends on the pinned `gpui-kit = "=0.8.1"` facade; its default assets/components and matching GPUI 0.3.10 platform snapshot are enabled. The shell also uses Serde/JSON and Tempfile for application preferences. No JavaScript fixtures or package installation are needed yet. Future Astro fixtures must use project-local Bun tooling and committed lockfiles.
 
 ### Native prerequisites
 
@@ -46,7 +48,7 @@ Install the Vulkan driver for your GPU as well (for example `vulkan-radeon`, `vu
 | --- | --- |
 | `mise run doctor` | Check tool executables, lockfile metadata, and platform build prerequisites; a compilation is still required to prove compatibility. |
 | `mise run build` | Build `astrolith-desktop` with the lockfile. |
-| `mise run test` | Run headless workspace tests. Bootstrap has no domain tests yet. |
+| `mise run test` | Run headless workspace tests. Includes preference, command, readonly-source, and UI interaction tests. |
 | `mise run fmt` | Check formatting without changing files. |
 | `mise run lint` | Run Clippy for every workspace target with warnings denied. |
 | `mise run check` | Run doctor, fmt, lint, build, and test in order; later milestones extend this gate. |
@@ -54,3 +56,21 @@ Install the Vulkan driver for your GPU as well (for example `vulkan-radeon`, `vu
 | `mise run dev` | Open the native desktop window. |
 
 The CI workflow configures Linux, macOS, and Windows builds/tests with the same Mise pins. Hosted runner results are separate evidence from local verification. Headless checks do not establish native IME, visual layout, focus, theme, or display scaling acceptance; those remain explicit M00 spike checks.
+## M01 shell
+
+Run `mise run dev`. Use **Open file…** to view a local UTF-8 source file (up to 8 MiB and 50,000 lines). The document is readonly: selection and copy work; edits and saving are unavailable. MDX bodies remain intact as source; MDX-aware highlighting is not promised. File errors and picker cancellation preserve the current document. Reads run off the UI thread.
+
+**Commands…** searches the shared registry, including panel toggles, document focus, theme selection, and reset layout. Arrow keys select a result; Enter invokes it. Escape first clears a nonempty search, then dismisses the palette and restores focus.
+
+| Command | Linux / Windows | macOS |
+| --- | --- | --- |
+| Open file | Ctrl+O | Command+O |
+| Commands | Ctrl+Shift+P | Command+Shift+P |
+| Toggle files | Ctrl+B | Command+B |
+| Toggle inspector | Ctrl+Alt+I | Command+Option+I |
+| Toggle preview region | Ctrl+Alt+P | Command+Option+P |
+| Focus document | Ctrl+1 | Command+1 |
+
+The preview region currently reports that no preview is running. It does not start a development server. Theme mode, side widths, and panel visibility restore at startup. Preferences use `astrolith/preferences.json` under `$XDG_CONFIG_HOME` (or `~/.config`) on Linux, `~/Library/Application Support` on macOS, and `%APPDATA%` on Windows. An absolute `ASTROLITH_SETTINGS_PATH` can isolate a smoke run. Invalid, unsupported, or externally changed settings are preserved and reported; fix the settings file and restart to enable persistence again.
+
+`mise run dev:editor` and `mise run dev:layout` retain the disposable M00 probes. Their manual acceptance does not automatically establish native acceptance for new M01 behavior. Local native evidence is Linux Wayland only; hosted CI and macOS/Windows native results require separate validation.

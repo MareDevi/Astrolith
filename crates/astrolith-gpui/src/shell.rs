@@ -165,10 +165,15 @@ impl Shell {
         let palette = cx.new(|cx| CommandState::new(window, cx));
         let latest = Arc::new(Mutex::new((0, settings.clone())));
         let mut subscriptions = vec![
-            cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, _, cx| {
+            cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, window, cx| {
                 if matches!(event, DockEvent::LayoutChanged) {
+                    this.constrain_docks(window, cx);
                     this.capture_layout(cx);
                 }
+            }),
+            cx.observe_window_bounds(window, |this, window, cx| {
+                this.constrain_docks(window, cx);
+                this.capture_layout(cx);
             }),
             cx.observe_window_appearance(window, |this, window, cx| {
                 if this.settings.theme == ThemeMode::System {
@@ -213,6 +218,32 @@ impl Shell {
             focus,
             _subscriptions: subscriptions,
         }
+    }
+
+    fn constrain_docks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let viewport = window.viewport_size();
+        let side_maximum = ((f32::from(viewport.width) - 320.) / 2.).clamp(160., 400.);
+        // Reserve vertical room for document content, tabs, toolbar, and status.
+        let bottom_maximum = (f32::from(viewport.height) - 300.).max(80.);
+        self.dock.update(cx, |dock, cx| {
+            for (placement, maximum) in [
+                (DockPlacement::Left, side_maximum),
+                (DockPlacement::Right, side_maximum),
+                (DockPlacement::Bottom, bottom_maximum),
+            ] {
+                if let Some(current) = dock.dock_size(placement) {
+                    let minimum = if placement == DockPlacement::Bottom {
+                        80.
+                    } else {
+                        160.
+                    };
+                    let constrained = f32::from(current).clamp(minimum, maximum);
+                    if current != px(constrained) {
+                        dock.set_dock_size(placement, px(constrained), window, cx);
+                    }
+                }
+            }
+        });
     }
 
     fn capture_layout(&mut self, cx: &mut Context<Self>) {
@@ -627,6 +658,39 @@ mod tests {
                     .try_find("inspector-panel")
                     .is_none_or(|panel| !panel.visible())
             );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn shrinking_after_expanded_docks_preserves_document_and_panel_geometry(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = mount(cx, Settings::default());
+        cx.simulate_window_resize(handle.into(), size(px(1800.), px(1100.)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            view.read(cx).dock.clone().update(cx, |dock, cx| {
+                for placement in [DockPlacement::Left, DockPlacement::Right] {
+                    dock.set_dock_size(placement, px(650.), window, cx);
+                }
+                dock.toggle_dock(DockPlacement::Bottom, window, cx);
+                dock.set_dock_size(DockPlacement::Bottom, px(650.), window, cx);
+            });
+        })
+        .unwrap();
+        cx.simulate_window_resize(handle.into(), size(px(800.), px(600.)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let document = window.find("document-panel").bounds();
+            assert!(document.size.width >= px(280.));
+            assert!(document.size.height >= px(150.));
+            for id in ["navigator-panel", "inspector-panel", "preview-panel"] {
+                let bounds = window.find(id).bounds();
+                assert!(bounds.left() >= px(0.) && bounds.right() <= px(800.));
+                assert!(bounds.top() >= px(0.) && bounds.bottom() <= px(600.));
+            }
+            assert!(view.read(cx).settings.layout.sidebar_width <= 240.);
         })
         .unwrap();
     }

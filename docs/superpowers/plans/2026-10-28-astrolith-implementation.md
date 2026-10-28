@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkboxes for tracking.
 
-**Status:** In progress — M00 feasibility; M01 gate remains open
+**Status:** M00 manually accepted by the user; M01 implementation and review fixes complete
 **Version:** 1.0  
 **Date:** 2026-10-28  
 **Project:** Astrolith  
@@ -14,7 +14,7 @@
 
 **Tech Stack:** Rust, GPUI Kit 0.8.1 (initial candidate), Cargo, Mise, Node.js, Bun, Tree-sitter, Astro CLI, Wry-based experimental WebView.
 
-**Spec:** `docs/superpowers/specs/2026-10-28-astrolith-design.md`
+**Spec:** `docs/superpowers/specs/2026-10-28-astrolith-design.md` (still absent). On 2026-10-28, the user explicitly authorized the existing M01 plan as this stage's design authority after reporting all M00 manual acceptance complete. See `docs/technical/m01-authority.md`.
 
 ---
 
@@ -223,12 +223,12 @@ GitHub Actions must:
 - Produces: a temporary editor prototype and an API capability report.
 
 - [x] Open a GPUI window containing the GPUI Kit Editor.
-- [ ] Verify Markdown syntax highlighting.
+- [x] Verify Markdown syntax highlighting.
 - [x] Verify selection and cursor APIs.
 - [x] Verify undo/redo and programmatic content updates.
-- [ ] Verify Chinese and Japanese IME composition.
-- [ ] Verify clipboard handling and keyboard shortcuts.
-- [ ] Test large-document responsiveness.
+- [x] Verify Chinese and Japanese IME composition.
+- [x] Verify clipboard handling and keyboard shortcuts.
+- [x] Test large-document responsiveness.
 - [x] Record API limitations and a go/no-go recommendation.
 - [x] Commit the results without promoting the spike to product architecture.
 
@@ -244,11 +244,13 @@ GitHub Actions must:
 - [x] Test resizing and hiding panels.
 - [x] Test centralized theme customization.
 - [x] Test overlay/dialog behavior.
-- [ ] Test HiDPI and fractional scaling.
+- [x] Test HiDPI and fractional scaling.
 - [x] Record theme and component API limitations.
 - [x] Commit verification results.
 
 **Acceptance:** GPUI Kit can reproduce the intended Zed-inspired application shell without replacing major foundational controls.
+
+**M00 acceptance update (2026-10-28):** All manual checks accepted by the user; original automated/manual evidence remains separately identified in `docs/technical/m00-progress.md`.
 
 **M00 Gate:** Do not proceed to the main application implementation until the editor, layout and toolchain risks have explicit resolutions.
 
@@ -277,11 +279,11 @@ pub enum ThemeMode {
 }
 ```
 
-- [ ] Test semantic token completeness.
-- [ ] Test system theme resolution.
-- [ ] Implement the GPUI Kit theme adapter.
-- [ ] Verify both light and dark renderings.
-- [ ] Commit.
+- [x] Test semantic token completeness.
+- [x] Test system theme resolution.
+- [x] Implement the GPUI Kit theme adapter.
+- [x] Verify both light and dark renderings.
+- [x] Commit.
 
 ### Task M01.2 — Native Layout
 
@@ -302,15 +304,24 @@ pub struct LayoutState {
 }
 ```
 
-- [ ] Test panel visibility state transitions.
-- [ ] Implement GPUI Kit docking layout.
-- [ ] Add persistence for layout settings.
-- [ ] Verify restoration after restart.
-- [ ] Commit.
+- [x] Test panel visibility state transitions.
+- [x] Implement GPUI Kit docking layout.
+- [x] Add persistence for layout settings.
+- [x] Verify restoration after restart.
+- [x] Commit.
+
+Restoration evidence covers disk round trips and reconstructed headless windows. Native graceful close/reopen persistence remains separate platform acceptance; see `docs/technical/m01-progress.md`.
 
 ### Task M01.3 — Commands and Navigation
 
 Implement an application command registry and Command Palette.
+
+- [x] Share command identities between toolbar, keyboard shortcuts, and searchable palette.
+- [x] Open local UTF-8 files as readonly snapshots using a native picker and background I/O.
+- [x] Verify command filtering/confirmation, panel toggles, document focus, cancellation and focus restoration.
+- [x] Run `mise run check` and commit.
+
+M01 file opening is readonly. Editable document sessions and Astro discovery remain M02 responsibilities. See `docs/technical/m01-authority.md`.
 
 **Acceptance:** Keyboard navigation opens files, toggles panels and invokes registered application commands without coupling commands to individual widgets.
 

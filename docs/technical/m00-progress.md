@@ -41,7 +41,9 @@ Extend the layout geometry test with top/bottom viewport-containment assertions.
 
 ## Gate before M01
 
-M00 has **not passed**. M01 must not begin while critical feasibility evidence remains unresolved.
+The original automated session left M00 open. On 2026-10-28, the user reported that all manual acceptance was complete: “m00我已手动验收均完善”. This supplies the manual acceptance decision for M00; it does not add instrument traces or platform details to the earlier reports.
+
+The user then explicitly authorized the existing M01 plan as the stage design authority despite the absent original specification: “授权，按现有 M01 计划继续”. See [the authority record](m01-authority.md). The following list records what required manual acceptance before that confirmation:
 
 - Follow the native Chinese/Japanese preedit, commit/cancel, and refresh procedures in [the editor report](editor-spike.md).
 - Inspect actual Markdown highlighting, Unicode glyphs, selection, and caret rendering.
@@ -50,6 +52,6 @@ M00 has **not passed**. M01 must not begin while critical feasibility evidence r
 - Verify the theme/dock spike's actual appearance, overlay focus, and compositor scaling at representative window sizes, following [its native acceptance matrix](design-system-spike.md).
 - Recover the design specification or explicitly reconcile the plan with the intended product design before product implementation.
 
-Acceptance reports must distinguish automated context tests, native mapping observations, and manual platform evidence. A failed native check requires an investigated fix and rerun; an editor replacement strategy requires approval under the original plan.
+Acceptance reports distinguish automated context tests, native mapping observations, and user-provided manual acceptance. Any later native regression requires investigation and a rerun; an editor replacement strategy still requires approval under the original plan.
 
 The earlier schema-generation, source-mapping, lossless-patching, document-lifecycle, and MDX review findings remain requirements for their owning product milestones. This feasibility work does not close them.
