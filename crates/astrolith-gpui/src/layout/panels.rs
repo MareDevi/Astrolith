@@ -17,6 +17,33 @@ pub(crate) struct WorkspacePanel {
 }
 
 impl WorkspacePanel {
+    pub fn show_source(
+        &mut self,
+        source: &crate::file::DocumentSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.title = source
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |editor, cx| {
+                editor.set_value(source.source.clone(), window, cx)
+            });
+        }
+        cx.emit(PanelEvent::LayoutChanged);
+        cx.notify();
+    }
+
+    pub fn set_content(&mut self, content: String, cx: &mut Context<Self>) {
+        self.content = content.into();
+        cx.notify();
+    }
+
     pub fn new(
         id: &'static str,
         title: &'static str,
