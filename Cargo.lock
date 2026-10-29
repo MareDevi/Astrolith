@@ -274,6 +274,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrolith-astro"
+version = "0.1.0"
+dependencies = [
+ "astrolith-core",
+ "serde_json",
+ "tempfile",
+ "tree-sitter",
+ "tree-sitter-typescript",
+]
+
+[[package]]
 name = "astrolith-core"
 version = "0.1.0"
 
@@ -286,14 +297,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrolith-document"
+version = "0.1.0"
+dependencies = [
+ "astrolith-core",
+]
+
+[[package]]
 name = "astrolith-gpui"
 version = "0.1.0"
 dependencies = [
+ "astrolith-astro",
+ "astrolith-core",
+ "astrolith-document",
+ "astrolith-workspace",
  "gpui-kit",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "astrolith-workspace"
+version = "0.1.0"
+dependencies = [
+ "astrolith-astro",
+ "astrolith-core",
+ "notify",
+ "serde_json",
+ "tempfile",
+ "yaml-rust2",
 ]
 
 [[package]]
@@ -3130,6 +3164,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "foldhash",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "824e001ac4f3012dd16a264bec811403a67ca9deb6c102fc5049b32c4574b35f"
+dependencies = [
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -7072,6 +7115,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-typescript"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "triomphe"
 version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8547,6 +8600,17 @@ name = "y4m"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a5a4b21e1a62b67a2970e6831bc091d7b87e119e7f9791aef9702e3bef04448"
+
+[[package]]
+name = "yaml-rust2"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b36710ce3a279cfce8465dbab826f161675a262950b922cb2c3663852dfe9eb0"
+dependencies = [
+ "arraydeque",
+ "encoding_rs",
+ "hashlink",
+]
 
 [[package]]
 name = "yazi"

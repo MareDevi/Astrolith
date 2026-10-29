@@ -5,6 +5,7 @@ use gpui_kit::{App, KeyBinding};
 #[action(namespace = astrolith, no_json)]
 pub(crate) enum CommandId {
     OpenFile,
+    OpenProject,
     OpenPalette,
     ToggleSidebar,
     ToggleInspector,
@@ -18,6 +19,7 @@ pub(crate) enum CommandId {
 
 pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::OpenFile,
+    CommandId::OpenProject,
     CommandId::OpenPalette,
     CommandId::ToggleSidebar,
     CommandId::ToggleInspector,
@@ -33,6 +35,7 @@ impl CommandId {
     pub fn label(self) -> &'static str {
         match self {
             Self::OpenFile => "Open file…",
+            Self::OpenProject => "Open project…",
             Self::OpenPalette => "Commands…",
             Self::ToggleSidebar => "Toggle files",
             Self::ToggleInspector => "Toggle inspector",
@@ -53,6 +56,13 @@ impl CommandId {
                     "cmd-o"
                 } else {
                     "ctrl-o"
+                }
+            }
+            Self::OpenProject => {
+                if mac {
+                    "cmd-shift-o"
+                } else {
+                    "ctrl-shift-o"
                 }
             }
             Self::OpenPalette => {

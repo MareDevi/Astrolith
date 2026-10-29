@@ -1,6 +1,6 @@
 # Astrolith
 
-Astrolith is a native Rust/GPUI Kit application for the planned Astro Content Collections editor. M01 provides a persistent dock layout, system/light/dark appearance, a searchable command palette, and readonly local UTF-8 file navigation. Astro project discovery, editing, safe document saving, and preview services remain later milestones.
+Astrolith is a native Rust/GPUI Kit application for the planned Astro Content Collections editor. M01 provides a persistent dock layout, system/light/dark appearance, a searchable command palette, and readonly local UTF-8 file navigation. M02 adds static Astro project discovery, a watched collection index, and retained editable Markdown/MDX sessions. Safe document saving and preview remain later milestones.
 
 M00 manual acceptance was confirmed by the user. The original design specification remains absent; the user authorized the existing M01 plan as this stage's authority. See [the decision record](docs/technical/m01-authority.md) and [M01 verification](docs/technical/m01-progress.md).
 
@@ -50,6 +50,7 @@ Install the Vulkan driver for your GPU as well (for example `vulkan-radeon`, `vu
 | --- | --- |
 | `mise run doctor` | Check tool executables, lockfile metadata, and platform build prerequisites; a compilation is still required to prove compatibility. |
 | `mise run build` | Build `astrolith-desktop` with the lockfile. |
+| `mise run test:fixtures` | Run frozen Astro 5.18.2/7.4.4 fixtures and compare real loader IDs/source paths with the Rust index. |
 | `mise run test` | Run headless workspace tests. Includes preference, command, readonly-source, and UI interaction tests. |
 | `mise run fmt` | Check formatting without changing files. |
 | `mise run lint` | Run Clippy for every workspace target with warnings denied. |
@@ -62,9 +63,13 @@ Install the Vulkan driver for your GPU as well (for example `vulkan-radeon`, `vu
 | `mise run test:editor-perf` | Measure the disposable editor workloads in release. |
 
 The CI workflow configures Linux, macOS, and Windows builds/tests with the same Mise pins. Hosted runner results are separate evidence from local verification. Headless checks do not establish native IME, visual layout, focus, theme, or display scaling acceptance; those remain explicit M00 spike checks.
-## M01 shell
+## Workspace shell
 
-Run `mise run dev`. Use **Open file…** to view a local UTF-8 source file (up to 8 MiB and 50,000 lines). The document is readonly: selection and copy work; edits and saving are unavailable. MDX bodies remain intact as source; MDX-aware highlighting is not promised. File errors and picker cancellation preserve the current document. Reads run off the UI thread.
+Run `mise run dev`. Use **Open project…** (`Ctrl+Shift+O`, `Cmd+Shift+O` on macOS) to select an Astro project. Select a collection entry to edit its source. Open-document tabs preserve text, selection and undo history. Dirty documents block project switching; closing them requires explicit discard. Changes stay in memory: saving is not available until M04.
+
+Static discovery currently supports only installed Astro **5.18.2** and **7.4.4**, literal local `glob()` collections and the three documented Markdown/MDX patterns. MDX patterns require the configured matching MDX integration (4.3.14 for Astro 5.18.2, 8.1.2 for Astro 7.4.4). Dynamic configs, custom IDs, legacy/experimental flags, unknown integrations, MDX options and local/imported schema constants receive diagnostics. Watcher refreshes the index and retains open buffers; close and reopen an unchanged document to load its disk version. See [M02 evidence and limits](docs/technical/m02-progress.md).
+
+Use **Open file…** to view a local UTF-8 source file (up to 8 MiB and 50,000 lines). The document is readonly: selection and copy work; edits and saving are unavailable. MDX bodies remain intact as source; MDX-aware highlighting is not promised. File errors and picker cancellation preserve the current document. Reads run off the UI thread.
 
 **Commands…** searches the shared registry, including panel toggles, document focus, theme selection, and reset layout. Arrow keys select a result; Enter invokes it. Escape first clears a nonempty search, then dismisses the palette and restores focus.
 

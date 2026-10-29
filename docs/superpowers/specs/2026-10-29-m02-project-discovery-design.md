@@ -1,8 +1,8 @@
-# M02.2 project discovery — proposal
+# M02.2 project discovery — approved design
 
-Date: 2026-10-29 (Asia/Shanghai). Status: proposed; user approval pending.
+Date: 2026-10-29 (Asia/Shanghai). Status: approved by the user on 2026-10-29; implementation includes the separately authorized M02.3/M02.4.
 
-This is a scoped proposal for M02.2, not a reconstruction of the missing original Astrolith specification. The implementation plan, original review R2/R6, M02.1 models, and concurrency amendment remain authoritative. M00 is accepted; M01 and M02.1/M02.R are implemented. Native responsiveness acceptance remains open.
+This approved design is scoped to M02.2, not a reconstruction of the missing original Astrolith specification. The implementation plan, original review R2/R6, M02.1 models, and concurrency amendment remain authoritative. M00 is accepted; M01 and M02.1/M02.R are implemented. Native responsiveness acceptance remains open.
 
 ## Outcome
 
@@ -15,7 +15,7 @@ Project discovery must distinguish “recognized Astro project” from “collec
 1. **Conservative static inspection (recommended).** Parse a documented subset of JavaScript/TypeScript configuration without executing it. Handle literal local `glob()` declarations; reject dynamic configuration. This keeps project opening read-only and avoids starting arbitrary loaders, but deliberately limits initial compatibility.
 2. **Project-local Astro execution.** Resolve and run project-local tooling to obtain actual configuration and entry/source mappings. This can preserve dynamic configuration and custom IDs, but requires process ownership, termination, deadlines, output limits, dependency readiness, and an experimentally verified adapter per supported Astro version. `astro sync` and generated schemas alone do not establish authoritative loader/source mappings. This moves substantial M03/M05 responsibilities forward.
 
-The recommendation is the author's proposal, not an existing user decision. A static parser must use a real syntax tree, not regular expressions or JavaScript evaluation. If pinned parser APIs or fixtures cannot establish the subset reliably, narrow the supported subset explicitly; never add inference fallbacks.
+The user approved conservative static inspection on 2026-10-29. A static parser must use a real syntax tree, not regular expressions or JavaScript evaluation. If pinned parser APIs or fixtures cannot establish the subset reliably, narrow the supported subset explicitly; never add inference fallbacks.
 
 ## Proposed static contract
 

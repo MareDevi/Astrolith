@@ -1,0 +1,1237 @@
+//! Owns project generations, index publication, retained sessions and load admission.
+use crate::{
+    editor::session::{DocumentSession, SessionChanged},
+    layout::panels::WorkspacePanel,
+    runtime,
+};
+use astrolith_astro::{
+    Cancellation, DiscoveryOutcome, DiscoveryRequest, ProjectManifest, contained_path,
+    inspect_project, read_bounded,
+};
+use astrolith_core::ProjectId;
+use astrolith_document::{DocumentIdentity, DocumentLoadTicket, DocumentRevision};
+use astrolith_workspace::{CollectionEntry, CollectionWatcher, scan_collections};
+use gpui_kit::component::{
+    ActiveTheme, Disableable, IndexPath, Sizable, StyledExt, WindowExt,
+    button::{Button, ButtonVariants},
+    list::{List, ListDelegate, ListEvent, ListItem, ListState},
+    tab::{Tab, TabBar},
+};
+use gpui_kit::{
+    App, AppContext, Context, Entity, EventEmitter, Focusable, IntoElement, PathPromptOptions,
+    Render, SharedString, Subscription, Task, Window, div, prelude::*,
+};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    sync::Arc,
+};
+
+// Tokio owns the native watcher's final drop; UI cancellation only aborts its task.
+struct ServiceWatcher {
+    weak: std::sync::Weak<CollectionWatcher>,
+    owner: tokio::task::JoinHandle<()>,
+}
+impl ServiceWatcher {
+    fn new(watcher: CollectionWatcher, cancellation: Cancellation) -> Self {
+        let watcher = Arc::new(watcher);
+        let weak = Arc::downgrade(&watcher);
+        let owner = tokio::spawn(async move {
+            while cancellation.check().is_ok() {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            drop(watcher);
+        });
+        Self { weak, owner }
+    }
+}
+impl Drop for ServiceWatcher {
+    fn drop(&mut self) {
+        self.owner.abort();
+    }
+}
+
+struct EntryList {
+    entries: Arc<Vec<CollectionEntry>>,
+}
+impl ListDelegate for EntryList {
+    type Item = ListItem;
+    fn items_count(&self, _: usize, _: &App) -> usize {
+        self.entries.len()
+    }
+    fn render_item(
+        &mut self,
+        ix: IndexPath,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) -> Option<ListItem> {
+        let entry = self.entries.get(ix.row)?;
+        let id = entry.entry().id();
+        let label = format!(
+            "{} / {}",
+            id.collection().as_str(),
+            entry.entry().source().as_str()
+        );
+        Some(
+            ListItem::new(SharedString::from(format!(
+                "entry:{}:{}",
+                id.collection().as_str(),
+                id.id()
+            )))
+            .accessibility_label(label.clone())
+            .child(div().text_sm().truncate().child(label)),
+        )
+    }
+    fn set_selected_index(
+        &mut self,
+        _: Option<IndexPath>,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) {
+    }
+}
+
+pub(crate) struct ProjectWorkspace {
+    document: Entity<WorkspacePanel>,
+    manifest: Option<Arc<ProjectManifest>>,
+    entries: Arc<Vec<CollectionEntry>>,
+    list: Entity<ListState<EntryList>>,
+    generation: u64,
+    index_revision: u64,
+    project_id: Option<ProjectId>,
+    cancellation: Cancellation,
+    loading: bool,
+    refreshing: bool,
+    index_error: Option<String>,
+    status: String,
+    task: Option<Task<()>>,
+    watch_task: Option<Task<()>>,
+    watcher_owner: Option<ServiceWatcher>,
+    loads: HashMap<PathBuf, Task<()>>,
+    sessions: BTreeMap<PathBuf, Entity<DocumentSession>>,
+    active: Option<PathBuf>,
+    _subscriptions: Vec<Subscription>,
+    session_subscriptions: HashMap<PathBuf, Subscription>,
+}
+impl Drop for ProjectWorkspace {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+impl EventEmitter<SessionChanged> for ProjectWorkspace {}
+impl ProjectWorkspace {
+    pub fn new(
+        document: Entity<WorkspacePanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let entries = Arc::new(Vec::new());
+        let list = cx.new(|cx| {
+            ListState::new(
+                EntryList {
+                    entries: entries.clone(),
+                },
+                window,
+                cx,
+            )
+        });
+        let subscription =
+            cx.subscribe_in(&list, window, |this, _, event: &ListEvent, window, cx| {
+                if let ListEvent::Confirm(ix) = event {
+                    this.open_entry(ix.row, window, cx);
+                }
+            });
+        Self {
+            document, manifest: None, entries, list, generation: 0, index_revision: 0,
+            project_id: None, cancellation: Cancellation::default(), loading: false,
+            refreshing: false, index_error: None,
+            status: "Open an Astro project to edit local Markdown and MDX. Changes remain in memory; saving is not available yet.".into(),
+            task: None, watch_task: None, watcher_owner: None, loads: HashMap::new(),
+            sessions: BTreeMap::new(), active: None, _subscriptions: vec![subscription],
+            session_subscriptions: HashMap::new(),
+        }
+    }
+    pub fn has_dirty(&self, cx: &App) -> bool {
+        self.sessions
+            .values()
+            .any(|session| session.read(cx).is_dirty(cx))
+    }
+    pub fn prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        if self.has_dirty(cx) {
+            self.status="Keep this project open while documents have unsaved changes. Close edited documents explicitly before switching projects.".into();
+            cx.notify();
+            return;
+        }
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open Astro project".into()),
+        });
+        self.loading = true;
+        cx.notify();
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let selected = paths.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.loading = false;
+                match selected {
+                    Ok(Ok(Some(paths))) => {
+                        if let Some(path) = paths.into_iter().next() {
+                            this.start(path, window, cx);
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    _ => {
+                        this.status = "Could not select a project directory.".into();
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+    fn start(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_dirty(cx) {
+            self.status = "Close unsaved documents before switching projects.".into();
+            cx.notify();
+            return;
+        }
+        self.cancellation.cancel();
+        self.cancellation = Cancellation::default();
+        let Some(next) = self.generation.checked_add(1) else {
+            self.status = "Project generation exhausted; restart the application.".into();
+            return;
+        };
+        self.generation = next;
+        let generation = self.generation;
+        let project = match ProjectId::new(format!("workspace-{generation}")) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        self.project_id = Some(project.clone());
+        let request =
+            DiscoveryRequest::new(project.clone(), generation, root, self.cancellation.clone());
+        self.loading = true;
+        self.refreshing = false;
+        self.index_error = None;
+        self.status = "Discovering project…".into();
+        self.watch_task = None;
+        self.watcher_owner = None;
+        self.loads.clear();
+        self.sessions.clear();
+        self.session_subscriptions.clear();
+        self.manifest = None;
+        self.active = None;
+        self.publish_entries(Vec::new(), cx);
+        self.document
+            .update(cx, |document, cx| document.clear_editor(cx));
+        let cancellation = self.cancellation.clone();
+        let work = runtime::blocking(cx, move || {
+            let outcome = inspect_project(&request).map_err(|error| error.to_string())?;
+            match outcome {
+                DiscoveryOutcome::Ready(manifest) => {
+                    let watcher = CollectionWatcher::for_project(&manifest)
+                        .map_err(|error| error.to_string())?;
+                    let manifest =
+                        match inspect_project(&request).map_err(|error| error.to_string())? {
+                            DiscoveryOutcome::Ready(manifest) => manifest,
+                            DiscoveryOutcome::Unsupported { diagnostics, .. } => {
+                                return Err(diagnostics.join("; "));
+                            }
+                        };
+                    watcher
+                        .refresh(&manifest)
+                        .map_err(|error| error.to_string())?;
+                    let entries = scan_collections(&manifest, &cancellation)
+                        .map_err(|error| error.to_string())?;
+                    Ok((
+                        manifest,
+                        entries,
+                        ServiceWatcher::new(watcher, cancellation.clone()),
+                    ))
+                }
+                DiscoveryOutcome::Unsupported { diagnostics, .. } => Err(diagnostics.join("; ")),
+            }
+        });
+        self.task=Some(cx.spawn_in(window,async move|this,cx| {
+            let result=work.await.and_then(|value|value);
+            let _=this.update_in(cx,|this,window,cx| {
+                if this.generation!=generation || this.project_id.as_ref()!=Some(&project){return;}
+                this.loading=false;
+                match result {
+                    Ok((manifest,entries,watcher))=> {
+                        this.manifest=Some(Arc::new(manifest));this.sessions.clear();this.active=None;
+                        this.document.update(cx,|document,cx|document.clear_editor(cx));
+                        this.publish_entries(entries,cx);
+                        this.start_watcher(watcher,window,cx);
+                        this.status=format!("{} entries · Changes stay in memory until closed. Saving is not available yet.",this.entries.len());
+                    },
+                    Err(error)=>this.status=format!("Could not open project: {error}"),
+                }
+                cx.notify();
+            });
+        }));
+        // `window` is only needed by the retained GPUI observer, never by service I/O.
+        cx.notify();
+    }
+    fn start_watcher(
+        &mut self,
+        watcher: ServiceWatcher,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(manifest) = self.manifest.clone() else {
+            return;
+        };
+        let weak_watcher = watcher.weak.clone();
+        self.watcher_owner = Some(watcher);
+        let generation = self.generation;
+        let root = manifest.root().to_owned();
+        let request = DiscoveryRequest::new(
+            manifest.project().clone(),
+            generation,
+            root.clone(),
+            self.cancellation.clone(),
+        );
+        self.watch_task = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                let snapshots = this.update_in(cx, |this, _, _| {
+                    this.refreshing = true;
+                    this.sessions.keys().chain(this.loads.keys()).cloned().collect::<std::collections::BTreeSet<_>>()
+                }).unwrap_or_default();
+                let project = request.project().clone();
+                let request = request.clone();
+                let watcher = weak_watcher.clone();
+                let root = root.clone();
+                let result = runtime::blocking(cx, move || {
+                    request.cancellation().check().map_err(|error| error.to_string())?;
+                    let Some(watcher) = watcher.upgrade() else { return Err("Watcher stopped".into()); };
+                    let batch = watcher.drain();
+                    if !batch.changed && !batch.needs_rescan { return Ok(None); }
+                    // Compare retained and in-flight sources even when reindexing fails.
+                    let changes = snapshots.into_iter().map(|path| {
+                        let fingerprint = contained_path(&root, path.strip_prefix(&root).unwrap_or(&path)).ok()
+                            .filter(|actual| actual == &path)
+                            .and_then(|actual| read_bounded(&actual, 8 * 1024 * 1024).ok())
+                            .map(|text| crate::editor::session::fingerprint(&text));
+                        (path, fingerprint)
+                    }).collect::<Vec<_>>();
+                    let index: Result<_, String> = (|| {
+                        match inspect_project(&request).map_err(|error| error.to_string())? {
+                            DiscoveryOutcome::Ready(manifest) => {
+                                watcher.refresh(&manifest).map_err(|error| error.to_string())?;
+                                let entries = scan_collections(&manifest, request.cancellation()).map_err(|error| error.to_string())?;
+                                Ok((manifest, entries))
+                            }
+                            DiscoveryOutcome::Unsupported { diagnostics, .. } => Err(diagnostics.join("; ")),
+                        }
+                    })();
+                    Ok(Some((index, changes)))
+                }).await.and_then(|result| result);
+                let still_current = this.update_in(cx, |this, _, cx| {
+                    if this.generation != generation || this.project_id.as_ref() != Some(&project) { return false; }
+                    this.refreshing = false;
+                    match result {
+                        Ok(Some((index, changes))) => {
+                            for (path, fingerprint) in changes {
+                                if let Some(session) = this.sessions.get(&path) {
+                                    session.update(cx, |session, _| session.externally_changed = fingerprint != Some(session.disk_fingerprint));
+                                }
+                            }
+                            match index {
+                                Ok((manifest, entries)) => {
+                                    this.index_error = None;
+                                    this.manifest = Some(Arc::new(manifest));
+                                    this.publish_entries(entries, cx);
+                                    this.status = "Index refreshed; open buffers retained. Close and reopen an unchanged document to reload it.".into();
+                                }
+                                Err(error) => {
+                                    this.publish_entries(Vec::new(), cx);
+                                    this.index_error = Some(error);
+                                    this.status = "Project index unavailable. Open buffers retained.".into();
+                                }
+                            }
+                            cx.notify();
+                        }
+                        Err(error) => {
+                            this.publish_entries(Vec::new(), cx);
+                            this.index_error = Some(error);
+                            this.status = "Project index unavailable. Open buffers retained.".into();
+                            cx.notify();
+                        }
+                        Ok(None) => {}
+                    }
+                    true
+                }).unwrap_or(false);
+                if !still_current { break; }
+            }
+        }));
+    }
+    fn publish_entries(&mut self, entries: Vec<CollectionEntry>, cx: &mut Context<Self>) {
+        self.index_revision = self
+            .index_revision
+            .checked_add(1)
+            .expect("index revision exhausted");
+        self.loads.clear();
+        self.entries = Arc::new(entries);
+        self.list.update(cx, |list, cx| {
+            list.delegate_mut().entries = self.entries.clone();
+            cx.notify();
+        });
+    }
+    fn open_entry(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.entries.get(ix) else {
+            return;
+        };
+        let Some(manifest) = self.manifest.clone() else {
+            return;
+        };
+        let source = entry.entry().source().clone();
+        let path = manifest.root().join(source.as_str());
+        if self.sessions.contains_key(&path) {
+            self.activate_session(&path, window, cx);
+            return;
+        }
+        if self.loads.contains_key(&path) {
+            self.active = Some(path);
+            self.document
+                .update(cx, |document, cx| document.clear_editor(cx));
+            return;
+        }
+        if self.refreshing {
+            self.status =
+                "Refreshing the project index; select this entry again when it finishes.".into();
+            cx.notify();
+            return;
+        }
+        if self.loads.len() >= 2 {
+            self.status =
+                "Two documents are loading; select this entry again when one finishes.".into();
+            cx.notify();
+            return;
+        }
+        if self.sessions.len() + self.loads.len() >= 32 {
+            self.status = "Close an open document before opening more than 32 documents.".into();
+            cx.notify();
+            return;
+        }
+        let retained_bytes: usize = self
+            .sessions
+            .values()
+            .map(|session| session.read(cx).buffer.original_text().len())
+            .sum();
+        if retained_bytes + (self.loads.len() + 1) * 8 * 1024 * 1024 > 32 * 1024 * 1024 {
+            self.status =
+                "Close documents before exceeding the 32 MiB loaded-source budget.".into();
+            cx.notify();
+            return;
+        }
+        self.active = Some(path.clone());
+        self.document
+            .update(cx, |document, cx| document.clear_editor(cx));
+        let generation = self.generation;
+        let identity =
+            DocumentIdentity::new(manifest.project().clone(), generation, source.clone());
+        let ticket = DocumentLoadTicket::new(identity, DocumentRevision::INITIAL);
+        let index_revision = self.index_revision;
+        let expected = path.clone();
+        let root = manifest.root().to_owned();
+        let cancellation = self.cancellation.clone();
+        let load = runtime::blocking(cx, move || {
+            cancellation.check().map_err(|error| error.to_string())?;
+            let actual = contained_path(&root, std::path::Path::new(source.as_str()))
+                .map_err(|error| error.to_string())?;
+            if actual != expected {
+                return Err("Source mapping changed; rescan the project.".into());
+            }
+            let source =
+                read_bounded(&actual, 8 * 1024 * 1024).map_err(|error| error.to_string())?;
+            if source.lines().count() > 50_000 {
+                return Err("Documents are limited to 50,000 lines.".into());
+            }
+            cancellation.check().map_err(|error| error.to_string())?;
+            Ok(source)
+        });
+        let key = path.clone();
+        self.loads.insert(
+            path.clone(),
+            cx.spawn_in(window, async move |this, cx| {
+                let result = load.await.and_then(|result| result);
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.finish_load(ticket, index_revision, key, result, window, cx);
+                });
+            }),
+        );
+        self.status = "Loading document…".into();
+        cx.notify();
+    }
+    fn finish_load(
+        &mut self,
+        ticket: DocumentLoadTicket,
+        index_revision: u64,
+        key: PathBuf,
+        result: Result<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let identity = ticket.identity();
+        if self.generation != identity.project_generation()
+            || self.project_id.as_ref() != Some(identity.project())
+            || self.index_revision != index_revision
+            || ticket.expected_revision() != DocumentRevision::INITIAL
+            || self.sessions.contains_key(&key)
+        {
+            return;
+        }
+        self.loads.remove(&key);
+        match result {
+            Ok(source) => {
+                // Only a coalesced first load can create an editor. Refresh never replaces it.
+                let session =
+                    cx.new(|cx| DocumentSession::new(identity.clone(), source, window, cx));
+                let subscription = cx.subscribe(&session, |_, _, _: &SessionChanged, cx| {
+                    cx.emit(SessionChanged);
+                    cx.notify();
+                });
+                self.session_subscriptions.insert(key.clone(), subscription);
+                self.sessions.insert(key.clone(), session.clone());
+                if self.active.as_ref() == Some(&key) {
+                    self.install(&key, session, cx);
+                    self.document.read(cx).focus_handle(cx).focus(window, cx);
+                }
+            }
+            Err(error) => {
+                if self.active.as_ref() == Some(&key) {
+                    self.active = None;
+                }
+                self.status = format!("Could not open entry: {error}");
+            }
+        }
+        cx.notify();
+    }
+    fn activate_session(
+        &mut self,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get(path).cloned() else {
+            return;
+        };
+        self.active = Some(path.to_owned());
+        self.install(path, session, cx);
+        self.document.read(cx).focus_handle(cx).focus(window, cx);
+    }
+    fn install(
+        &mut self,
+        path: &std::path::Path,
+        session: Entity<DocumentSession>,
+        cx: &mut Context<Self>,
+    ) {
+        let title = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let editor = session.read(cx).editor.clone();
+        self.document
+            .update(cx, |document, cx| document.show_editor(title, editor, cx));
+        self.status = if session.read(cx).externally_changed {"Source changed on disk. This buffer is retained; close and reopen an unchanged document to reload."} else {"Editing in memory · Saving is not available yet."}.into();
+        cx.notify();
+    }
+    fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.active.clone() else {
+            return;
+        };
+        if self
+            .sessions
+            .get(&path)
+            .is_some_and(|session| session.read(cx).is_dirty(cx))
+        {
+            let owner = cx.weak_entity();
+            window.open_dialog(cx,move|dialog,_,_| {
+                let owner=owner.clone();let path=path.clone();
+                dialog.title("Discard unsaved changes?")
+                    .child("Saving is not available yet. Keep editing to preserve this document in memory.")
+                    .footer(div().h_flex().gap_2()
+                        .child(Button::new("keep-editing").primary().label("Keep editing").on_click(|_,window,cx|window.close_dialog(cx)))
+                        .child(Button::new("discard-document").danger().label("Discard changes").on_click(move|_,window,cx| {
+                            let _=owner.update(cx,|this,cx|this.remove_session(&path,cx));window.close_dialog(cx);
+                        })))
+            });
+        } else {
+            self.remove_session(&path, cx);
+        }
+    }
+    fn remove_session(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.sessions.remove(path);
+        self.session_subscriptions.remove(path);
+        self.active = None;
+        self.document
+            .update(cx, |document, cx| document.clear_editor(cx));
+        cx.emit(SessionChanged);
+        cx.notify();
+    }
+    pub fn guard_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.has_dirty(cx) {
+            return true;
+        }
+        if !window.has_active_dialog(cx) {
+            let owner = cx.weak_entity();
+            window.open_dialog(cx,move|dialog,_,_| {
+                let owner=owner.clone();
+                dialog.title("Discard unsaved documents?")
+                    .child("Changes exist only in memory. Keep the window open to preserve your documents.")
+                    .footer(div().h_flex().gap_2()
+                        .child(Button::new("keep-window").primary().label("Keep editing").on_click(|_,window,cx|window.close_dialog(cx)))
+                        .child(Button::new("discard-window").danger().label("Discard and close").on_click(move|_,window,cx| {
+                            let _=owner.update(cx,|this,_|this.sessions.clear());window.close_dialog(cx);window.remove_window();
+                        })))
+            });
+        }
+        false
+    }
+}
+impl Render for ProjectWorkspace {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_session = self
+            .active
+            .as_ref()
+            .and_then(|path| self.sessions.get(path));
+        let active_loaded = active_session.is_some();
+        let paths: Vec<_> = self.sessions.keys().cloned().collect();
+        let selected = paths
+            .iter()
+            .position(|path| Some(path) == self.active.as_ref())
+            .unwrap_or(0);
+        let tabs = TabBar::new("open-documents")
+            .selected_index(selected)
+            .children(paths.iter().map(|path| {
+                Tab::new().label(
+                    path.strip_prefix(
+                        self.manifest
+                            .as_ref()
+                            .map_or(std::path::Path::new(""), |manifest| manifest.root()),
+                    )
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .into_owned(),
+                )
+            }))
+            .on_click(cx.listener(move |this, ix: &usize, window, cx| {
+                if let Some(path) = paths.get(*ix) {
+                    this.activate_session(path, window, cx);
+                }
+            }));
+        let external = active_session.is_some_and(|session| session.read(cx).externally_changed);
+        let dirty = active_session.is_some_and(|session| session.read(cx).dirty);
+        div()
+            .v_flex()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .child(
+                div().p_2().child(
+                    Button::new("open-project")
+                        .small()
+                        .ghost()
+                        .label("Open project…")
+                        .disabled(self.loading)
+                        .on_click(cx.listener(|this, _, window, cx| this.prompt(window, cx))),
+                ),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.status.clone()),
+            )
+            .when_some(self.index_error.as_ref(), |view, error| {
+                view.child(
+                    div()
+                        .px_3()
+                        .text_xs()
+                        .text_color(cx.theme().warning)
+                        .child(format!("Index unavailable: {error}")),
+                )
+            })
+            .when(!self.sessions.is_empty(), |view| view.child(tabs))
+            .child(div().flex_1().min_h_0().child(List::new(&self.list)))
+            .when(active_loaded, |view| {
+                view.child(
+                    div()
+                        .p_2()
+                        .v_flex()
+                        .gap_1()
+                        .when(external, |view| {
+                            view.child(
+                                div()
+                                    .text_color(cx.theme().warning)
+                                    .child("Source changed on disk · Buffer retained"),
+                            )
+                        })
+                        .child(if dirty {
+                            "Unsaved changes"
+                        } else {
+                            "Unchanged"
+                        })
+                        .child(
+                            Button::new("close-document")
+                                .small()
+                                .ghost()
+                                .label("Close document")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.close_active(window, cx)
+                                    }),
+                                ),
+                        ),
+                )
+            })
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::{TestAppContext, WindowHandle, WindowOptions, base::Root, test::TestWindowExt};
+    fn fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/astro")).unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/@astrojs/mdx")).unwrap();
+        std::fs::write(
+            dir.path().join("node_modules/@astrojs/mdx/package.json"),
+            r#"{"version":"4.3.14"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("astro.config.mjs"),"import {defineConfig} from 'astro/config'; import mdx from '@astrojs/mdx'; export default defineConfig({integrations:[mdx()]});").unwrap();
+        std::fs::create_dir_all(dir.path().join("src/posts")).unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"dependencies":{"astro":"5.18.2"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("node_modules/astro/package.json"),
+            r#"{"version":"5.18.2"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/content.config.ts"),"import {defineCollection} from 'astro:content'; import {glob} from 'astro/loaders'; const blog=defineCollection({loader:glob({base:'src/posts',pattern:'**/*.{md,mdx}'})}); export const collections={blog};").unwrap();
+        std::fs::write(dir.path().join("src/posts/a.md"), "# A\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/posts/b.mdx"),
+            "import X from './X';\n<X>{42}</X>\n",
+        )
+        .unwrap();
+        dir
+    }
+    struct TestHost {
+        navigation: Entity<ProjectWorkspace>,
+        document: Entity<WorkspacePanel>,
+    }
+    impl Render for TestHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .h_flex()
+                .items_stretch()
+                .size_full()
+                .child(div().w_64().h_full().child(self.navigation.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(self.document.clone()),
+                )
+        }
+    }
+    fn mount(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<ProjectWorkspace>) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::runtime::init(cx).unwrap();
+            let mut project = None;
+            let (handle, _) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let document =
+                    cx.new(|cx| WorkspacePanel::new("document-panel", "Document", "", window, cx));
+                let navigation = cx.new(|cx| ProjectWorkspace::new(document.clone(), window, cx));
+                project = Some(navigation.clone());
+                cx.new(|_| TestHost {
+                    navigation,
+                    document,
+                })
+            })
+            .unwrap();
+            (handle.downcast::<Root>().unwrap(), project.unwrap())
+        })
+    }
+    #[gpui_kit::test]
+    async fn discovered_project_opens_edits_and_retains_sessions(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        assert_eq!(view.read_with(cx, |view, _| view.entries.len()), 2);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(0, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let first = view.read_with(cx, |view, _| view.active.clone().unwrap());
+        cx.update_window(handle.into(), |_, window, cx| {
+            let editor = view
+                .read(cx)
+                .sessions
+                .get(&first)
+                .unwrap()
+                .read(cx)
+                .editor
+                .clone();
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press("secondary-a", cx);
+            window.input("# Changed\n", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let mut undo_count = 0;
+        while view.read_with(cx, |view, cx| {
+            view.sessions
+                .get(&first)
+                .unwrap()
+                .read(cx)
+                .buffer
+                .is_dirty()
+        }) {
+            assert!(undo_count < 8, "undo must reach the loaded source baseline");
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.press(
+                    if cfg!(target_os = "macos") {
+                        "cmd-z"
+                    } else {
+                        "ctrl-z"
+                    },
+                    cx,
+                )
+            })
+            .unwrap();
+            cx.run_until_parked();
+            undo_count += 1;
+        }
+        for _ in 0..undo_count {
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.press(
+                    if cfg!(target_os = "macos") {
+                        "cmd-shift-z"
+                    } else {
+                        "ctrl-y"
+                    },
+                    cx,
+                )
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+        assert!(view.read_with(cx, |view, cx| {
+            view.sessions
+                .get(&first)
+                .unwrap()
+                .read(cx)
+                .buffer
+                .is_dirty()
+        }));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| assert!(!view.guard_window_close(window, cx)));
+            assert!(window.has_active_dialog(cx));
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(1, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.activate_session(&first, window, cx))
+        })
+        .unwrap();
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&first).unwrap().read(cx);
+            assert_eq!(session.editor.read(cx).value(), "# Changed\n");
+            assert!(session.buffer.is_dirty());
+            assert!(session.buffer.revision().get() > 0);
+        });
+        let next = fixture();
+        let generation = view.read_with(cx, |view, _| view.generation);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(next.path().into(), window, cx))
+        })
+        .unwrap();
+        assert_eq!(view.read_with(cx, |view, _| view.generation), generation);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/posts/a.md")).unwrap(),
+            "# A\n"
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.close_active(window, cx));
+            assert!(window.has_active_dialog(cx));
+            window.press("escape", cx);
+        })
+        .unwrap();
+        assert_eq!(view.read_with(cx, |view, _| view.sessions.len()), 2);
+    }
+    #[gpui_kit::test]
+    async fn project_picker_cancel_and_watcher_keep_open_buffers(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("open-project", cx);
+        })
+        .unwrap();
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.directories);
+            assert!(!options.files);
+            Some(vec![dir.path().to_owned()])
+        });
+        cx.condition(&view, |view, _| !view.loading).await;
+        assert_eq!(view.read_with(cx, |view, _| view.entries.len()), 2);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(0, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let original = view.read_with(cx, |view, _| view.active.clone().unwrap());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(1, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let other = view.read_with(cx, |view, _| view.active.clone().unwrap());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.activate_session(&original, window, cx))
+        })
+        .unwrap();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.prompt(window, cx))
+        })
+        .unwrap();
+        cx.simulate_path_prompt_response(|_| None);
+        cx.condition(&view, |view, _| !view.loading).await;
+        assert_eq!(
+            view.read_with(cx, |view, _| view.active.clone()),
+            Some(original.clone())
+        );
+        std::fs::write(
+            dir.path().join("src/posts/a.md"),
+            "# External replacement\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/posts/c.md"), "# New\n").unwrap();
+        for _ in 0..100 {
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            })
+            .await
+            .unwrap();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.entries.len() == 3) {
+                break;
+            }
+        }
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.entries.len(), 3, "watcher must publish new entries");
+            let session = view.sessions.get(&original).unwrap().read(cx);
+            assert_eq!(session.editor.read(cx).value(), "# A\n");
+            assert!(session.externally_changed);
+            assert!(
+                !view
+                    .sessions
+                    .get(&other)
+                    .unwrap()
+                    .read(cx)
+                    .externally_changed,
+                "unmodified B must not be marked changed"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.activate_session(&other, window, cx);
+                view.activate_session(&original, window, cx);
+                assert!(view.status.contains("changed on disk"));
+            })
+        })
+        .unwrap();
+        std::fs::write(dir.path().join("src/posts/a.md"), "---\nslug: [\n---\n").unwrap();
+        for _ in 0..100 {
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            })
+            .await
+            .unwrap();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.index_error.is_some()) {
+                break;
+            }
+        }
+        view.read_with(cx, |view, cx| {
+            assert!(view.index_error.is_some());
+            assert!(
+                view.sessions
+                    .get(&original)
+                    .unwrap()
+                    .read(cx)
+                    .externally_changed
+            );
+            assert!(
+                !view
+                    .sessions
+                    .get(&other)
+                    .unwrap()
+                    .read(cx)
+                    .externally_changed
+            );
+        });
+        std::fs::write(dir.path().join("src/posts/a.md"), "# Recovered source\n").unwrap();
+        for _ in 0..100 {
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            })
+            .await
+            .unwrap();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| {
+                view.index_error.is_none() && view.entries.len() == 3
+            }) {
+                break;
+            }
+        }
+        assert!(view.read_with(cx, |view, _| view.index_error.is_none()
+            && view.entries.len() == 3));
+        // Unsupported reconfiguration withdraws the authoritative index but preserves editors.
+        std::fs::write(
+            dir.path().join("src/content.config.ts"),
+            "export const collections = buildDynamically();",
+        )
+        .unwrap();
+        for _ in 0..100 {
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            })
+            .await
+            .unwrap();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.entries.is_empty()) {
+                break;
+            }
+        }
+        view.read_with(cx, |view, cx| {
+            assert!(view.entries.is_empty());
+            assert!(view.status.contains("unavailable"));
+            assert_eq!(
+                view.sessions
+                    .get(&original)
+                    .unwrap()
+                    .read(cx)
+                    .editor
+                    .read(cx)
+                    .value(),
+                "# A\n"
+            );
+        });
+    }
+    #[gpui_kit::test]
+    async fn newer_index_rejects_late_first_load_and_readonly_still_mounts(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                let manifest = view.manifest.as_ref().unwrap();
+                let entry = &view.entries[0];
+                let path = entry.absolute_source().to_owned();
+                let identity = DocumentIdentity::new(
+                    manifest.project().clone(),
+                    view.generation,
+                    entry.entry().source().clone(),
+                );
+                let ticket = DocumentLoadTicket::new(identity, DocumentRevision::INITIAL);
+                let revision = view.index_revision;
+                view.publish_entries(Vec::new(), cx);
+                view.finish_load(
+                    ticket,
+                    revision,
+                    path,
+                    Ok("obsolete text".into()),
+                    window,
+                    cx,
+                );
+                assert!(
+                    view.sessions.is_empty(),
+                    "an obsolete index result cannot create a tab"
+                );
+                let readonly = crate::file::DocumentSource {
+                    path: dir.path().join("src/posts/a.md"),
+                    source: "# Readonly\n".into(),
+                };
+                view.document
+                    .update(cx, |panel, cx| panel.show_source(readonly, window, cx));
+                assert_eq!(
+                    view.document
+                        .read(cx)
+                        .editor
+                        .as_ref()
+                        .unwrap()
+                        .read(cx)
+                        .value(),
+                    "# Readonly\n"
+                );
+                assert!(!view.document.read(cx).is_editable());
+            })
+        })
+        .unwrap();
+    }
+    #[gpui_kit::test]
+    #[ignore = "actual installed Astro project; invoked by mise run test:fixtures"]
+    async fn installed_astro_fixture_editing_workflow(cx: &mut TestAppContext) {
+        let root = PathBuf::from(
+            std::env::var_os("ASTROLITH_FIXTURE_PROJECT")
+                .expect("fixture harness supplies installed project"),
+        );
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.prompt(window, cx))
+        })
+        .unwrap();
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|_| Some(vec![root.clone()]));
+        cx.condition(&view, |view, _| !view.loading).await;
+        let (markdown, mdx) = view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.entries.len(),
+                11,
+                "real installed fixture must remain fully indexed"
+            );
+            (
+                view.entries
+                    .iter()
+                    .position(|entry| entry.entry().source().as_str().ends_with("introduction.md"))
+                    .unwrap(),
+                view.entries
+                    .iter()
+                    .position(|entry| entry.entry().source().as_str().ends_with(".mdx"))
+                    .unwrap(),
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(markdown, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let first = view.read_with(cx, |view, _| view.active.clone().unwrap());
+        let disk = std::fs::read_to_string(&first).unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            let editor = view
+                .read(cx)
+                .sessions
+                .get(&first)
+                .unwrap()
+                .read(cx)
+                .editor
+                .clone();
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press("secondary-a", cx);
+            window.input("# Fixture edit\n", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(mdx, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        view.read_with(cx, |view, cx| {
+            let mdx = view
+                .sessions
+                .get(view.active.as_ref().unwrap())
+                .unwrap()
+                .read(cx)
+                .editor
+                .read(cx)
+                .value();
+            assert!(mdx.contains("export const label"));
+            assert!(mdx.contains("<p>{label}</p>"));
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.activate_session(&first, window, cx))
+        })
+        .unwrap();
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&first).unwrap().read(cx);
+            assert_eq!(session.editor.read(cx).value(), "# Fixture edit\n");
+            assert!(session.is_dirty(cx));
+        });
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            disk,
+            "fixture editing must not write source"
+        );
+    }
+    #[gpui_kit::test]
+    async fn newest_project_wins_and_duplicate_source_loads_coalesce(cx: &mut TestAppContext) {
+        let a = fixture();
+        let b = fixture();
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.start(a.path().into(), window, cx);
+                view.start(b.path().into(), window, cx);
+            })
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        assert_eq!(
+            view.read_with(cx, |view, _| view
+                .manifest
+                .as_ref()
+                .unwrap()
+                .root()
+                .to_owned()),
+            b.path().canonicalize().unwrap()
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.open_entry(0, window, cx);
+                view.open_entry(0, window, cx);
+                assert_eq!(view.loads.len(), 1);
+            })
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        assert_eq!(view.read_with(cx, |view, _| view.sessions.len()), 1);
+    }
+}

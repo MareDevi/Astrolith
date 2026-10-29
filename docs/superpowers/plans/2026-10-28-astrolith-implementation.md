@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkboxes for tracking.
 
-**Status:** M00 manually accepted by the user; M01 complete; M02.1 domain models and M02.R runtime/responsiveness repairs complete; native latency acceptance remains open
+**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native latency acceptance remains open
 **Version:** 1.1
 **Date:** 2026-10-28  
 **Project:** Astrolith  
@@ -430,7 +430,7 @@ pub struct DocumentRevision(pub u64);
 
 Keep mutable sessions retained across tab switches. Test out-of-order load/parse results and project/document/revision validation. The M01 readonly snapshot initialization optimization is not an editable-session refresh strategy.
 
-**M02 Gate:** A real Astro project can be opened; its local Markdown files can be discovered and edited.
+**M02 Gate: complete (2026-10-29).** Real installed Astro 5.18.2 and 7.4.4 fixtures open, index and edit through the retained GPUI workflow. Saving remains M04. See `docs/technical/m02-progress.md` for actual checks, compatibility limits and separate native acceptance.
 
 ---
 

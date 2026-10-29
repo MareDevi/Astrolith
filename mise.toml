@@ -25,7 +25,7 @@ run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 
 [tasks.check]
 description = "Run the current milestone's automated checks"
-run = [{ task = "doctor" }, { task = "fmt" }, { task = "lint" }, { task = "build" }, { task = "test" }]
+run = [{ task = "doctor" }, { task = "fmt" }, { task = "lint" }, { task = "build" }, { task = "test" }, { task = "test:fixtures" }]
 
 [tasks.ci]
 description = "Run the same checks in continuous integration"
@@ -58,3 +58,31 @@ run = "cargo test --workspace --release --locked readonly_file_open_workload -- 
 [tasks."test:editor-perf:dev"]
 description = "Measure the editor workloads with the same dependency optimizations as dev"
 run = "cargo test --workspace --locked large_document_workload -- --ignored --nocapture"
+
+[tasks."test:astro"]
+description = "Test static Astro discovery"
+run = "cargo test -p astrolith-astro --locked"
+
+[tasks."fmt:write"]
+description = "Format workspace Rust sources"
+run = "cargo fmt --all"
+
+[tasks."lock:update"]
+description = "Resolve declared Rust dependencies into the committed lockfile"
+run = "cargo metadata --format-version 1"
+
+[tasks."test:document"]
+description = "Test retained document buffers"
+run = "cargo test -p astrolith-document --locked"
+
+[tasks."test:gpui"]
+description = "Test native workspace interactions headlessly"
+run = "cargo test -p astrolith-gpui --locked"
+
+[tasks."test:fixtures"]
+description = "Verify frozen Astro fixtures with the actual project-local loaders"
+run = "node --test fixtures/test-astro-fixtures.test.mjs && node scripts/test-astro-fixtures.mjs"
+
+[tasks."test:workspace"]
+description = "Test collection index and bounded watcher"
+run = "cargo test -p astrolith-workspace --locked"

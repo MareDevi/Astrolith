@@ -1,6 +1,6 @@
 # M02 — domain and editor progress
 
-Date: 2026-10-28.
+Started: 2026-10-28. Updated: 2026-10-29.
 
 ## M02.1 — domain IDs and models
 
@@ -18,6 +18,43 @@ Verification: the new behavioral tests first failed because the domain API did n
 
 Independent review found a formatting failure in the test while it was being edited; the final formatted tree passed `mise run fmt` and the complete check. Review also prompted explicit documentation of the colon restriction. The suggestion to trim IDs was declined: nonblank IDs are opaque and must preserve loader-provided whitespace rather than silently changing identity. No correctness blockers remain after review. No native-window smoke is required for this pure domain addition; no GUI behavior changed. Native M01 acceptance remains as recorded separately.
 
-## Next task
+## M02.2–M02.4 — Astro workspace and retained editing
 
-M02.2 — project discovery. Before implementing it, define the supported local loader/source-mapping subset and introduce exact-version locked Astro fixtures as required by review R2/R6. Do not infer collection roots from logical IDs. M02's real-project editing gate remains incomplete.
+The user approved conservative static discovery and completion of all M02 on 2026-10-29. The scoped approved design is `docs/superpowers/specs/2026-10-29-m02-project-discovery-design.md`; the execution plan is `docs/superpowers/plans/2026-10-29-m02-completion.md`. This does not reconstruct the missing original product specification or authorize M03/M04.
+
+### Implemented contract
+
+- `astrolith-astro` is independent of GPUI. It validates local metadata and exact installed Astro versions, parses configuration with a real Tree-sitter TypeScript AST, and returns either a complete manifest or explicit unsupported diagnostics. Discovery never executes project JavaScript.
+- Verified releases are Astro **5.18.2** with `@astrojs/mdx` **4.3.14**, and Astro **7.4.4** with MDX **8.1.2**. Each fixture has a committed frozen Bun lockfile. Other versions remain unsupported, even if their API appears similar. A pattern selecting MDX requires a verified `@astrojs/mdx` default import, an active empty `mdx()` integration call and the matching installed MDX version. A Markdown-only pattern remains supported without the integration or Astro config.
+- Supported configuration uses verified imports and literal `defineConfig`/`defineCollection`/`glob` declarations, including aliases, local declaration references and exported collection aliases. Patterns are only `**/*.md`, `**/*.mdx`, `**/*.{md,mdx}`. Local schema constants, dynamic expressions, escaped/template strings, custom IDs, imported collection declarations, legacy mode and unsupported options receive diagnostics. Unknown integrations, MDX options, `legacy` and `experimental` configuration are rejected because they may change content discovery. Schema expressions are inspected conservatively without evaluation. The syntax preflight caps AST depth at 128 and nodes at 100,000 before recursive interpretation. Frontmatter supports ordinary YAML with optional BOM/leading blank lines; TOML delimiters, YAML anchors/aliases/merge keys/tags, complex keys and ambiguous plain slug scalars receive diagnostics before alias materialization. Quote ambiguous string slugs explicitly. Truthy non-string slugs remain unsupported; no JS coercion is guessed.
+- Metadata/config reads require regular UTF-8 files and cap actual bytes at 1 MiB, including growth after inspection. Canonical containment is revalidated at file access. Special files, traversal and escaping symlinks are rejected; this is not a race-free security boundary.
+- `astrolith-workspace` indexes explicit collection-scoped IDs and canonical source mappings. Default IDs follow the actual pinned Astro loader and github-slugger Unicode rules; slug overrides remain independent from source paths. Duplicate logical IDs fail the whole scan. Overlapping collections retain distinct identities but share one editor per source.
+- Index traversal caps depth at 64 and visited directories, inspected nodes and selected entries at 100,000 each. Frontmatter reads cap at 1 MiB. Dot paths, `node_modules` and `.git` are ignored; encountered source symlinks are refused.
+- A bounded native watcher merges quiet bursts over 100 ms, drains at most 64 queued events, and requests full rescans on overflow/error. Initial discovery is repeated after watcher registration to close its startup gap. Registration refresh and all scans run on the existing blocking lane. Native watcher disposal stays on the service runtime.
+- Project identity/generation and index publication revision protect actual shell publication. Replacing an index cancels old first-load tasks; stale completions cannot create tabs. One owner retains each operation; source loads coalesce and admit at most two concurrent requests.
+- Pure document buffers track baseline, revision, dirty state and stale refresh tickets. GPUI retains one `EditorState` and undo history per canonical source. Open-document tabs reinstall the retained entity, preserving selection and composition state. Background refresh never replaces an open editor's text.
+- External source changes are compared in the background against per-document content fingerprints. The affected document keeps a visible warning across tab switches. Unchanged documents are not falsely marked. Close and reopen an unchanged buffer to reload; edited text requires explicit discard first.
+- Up to 32 sessions are retained. Loaded baseline sources have a 32 MiB total budget, with 8 MiB reserved per admitted load; individual documents cap at 8 MiB and 50,000 lines. Editor history and new user edits add memory beyond this initial-source budget.
+- **Open project…** and `Ctrl+Shift+O`/`Cmd+Shift+O` reveal the navigator. Picking cancellation preserves the project. Actual edits, undo/redo and dirty state work. Dirty buffers block project switching; closing a document or native window defaults to keeping its text, with discard requiring an explicit action. The existing readonly file picker continues working after project opening.
+
+### Verification and review
+
+Behavioral RED evidence includes missing discovery/document/workspace APIs, an ignored-file mismatch, JavaScript `__proto__` and TDZ false acceptance, absent production-oracle comparison, absent tab activation, hidden navigation on project opening, and a reader that grows beyond its initial metadata length. Final regression tests also exercise the owning completion path with a stale index revision, actual keyboard edits/undo/redo, project switching, duplicate loads, picker cancellation, filesystem refresh and configuration failure while buffers remain open.
+
+The fixture task performs frozen installs in temporary copies, runs actual local Astro sync and a delegated real `glob()` oracle, then runs the production Rust discovery/index executable on the same projects. It compares every `(collection, id, filePath)` triple: **11 production mappings per release**, plus a separately recorded custom-ID mapping which production explicitly refuses. Installed loader source hashes are emitted in the generated report. The generated outputs are temporary; fixtures themselves remain unchanged. The same task runs the headless GPUI picker/edit/MDX/tab workflow against each real installed fixture and verifies that source files remain byte-for-byte unchanged.
+
+Independent discovery review found `__proto__` special semantics, declaration TDZ and missing direct production/oracle comparison; all were fixed. Integration review prompted index-revision rejection, per-source external-change status, reinspection after watcher startup, scoped watch registration, source-memory admission and restoring readonly source mounting. Final independent review additionally found unverified MDX entry types and inertly accepted legacy flags. Both were fixed with actual integration provenance, exact Astro/MDX version-pair checks and explicit legacy/experimental refusal; their regression tests passed. Full-text domain mirroring on each editor Change remains a bounded-size M02 tradeoff; input/scroll latency under concurrent indexing is still a separate native acceptance item.
+
+Final `mise run check` passed doctor, formatting, warnings-denied Clippy, locked build and tests: **130 Rust tests passed, zero failed**. Three ordinary-suite tests are intentionally ignored: two performance diagnostics and the installed-fixture editor workflow. The fixture stage explicitly runs the latter once for each actual Astro release; both passed. The five Node harness tests and both real loader/production mapping comparisons passed.
+
+Bounded native smoke used isolated temporary preferences on Linux Wayland: native windows mapped at 1263×1384 and, in the final repeat, 943×1144 with `xwayland=false`; the real Ctrl+Shift+O shortcut opened the GTK portal directory chooser. The smoke sent Escape to the chooser and terminated only its test process. A separate attempted automated directory-text selection did not complete and is not counted as native project-workflow evidence. Actual installed-project editing is covered by the two headless fixture workflows.
+
+A residual M02 performance limit remains: every relevant quiet watcher batch triggers bounded rediscovery and a full collection rescan. Incremental file updates and conditional rediscovery are deferred; one retained publisher and the existing two-job blocking lane prevent unbounded concurrency. This is a recorded performance limitation, not evidence that native responsiveness budgets passed.
+
+### Limits and next milestone
+
+M02 adds in-memory editing only. Saving, disk conflict resolution, crash recovery and atomic replacement belong to M04. Native window close is guarded; forced process termination and platform/application shutdown can still discard memory. GPUI's platform quit callback does not provide a veto here, so application-wide quit protection is not claimed. The interface states that edits stay in memory.
+
+Linux native smoke establishes native Wayland window mapping, a rendered shell and opening the GTK portal directory picker through the actual project shortcut. Native project selection/editing, Chinese/Japanese IME acceptance, fractional scaling, file-to-present latency and input/scroll p95 remain unverified. Headless interaction tests and real Astro loader compatibility are separate evidence. Hosted macOS/Windows CI has not been run locally.
+
+**Next milestone:** M03 schema-driven frontmatter, following the original plan and its review. Native responsiveness acceptance remains open independently.

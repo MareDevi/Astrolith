@@ -14,15 +14,22 @@ pub(crate) struct WorkspacePanel {
     content: SharedString,
     focus: FocusHandle,
     pub editor: Option<Entity<EditorState>>,
+    readonly: bool,
+    view: Option<gpui_kit::AnyView>,
 }
 
 impl WorkspacePanel {
+    pub fn is_editable(&self) -> bool {
+        self.editor.is_some() && !self.readonly
+    }
+
     pub fn show_source(
         &mut self,
         source: crate::file::DocumentSource,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.readonly = true;
         self.title = source
             .path
             .file_name()
@@ -30,7 +37,7 @@ impl WorkspacePanel {
             .to_string_lossy()
             .into_owned()
             .into();
-        if self.editor.is_some() {
+        {
             // A readonly file is a new snapshot, not an edit of the previous
             // document. Initial content avoids the full replacement edit path.
             self.editor = Some(cx.new(|cx| {
@@ -39,6 +46,32 @@ impl WorkspacePanel {
                     .default_value(source.source)
             }));
         }
+        cx.emit(PanelEvent::LayoutChanged);
+        cx.notify();
+    }
+
+    pub fn set_view(&mut self, view: gpui_kit::AnyView, cx: &mut Context<Self>) {
+        self.view = Some(view);
+        cx.notify();
+    }
+
+    pub fn show_editor(
+        &mut self,
+        title: String,
+        editor: Entity<EditorState>,
+        cx: &mut Context<Self>,
+    ) {
+        self.title = title.into();
+        self.editor = Some(editor);
+        self.readonly = false;
+        cx.emit(PanelEvent::LayoutChanged);
+        cx.notify();
+    }
+
+    pub fn clear_editor(&mut self, cx: &mut Context<Self>) {
+        self.editor = None;
+        self.title = "Document".into();
+        self.content = "Select a collection entry to edit its source.".into();
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
     }
@@ -68,6 +101,8 @@ impl WorkspacePanel {
             content: content.into(),
             focus: cx.focus_handle().tab_stop(true),
             editor,
+            readonly: true,
+            view: None,
         }
     }
 }
@@ -115,13 +150,20 @@ impl Render for WorkspacePanel {
             .when_some(self.editor.as_ref(), |view, editor| {
                 view.child(
                     Editor::new(editor)
-                        .readonly(true)
+                        .readonly(self.readonly)
                         .bordered(false)
-                        .aria_label("Document source, readonly")
+                        .aria_label(if self.readonly {
+                            "Document source, readonly"
+                        } else {
+                            "Document source, editable"
+                        })
                         .size_full(),
                 )
             })
-            .when(self.editor.is_none(), |view| {
+            .when_some(self.view.as_ref(), |view, content| {
+                view.child(content.clone())
+            })
+            .when(self.editor.is_none() && self.view.is_none(), |view| {
                 view.child(
                     div()
                         .p_3()

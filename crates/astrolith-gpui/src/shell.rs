@@ -10,6 +10,7 @@ use crate::{
         panels::WorkspacePanel,
         state::{LayoutState, PanelKind},
     },
+    project_discovery::ProjectWorkspace,
     runtime,
     settings::{Settings, SettingsStore, settings_path},
     theme::{self, ThemeMode},
@@ -76,6 +77,7 @@ pub fn open(cx: &mut App) {
 pub(crate) struct Shell {
     dock: Entity<DockArea>,
     document: Entity<WorkspacePanel>,
+    project: Entity<ProjectWorkspace>,
     navigator: Entity<WorkspacePanel>,
     palette: Entity<CommandState>,
     palette_focus: FocusHandle,
@@ -114,7 +116,17 @@ impl Shell {
                 cx,
             )
         });
-        let document = cx.new(|cx| WorkspacePanel::new("document-panel", "Welcome", "# Astrolith\n\nOpen a local Markdown or MDX document to view its source.\n\nThis stage provides readonly file navigation.\n\n中文 · 日本語", window, cx));
+        let document = cx.new(|cx| WorkspacePanel::new("document-panel", "Welcome", "# Astrolith\n\nOpen an Astro project to edit Markdown and MDX.\n\nEdits stay in memory. Saving is not available yet.\n\n中文 · 日本語", window, cx));
+        let project = cx.new(|cx| ProjectWorkspace::new(document.clone(), window, cx));
+        navigator.update(cx, |navigator, cx| {
+            navigator.set_view(project.clone().into(), cx)
+        });
+        let project_owner = project.downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            project_owner
+                .update(cx, |project, cx| project.guard_window_close(window, cx))
+                .unwrap_or(true)
+        });
         let inspector = cx.new(|cx| WorkspacePanel::new("inspector-panel", "Inspector", "No collection selected\n\nCollection metadata becomes available when an Astro workspace is open.", window, cx));
         let preview = cx.new(|cx| WorkspacePanel::new("preview-panel", "Preview", "No preview running\n\nAstro preview will use your project's development server and an external browser.", window, cx));
         let (dock, skin) = DockSkin::dock_area("astrolith-workspace", Some(1), window, cx);
@@ -218,6 +230,7 @@ impl Shell {
         Self {
             dock,
             document,
+            project,
             navigator,
             palette,
             palette_focus: cx.focus_handle().tab_stop(true),
@@ -333,6 +346,13 @@ impl Shell {
     fn execute(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         match command {
             CommandId::OpenFile => self.open_file(window, cx),
+            CommandId::OpenProject => {
+                if !self.dock.read(cx).is_dock_open(DockPlacement::Left) {
+                    self.toggle_panel(PanelKind::Sidebar, window, cx);
+                }
+                self.project
+                    .update(cx, |project, cx| project.prompt(window, cx));
+            }
             CommandId::OpenPalette => self.open_palette(window, cx),
             CommandId::ToggleSidebar => self.toggle_panel(PanelKind::Sidebar, window, cx),
             CommandId::ToggleInspector => self.toggle_panel(PanelKind::Inspector, window, cx),
@@ -499,6 +519,15 @@ impl Render for Shell {
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .child(
+                        Button::new("open-project-toolbar")
+                            .small()
+                            .ghost()
+                            .label(CommandId::OpenProject.label())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.execute(CommandId::OpenProject, window, cx)
+                            })),
+                    )
+                    .child(
                         Button::new("open-file")
                             .small()
                             .ghost()
@@ -571,6 +600,8 @@ impl Render for Shell {
                     .text_color(cx.theme().muted_foreground)
                     .child(if self.opening {
                         "Opening file…".to_owned()
+                    } else if self.document.read(cx).is_editable() {
+                        "Editing in memory · Saving is not available yet.".into()
                     } else {
                         self.file_status.clone()
                     })
@@ -610,6 +641,23 @@ mod tests {
         })
     }
 
+    #[gpui_kit::test]
+    async fn opening_project_reveals_hidden_navigator(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.layout.sidebar_visible = false;
+        let (handle, view) = mount(cx, settings);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::OpenProject, window, cx)
+            })
+        })
+        .unwrap();
+        assert!(view.read_with(cx, |view, cx| {
+            view.dock.read(cx).is_dock_open(DockPlacement::Left)
+        }));
+        cx.simulate_path_prompt_response(|_| None);
+        cx.run_until_parked();
+    }
     #[gpui_kit::test]
     fn toolbar_and_native_collapse_share_live_visibility_and_restore_document_space(
         cx: &mut TestAppContext,

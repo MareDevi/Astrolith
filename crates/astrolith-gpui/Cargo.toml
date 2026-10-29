@@ -6,6 +6,10 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+astrolith-workspace = { path = "../astrolith-workspace" }
+astrolith-core = { path = "../astrolith-core" }
+astrolith-astro = { path = "../astrolith-astro" }
+astrolith-document = { path = "../astrolith-document" }
 gpui-kit.workspace = true
 tokio.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
