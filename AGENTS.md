@@ -8,7 +8,14 @@
 - Run `mise run check` before committing and report actual results. It composes doctor, formatting, lint, build, and headless tests. `mise run ci` uses the same checks on Linux, macOS, and Windows.
 - Bootstrap/spikes need real build and bounded window smoke evidence. Do not add tests that merely repeat configuration. Later meaningful behavior must receive appropriate tests.
 - Native IME, focus, scaling, and rendering acceptance require real-platform evidence; a successful headless test or build does not establish those results. External browser preview remains the normal Wayland path; embedded preview must remain optional.
-- End each implementation task with verification and a Conventional Commit. Preserve unrelated changes and the existing review documents.
+- Commit often. Every atomic, self-contained change gets its own commit — never batch unrelated work or wait until a task is finished. End each implementation task with verification and at least one commit. Preserve unrelated changes and the existing review documents.
+
+## Commits
+
+- Use Conventional Commits: `<type>(<scope>): <description>`, with `feat`, `fix`, `refactor`, `test`, `docs`, `build`, `ci`, `chore` as the allowed types; imperative, lowercase description. Add a body only when the change needs rationale.
+- One logical change per commit: it must build and pass `mise run check` on its own, and be revertible without dragging in unrelated files. Split refactors, behavior changes, formatting, dependency bumps, and docs into separate commits.
+- Commit as soon as a change is verified, including intermediate progress that leaves the tree green. Do not stage unrelated files, generated artifacts, or secrets.
+- Use `--locked` for any Cargo command in the commit workflow; commit the resulting `Cargo.lock` change with the dependency it belongs to.
 
 ## Current library documentation
 
