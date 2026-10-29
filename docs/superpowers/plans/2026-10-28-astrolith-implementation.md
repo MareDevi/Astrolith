@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkboxes for tracking.
 
-**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native latency acceptance remains open
+**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native IME, scaling and latency manually accepted by the user on 2026-10-29
 **Version:** 1.1
 **Date:** 2026-10-28  
 **Project:** Astrolith  
@@ -376,7 +376,7 @@ See `docs/technical/m02-progress.md` for the model contract, verification and re
 - [x] Add and test the application-owned Tokio/GPUI bridge, including queued cancellation and blocking concurrency after cancellation.
 - [x] Measure the existing readonly file-to-frame path and debug/release editor workloads before changing behavior.
 - [x] Remove redundant readonly full-buffer replacement work, coalesce preference writes, and optimize measured development dependency hotspots.
-- [x] Record before/after CPU measurements, run `mise run check`, and perform a bounded native smoke. Keep native latency acceptance separately open until measured or explicitly accepted by the user.
+- [x] Record before/after CPU measurements, run `mise run check`, and perform a bounded native smoke. Native IME, scaling and latency were explicitly accepted by the user on 2026-10-29; numerical native measurements remain separate evidence.
 - [x] Commit the repair and retain the original review documents.
 
 M02.2 discovery must use the runtime/executor contract above and expose cancellation and obsolete-project rejection.

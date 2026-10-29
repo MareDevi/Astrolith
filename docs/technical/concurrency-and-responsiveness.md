@@ -39,7 +39,7 @@ Execute these tasks with failing behavior tests for settings coalescing and snap
 
 Use identical generated multilingual workloads: 1 KiB, 100 KiB, 1 MiB and a 100 KiB single line; log actual bytes/lines. Run the real shell open path as well as the disposable editor spike, in dev and release separately. Record file read/validation, foreground installation, first headless frame and total CPU time; exclude fixture creation. Retain before/after samples with exact profile and environment.
 
-Native target on the documented Linux Wayland reference machine: 1 MiB selected file to first presented content at most 500 ms; at least 100 visible input/scroll/resize samples with p95 at most 50 ms. Exclude human time in the picker, report portal response separately, and exercise background indexing concurrently. Repeat long-line and fractional-scale cases. These are proposed acceptance budgets; a headless pass or a mapped window does not establish them. The user's current report of native sluggishness remains open until instrumented native interaction or explicit user acceptance confirms improvement.
+Native target on the documented Linux Wayland reference machine: 1 MiB selected file to first presented content at most 500 ms; at least 100 visible input/scroll/resize samples with p95 at most 50 ms. Exclude human time in the picker, report portal response separately, and exercise background indexing concurrently. Repeat long-line and fractional-scale cases. These are proposed acceptance budgets; a headless pass or a mapped window does not establish them. The user explicitly accepted native latency on 2026-10-29, as recorded below; numerical budgets still require instrumented evidence.
 
 ## Execution evidence
 
@@ -69,3 +69,7 @@ Bounded native smoke (under one second for the successful run): Hyprland 0.56.2 
 Native file-to-present, input/scroll p95, fractional-scale performance and concurrent indexing acceptance remain unmeasured. The smoke and CPU improvements do not establish those results.
 
 Final verification after review: `mise run check` passed again with 46 tests passed and two ignored diagnostics. The rebuilt desktop repeated the native smoke successfully: pending preference change survived graceful close, exit code 0, empty stdout/stderr. The final shutdown regression covers an operation longer than GPUI's quit-observer budget; the native smoke checks the real application path with a normal disk.
+
+## Manual acceptance — 2026-10-29
+
+The user confirmed completed manual acceptance of native IME, scaling and latency and authorized merging M02 into `dev`. This closes the manual responsiveness acceptance gate. The historical measurements above remain unchanged. No native latency samples, p95 values, exact scaling settings or concurrent-indexing workload details were supplied; this acceptance does not establish the proposed numerical budgets or additional platform coverage.
