@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkboxes for tracking.
 
-**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native IME, scaling and latency manually accepted by the user on 2026-10-29; M03.1 JSON Schema normalization and the R1 schema generation service complete on 2026-10-30 (fixture schema authoring, M03.2 helpers, forms and validation pending; forms remain blocked on M04.1)
+**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native IME, scaling and latency manually accepted by the user on 2026-10-29; M03.1 JSON Schema normalization and the R1 schema generation service complete on 2026-10-30; M04.1 lossless document model and scalar field-patch contract complete on 2026-10-31 (fixture schema authoring, M03.2 helpers, M04.2 save coordinator, M04.3 recovery, forms and validation pending; forms remain blocked on M04.2)
 **Version:** 1.1
 **Date:** 2026-10-28  
 **Project:** Astrolith  
@@ -455,7 +455,7 @@ pub fn normalize_schema(
 
 **Tests:** Astro 5/6/7 generated schemas; nullable fields, date, defaults, enum, nested objects, arrays and unsupported unions.
 
-**M03.1 update (2026-10-30):** The pure normalizer is implemented and tested against real generated Astro 5.18.2 (draft-07 `$ref`/`definitions`) and 7.4.4 (draft 2020-12) schema output; the two dialects normalize to one identical model. Astro 6 remains unverified (no fixture). The review-R1 generation service is now implemented in `schema/generation.rs`: it resolves the project-local Astro CLI, runs `astro sync` under a timeout/cancellation/bounded-output policy, and discovers, loads and normalizes `.astro/collections/*.schema.json` with a freshness check; it is verified end-to-end against both installed fixtures. Fixture schema authoring and shell/form wiring remain pending; per R3, editable forms (M03.3) remain blocked on the M04.1 lossless document/field-patch contract. See `docs/technical/m03-progress.md`.
+**M03.1 update (2026-10-30):** The pure normalizer is implemented and tested against real generated Astro 5.18.2 (draft-07 `$ref`/`definitions`) and 7.4.4 (draft 2020-12) schema output; the two dialects normalize to one identical model. Astro 6 remains unverified (no fixture). The review-R1 generation service is now implemented in `schema/generation.rs`: it resolves the project-local Astro CLI, runs `astro sync` under a timeout/cancellation/bounded-output policy, and discovers, loads and normalizes `.astro/collections/*.schema.json` with a freshness check; it is verified end-to-end against both installed fixtures. Fixture schema authoring and shell/form wiring remain pending; per R3, editable forms (M03.3) remain blocked on the M04.2 save coordinator (the M04.1 lossless contract is complete). See `docs/technical/m03-progress.md`.
 
 ### Task M03.2 — Astro Helper Resolution
 
