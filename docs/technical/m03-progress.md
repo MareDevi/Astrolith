@@ -39,9 +39,19 @@ Field order is deterministic: fields are sorted by name, because `serde_json`'s 
 
 ## Verification
 
-Nine behavioral tests cover both real dialect fixtures, the shared dialect-independent model, scalar/object/container fields, nested objects, nullable scalars, heterogeneous unions, `anyOf` dates, arrays and defaults, empty schemas, and structural errors. The two fixtures differ in raw bytes but normalize to identical `fields` and `diagnostics`.
+Sixteen behavioral tests cover both real dialect fixtures, the shared dialect-independent model, scalar/object/container fields, nested objects, nullable scalars, heterogeneous unions, `anyOf` dates (including nullable dates), arrays and defaults, empty schemas, structural errors, `$defs` references, `$ref` cycles, open objects, tuple arrays, null-only fields, nested unresolved references, deterministic multi-diagnostic ordering, and depth bounding. The two fixtures differ in raw bytes but normalize to identical `fields` and `diagnostics`.
 
-`mise run check` result: **PASS** — doctor, formatting, warnings-denied Clippy, locked build, workspace tests and the frozen Astro fixture task all succeeded (**139 Rust tests passed, 0 failed, 3 intentionally ignored**; the 9 schema tests are new, up from 130) and **Astro fixture compatibility: PASS**. Note that the same schema tests initially passed under `cargo test -p astrolith-astro` but failed under `cargo test --workspace` until fields were sorted (the `preserve_order` feature unification described above).
+## Independent review and resolutions
+
+An independent review verified the tests and Clippy and found no model/API or silent-coercion problems, with two [P1] issues and several [P2] nits. Both P1s were fixed:
+
+1. **[P1] Reference-cycle / depth stack overflow.** A crafted `.schema.json` with a self-referential `$ref` (or programmatic deeply nested `Value`) could recurse without bound and overflow the stack. The traversal now carries a depth counter capped at 64 and an active-reference stack that reports a `cyclic schema reference` diagnostic, so normalization stays bounded.
+2. **[P1] Non-deterministic diagnostic order.** Diagnostics were pushed in `properties` iteration order while only `fields` were sorted, so `CollectionSchema` equality varied with `preserve_order` feature unification once there were two or more unsupported fields. Diagnostics are now sorted by `(path, message)`.
+
+P2 fixes applied: `$defs` (2020-12) references are resolved alongside `#/definitions/`; a nullable date flattened into the Astro 5 `anyOf` plus a `null` branch normalizes to `Nullable<Date>` instead of `Unsupported`; `type: ["null"]`, standalone `integer`/`unix-time`, tuple arrays, non-object `items` and array-item diagnostic paths are classified/labelled correctly. Residual: Astro 6 still has no fixture (honestly disclosed above; the "5/6/7" matrix is only satisfied for 5 and 7).
+
+
+`mise run check` result: **PASS** — doctor, formatting, warnings-denied Clippy, locked build, workspace tests and the frozen Astro fixture task all succeeded (**146 Rust tests passed, 0 failed, 3 intentionally ignored**; the 16 schema tests are new, up from 130) and **Astro fixture compatibility: PASS**. Note that the same schema tests initially passed under `cargo test -p astrolith-astro` but failed under `cargo test --workspace` until fields were sorted (the `preserve_order` feature unification described above); diagnostics were sorted for the same reason.
 
 ## Remaining M03 scope (not done here)
 
