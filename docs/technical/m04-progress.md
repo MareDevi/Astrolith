@@ -55,9 +55,26 @@ Independent review of M04.2 found the conflict core sound (no P0) and raised thr
 - **[P1] A failed `rename` leaked the temp file.** The temp is now removed on rename error, and a read-only-directory test verifies the original is intact with no leftover temp.
 - **[P2]** Permissions are set before `sync_all`; `DocumentSnapshot::new` is crate-private (callers use `capture`, which always uses the true load baseline); the residual check-to-replace race and single-writer assumptions are stated precisely in the module docs.
 
+## M04.3 recovery (implemented)
+
+`crates/astrolith-document/src/recovery.rs` adds a directory-backed recovery store for unsaved content:
+
+- **Records:** `RecoveryRecord` captures identity (project + generation + canonical source), revision, unsaved content and a modified timestamp; `RecoveryRecord::capture(&buffer, modified)` builds one. It deliberately stores **no absolute path**; `resolve_path(project_root)` joins the validated relative `SourcePath`, so a tampered record cannot redirect a write elsewhere.
+- **Atomic, keyed persistence:** `RecoveryStore::save` writes JSON atomically (reusing the save coordinator's temp+rename) to a stable file keyed by an FNV-1a hash of project + canonical source (generation-independent, so a record survives reopening), with in-process per-document write serialization.
+- **Tolerant load:** `load` returns valid records newest-first plus diagnostics for corrupt/unreadable files; one bad file never aborts recovery. `has_original(project_root)` reports whether the source still exists so a missing original is still recoverable.
+- **Correct cleanup:** `clear_after_save(identity, saved_content)` removes a record only when its persisted content equals the just-saved content. Comparing durable content (not the per-buffer revision counter, which resets on reopen) keeps *newer* unsaved content across restarts; `clear` removes unconditionally; an unparseable record is removed on cleanup.
+
+Ten new tests: save/load round-trip; invalid-record diagnostic; valid-JSON-missing-field / bad-identity diagnostics; missing-original still recoverable with path resolved from the project root; obsolete record removed by `clear_after_save`; newer unsaved content kept; corrupt record removed on cleanup; two-document isolation; absent-record clear; directory-named-record diagnostic. Full `mise run check`: **PASS** — **201 Rust tests passed, 0 failed, 4 intentionally ignored**; Astro fixture compatibility PASS.
+
+Independent review of M04.3 found the load path panic-free/tolerant and atomic writes sound, but two [P1]s (both fixed):
+
+- **[P1] Trusted absolute path on load** could let a tampered record direct a write to an arbitrary file. The absolute path is no longer persisted; recovery resolves the validated relative source against a caller-supplied project root.
+- **[P1] Revision-based cleanup was unsound across reopening** (the in-memory revision counter resets, so newer content could be kept forever or an older record deleted). Cleanup now compares durable **content**, preserving newer unsaved edits and removing only obsolete ones.
+- **[P2]** Added per-document write serialization, plus tests for two-document isolation, corrupt-record cleanup, directory-named records, missing-field/bad-identity diagnostics and path resolution.
+
 ## Limits and next
 
 - Only scalar leaf patches are supported. Flow collections, block scalars and null leaves are preserved verbatim and read/refused as appropriate; editing them needs a future whole-region editor. This is deliberate, not silent loss.
 - A patched float is re-rendered canonically (e.g. `1.50` may become `1.5`); only that field changes.
-- The broader dirty-document lifecycle coordinator (unsaved tab closure, project switching, application exit, watcher-driven reload decisions) spans the shell and M04.3 recovery; M04.2 provides the save primitive but not those policy decisions. The writer lock is in-process (one application instance).
-- M04.3 (recovery of unsaved content) remains. Forms remain blocked until the M04 gate ("no known path silently destroys unsaved content or overwrites conflicting disk changes") is judged closed, which needs M04.3 as well.
+- The broader dirty-document lifecycle coordinator (unsaved tab closure, project switching, application exit, watcher-driven reload decisions) and the wiring of save/recovery into the shell remain. M04.1–M04.3 provide the lossless model, save primitive and recovery store, but the policy decisions and shell integration are still outstanding. The writer lock is in-process (one application instance).
+- The M04 gate ("no known path silently destroys unsaved content or overwrites conflicting disk changes") now has its primitives (lossless patch, conflict-aware save, recovery records); the shell must still adopt them before forms (M03.3) can persist.
