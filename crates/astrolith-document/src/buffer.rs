@@ -172,6 +172,17 @@ impl DocumentBuffer {
         }
     }
 
+    /// Create a buffer whose baseline is the on-disk source but whose current
+    /// text differs (used when restoring recovered unsaved content).
+    pub fn from_unsaved(identity: DocumentIdentity, original: String, current: String) -> Self {
+        Self {
+            identity,
+            original_text: original,
+            current_text: current,
+            revision: DocumentRevision::INITIAL,
+        }
+    }
+
     /// Return the project and source identity retained by this buffer.
     pub fn identity(&self) -> &DocumentIdentity {
         &self.identity

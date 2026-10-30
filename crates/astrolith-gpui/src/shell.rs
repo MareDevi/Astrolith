@@ -116,7 +116,7 @@ impl Shell {
                 cx,
             )
         });
-        let document = cx.new(|cx| WorkspacePanel::new("document-panel", "Welcome", "# Astrolith\n\nOpen an Astro project to edit Markdown and MDX.\n\nEdits stay in memory. Saving is not available yet.\n\n中文 · 日本語", window, cx));
+        let document = cx.new(|cx| WorkspacePanel::new("document-panel", "Welcome", "# Astrolith\n\nOpen an Astro project to edit Markdown and MDX.\n\nPress Ctrl/Cmd+S to save the active document.\n\n中文 · 日本語", window, cx));
         let project = cx.new(|cx| ProjectWorkspace::new(document.clone(), window, cx));
         navigator.update(cx, |navigator, cx| {
             navigator.set_view(project.clone().into(), cx)
@@ -346,6 +346,14 @@ impl Shell {
     fn execute(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         match command {
             CommandId::OpenFile => self.open_file(window, cx),
+            CommandId::Save => {
+                self.project
+                    .update(cx, |project, cx| project.save_active(window, cx));
+            }
+            CommandId::RecoverUnsaved => {
+                self.project
+                    .update(cx, |project, cx| project.recover_pending(window, cx));
+            }
             CommandId::OpenProject => {
                 if !self.dock.read(cx).is_dock_open(DockPlacement::Left) {
                     self.toggle_panel(PanelKind::Sidebar, window, cx);
@@ -601,7 +609,7 @@ impl Render for Shell {
                     .child(if self.opening {
                         "Opening file…".to_owned()
                     } else if self.document.read(cx).is_editable() {
-                        "Editing in memory · Saving is not available yet.".into()
+                        "Editing in memory · Ctrl/Cmd+S saves.".into()
                     } else {
                         self.file_status.clone()
                     })

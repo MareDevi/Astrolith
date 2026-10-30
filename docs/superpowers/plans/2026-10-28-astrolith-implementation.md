@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkboxes for tracking.
 
-**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native IME, scaling and latency manually accepted by the user on 2026-10-29; M03.1 JSON Schema normalization and the R1 schema generation service complete on 2026-10-30; M04.1 lossless document model and scalar field-patch contract complete on 2026-10-31 (fixture schema authoring, M03.2 helpers, M04.2 save coordinator, M04.3 recovery, forms and validation pending; forms remain blocked on M04.2)
+**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native IME, scaling and latency manually accepted by the user on 2026-10-29; M03.1 JSON Schema normalization and the R1 schema generation service complete on 2026-10-30; M04.1 lossless document model, M04.2 conflict-aware save, M04.3 recovery, and shell save/recovery integration complete on 2026-10-31 (fixture schema authoring, M03.2 helpers, M03.3 forms and M03.4 validation pending; remaining lifecycle polish: recovery auto-apply and native-exit flush)
 **Version:** 1.1
 **Date:** 2026-10-28  
 **Project:** Astrolith  
@@ -549,6 +549,8 @@ Use one writer per document and immutable snapshots. Test exit while save N is r
 **Tests:** Unsaved-content recovery, invalid recovery record, missing original file and recovery cleanup after confirmed successful save.
 
 **M04.3 update (2026-10-31):** Recovery store implemented in `crates/astrolith-document/src/recovery.rs`. `RecoveryRecord` captures identity (project + generation + canonical source), revision, unsaved content and timestamp; it stores no absolute path (recovery resolves the validated relative source against a caller project root). `RecoveryStore` persists records atomically to a stable, generation-independent key with per-document write serialization, loads them tolerantly (corrupt files become diagnostics, missing originals remain recoverable), and `clear_after_save` removes a record only when its durable content equals the saved content (so newer unsaved edits are kept across restarts). Ten new tests pass. When to write/prompt recovery remains shell/lifecycle scope. See `docs/technical/m04-progress.md`.
+
+**Shell save/recovery integration (2026-10-31):** `astrolith-gpui` now exposes a Save command (Ctrl/Cmd+S, palette, button) that snapshots the active buffer, runs `save_snapshot` off the UI thread, confirms the saved revision and clears the recovery record on success, and reports a conflict without overwriting on failure. Dirty edits are captured to the `RecoveryStore` after a 500 ms debounce and cleared when clean/saved/discarded; a `Recover unsaved changes…` command restores matching records as dirty sessions with disk reads off the UI thread. Four headless tests pass. Remaining lifecycle polish (startup auto-apply, exit flush) is shell scope. See `docs/technical/m04-progress.md`.
 
 **M04 Gate:** No known path silently destroys unsaved content or overwrites conflicting disk changes.
 

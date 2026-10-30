@@ -72,9 +72,21 @@ Independent review of M04.3 found the load path panic-free/tolerant and atomic w
 - **[P1] Revision-based cleanup was unsound across reopening** (the in-memory revision counter resets, so newer content could be kept forever or an older record deleted). Cleanup now compares durable **content**, preserving newer unsaved edits and removing only obsolete ones.
 - **[P2]** Added per-document write serialization, plus tests for two-document isolation, corrupt-record cleanup, directory-named records, missing-field/bad-identity diagnostics and path resolution.
 
+## Shell integration: save + recovery (implemented)
+
+Wires the M04 primitives into the GPUI shell (`astrolith-gpui`):
+
+- **Save command** (Ctrl/Cmd+S, palette, Save button): syncs the latest editor text into the buffer, snapshots it, and calls `save_snapshot` off the UI thread. On `Saved` it `confirm_saved`s (clears dirty only if the saved revision is current) and clears the recovery record; on `Conflict` it marks the buffer externally changed, keeps edits, and reports a conflict; I/O errors surface in the status line. Each save/recover has its own UI task, so one cannot drop another's completion.
+- **Recovery lifecycle**: dirty edits are captured after a 500 ms debounce into a `RecoveryStore` under the app recovery directory (`ASTROLITH_RECOVERY_DIR` overrides). Clean, saved, and discarded sessions clear their record (per-tab and window-close discard). At project open, pending records matching the current project identity and an indexed source are surfaced.
+- **Recover command** (`Recover unsaved changes…`): restores matching records as dirty sessions using the record's own identity (so a later save clears the same record) and the current on-disk file as baseline; disk reads run off the UI thread.
+
+Verification: four new headless GPUI tests — save writes disk and clears dirty; a save conflict preserves disk and keeps edits; a dirty edit records recovery and it is cleared after save; `recover_pending` restores a pending record as a dirty session with the on-disk baseline. GPUI suite: 34 passed. Full `mise run check`: **PASS** — **205 Rust tests passed, 0 failed, 4 intentionally ignored**; Astro fixture compatibility PASS.
+
+Independent review found no P0 and no UI-thread blocking; two P1s fixed: `recover_pending` reused `save_task` (now a dedicated `restore_task`, so a recover no longer drops an in-flight save's completion), and restored sessions discarded the stored identity (now preserved, so cleanup matches and the record is cleared). Pending recovery is additionally filtered by the current project id, and window-close discard now clears recovery. Residual: project identity is launch-local (`workspace-N`), so cross-launch records for a different project with an identical relative source and generation are not fully disambiguated (restore still resolves under the current root, so it cannot write outside the project); records whose original file is missing are skipped at restore.
+
 ## Limits and next
 
 - Only scalar leaf patches are supported. Flow collections, block scalars and null leaves are preserved verbatim and read/refused as appropriate; editing them needs a future whole-region editor. This is deliberate, not silent loss.
 - A patched float is re-rendered canonically (e.g. `1.50` may become `1.5`); only that field changes.
-- The broader dirty-document lifecycle coordinator (unsaved tab closure, project switching, application exit, watcher-driven reload decisions) and the wiring of save/recovery into the shell remain. M04.1–M04.3 provide the lossless model, save primitive and recovery store, but the policy decisions and shell integration are still outstanding. The writer lock is in-process (one application instance).
+- Save and recovery are now wired into the shell (Save command, debounced recovery capture, Recover command). Remaining lifecycle polish: auto-apply/prompt for recovery on startup, clearing recovery on window-discard, and native-exit recovery flush; these are shell policy refinements, not document-core gaps. The writer lock is in-process (one application instance).
 - The M04 gate ("no known path silently destroys unsaved content or overwrites conflicting disk changes") now has its primitives (lossless patch, conflict-aware save, recovery records); the shell must still adopt them before forms (M03.3) can persist.
