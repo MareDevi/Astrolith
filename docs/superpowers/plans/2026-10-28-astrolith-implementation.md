@@ -539,6 +539,8 @@ pub async fn save_snapshot(
 
 Use one writer per document and immutable snapshots. Test exit while save N is running and revision N+1 remains dirty, cancellation during admission, and bounded shutdown without abandoning document-integrity operations.
 
+**M04.2 update (2026-10-31):** Save coordinator implemented in `crates/astrolith-document/src/{save.rs,version.rs}`. `DocumentSnapshot` carries path/identity/revision/content/`DiskBaseline`; `save_snapshot` compares on-disk bytes to the baseline (changed or deleted file → `SaveOutcome::Conflict`, untouched) and otherwise writes atomically (same-dir `create_new` temp, `sync_all`, permission preserve, `rename`, best-effort dir fsync). Saves for one path are serialized process-wide (one writer), and I/O runs in `spawn_blocking`. `DocumentBuffer::confirm_saved` clears dirty only when the saved revision is still current, so saving N while editing N+1 keeps N+1 dirty. The residual check-to-replace race is documented. Eleven new tests pass. The broader dirty-lifecycle coordinator (close/switch/exit/reload) and unsaved-content recovery remain M04.3 / shell scope. See `docs/technical/m04-progress.md`.
+
 ### Task M04.3 — Recovery
 
 **Files**
