@@ -11,6 +11,8 @@
 pub mod buffer;
 /// Lossless frontmatter parse and scalar field spans.
 pub mod parse;
+/// Recovery records for unsaved document content.
+pub mod recovery;
 /// Conflict-aware, one-writer-per-document save coordinator.
 pub mod save;
 /// Lossless document and scalar serialization.
@@ -22,6 +24,7 @@ pub use buffer::{
     DocumentBuffer, DocumentError, DocumentIdentity, DocumentLoadTicket, DocumentRevision,
 };
 pub use parse::{FrontmatterValue, LineEnding, ParsedDocument, parse_document};
+pub use recovery::{RecoveryLoad, RecoveryRecord, RecoveryStore};
 pub use save::{DocumentSnapshot, SaveOutcome, save_snapshot};
 pub use serialize::serialize_document;
 pub use version::DiskBaseline;
