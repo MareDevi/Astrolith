@@ -1,6 +1,6 @@
 # M03 — schema-driven frontmatter progress
 
-Started: 2026-10-30. Base: `dev` at `c985ca1`. Scope: M03.1 JSON Schema normalization only. The original product specification remains absent; this note follows the implementation plan and its review and does not reconstruct that specification or approve later milestone gates.
+Started: 2026-10-30. Base: `dev` at `c985ca1`. Scope: M03.1 JSON Schema normalization and the R1 schema generation service. The original product specification remains absent; this note follows the implementation plan and its review and does not reconstruct that specification or approve later milestone gates.
 
 ## Ordering against the implementation review
 
@@ -10,7 +10,7 @@ The plan-review findings still govern M03 ordering and are not waived here:
 - **R3** makes the lossless document model and field-patch contract (M04.1) a prerequisite of editable frontmatter forms (M03.3).
 - **R6** requires locked fixtures before the first Astro integration task; the Astro 5.18.2 and 7.4.4 fixtures already exist.
 
-M03.1 is the pure JSON→model step. It does not execute project tooling, does not read the filesystem, and does not wire forms, so it is safe to land before the R1 generation service and before the R3 form gate. Generation, freshness and fixture schema authoring remain outstanding M03 work; forms remain blocked on M04.
+M03.1 is the pure JSON→model step. It does not execute project tooling, does not read the filesystem, and does not wire forms, so it is safe to land before the R1 generation service and before the R3 form gate. The R1 generation service is now implemented (below). Fixture schema authoring, M03.2 helper resolution, forms and validation remain outstanding; forms remain blocked on M04.
 
 ## Verified generation contract (input to M03.1)
 
@@ -51,11 +51,40 @@ An independent review verified the tests and Clippy and found no model/API or si
 P2 fixes applied: `$defs` (2020-12) references are resolved alongside `#/definitions/`; a nullable date flattened into the Astro 5 `anyOf` plus a `null` branch normalizes to `Nullable<Date>` instead of `Unsupported`; `type: ["null"]`, standalone `integer`/`unix-time`, tuple arrays, non-object `items` and array-item diagnostic paths are classified/labelled correctly. Residual: Astro 6 still has no fixture (honestly disclosed above; the "5/6/7" matrix is only satisfied for 5 and 7).
 
 
-`mise run check` result: **PASS** — doctor, formatting, warnings-denied Clippy, locked build, workspace tests and the frozen Astro fixture task all succeeded (**146 Rust tests passed, 0 failed, 3 intentionally ignored**; the 16 schema tests are new, up from 130) and **Astro fixture compatibility: PASS**. Note that the same schema tests initially passed under `cargo test -p astrolith-astro` but failed under `cargo test --workspace` until fields were sorted (the `preserve_order` feature unification described above); diagnostics were sorted for the same reason.
+`mise run check` result: **PASS** — doctor, formatting, warnings-denied Clippy, locked build, workspace tests and the frozen Astro fixture task all succeeded (**158 Rust tests passed, 0 failed, 4 intentionally ignored**; 28 schema/generation tests are new, up from 130) and **Astro fixture compatibility: PASS**. The same schema tests initially passed under `cargo test -p astrolith-astro` but failed under `cargo test --workspace` until fields were sorted (the `preserve_order` feature unification described above); diagnostics were sorted for the same reason.
+
+## R1 schema generation service (implemented)
+
+`crates/astrolith-astro/src/schema/generation.rs` adds the R1 tooling owner:
+
+- **Executable resolution:** reads `node_modules/astro/package.json`, resolves its `bin.astro` entry, canonicalizes it, and rejects an entry that escapes the project or is not a file. A missing installation is a clear error.
+- **Generation command:** runs `node <astro-entry> sync` with the project root as working directory. Node defaults to `node` on `PATH`; `ASTROLITH_NODE` can be supplied through the request builder for non-PATH environments. Node must therefore be available to the app (a documented requirement, not yet packaged).
+- **Bounds:** 30 s default deadline (overridable), the shared `Cancellation` polled during the run, a 1 MiB capture cap per output stream (drained continuously to avoid pipe deadlock), and a 1 MiB cap per schema file. Timeout/cancellation kill the direct child. Full process-tree cleanup (e.g. esbuild grandchildren) is the M05 process-lifecycle responsibility, not claimed here.
+- **Output discovery:** lists `.astro/collections/*.schema.json`, reads each bounded file, parses it, and normalizes it via M03.1. A bad file becomes a per-collection diagnostic without discarding the others; results are sorted by collection.
+- **Non-zero exit:** tolerated when schema files were still written (Astro writes schemas before content validation) and recorded as a diagnostic; a run that produces no schemas is an error.
+- **Freshness:** `schemas_are_stale(root, content_config)` reports stale when `.astro/collections` is missing/empty or its newest schema predates `content.config`.
+
+It is not yet wired into the GPUI shell or forms; that belongs with M03.3 after the M04 lossless-edit gate.
+
+### Generation verification
+
+- Twelve generation unit tests cover resolution, generation+normalization, non-zero exit with schemas, a malformed schema alongside a valid one, missing schemas, timeout, cancellation, freshness (older/newer/missing/any-stale), entry containment (bin without `astro`, bin escaping the project), and a missing installation. Spawn-based tests are serialized to avoid the Linux `ETXTBSY` fork race.
+- An opt-in `installed_project_generates_schemas_end_to_end` test was run against freshly `bun install`-ed Astro **5.18.2** and **7.4.4** fixtures (with a `docs` schema added) under Node 26.12.1: both resolved the installed CLI, ran `astro sync`, discovered `.astro/collections/docs.schema.json`, and normalized the `title` field. These fixtures live in a temporary copy, so the committed fixtures and lockfiles are unchanged.
+
+### Generation review and resolutions
+
+Independent review found no P0 and one [P1] plus several [P2]s, all addressed:
+
+- **[P1] Unbounded drain could defeat the timeout.** Captured output previously used reader threads joined without a bound; a surviving grandchild holding the pipe could block the join past the deadline. Output is now captured to an anonymous temp file (stdout discarded) and read with a hard 1 MiB cap, so the deadline is a hard bound and no reader threads leak on timeout/cancellation.
+- **[P2] Zombie on wait error.** The `try_wait` error branch now reaps the child.
+- **[P2] Freshness only checked the newest schema.** `schemas_are_stale` now reports stale if *any* schema predates the config (partial-sync case) and treats a missing config as stale.
+- **[P2] Containment untested.** Added negative tests for a `bin` object without `astro` and a `bin` that escapes the project root.
+- **[P2] Unbounded schema count.** Discovery now refuses more than 512 collection schema files.
+- Limits kept/documented: leftover `.schema.json` files from a removed collection are still reported (not cleared) — obsolete but not silently lost; Windows process-spawn tests are not run locally (Node-on-PATH is required and documented).
 
 ## Remaining M03 scope (not done here)
 
-1. **R1 schema generation service:** resolve the project-local `astro` binary, choose the working directory, run `astro sync` within a deadline, discover `.astro/collections/*.schema.json`, report diagnostics, support cancellation, and model freshness/invalidation when `content.config` changes. This is required before forms consume schemas.
+1. **R1 schema generation service — done** (`src/schema/generation.rs`; see above). Wiring it into the shell/forms remains M03.3.
 2. **Fixture schema authoring:** add schema-bearing collections whose existing entries satisfy the schema so the whole M02 fixture pipeline keeps passing, and capture their generated schema as regression oracles.
 3. **M03.2 Astro helper resolution** (`image()`, `reference()`, nested/array fields) on top of the normalized model.
 4. **M03.3 forms** — blocked on M04.1's lossless document model and field-patch contract (R3); no persistent field editing before that gate.
