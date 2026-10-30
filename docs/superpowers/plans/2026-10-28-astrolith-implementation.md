@@ -548,6 +548,8 @@ Use one writer per document and immutable snapshots. Test exit while save N is r
 
 **Tests:** Unsaved-content recovery, invalid recovery record, missing original file and recovery cleanup after confirmed successful save.
 
+**M04.3 update (2026-10-31):** Recovery store implemented in `crates/astrolith-document/src/recovery.rs`. `RecoveryRecord` captures identity (project + generation + canonical source), revision, unsaved content and timestamp; it stores no absolute path (recovery resolves the validated relative source against a caller project root). `RecoveryStore` persists records atomically to a stable, generation-independent key with per-document write serialization, loads them tolerantly (corrupt files become diagnostics, missing originals remain recoverable), and `clear_after_save` removes a record only when its durable content equals the saved content (so newer unsaved edits are kept across restarts). Ten new tests pass. When to write/prompt recovery remains shell/lifecycle scope. See `docs/technical/m04-progress.md`.
+
 **M04 Gate:** No known path silently destroys unsaved content or overwrites conflicting disk changes.
 
 ---

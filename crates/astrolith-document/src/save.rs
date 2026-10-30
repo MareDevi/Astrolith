@@ -154,7 +154,7 @@ fn save_blocking(
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
     let directory = path
         .parent()
         .ok_or_else(|| io::Error::other("save path has no parent directory"))?;
