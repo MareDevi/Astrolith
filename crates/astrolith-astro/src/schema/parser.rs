@@ -18,7 +18,7 @@ const MAX_SCHEMA_DEPTH: usize = 64;
 pub struct SchemaError(String);
 
 impl SchemaError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }

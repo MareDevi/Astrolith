@@ -1,5 +1,6 @@
 //! Normalization of Astro-generated collection JSON Schema.
 
+pub mod generation;
 mod model;
 mod parser;
 

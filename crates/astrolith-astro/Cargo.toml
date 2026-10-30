@@ -8,11 +8,9 @@ publish.workspace = true
 [dependencies]
 astrolith-core = { path = "../astrolith-core" }
 serde_json = "1.0.154"
+tempfile = "3.27.0"
 tree-sitter = "=0.26.13"
 tree-sitter-typescript = "=0.23.2"
-
-[dev-dependencies]
-tempfile = "3.27.0"
 
 [lints]
 workspace = true
