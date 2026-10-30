@@ -301,6 +301,7 @@ name = "astrolith-document"
 version = "0.1.0"
 dependencies = [
  "astrolith-core",
+ "yaml-rust2",
 ]
 
 [[package]]
