@@ -56,6 +56,11 @@ pub enum DocumentError {
         /// Why the patch is refused.
         reason: String,
     },
+    /// A filesystem or save operation failed.
+    Io {
+        /// Human-readable description of the failure.
+        message: String,
+    },
 }
 
 impl std::fmt::Display for DocumentError {
@@ -72,6 +77,7 @@ impl std::fmt::Display for DocumentError {
             Self::UnsupportedPatch { path, reason } => {
                 write!(formatter, "unsupported patch for `{path}`: {reason}")
             }
+            Self::Io { message } => write!(formatter, "document I/O failed: {message}"),
         }
     }
 }
@@ -206,6 +212,22 @@ impl DocumentBuffer {
         self.current_text = text;
         self.revision = next_revision;
         Ok(next_revision)
+    }
+
+    /// Record a successful save of `saved_revision`'s content.
+    ///
+    /// The buffer becomes clean only when the saved revision is still the current
+    /// revision and `persisted` matches the current text. If the user edited after
+    /// the snapshot (a newer revision exists), the buffer stays dirty so the newer
+    /// edit is never silently marked saved. Returns whether the buffer was marked
+    /// clean.
+    pub fn confirm_saved(&mut self, saved_revision: DocumentRevision, persisted: &str) -> bool {
+        if self.revision == saved_revision && self.current_text == persisted {
+            self.original_text = persisted.to_owned();
+            true
+        } else {
+            false
+        }
     }
 
     /// Capture the identity and revision needed to validate asynchronous work.
