@@ -273,3 +273,138 @@ fn structurally_invalid_documents_are_errors() {
         "an unresolved root reference must be an error, not an empty schema"
     );
 }
+
+#[test]
+fn cyclic_references_do_not_recurse_forever() {
+    let schema = normalize_schema(&json!({
+        "type": "object",
+        "properties": { "loop": { "$ref": "#/definitions/node" } },
+        "definitions": {
+            "node": {
+                "type": "object",
+                "properties": { "self": { "$ref": "#/definitions/node" } }
+            }
+        }
+    }))
+    .expect("a cyclic schema must not crash normalization");
+
+    let FieldKind::Object { fields } = &field(&schema, "loop").kind else {
+        panic!("a resolved reference should be an object");
+    };
+    assert!(matches!(fields[0].kind, FieldKind::Unsupported { .. }));
+    assert!(
+        schema
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("cyclic"))
+    );
+}
+
+#[test]
+fn multiple_diagnostics_are_sorted_deterministically() {
+    let schema = normalize_schema(&json!({
+        "type": "object",
+        "properties": {
+            "zeta": { "type": ["string", "number"] },
+            "alpha": { "type": ["boolean", "object"] }
+        }
+    }))
+    .expect("schema normalizes");
+
+    let paths: Vec<&str> = schema
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.path.as_str())
+        .collect();
+    assert_eq!(paths, ["alpha", "zeta"]);
+}
+
+#[test]
+fn defs_references_are_supported() {
+    let schema = normalize_schema(&json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": { "value": { "$ref": "#/$defs/name" } },
+        "$defs": { "name": { "type": "string" } }
+    }))
+    .expect("$defs reference resolves");
+
+    assert_eq!(schema.dialect, SchemaDialect::Draft202012);
+    assert_eq!(field(&schema, "value").kind, string_kind());
+}
+
+#[test]
+fn open_objects_tuples_and_null_only_fields_are_unsupported() {
+    let schema = normalize_schema(&json!({
+        "type": "object",
+        "properties": {
+            "open": { "type": "object" },
+            "tuple": { "type": "array", "items": [{ "type": "string" }] },
+            "nothing": { "type": "null" },
+            "nothingUnion": { "type": ["null"] }
+        }
+    }))
+    .expect("schema normalizes");
+
+    for name in ["open", "tuple", "nothing", "nothingUnion"] {
+        assert!(
+            matches!(field(&schema, name).kind, FieldKind::Unsupported { .. }),
+            "{name} should be unsupported"
+        );
+    }
+    assert_eq!(schema.diagnostics.len(), 4);
+}
+
+#[test]
+fn nested_unresolved_reference_is_unsupported_not_fatal() {
+    let schema = normalize_schema(&json!({
+        "type": "object",
+        "properties": { "broken": { "$ref": "#/definitions/missing" } },
+        "definitions": {}
+    }))
+    .expect("a nested unresolved reference must not abort the whole schema");
+
+    assert!(matches!(
+        field(&schema, "broken").kind,
+        FieldKind::Unsupported { .. }
+    ));
+    assert_eq!(schema.diagnostics[0].path, "broken");
+}
+
+#[test]
+fn nullable_date_union_is_wrapped_not_unsupported() {
+    // Astro 5 flattens a nullable date to its three date branches plus a null branch.
+    let schema = normalize_schema(&json!({
+        "type": "object",
+        "properties": {
+            "when": {
+                "anyOf": [
+                    { "type": "string", "format": "date-time" },
+                    { "type": "string", "format": "date" },
+                    { "type": "integer", "format": "unix-time" },
+                    { "type": "null" }
+                ]
+            }
+        }
+    }))
+    .expect("schema normalizes");
+
+    assert_eq!(
+        field(&schema, "when").kind,
+        FieldKind::Nullable {
+            inner: Box::new(FieldKind::Date)
+        }
+    );
+    assert!(schema.diagnostics.is_empty());
+}
+
+#[test]
+fn deeply_nested_schemas_are_bounded_not_crashing() {
+    let mut value = json!({ "type": "string" });
+    for _ in 0..100 {
+        value = json!({ "type": "object", "properties": { "x": value } });
+    }
+    let schema = normalize_schema(&json!({ "type": "object", "properties": { "root": value } }))
+        .expect("excessive depth must be bounded, not fatal");
+    assert!(!schema.diagnostics.is_empty());
+}
