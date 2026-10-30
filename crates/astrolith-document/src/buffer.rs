@@ -32,18 +32,47 @@ impl DocumentRevision {
     }
 }
 
-/// Invalid document state transition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Invalid document state transition or frontmatter problem.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DocumentError {
     /// Changed text would advance a revision beyond [`u64::MAX`].
     RevisionOverflow,
+    /// Frontmatter delimiters or YAML content are malformed.
+    InvalidFrontmatter,
+    /// The frontmatter uses a construct outside the supported lossless subset.
+    UnsupportedFrontmatter {
+        /// Why the construct is unsupported.
+        reason: String,
+    },
+    /// A requested field path does not exist in the frontmatter.
+    UnknownField {
+        /// The dotted field path that was requested.
+        path: String,
+    },
+    /// A field cannot be patched in place without risking data loss.
+    UnsupportedPatch {
+        /// The dotted field path that was requested.
+        path: String,
+        /// Why the patch is refused.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for DocumentError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::RevisionOverflow => "document revision overflowed",
-        })
+        match self {
+            Self::RevisionOverflow => formatter.write_str("document revision overflowed"),
+            Self::InvalidFrontmatter => formatter.write_str("invalid or unterminated frontmatter"),
+            Self::UnsupportedFrontmatter { reason } => {
+                write!(formatter, "unsupported frontmatter: {reason}")
+            }
+            Self::UnknownField { path } => {
+                write!(formatter, "unknown frontmatter field `{path}`")
+            }
+            Self::UnsupportedPatch { path, reason } => {
+                write!(formatter, "unsupported patch for `{path}`: {reason}")
+            }
+        }
     }
 }
 

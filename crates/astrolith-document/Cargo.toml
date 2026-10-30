@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 astrolith-core = { path = "../astrolith-core" }
+yaml-rust2 = "=0.11.1"
 
 [lints]
 workspace = true

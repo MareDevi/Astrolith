@@ -514,6 +514,8 @@ pub fn serialize_document(
 
 **Tests:** Empty files, CRLF/LF, YAML comments, unknown fields, Unicode, trailing newlines and unchanged round-trip equality.
 
+**M04.1 update (2026-10-31):** Lossless model implemented in `crates/astrolith-document/src/{parse.rs,serialize.rs}`. `parse_document` keeps the exact source and records byte spans for scalable block-mapping plain/quoted scalars (including nested mappings); `serialize_document` returns the original bytes unchanged when there are no patches and splices only patched spans otherwise, so comments, unknown keys, block scalars, Unicode, CRLF/LF and trailing newlines are preserved by construction. Flow collections and block scalars are readable but not patchable; anchors/aliases/tags, sequences, quoted/complex keys, tab indentation, duplicate keys and malformed YAML are refused (never destructively re-serialized). `set_field(path, value)` provides the scalar field-patch contract required by review R3, with plain-string safety validated against a real YAML re-parse so a patch cannot corrupt the file. 22 new tests pass; still pending before forms: the M04.2 save coordinator and M04.3 recovery. See `docs/technical/m04-progress.md`.
+
 ### Task M04.2 — Save Coordinator
 
 **Files**
