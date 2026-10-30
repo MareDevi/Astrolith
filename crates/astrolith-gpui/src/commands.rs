@@ -6,6 +6,8 @@ use gpui_kit::{App, KeyBinding};
 pub(crate) enum CommandId {
     OpenFile,
     OpenProject,
+    Save,
+    RecoverUnsaved,
     OpenPalette,
     ToggleSidebar,
     ToggleInspector,
@@ -20,6 +22,8 @@ pub(crate) enum CommandId {
 pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::OpenFile,
     CommandId::OpenProject,
+    CommandId::Save,
+    CommandId::RecoverUnsaved,
     CommandId::OpenPalette,
     CommandId::ToggleSidebar,
     CommandId::ToggleInspector,
@@ -36,6 +40,8 @@ impl CommandId {
         match self {
             Self::OpenFile => "Open file…",
             Self::OpenProject => "Open project…",
+            Self::Save => "Save",
+            Self::RecoverUnsaved => "Recover unsaved changes…",
             Self::OpenPalette => "Commands…",
             Self::ToggleSidebar => "Toggle files",
             Self::ToggleInspector => "Toggle inspector",
@@ -63,6 +69,13 @@ impl CommandId {
                     "cmd-shift-o"
                 } else {
                     "ctrl-shift-o"
+                }
+            }
+            Self::Save => {
+                if mac {
+                    "cmd-s"
+                } else {
+                    "ctrl-s"
                 }
             }
             Self::OpenPalette => {

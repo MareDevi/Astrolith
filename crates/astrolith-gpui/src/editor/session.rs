@@ -20,12 +20,35 @@ impl DocumentSession {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let disk_fingerprint = fingerprint(&source);
-        let buffer = DocumentBuffer::new(identity, source.clone());
+        Self::build(identity, source.clone(), source, window, cx)
+    }
+
+    /// Build a session whose baseline is the on-disk `original` but whose visible
+    /// text is recovered unsaved `current` content (so it loads dirty).
+    pub fn from_recovered(
+        identity: DocumentIdentity,
+        original: String,
+        current: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(identity, original, current, window, cx)
+    }
+
+    fn build(
+        identity: DocumentIdentity,
+        original: String,
+        current: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let disk_fingerprint = fingerprint(&original);
+        let buffer = DocumentBuffer::from_unsaved(identity, original, current.clone());
+        let dirty = buffer.is_dirty();
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("markdown")
-                .default_value(source)
+                .default_value(current)
         });
         let change = cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -44,11 +67,12 @@ impl DocumentSession {
             editor,
             buffer,
             externally_changed: false,
-            dirty: false,
+            dirty,
             disk_fingerprint,
             _change: change,
         }
     }
+
     pub fn is_dirty(&self, cx: &App) -> bool {
         // The event queue may not have delivered the last Change at close time.
         // Read the real editor before permitting a destructive transition.

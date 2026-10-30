@@ -151,6 +151,31 @@ pub(crate) fn settings_path() -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::other("Application configuration directory unavailable."))
 }
 
+/// Directory holding crash-recovery records, alongside preferences.
+pub(crate) fn recovery_dir() -> io::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("ASTROLITH_RECOVERY_DIR") {
+        let path = PathBuf::from(path);
+        return if path.is_absolute() {
+            Ok(path)
+        } else {
+            Err(io::Error::other("ASTROLITH_RECOVERY_DIR must be absolute."))
+        };
+    }
+    #[cfg(target_os = "windows")]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join("Library/Application Support"));
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
+    base.filter(|path| path.is_absolute())
+        .map(|path| path.join("astrolith/recovery"))
+        .ok_or_else(|| io::Error::other("Application recovery directory unavailable."))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

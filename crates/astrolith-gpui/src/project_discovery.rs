@@ -2,14 +2,17 @@
 use crate::{
     editor::session::{DocumentSession, SessionChanged},
     layout::panels::WorkspacePanel,
-    runtime,
+    runtime, settings,
 };
 use astrolith_astro::{
     Cancellation, DiscoveryOutcome, DiscoveryRequest, ProjectManifest, contained_path,
     inspect_project, read_bounded,
 };
 use astrolith_core::ProjectId;
-use astrolith_document::{DocumentIdentity, DocumentLoadTicket, DocumentRevision};
+use astrolith_document::{
+    DocumentIdentity, DocumentLoadTicket, DocumentRevision, DocumentSnapshot, RecoveryRecord,
+    RecoveryStore, SaveOutcome, save_snapshot,
+};
 use astrolith_workspace::{CollectionEntry, CollectionWatcher, scan_collections};
 use gpui_kit::component::{
     ActiveTheme, Disableable, IndexPath, Sizable, StyledExt, WindowExt,
@@ -112,6 +115,12 @@ pub(crate) struct ProjectWorkspace {
     active: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
     session_subscriptions: HashMap<PathBuf, Subscription>,
+    recovery: Option<RecoveryStore>,
+    pending_recovery: Vec<RecoveryRecord>,
+    recovery_task: Option<Task<()>>,
+    recovery_load_task: Option<Task<()>>,
+    save_task: Option<Task<()>>,
+    restore_task: Option<Task<()>>,
 }
 impl Drop for ProjectWorkspace {
     fn drop(&mut self) {
@@ -142,13 +151,32 @@ impl ProjectWorkspace {
                 }
             });
         Self {
-            document, manifest: None, entries, list, generation: 0, index_revision: 0,
-            project_id: None, cancellation: Cancellation::default(), loading: false,
-            refreshing: false, index_error: None,
-            status: "Open an Astro project to edit local Markdown and MDX. Changes remain in memory; saving is not available yet.".into(),
-            task: None, watch_task: None, watcher_owner: None, loads: HashMap::new(),
-            sessions: BTreeMap::new(), active: None, _subscriptions: vec![subscription],
+            document,
+            manifest: None,
+            entries,
+            list,
+            generation: 0,
+            index_revision: 0,
+            project_id: None,
+            cancellation: Cancellation::default(),
+            loading: false,
+            refreshing: false,
+            index_error: None,
+            status: "Open an Astro project to edit local Markdown and MDX.".into(),
+            task: None,
+            watch_task: None,
+            watcher_owner: None,
+            loads: HashMap::new(),
+            sessions: BTreeMap::new(),
+            active: None,
+            _subscriptions: vec![subscription],
             session_subscriptions: HashMap::new(),
+            recovery: settings::recovery_dir().ok().map(RecoveryStore::new),
+            pending_recovery: Vec::new(),
+            recovery_task: None,
+            recovery_load_task: None,
+            save_task: None,
+            restore_task: None,
         }
     }
     pub fn has_dirty(&self, cx: &App) -> bool {
@@ -255,20 +283,29 @@ impl ProjectWorkspace {
                 DiscoveryOutcome::Unsupported { diagnostics, .. } => Err(diagnostics.join("; ")),
             }
         });
-        self.task=Some(cx.spawn_in(window,async move|this,cx| {
-            let result=work.await.and_then(|value|value);
-            let _=this.update_in(cx,|this,window,cx| {
-                if this.generation!=generation || this.project_id.as_ref()!=Some(&project){return;}
-                this.loading=false;
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = work.await.and_then(|value| value);
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.generation != generation || this.project_id.as_ref() != Some(&project) {
+                    return;
+                }
+                this.loading = false;
                 match result {
-                    Ok((manifest,entries,watcher))=> {
-                        this.manifest=Some(Arc::new(manifest));this.sessions.clear();this.active=None;
-                        this.document.update(cx,|document,cx|document.clear_editor(cx));
-                        this.publish_entries(entries,cx);
-                        this.start_watcher(watcher,window,cx);
-                        this.status=format!("{} entries · Changes stay in memory until closed. Saving is not available yet.",this.entries.len());
-                    },
-                    Err(error)=>this.status=format!("Could not open project: {error}"),
+                    Ok((manifest, entries, watcher)) => {
+                        this.manifest = Some(Arc::new(manifest));
+                        this.sessions.clear();
+                        this.active = None;
+                        this.document
+                            .update(cx, |document, cx| document.clear_editor(cx));
+                        this.publish_entries(entries, cx);
+                        this.start_watcher(watcher, window, cx);
+                        this.status = format!(
+                            "{} entries · Ctrl/Cmd+S saves the active document.",
+                            this.entries.len()
+                        );
+                        this.load_pending_recovery(cx);
+                    }
+                    Err(error) => this.status = format!("Could not open project: {error}"),
                 }
                 cx.notify();
             });
@@ -492,7 +529,8 @@ impl ProjectWorkspace {
                 // Only a coalesced first load can create an editor. Refresh never replaces it.
                 let session =
                     cx.new(|cx| DocumentSession::new(identity.clone(), source, window, cx));
-                let subscription = cx.subscribe(&session, |_, _, _: &SessionChanged, cx| {
+                let subscription = cx.subscribe(&session, |this, _, _: &SessionChanged, cx| {
+                    this.schedule_recovery(cx);
                     cx.emit(SessionChanged);
                     cx.notify();
                 });
@@ -539,7 +577,7 @@ impl ProjectWorkspace {
         let editor = session.read(cx).editor.clone();
         self.document
             .update(cx, |document, cx| document.show_editor(title, editor, cx));
-        self.status = if session.read(cx).externally_changed {"Source changed on disk. This buffer is retained; close and reopen an unchanged document to reload."} else {"Editing in memory · Saving is not available yet."}.into();
+        self.status = if session.read(cx).externally_changed {"Source changed on disk. This buffer is retained; close and reopen an unchanged document to reload."} else {"Editing in memory · Ctrl/Cmd+S saves."}.into();
         cx.notify();
     }
     fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -567,6 +605,16 @@ impl ProjectWorkspace {
         }
     }
     fn remove_session(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.recovery_task = None;
+        if let Some(session) = self.sessions.get(path)
+            && let Some(store) = self.recovery.clone()
+        {
+            let identity = session.read(cx).buffer.identity().clone();
+            let task = runtime::blocking(cx, move || {
+                let _ = store.clear(&identity);
+            });
+            task.detach();
+        }
         self.sessions.remove(path);
         self.session_subscriptions.remove(path);
         self.active = None;
@@ -588,13 +636,260 @@ impl ProjectWorkspace {
                     .footer(div().h_flex().gap_2()
                         .child(Button::new("keep-window").primary().label("Keep editing").on_click(|_,window,cx|window.close_dialog(cx)))
                         .child(Button::new("discard-window").danger().label("Discard and close").on_click(move|_,window,cx| {
-                            let _=owner.update(cx,|this,_|this.sessions.clear());window.close_dialog(cx);window.remove_window();
+                            let _=owner.update(cx,|this,cx| {
+                                if let Some(store)=this.recovery.clone() {
+                                    let identities: Vec<_> = this.sessions.values().map(|session| session.read(cx).buffer.identity().clone()).collect();
+                                    let task = runtime::blocking(cx, move || { for identity in identities { let _ = store.clear(&identity); } });
+                                    task.detach();
+                                }
+                                this.sessions.clear();
+                            });
+                            window.close_dialog(cx);window.remove_window();
                         })))
             });
         }
         false
     }
+
+    /// Save the active document with conflict detection.
+    pub fn save_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.active.clone() else {
+            self.status = "No document is open to save.".into();
+            cx.notify();
+            return;
+        };
+        let Some(session) = self.sessions.get(&path).cloned() else {
+            return;
+        };
+        // Capture the latest editor text into the buffer before snapshotting so a
+        // queued Change event cannot cause a stale snapshot.
+        session.update(cx, |session, cx| {
+            let text = session.editor.read(cx).text().to_string();
+            let _ = session.buffer.apply_text(text);
+            session.dirty = session.buffer.is_dirty();
+            cx.notify();
+        });
+        let snapshot = DocumentSnapshot::capture(&session.read(cx).buffer, path.clone());
+        self.status = "Saving…".into();
+        cx.notify();
+        let save = runtime::spawn(cx, async move { save_snapshot(&snapshot).await });
+        self.save_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = save
+                .await
+                .and_then(|outcome| outcome.map_err(|error| error.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_save(path, result, window, cx);
+            });
+        }));
+    }
+
+    fn finish_save(
+        &mut self,
+        path: PathBuf,
+        result: Result<SaveOutcome, String>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get(&path).cloned() else {
+            self.status = "Document closed before the save finished.".into();
+            cx.notify();
+            return;
+        };
+        match result {
+            Ok(SaveOutcome::Saved { revision }) => {
+                let content = session.read(cx).buffer.current_text().to_owned();
+                let identity = session.read(cx).buffer.identity().clone();
+                let marked = session.update(cx, |session, cx| {
+                    let marked = session
+                        .buffer
+                        .confirm_saved(DocumentRevision::new(revision), &content);
+                    session.dirty = session.buffer.is_dirty();
+                    if marked {
+                        session.externally_changed = false;
+                    }
+                    cx.notify();
+                    marked
+                });
+                if marked && let Some(store) = self.recovery.clone() {
+                    let task = runtime::blocking(cx, move || {
+                        let _ = store.clear_after_save(&identity, &content);
+                    });
+                    task.detach();
+                }
+                self.status = if marked {
+                    "Saved.".into()
+                } else {
+                    "Saved an earlier revision; newer edits remain unsaved.".into()
+                };
+            }
+            Ok(SaveOutcome::Conflict) => {
+                session.update(cx, |session, cx| {
+                    session.externally_changed = true;
+                    cx.notify();
+                });
+                self.status = "Save conflict: the file changed on disk. Your edits are kept; reopen the document to reload, then try again.".into();
+            }
+            Err(error) => self.status = format!("Could not save: {error}"),
+        }
+        cx.notify();
+    }
+
+    fn schedule_recovery(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.recovery.clone() else {
+            return;
+        };
+        let timer = cx
+            .background_executor()
+            .timer(std::time::Duration::from_millis(500));
+        self.recovery_task = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            let Ok((dirty, clean)) = this.update(cx, |this, cx| this.persist_recovery_records(cx))
+            else {
+                return;
+            };
+            if dirty.is_empty() && clean.is_empty() {
+                return;
+            }
+            let _ = runtime::blocking(cx, move || {
+                for record in dirty {
+                    let _ = store.save(&record);
+                }
+                for identity in clean {
+                    let _ = store.clear(&identity);
+                }
+            })
+            .await;
+        }));
+    }
+
+    fn persist_recovery_records(&self, cx: &App) -> (Vec<RecoveryRecord>, Vec<DocumentIdentity>) {
+        let now = now_secs();
+        let mut dirty = Vec::new();
+        let mut clean = Vec::new();
+        for session in self.sessions.values() {
+            let session = session.read(cx);
+            if session.is_dirty(cx) {
+                dirty.push(RecoveryRecord::capture(&session.buffer, now));
+            } else {
+                clean.push(session.buffer.identity().clone());
+            }
+        }
+        (dirty, clean)
+    }
+
+    fn load_pending_recovery(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.recovery.clone() else {
+            return;
+        };
+        let sources: std::collections::HashSet<String> = self
+            .entries
+            .iter()
+            .map(|entry| entry.entry().source().as_str().to_owned())
+            .collect();
+        if sources.is_empty() {
+            self.pending_recovery.clear();
+            return;
+        }
+        let task = runtime::blocking(cx, move || {
+            store.load().map(|load| {
+                load.records()
+                    .iter()
+                    .filter(|record| {
+                        sources.contains(record.identity().canonical_source().as_str())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+        });
+        self.recovery_load_task = Some(cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .and_then(|value| value.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if let Ok(records) = result {
+                    let records: Vec<_> = records
+                        .into_iter()
+                        .filter(|record| {
+                            this.project_id.as_ref() == Some(record.identity().project())
+                        })
+                        .collect();
+                    if !records.is_empty() {
+                        this.status = format!(
+                            "{} unsaved recovery record(s) found. Use 'Recover unsaved changes' to restore.",
+                            records.len()
+                        );
+                    }
+                    this.pending_recovery = records;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// Restore pending recovery records as dirty sessions (reads happen off the UI thread).
+    pub fn recover_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_recovery.is_empty() {
+            self.status = "No recovery records to restore.".into();
+            cx.notify();
+            return;
+        }
+        let Some(manifest) = self.manifest.clone() else {
+            return;
+        };
+        let root = manifest.root().to_owned();
+        let records = std::mem::take(&mut self.pending_recovery);
+        let reads = runtime::blocking(cx, move || {
+            let mut loaded = Vec::new();
+            for record in records {
+                let source = record.identity().canonical_source().clone();
+                let Ok(actual) = contained_path(&root, std::path::Path::new(source.as_str()))
+                else {
+                    continue;
+                };
+                let Ok(disk) = read_bounded(&actual, 8 * 1024 * 1024) else {
+                    continue;
+                };
+                loaded.push((
+                    actual,
+                    record.identity().clone(),
+                    disk,
+                    record.content().to_owned(),
+                ));
+            }
+            loaded
+        });
+        self.restore_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let loaded = reads.await.unwrap_or_default();
+            let _ = this.update_in(cx, |this, window, cx| {
+                let mut restored = 0;
+                for (path, identity, disk, content) in loaded {
+                    if this.sessions.contains_key(&path) {
+                        this.activate_session(&path, window, cx);
+                        restored += 1;
+                        continue;
+                    }
+                    let session = cx.new(|cx| {
+                        DocumentSession::from_recovered(identity, disk, content, window, cx)
+                    });
+                    let key = path.clone();
+                    let subscription = cx.subscribe(&session, |this, _, _: &SessionChanged, cx| {
+                        this.schedule_recovery(cx);
+                        cx.emit(SessionChanged);
+                        cx.notify();
+                    });
+                    this.session_subscriptions.insert(key.clone(), subscription);
+                    this.sessions.insert(key.clone(), session.clone());
+                    this.active = Some(key.clone());
+                    this.install(&key, session.clone(), cx);
+                    restored += 1;
+                }
+                this.status = format!("Restored {restored} unsaved document(s) from recovery.");
+                cx.notify();
+            });
+        }));
+    }
 }
+
 impl Render for ProjectWorkspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active_session = self
@@ -681,6 +976,15 @@ impl Render for ProjectWorkspace {
                             "Unchanged"
                         })
                         .child(
+                            Button::new("save-document")
+                                .small()
+                                .ghost()
+                                .label("Save")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.save_active(window, cx)),
+                                ),
+                        )
+                        .child(
                             Button::new("close-document")
                                 .small()
                                 .ghost()
@@ -695,9 +999,17 @@ impl Render for ProjectWorkspace {
             })
     }
 }
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use astrolith_core::SourcePath;
     use gpui_kit::{TestAppContext, WindowHandle, WindowOptions, base::Root, test::TestWindowExt};
     fn fixture() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -759,6 +1071,8 @@ mod tests {
                 let document =
                     cx.new(|cx| WorkspacePanel::new("document-panel", "Document", "", window, cx));
                 let navigation = cx.new(|cx| ProjectWorkspace::new(document.clone(), window, cx));
+                // Tests must never write to the real user recovery directory.
+                navigation.update(cx, |project, _| project.recovery = None);
                 project = Some(navigation.clone());
                 cx.new(|_| TestHost {
                     navigation,
@@ -1233,5 +1547,247 @@ mod tests {
         .unwrap();
         cx.condition(&view, |view, _| view.loads.is_empty()).await;
         assert_eq!(view.read_with(cx, |view, _| view.sessions.len()), 1);
+    }
+
+    async fn edit_active(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+        view: &Entity<ProjectWorkspace>,
+        text: &str,
+    ) {
+        let handle = handle.into();
+        cx.update_window(handle, |_, window, cx| {
+            let path = view.read(cx).active.clone().unwrap();
+            let editor = view
+                .read(cx)
+                .sessions
+                .get(&path)
+                .unwrap()
+                .read(cx)
+                .editor
+                .clone();
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press("secondary-a", cx);
+            window.input(text, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    async fn saving_the_active_document_writes_disk_and_clears_dirty(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(0, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let path = view.read_with(cx, |view, _| view.active.clone().unwrap());
+
+        edit_active(cx, handle, &view, "# Saved\n").await;
+        assert!(view.read_with(cx, |view, cx| {
+            view.sessions.get(&path).unwrap().read(cx).buffer.is_dirty()
+        }));
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if std::fs::read_to_string(&path).unwrap() == "# Saved\n" {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Saved\n");
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert!(!session.buffer.is_dirty());
+            assert!(!view.has_dirty(cx));
+            assert!(view.status.contains("Saved"));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn save_conflict_preserves_disk_and_keeps_edits(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(0, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let path = view.read_with(cx, |view, _| view.active.clone().unwrap());
+
+        std::fs::write(&path, "# External\n").unwrap();
+        edit_active(cx, handle, &view, "# Mine\n").await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.status.contains("conflict")) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# External\n");
+        view.read_with(cx, |view, cx| {
+            assert!(view.status.contains("conflict"));
+            assert!(view.sessions.get(&path).unwrap().read(cx).buffer.is_dirty());
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn dirty_edits_are_recorded_for_recovery_and_cleared_after_save(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let recovery_dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(recovery_dir.path());
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| view.recovery = Some(store.clone()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(0, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let path = view.read_with(cx, |view, _| view.active.clone().unwrap());
+
+        edit_active(cx, handle, &view, "# Recovered\n").await;
+        for _ in 0..300 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            cx.run_until_parked();
+            if !store.load().unwrap().records().is_empty() {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.records().len(), 1, "dirty edit must be recorded");
+        assert_eq!(loaded.records()[0].content(), "# Recovered\n");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            if store.load().unwrap().records().is_empty()
+                && std::fs::read_to_string(&path).unwrap() == "# Recovered\n"
+            {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert!(
+            store.load().unwrap().records().is_empty(),
+            "recovery record must be cleared after a successful save"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn recover_command_restores_pending_record_as_dirty_session(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let recovery_dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(recovery_dir.path());
+        let identity = DocumentIdentity::new(
+            ProjectId::new("workspace-1").unwrap(),
+            1,
+            SourcePath::new("src/posts/a.md").unwrap(),
+        );
+        store
+            .save(&RecoveryRecord::new(
+                identity,
+                DocumentRevision::new(1),
+                "# Recovered\n",
+                1,
+            ))
+            .unwrap();
+
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| view.recovery = Some(store.clone()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if !view.read_with(cx, |view, _| view.pending_recovery.is_empty()) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            view.read_with(cx, |view, _| view.pending_recovery.len()),
+            1,
+            "pending recovery record must load at project open"
+        );
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.recover_pending(window, cx))
+        })
+        .unwrap();
+        let path = dir.path().join("src/posts/a.md");
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.sessions.contains_key(&path)) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).expect("restored session");
+            let session = session.read(cx);
+            assert_eq!(session.editor.read(cx).value(), "# Recovered\n");
+            assert_eq!(session.buffer.original_text(), "# A\n");
+            assert!(session.buffer.is_dirty());
+        });
     }
 }
