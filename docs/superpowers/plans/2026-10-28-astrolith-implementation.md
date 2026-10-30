@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkboxes for tracking.
 
-**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native IME, scaling and latency manually accepted by the user on 2026-10-29
+**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native IME, scaling and latency manually accepted by the user on 2026-10-29; M03.1 JSON Schema normalization complete on 2026-10-30 (M03 schema generation, forms and validation pending; forms remain blocked on M04.1)
 **Version:** 1.1
 **Date:** 2026-10-28  
 **Project:** Astrolith  
@@ -454,6 +454,8 @@ pub fn normalize_schema(
 ```
 
 **Tests:** Astro 5/6/7 generated schemas; nullable fields, date, defaults, enum, nested objects, arrays and unsupported unions.
+
+**M03.1 update (2026-10-30):** The pure normalizer is implemented and tested against real generated Astro 5.18.2 (draft-07 `$ref`/`definitions`) and 7.4.4 (draft 2020-12) schema output; the two dialects normalize to one identical model. Astro 6 remains unverified (no fixture). Per review R1, the `astro sync` generation service and fixture schema authoring are still required before schemas feed forms; per R3, editable forms (M03.3) remain blocked on the M04.1 lossless document/field-patch contract. See `docs/technical/m03-progress.md`.
 
 ### Task M03.2 — Astro Helper Resolution
 
