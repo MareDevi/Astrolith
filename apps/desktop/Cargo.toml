@@ -7,7 +7,9 @@ publish.workspace = true
 
 [dependencies]
 astrolith-gpui = { path = "../../crates/astrolith-gpui" }
+astrolith-observability = { path = "../../crates/astrolith-observability" }
 gpui-kit = { workspace = true, features = ["tree-sitter-markdown", "tree-sitter-markdown-inline"] }
+tracing.workspace = true
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
