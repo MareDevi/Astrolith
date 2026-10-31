@@ -21,6 +21,8 @@ If Mise requests trust, review `mise.toml` and use `mise trust` in this director
 
 The shell owns one Tokio service runtime; GPUI retains native UI and background CPU execution. Filesystem jobs use a bounded blocking lane, and preference changes coalesce for 250 ms before writing. Selected editor/layout/parser dependencies are optimized in development builds while application code keeps debug information and normal development compilation. See [concurrency boundaries and performance evidence](docs/technical/concurrency-and-responsiveness.md).
 
+Logging writes human-readable records to stderr and structured JSON to daily-rotated files, from a non-blocking writer. See [logging configuration and event levels](docs/technical/logging.md).
+
 ### Native prerequisites
 
 Mise does not install operating system development packages or GPU drivers. GPUI Kit's [installation guide](https://gpui-kit.com/docs/installation) describes platform requirements; the bootstrap uses the following build dependencies.
