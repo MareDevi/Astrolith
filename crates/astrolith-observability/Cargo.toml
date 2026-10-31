@@ -1,0 +1,18 @@
+[package]
+name = "astrolith-observability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Logging bootstrap for Astrolith"
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

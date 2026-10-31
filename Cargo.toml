@@ -1,5 +1,14 @@
 [workspace]
-members = ["apps/desktop", "crates/astrolith-gpui", "crates/astrolith-core", "crates/astrolith-astro", "crates/astrolith-document", "crates/astrolith-workspace", "crates/astrolith-preview"]
+members = [
+    "apps/desktop",
+    "crates/astrolith-gpui",
+    "crates/astrolith-core",
+    "crates/astrolith-astro",
+    "crates/astrolith-document",
+    "crates/astrolith-workspace",
+    "crates/astrolith-preview",
+    "crates/astrolith-observability",
+]
 resolver = "3"
 
 [workspace.package]
@@ -11,6 +20,9 @@ publish = false
 [workspace.dependencies]
 gpui-kit = "=0.8.1"
 tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "sync", "time", "net", "process", "io-util"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt", "json", "registry", "tracing-log"] }
+tracing-appender = "=0.2.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
