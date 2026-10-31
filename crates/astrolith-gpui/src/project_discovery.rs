@@ -7,6 +7,8 @@ use crate::{
 use astrolith_astro::{
     Cancellation, DiscoveryOutcome, DiscoveryRequest, ProjectManifest, contained_path,
     inspect_project, read_bounded,
+    schema::CollectionSchema,
+    schema::generation::{SchemaGenerationRequest, generate_collection_schemas},
 };
 use astrolith_core::ProjectId;
 use astrolith_document::{
@@ -109,9 +111,15 @@ pub(crate) struct ProjectWorkspace {
     status: String,
     task: Option<Task<()>>,
     watch_task: Option<Task<()>>,
+    schema_task: Option<Task<()>>,
     watcher_owner: Option<ServiceWatcher>,
     loads: HashMap<PathBuf, Task<()>>,
     sessions: BTreeMap<PathBuf, Entity<DocumentSession>>,
+    /// Collection id for each retained session, used to resolve its schema.
+    session_collections: BTreeMap<PathBuf, String>,
+    /// Normalized collection schemas keyed by collection id (injected by the
+    /// shell from the R1 generation service).
+    schemas: BTreeMap<String, Arc<CollectionSchema>>,
     active: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
     session_subscriptions: HashMap<PathBuf, Subscription>,
@@ -165,9 +173,12 @@ impl ProjectWorkspace {
             status: "Open an Astro project to edit local Markdown and MDX.".into(),
             task: None,
             watch_task: None,
+            schema_task: None,
             watcher_owner: None,
             loads: HashMap::new(),
             sessions: BTreeMap::new(),
+            session_collections: BTreeMap::new(),
+            schemas: BTreeMap::new(),
             active: None,
             _subscriptions: vec![subscription],
             session_subscriptions: HashMap::new(),
@@ -183,6 +194,102 @@ impl ProjectWorkspace {
         self.sessions
             .values()
             .any(|session| session.read(cx).is_dirty(cx))
+    }
+
+    /// Install normalized collection schemas (from the R1 generation service).
+    pub fn set_collection_schemas(
+        &mut self,
+        schemas: Vec<(String, CollectionSchema)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.schemas = schemas
+            .into_iter()
+            .map(|(collection, schema)| (collection, Arc::new(schema)))
+            .collect();
+        cx.notify();
+    }
+
+    /// Generate and load collection schemas from the project's own Astro install.
+    ///
+    /// Runs entirely off the UI thread. A missing or failing Astro installation is
+    /// non-fatal: the frontmatter form simply stays unavailable for that project.
+    fn load_collection_schemas(&mut self, cx: &mut Context<Self>) {
+        let Some(manifest) = self.manifest.clone() else {
+            return;
+        };
+        let generation = self.generation;
+        let project = self.project_id.clone();
+        let root = manifest.root().to_owned();
+        let cancellation = self.cancellation.clone();
+        let task = runtime::blocking(cx, move || {
+            let request = SchemaGenerationRequest::new(root, cancellation);
+            generate_collection_schemas(&request)
+        });
+        self.schema_task = Some(cx.spawn(async move |this, cx| {
+            let result = task
+                .await
+                .and_then(|value| value.map_err(|error| error.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation || this.project_id != project {
+                    return;
+                }
+                if let Ok(report) = result {
+                    let schemas = report
+                        .schemas
+                        .into_iter()
+                        .map(|entry| (entry.collection, entry.schema))
+                        .collect();
+                    this.set_collection_schemas(schemas, cx);
+                }
+            });
+        }));
+    }
+
+    /// Identity used to decide when the frontmatter form needs a refresh.
+    pub fn active_frontmatter_key(&self) -> Option<(PathBuf, bool)> {
+        let path = self.active.clone()?;
+        let has_schema = self
+            .session_collections
+            .get(&path)
+            .is_some_and(|collection| self.schemas.contains_key(collection));
+        Some((path, has_schema))
+    }
+
+    /// Return the active document's resolved schema and current text, if any.
+    pub fn active_frontmatter(&self, cx: &App) -> Option<(Arc<CollectionSchema>, String)> {
+        let path = self.active.as_ref()?;
+        let collection = self.session_collections.get(path)?;
+        let schema = self.schemas.get(collection)?.clone();
+        let session = self.sessions.get(path)?;
+        let text = session.read(cx).editor.read(cx).text().to_string();
+        Some((schema, text))
+    }
+
+    /// Apply full document text produced by the frontmatter form to the active
+    /// session. This never touches disk; the normal save coordinator persists it.
+    pub fn apply_frontmatter_text(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.active.clone() else {
+            return;
+        };
+        let Some(session) = self.sessions.get(&path).cloned() else {
+            return;
+        };
+        session.update(cx, |session, cx| {
+            session
+                .editor
+                .update(cx, |editor, cx| editor.set_value(text.clone(), window, cx));
+            let current = session.editor.read(cx).text().to_string();
+            let _ = session.buffer.apply_text(current);
+            session.dirty = session.buffer.is_dirty();
+            cx.emit(SessionChanged);
+            cx.notify();
+        });
+        cx.notify();
     }
     pub fn prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading {
@@ -246,10 +353,13 @@ impl ProjectWorkspace {
         self.index_error = None;
         self.status = "Discovering project…".into();
         self.watch_task = None;
+        self.schema_task = None;
         self.watcher_owner = None;
         self.loads.clear();
         self.sessions.clear();
         self.session_subscriptions.clear();
+        self.session_collections.clear();
+        self.schemas.clear();
         self.pending_recovery.clear();
         self.manifest = None;
         self.active = None;
@@ -305,6 +415,7 @@ impl ProjectWorkspace {
                             this.entries.len()
                         );
                         this.load_pending_recovery(window, cx);
+                        this.load_collection_schemas(cx);
                     }
                     Err(error) => this.status = format!("Could not open project: {error}"),
                 }
@@ -428,6 +539,7 @@ impl ProjectWorkspace {
             return;
         };
         let source = entry.entry().source().clone();
+        let collection = entry.entry().id().collection().as_str().to_owned();
         let path = manifest.root().join(source.as_str());
         if self.sessions.contains_key(&path) {
             self.activate_session(&path, window, cx);
@@ -468,6 +580,8 @@ impl ProjectWorkspace {
             return;
         }
         self.active = Some(path.clone());
+        self.session_collections
+            .insert(path.clone(), collection.clone());
         self.document
             .update(cx, |document, cx| document.clear_editor(cx));
         let generation = self.generation;
@@ -618,6 +732,7 @@ impl ProjectWorkspace {
         }
         self.sessions.remove(path);
         self.session_subscriptions.remove(path);
+        self.session_collections.remove(path);
         self.active = None;
         self.document
             .update(cx, |document, cx| document.clear_editor(cx));
@@ -1879,5 +1994,115 @@ mod tests {
             std::fs::read_to_string(dir.path().join("src/posts/a.md")).unwrap(),
             "# A\n"
         );
+    }
+
+    #[gpui_kit::test]
+    async fn frontmatter_form_wiring_persists_a_scalar_edit_losslessly(cx: &mut TestAppContext) {
+        use astrolith_astro::schema::{CollectionSchema, Field, FieldKind, SchemaDialect};
+
+        let dir = fixture();
+        let with_frontmatter = "---\ntitle: Old\ndraft: false\n---\n\n# Body 中文\n";
+        std::fs::write(dir.path().join("src/posts/c.md"), with_frontmatter).unwrap();
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        // Schemas are per project, so inject after the project has opened (the
+        // real shell installs them from the generation task in the same spot).
+        view.update(cx, |view, cx| {
+            view.set_collection_schemas(
+                vec![(
+                    "blog".to_owned(),
+                    CollectionSchema {
+                        dialect: SchemaDialect::Draft202012,
+                        fields: vec![
+                            Field {
+                                name: "title".to_owned(),
+                                required: true,
+                                default: None,
+                                kind: FieldKind::String { format: None },
+                            },
+                            Field {
+                                name: "draft".to_owned(),
+                                required: false,
+                                default: None,
+                                kind: FieldKind::Boolean,
+                            },
+                        ],
+                        diagnostics: Vec::new(),
+                    },
+                )],
+                cx,
+            );
+        });
+
+        let path = dir.path().join("src/posts/c.md");
+        let index = view.read_with(cx, |view, _| {
+            view.entries
+                .iter()
+                .position(|entry| entry.entry().source().as_str() == "src/posts/c.md")
+                .expect("the frontmatter fixture must be indexed")
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(index, window, cx))
+        })
+        .unwrap();
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.sessions.contains_key(&path)) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+
+        // The active document resolves its schema and current text for the form.
+        let (schema, text) = view
+            .read_with(cx, |view, cx| view.active_frontmatter(cx))
+            .expect("active document must expose its schema and text");
+        assert!(schema.fields.iter().any(|field| field.name == "title"));
+        assert_eq!(text, with_frontmatter);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.active_frontmatter_key()),
+            Some((path.clone(), true))
+        );
+
+        // Apply a full-document edit produced by the form; only the title changes.
+        let edited = "---\ntitle: Edited\ndraft: false\n---\n\n# Body 中文\n";
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.apply_frontmatter_text(edited.to_owned(), window, cx)
+            })
+        })
+        .unwrap();
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert_eq!(session.editor.read(cx).value(), edited);
+            assert_eq!(session.buffer.current_text(), edited);
+            assert!(session.buffer.is_dirty());
+        });
+
+        // The normal save coordinator persists the lossless result.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if std::fs::read_to_string(&path).unwrap() == edited {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
     }
 }

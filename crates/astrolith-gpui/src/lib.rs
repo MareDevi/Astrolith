@@ -2,6 +2,7 @@
 mod commands;
 mod editor;
 mod file;
+pub mod frontmatter;
 mod layout;
 mod project_discovery;
 mod runtime;

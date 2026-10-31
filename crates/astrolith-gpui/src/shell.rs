@@ -1,4 +1,5 @@
 use std::{
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex},
 };
@@ -6,6 +7,7 @@ use std::{
 use crate::{
     commands::{self, COMMANDS, CommandId},
     file::{DocumentSource, read_document},
+    frontmatter::{FrontmatterChanged, FrontmatterForm},
     layout::{
         panels::WorkspacePanel,
         state::{LayoutState, PanelKind},
@@ -79,6 +81,8 @@ pub(crate) struct Shell {
     document: Entity<WorkspacePanel>,
     project: Entity<ProjectWorkspace>,
     navigator: Entity<WorkspacePanel>,
+    frontmatter: Entity<FrontmatterForm>,
+    frontmatter_key: Option<(PathBuf, bool)>,
     palette: Entity<CommandState>,
     palette_focus: FocusHandle,
     opening: bool,
@@ -127,7 +131,11 @@ impl Shell {
                 .update(cx, |project, cx| project.guard_window_close(window, cx))
                 .unwrap_or(true)
         });
+        let frontmatter = cx.new(FrontmatterForm::new);
         let inspector = cx.new(|cx| WorkspacePanel::new("inspector-panel", "Inspector", "No collection selected\n\nCollection metadata becomes available when an Astro workspace is open.", window, cx));
+        inspector.update(cx, |panel, cx| {
+            panel.set_view(frontmatter.clone().into(), cx)
+        });
         let preview = cx.new(|cx| WorkspacePanel::new("preview-panel", "Preview", "No preview running\n\nAstro preview will use your project's development server and an external browser.", window, cx));
         let (dock, skin) = DockSkin::dock_area("astrolith-workspace", Some(1), window, cx);
         dock.update(cx, |area, cx| {
@@ -202,6 +210,17 @@ impl Shell {
                 }
             }),
         ];
+        let apply_owner = project.downgrade();
+        subscriptions.push(cx.subscribe_in(
+            &frontmatter,
+            window,
+            move |_this, _form, event: &FrontmatterChanged, window, cx| {
+                let text = event.text.clone();
+                let _ = apply_owner.update(cx, |project, cx| {
+                    project.apply_frontmatter_text(text, window, cx)
+                });
+            },
+        ));
         if let Some(store) = store.clone() {
             let latest = latest.clone();
             // Register on App rather than the view: last-window closure may drop the view first.
@@ -250,6 +269,8 @@ impl Shell {
             document,
             project,
             navigator,
+            frontmatter,
+            frontmatter_key: None,
             palette,
             palette_focus: cx.focus_handle().tab_stop(true),
             opening: false,
@@ -524,7 +545,23 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Activate the frontmatter form whenever the active document (or its
+        // schema availability) changes. Editing the form does not change this
+        // key, so live edits never rebuild the controls mid-entry.
+        let key = self.project.read(cx).active_frontmatter_key();
+        if key != self.frontmatter_key {
+            self.frontmatter_key = key;
+            match self.project.read(cx).active_frontmatter(cx) {
+                Some((schema, text)) => {
+                    self.frontmatter
+                        .update(cx, |form, cx| form.set_document(schema, text, window, cx));
+                }
+                None => {
+                    self.frontmatter.update(cx, |form, cx| form.clear(cx));
+                }
+            }
+        }
         let layout = &self.settings.layout;
         div()
             .v_flex()
