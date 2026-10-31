@@ -250,6 +250,7 @@ impl ProjectWorkspace {
         self.loads.clear();
         self.sessions.clear();
         self.session_subscriptions.clear();
+        self.pending_recovery.clear();
         self.manifest = None;
         self.active = None;
         self.publish_entries(Vec::new(), cx);
@@ -303,7 +304,7 @@ impl ProjectWorkspace {
                             "{} entries · Ctrl/Cmd+S saves the active document.",
                             this.entries.len()
                         );
-                        this.load_pending_recovery(cx);
+                        this.load_pending_recovery(window, cx);
                     }
                     Err(error) => this.status = format!("Could not open project: {error}"),
                 }
@@ -777,7 +778,34 @@ impl ProjectWorkspace {
         (dirty, clean)
     }
 
-    fn load_pending_recovery(&mut self, cx: &mut Context<Self>) {
+    /// Flush every dirty session's current content to the recovery store on the
+    /// native-quit path.
+    ///
+    /// Only the editor-text snapshot runs on the UI thread; the writes run on the
+    /// service runtime via [`runtime::flush_on_quit`], which is submitted outside
+    /// ordinary file admission and drains before shutdown. That way a 500 ms
+    /// recovery debounce that has not yet fired cannot lose unsaved content when
+    /// the application exits.
+    ///
+    /// Returns the flush task so a caller (or a test) can await it, or `None`
+    /// when recovery is disabled or nothing is dirty.
+    pub fn flush_recovery_on_quit(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<(), String>>> {
+        let store = self.recovery.clone()?;
+        let (dirty, _clean) = self.persist_recovery_records(cx);
+        if dirty.is_empty() {
+            return None;
+        }
+        Some(runtime::flush_on_quit(cx, move || {
+            for record in dirty {
+                let _ = store.save(&record);
+            }
+        }))
+    }
+
+    fn load_pending_recovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(store) = self.recovery.clone() else {
             return;
         };
@@ -790,6 +818,7 @@ impl ProjectWorkspace {
             self.pending_recovery.clear();
             return;
         }
+        let generation = self.generation;
         let task = runtime::blocking(cx, move || {
             store.load().map(|load| {
                 load.records()
@@ -801,27 +830,34 @@ impl ProjectWorkspace {
                     .collect::<Vec<_>>()
             })
         });
-        self.recovery_load_task = Some(cx.spawn(async move |this, cx| {
+        self.recovery_load_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = task
                 .await
                 .and_then(|value| value.map_err(|error| error.to_string()));
-            let _ = this.update(cx, |this, cx| {
-                if let Ok(records) = result {
-                    let records: Vec<_> = records
-                        .into_iter()
-                        .filter(|record| {
-                            this.project_id.as_ref() == Some(record.identity().project())
-                        })
-                        .collect();
-                    if !records.is_empty() {
-                        this.status = format!(
-                            "{} unsaved recovery record(s) found. Use 'Recover unsaved changes' to restore.",
-                            records.len()
-                        );
-                    }
-                    this.pending_recovery = records;
-                    cx.notify();
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.generation != generation {
+                    return;
                 }
+                let Ok(records) = result else {
+                    return;
+                };
+                let records: Vec<_> = records
+                    .into_iter()
+                    .filter(|record| this.project_id.as_ref() == Some(record.identity().project()))
+                    .collect();
+                if records.is_empty() {
+                    this.pending_recovery.clear();
+                    cx.notify();
+                    return;
+                }
+                let count = records.len();
+                this.pending_recovery = records;
+                this.status = format!("Restoring {count} unsaved document(s) from recovery…");
+                // Auto-apply: restore pending records as dirty sessions immediately
+                // instead of only prompting. `recover_pending` is idempotent and never
+                // writes to disk, so the manual command remains safe afterwards.
+                this.recover_pending(window, cx);
+                cx.notify();
             });
         }));
     }
@@ -1724,7 +1760,9 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    async fn recover_command_restores_pending_record_as_dirty_session(cx: &mut TestAppContext) {
+    async fn startup_auto_applies_pending_recovery_and_never_overwrites_disk(
+        cx: &mut TestAppContext,
+    ) {
         let dir = fixture();
         let recovery_dir = tempfile::tempdir().unwrap();
         let store = RecoveryStore::new(recovery_dir.path());
@@ -1749,29 +1787,9 @@ mod tests {
         })
         .unwrap();
         cx.condition(&view, |view, _| !view.loading).await;
-        for _ in 0..200 {
-            cx.run_until_parked();
-            if !view.read_with(cx, |view, _| view.pending_recovery.is_empty()) {
-                break;
-            }
-            runtime::blocking(cx, || {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            })
-            .await
-            .unwrap();
-        }
-        assert_eq!(
-            view.read_with(cx, |view, _| view.pending_recovery.len()),
-            1,
-            "pending recovery record must load at project open"
-        );
 
-        cx.update_window(handle.into(), |_, window, cx| {
-            view.update(cx, |view, cx| view.recover_pending(window, cx))
-        })
-        .unwrap();
         let path = dir.path().join("src/posts/a.md");
-        for _ in 0..200 {
+        for _ in 0..300 {
             cx.run_until_parked();
             if view.read_with(cx, |view, _| view.sessions.contains_key(&path)) {
                 break;
@@ -1783,11 +1801,83 @@ mod tests {
             .unwrap();
         }
         view.read_with(cx, |view, cx| {
-            let session = view.sessions.get(&path).expect("restored session");
+            let session = view
+                .sessions
+                .get(&path)
+                .expect("pending recovery must auto-apply at project open");
             let session = session.read(cx);
             assert_eq!(session.editor.read(cx).value(), "# Recovered\n");
             assert_eq!(session.buffer.original_text(), "# A\n");
             assert!(session.buffer.is_dirty());
+            assert!(
+                view.pending_recovery.is_empty(),
+                "auto-applied records are consumed"
+            );
+            assert!(
+                view.status.contains("Restored"),
+                "status should report the restore, was {:?}",
+                view.status
+            );
         });
+        // Auto-apply must never write the recovered text over the original file.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# A\n");
+        // The record survives until its content is saved or discarded.
+        assert_eq!(store.load().unwrap().records().len(), 1);
+
+        // The manual command stays safe and idempotent after auto-apply.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.recover_pending(window, cx))
+        })
+        .unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.status.contains("No recovery records"));
+            assert_eq!(
+                view.sessions.len(),
+                1,
+                "manual recover must not duplicate an auto-applied session"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn quitting_flushes_unsaved_debounced_content_to_recovery(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let recovery_dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(recovery_dir.path());
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| view.recovery = Some(store.clone()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(0, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+
+        // A dirty edit whose 500 ms recovery debounce has not elapsed yet.
+        edit_active(cx, handle, &view, "# Quit flush\n").await;
+        assert!(
+            store.load().unwrap().records().is_empty(),
+            "debounce must not have written before the exit flush"
+        );
+
+        // The native-quit observer flushes the latest dirty text despite the debounce.
+        let flush = view
+            .update(cx, |view, cx| view.flush_recovery_on_quit(cx))
+            .expect("a dirty session must produce an exit flush");
+        flush.await.unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.records().len(), 1, "exit must flush unsaved content");
+        assert_eq!(loaded.records()[0].content(), "# Quit flush\n");
+        // The flush must not write the recovered text over the original file.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/posts/a.md")).unwrap(),
+            "# A\n"
+        );
     }
 }

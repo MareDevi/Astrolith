@@ -224,6 +224,24 @@ impl Shell {
             })
             .detach();
         }
+        // Quit observers run before windows are cleared, so the workspace entities
+        // are still alive here and can hand their latest dirty text to a durable
+        // flush even when the 500 ms recovery debounce has not fired.
+        let recovery_owner = project.downgrade();
+        App::on_app_quit(cx, move |cx| {
+            let flush = recovery_owner
+                .update(cx, |project, cx| project.flush_recovery_on_quit(cx))
+                .ok()
+                .flatten();
+            async move {
+                if let Some(flush) = flush
+                    && let Err(error) = flush.await
+                {
+                    eprintln!("Could not flush unsaved recovery on exit: {error}");
+                }
+            }
+        })
+        .detach();
         let focus = cx.focus_handle().tab_stop(true);
         focus.focus(window, cx);
         subscriptions.push(cx.observe(&dock, |_, _, cx| cx.notify()));
