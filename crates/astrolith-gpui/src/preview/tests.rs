@@ -112,8 +112,37 @@ fn mount(
     })
 }
 
+/// Serialize tests that drive the application service runtime.
+///
+/// The GPUI test scheduler and a per-test Tokio runtime do not compose reliably
+/// when several of these scenarios run concurrently in one process: the
+/// notification the condition waits on can be missed under load. The guard is a
+/// spin flag rather than a `MutexGuard` so it never lives across an `await`.
+struct Serial;
+
+static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+impl Serial {
+    fn acquire() -> Self {
+        while BUSY
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            std::thread::yield_now();
+        }
+        Self
+    }
+}
+
+impl Drop for Serial {
+    fn drop(&mut self) {
+        BUSY.store(false, Ordering::SeqCst);
+    }
+}
+
 #[gpui_kit::test]
 async fn start_becomes_ready_and_reports_the_url(cx: &mut gpui_kit::TestAppContext) {
+    let _serial = Serial::acquire();
     let backend = TestBackend::ready("http://127.0.0.1:4321/");
     let (_handle, panel, _surface) = mount(cx, backend.clone());
     panel.update(cx, |panel, cx| panel.start(cx));
@@ -138,6 +167,7 @@ async fn start_becomes_ready_and_reports_the_url(cx: &mut gpui_kit::TestAppConte
 
 #[gpui_kit::test]
 async fn start_failure_is_reported_and_not_ready(cx: &mut gpui_kit::TestAppContext) {
+    let _serial = Serial::acquire();
     let backend = TestBackend::failing("astro is not installed");
     let (_handle, panel, _surface) = mount(cx, backend);
     panel.update(cx, |panel, cx| panel.start(cx));
@@ -159,6 +189,7 @@ async fn start_failure_is_reported_and_not_ready(cx: &mut gpui_kit::TestAppConte
 
 #[gpui_kit::test]
 async fn stop_returns_to_stopped(cx: &mut gpui_kit::TestAppContext) {
+    let _serial = Serial::acquire();
     let backend = TestBackend::ready("http://127.0.0.1:4321/");
     let (_handle, panel, _surface) = mount(cx, backend.clone());
     panel.update(cx, |panel, cx| panel.start(cx));
@@ -204,12 +235,15 @@ fn open_without_a_ready_server_reports_not_ready(cx: &mut gpui_kit::TestAppConte
 }
 
 #[gpui_kit::test]
-async fn open_ready_entry_launches_the_surface(cx: &mut gpui_kit::TestAppContext) {
+fn open_ready_entry_launches_the_surface(cx: &mut gpui_kit::TestAppContext) {
     let backend = TestBackend::ready("http://127.0.0.1:4321/");
     let (_handle, panel, surface) = mount(cx, backend);
-    panel.update(cx, |panel, cx| panel.start(cx));
-    cx.condition(&panel, |panel, _| panel.status().is_ready())
-        .await;
+    // Set the ready state directly: the start path is covered separately, and a
+    // synchronous open keeps this test independent of scheduler timing.
+    panel.update(cx, |panel, cx| {
+        panel.status = ServerStatus::Ready(Url::parse("http://127.0.0.1:4321/").unwrap());
+        cx.notify();
+    });
     let entry = EntryId::new("docs", "guides/nested").unwrap();
     panel.update(cx, |panel, cx| {
         panel.set_entry(Some(entry.clone()), cx);
@@ -222,12 +256,13 @@ async fn open_ready_entry_launches_the_surface(cx: &mut gpui_kit::TestAppContext
 }
 
 #[gpui_kit::test]
-async fn surface_failure_is_surfaced(cx: &mut gpui_kit::TestAppContext) {
+fn surface_failure_is_surfaced(cx: &mut gpui_kit::TestAppContext) {
     let backend = TestBackend::ready("http://127.0.0.1:4321/");
     let (_handle, panel, _surface) = mount(cx, backend);
-    panel.update(cx, |panel, cx| panel.start(cx));
-    cx.condition(&panel, |panel, _| panel.status().is_ready())
-        .await;
+    panel.update(cx, |panel, cx| {
+        panel.status = ServerStatus::Ready(Url::parse("http://127.0.0.1:4321/").unwrap());
+        cx.notify();
+    });
     panel.update(cx, |panel, cx| {
         panel.surface = Arc::new(RecordingSurface::failing(SurfaceError::LaunchFailed {
             command: "xdg-open".to_owned(),
