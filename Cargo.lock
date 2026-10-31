@@ -280,6 +280,7 @@ dependencies = [
  "astrolith-core",
  "serde_json",
  "tempfile",
+ "tokio",
  "tree-sitter",
  "tree-sitter-typescript",
 ]

@@ -4,14 +4,11 @@ use std::fs;
 use std::path::Path;
 
 #[cfg(unix)]
+use crate::schema::test_support::SPAWN_LOCK;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::path::PathBuf;
-
-/// Serializes tests that write an executable script and then spawn it, to avoid
-/// the Linux `ETXTBSY` race when concurrent tests fork while a script is open.
-#[cfg(unix)]
-static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(unix)]
 const VALID_DOCS: &str = r#"#!/bin/sh

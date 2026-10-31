@@ -233,15 +233,41 @@ pub fn resolve_astro_entry(root: &Path) -> Result<PathBuf, SchemaError> {
     Ok(entry)
 }
 
-struct ToolRun {
-    success: bool,
-    status: String,
-    stderr: Vec<u8>,
+/// Outcome of one bounded Astro CLI invocation.
+pub(crate) struct ToolRun {
+    pub(crate) success: bool,
+    pub(crate) status: String,
+    pub(crate) stderr: Vec<u8>,
 }
 
 fn run_astro_sync(request: &SchemaGenerationRequest, entry: &Path) -> Result<ToolRun, SchemaError> {
-    request
-        .cancellation
+    run_astro_tool(
+        &request.root,
+        &request.node,
+        entry,
+        &["sync"],
+        &request.cancellation,
+        request.timeout,
+        "Astro schema generation",
+    )
+}
+
+/// Run the project-local Astro CLI entry with the given arguments under a hard
+/// deadline and cooperative cancellation, capturing bounded stderr.
+///
+/// Shared by schema generation and Astro tooling validation so both use the same
+/// process, timeout, cancellation and output bounds. The caller resolves the
+/// executable entry first (see [`resolve_astro_entry`]).
+pub(crate) fn run_astro_tool(
+    root: &Path,
+    node: &Path,
+    entry: &Path,
+    args: &[&str],
+    cancellation: &Cancellation,
+    timeout: Duration,
+    label: &str,
+) -> Result<ToolRun, SchemaError> {
+    cancellation
         .check()
         .map_err(|error| SchemaError::new(error.to_string()))?;
 
@@ -254,10 +280,10 @@ fn run_astro_sync(request: &SchemaGenerationRequest, entry: &Path) -> Result<Too
         .try_clone()
         .map_err(|error| SchemaError::new(format!("Cannot clone tool output buffer: {error}")))?;
 
-    let mut child = Command::new(&request.node)
+    let mut child = Command::new(node)
         .arg(entry)
-        .arg("sync")
-        .current_dir(&request.root)
+        .args(args)
+        .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_for_child))
@@ -265,25 +291,25 @@ fn run_astro_sync(request: &SchemaGenerationRequest, entry: &Path) -> Result<Too
         .map_err(|error| {
             SchemaError::new(format!(
                 "Failed to start Astro tooling (`{}`): {error}",
-                request.node.display()
+                node.display()
             ))
         })?;
 
     let started = Instant::now();
     let status = loop {
-        if request.cancellation.check().is_err() {
+        if cancellation.check().is_err() {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(SchemaError::new("Astro schema generation cancelled"));
+            return Err(SchemaError::new(format!("{label} cancelled")));
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= request.timeout => {
+            Ok(None) if started.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(SchemaError::new(format!(
-                    "Astro schema generation timed out after {}s",
-                    request.timeout.as_secs()
+                    "{label} timed out after {}s",
+                    timeout.as_secs()
                 )));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
