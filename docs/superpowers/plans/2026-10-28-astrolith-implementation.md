@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkboxes for tracking.
 
-**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native IME, scaling and latency manually accepted by the user on 2026-10-29; M03.1 JSON Schema normalization and the R1 schema generation service complete on 2026-10-30; M04.1 lossless document model, M04.2 conflict-aware save, M04.3 recovery, and shell save/recovery integration complete on 2026-10-31; on 2026-10-31 the remaining backlog — fixture schema oracles, M03.2 Astro helper resolution, M03.4 frontmatter validation, M03.3 schema-driven forms, and recovery lifecycle polish (startup auto-apply + native-exit flush) — is implemented and headless-verified (`mise run check` PASS, 260 Rust tests). Both independent-review P1s are now **closed**: `b676845` wires M03.2 helper resolution into the real schema-loading path (so `image()`/`reference()` reach the form), and `fddbd34` makes a frontmatter field edit patch the *live* document text so a concurrent unsaved body edit is preserved (with a regression test). Remaining open items are P2s listed in `docs/technical/m03-progress.md` (helper collection-selection heuristic, per-keystroke whole-document re-parse, Astro tooling validation not surfaced in the UI, stale form display after manual frontmatter edits). Native save/recovery/form acceptance remains **pending human execution** per `docs/technical/native-acceptance-save-recovery.md` — headless tests do not establish native IME/focus/scaling/rendering behaviour.
+**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native IME, scaling and latency manually accepted by the user on 2026-10-29; M03.1 JSON Schema normalization and the R1 schema generation service complete on 2026-10-30; M04.1 lossless document model, M04.2 conflict-aware save, M04.3 recovery, and shell save/recovery integration complete on 2026-10-31; on 2026-10-31 the remaining backlog — fixture schema oracles, M03.2 Astro helper resolution, M03.4 frontmatter validation, M03.3 schema-driven forms, and recovery lifecycle polish — is implemented and headless-verified (`mise run check` PASS). Both independent-review P1s are closed (`b676845`, `fddbd34`). **M05 (Astro preview services) is implemented and headless-verified on 2026-10-31:** M05.1 dev-server lifecycle (`fca3fcd`), M05.2 entry route resolution (`59e8544`), M05.3 external browser surface plus the Preview-panel wiring (`2c8c562`, `1ba5ed3`), and the M05 gate — an opt-in test that drives the real `astro dev`, saves an edit and observes it in the served HTML (`365bcbe`). M05 has **not** been independently reviewed: the implementing team hit a provider rate limit and was halted, so the remaining work was completed directly; that review is owed. Native browser/rendering acceptance for preview, and native save/recovery/form acceptance, remain **pending human execution**; headless tests do not establish native IME/focus/scaling/rendering behaviour. Remaining open items are the P2s listed in `docs/technical/m03-progress.md` and the limits in `docs/technical/m05-progress.md`.
 **Version:** 1.1
 **Date:** 2026-10-28  
 **Project:** Astrolith  
@@ -577,6 +577,8 @@ Use one writer per document and immutable snapshots. Test exit while save N is r
 
 ### Task M05.1 — Dev Server Lifecycle
 
+**M05.1 update (2026-10-31):** Implemented in `crates/astrolith-preview/src/{server.rs,process.rs}` (commit `fca3fcd`): `ServerStatus`, project-local Astro CLI resolution, 30 s startup bound, 3 s graceful stop then terminate+reap, both drains capped at 1 MiB per stream, Unix process-group kill and a `cfg`-gated Windows Job Object. 20 tests including a grandchild-in-group kill and a 4 MiB flood. Windows ownership is unverified on this host. See `docs/technical/m05-progress.md`.
+
 **Files**
 - Create: `crates/astrolith-preview/src/server.rs`
 - Create: `crates/astrolith-preview/src/process.rs`
@@ -599,6 +601,8 @@ Implement runtime-owned stdout/stderr draining with capped retention, startup/st
 
 ### Task M05.2 — Entry Route Resolver
 
+**M05.2 update (2026-10-31):** Implemented as `resolve_entry_url(&EntryId, &RouteMapping, &Url)` with the `/<collection>/<entry id>` convention, explicit per-entry overrides, `index` folding, percent-encoded segments and typed errors for unmapped/invalid routes (commit `59e8544`, 20 tests).
+
 **Files**
 - Create: `crates/astrolith-preview/src/routes.rs`
 - Create: `crates/astrolith-preview/src/config.rs`
@@ -616,6 +620,8 @@ pub fn resolve_entry_url(
 **Tests:** Slugs, nested paths, URL escaping, absent mapping and invalid routes.
 
 ### Task M05.3 — External Browser Preview
+
+**M05.3 update (2026-10-31):** `PreviewSurface`/`RecordingSurface`, a detached platform-opener `ExternalBrowser`, and `PreviewSession` server reuse (commit `2c8c562`); fixtures gained a `docs` page so entry routes render; an opt-in gate test starts the real `astro dev`, saves an edit and observes it in the served HTML (commit `365bcbe`); the GPUI Preview panel is wired with Start/Stop/Open commands, status, project-switch detach and quit abort (commit `1ba5ed3`). Native browser launch and rendering remain manual evidence.
 
 **Files**
 - Create: `crates/astrolith-preview/src/surface.rs`
