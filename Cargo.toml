@@ -1,5 +1,5 @@
 [workspace]
-members = ["apps/desktop", "crates/astrolith-gpui", "crates/astrolith-core", "crates/astrolith-astro", "crates/astrolith-document", "crates/astrolith-workspace"]
+members = ["apps/desktop", "crates/astrolith-gpui", "crates/astrolith-core", "crates/astrolith-astro", "crates/astrolith-document", "crates/astrolith-workspace", "crates/astrolith-preview"]
 resolver = "3"
 
 [workspace.package]
