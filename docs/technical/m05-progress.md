@@ -5,9 +5,9 @@ Started: 2026-10-31. Base: `dev` at `d15daa0`, continuing from `fca3fcd` (M05.1,
 resolution, M05.3 external browser preview plus the Preview-panel wiring, and the M05 acceptance gate.
 The original product specification remains absent; this note follows the implementation plan and its review.
 
-**Review status: NOT independently reviewed.** The team that was implementing this milestone hit a provider
-rate limit (WorkBuddy, reset 18:29 UTC+8) and the user terminated it, so the remaining work was completed
-directly. This document is a self-assessment. The plan's independent-review step for M05 is still owed.
+**Review status: independently reviewed and repaired (2026-10-31).** The independent review
+found one P1 and four P2/P3 issues; all were fixed in `3f398fe` and re-verified, including a
+successful opt-in M05 gate run. See "Independent review and repairs" below.
 
 ## Binding contract (from `concurrency-and-responsiveness.md`)
 
@@ -102,6 +102,39 @@ edit in the served HTML. It is **not** met for native presentation: the browser 
 page on a real desktop were not observed in this environment. Per `AGENTS.md`, a successful headless test
 does not establish native behaviour; native browser/rendering acceptance remains **pending human execution**.
 
+## Independent review and repairs (`3f398fe`)
+
+The owed independent review found and the repairs fixed:
+
+- **P1 — preview never attached without an edit.** `SessionChanged` fires only on text
+  changes, so opening a project did not create a backend, project switches kept the old
+  server alive, and the panel button could open a stale entry. The shell now also observes
+  the workspace entity, and `ensure_attached` only rewrites a changed mapping.
+- **P2 — Windows opener command injection.** `cmd /C start` re-parsed `&`, `|`, `^`,
+  parentheses and `%` in entry-derived URLs. Windows now launches
+  `rundll32.exe url.dll,FileProtocolHandler <url>` with the URL as one argument, and a
+  regression test keeps reserved characters in a single argument.
+- **P2 — auto-incremented ports killed.** A "port in use, trying another" warning was
+  treated as fatal before the child exited. It is now classified only after `try_wait`
+  returns an exit; a fixture that warns and then binds another port proves startup
+  succeeds.
+- **P2 — post-ready death unobserved and Start-while-ready state loss.** The panel polls a
+  new `DevServer::poll_exit` every 250 ms and reports an unexpected exit without holding
+  the server mutex (so Stop can still acquire it); Start while ready keeps the URL and says
+  the server is already running.
+- **Astro 7 foregrounding.** Astro 7 auto-backgrounds `astro dev` when it detects an agent
+  environment, detaching into its own session outside the owned process group (observed as
+  orphaned servers after a gate run). `DevServer` now passes `--ignore-lock` when the
+  installed major is 7+, which opts out of that inference and the cross-process lock file;
+  Astro 5/6 never receive the unknown flag.
+- **P3 — gate credibility.** The gate now publishes the edit through a same-directory
+  fsync+rename (the save path's atomic replacement) and asserts the whole process group is
+  gone, not only that the port closed.
+
+Verification after the repairs: `mise run check` **PASS**; the opt-in gate
+(`cargo test -p astrolith-preview --locked --test preview_gate -- --ignored --nocapture`)
+**PASS** in 2.3 s with no surviving `astro dev` process.
+
 ## Known limits
 
 1. **Windows process ownership is unverified.** The Job Object path is `cfg`-gated and cannot be built or run
@@ -116,4 +149,8 @@ does not establish native behaviour; native browser/rendering acceptance remains
    surface is the required MVP path.
 6. **No cross-launch server reuse**: a server is owned per project attachment; a previously running external
    server started outside Astrolith is not adopted (its URL is not discovered).
-7. **Independent review is owed** (see the top of this document).
+7. **Windows opener is untested on Windows.** The `rundll32` command shape is asserted by a
+   platform-gated test but cannot run on this host; a Windows runner must confirm it launches a browser.
+8. **Astro 7 detection relies on the installed `package.json` major.** If it cannot be read, the server
+   starts without `--ignore-lock`; in an agent environment Astro 7 may then background itself. Resolution
+   already needs that file, so this is a defensive fallback, not a normal path.
