@@ -219,6 +219,8 @@ pub enum InitError {
     Filter(String),
     /// The rolling log directory or file could not be initialized.
     File(RollingInitError),
+    /// Neither stderr nor file output is enabled.
+    NoSink,
     /// A global subscriber was installed earlier in this process.
     AlreadyInitialized,
 }
@@ -228,6 +230,7 @@ impl fmt::Display for InitError {
         match self {
             Self::Filter(error) => write!(formatter, "invalid log filter: {error}"),
             Self::File(error) => write!(formatter, "could not initialize the log file: {error}"),
+            Self::NoSink => formatter.write_str("no logging sink is enabled"),
             Self::AlreadyInitialized => {
                 formatter.write_str("a global tracing subscriber is already installed")
             }
@@ -295,34 +298,52 @@ pub fn init(config: LogConfig) -> Result<LogGuard, InitError> {
         }
     });
 
+    let mut file_error = None;
     let file_layer = match &config.file {
-        Some(file) => {
-            let appender = RollingFileAppender::builder()
-                .rotation(Rotation::DAILY)
-                .filename_prefix(&file.prefix)
-                .filename_suffix("log")
-                .max_log_files(file.max_files)
-                .build(&file.directory)
-                .map_err(InitError::File)?;
-            let (writer, guard) = tracing_appender::non_blocking(appender);
-            worker = Some(guard);
-            file_directory = Some(file.directory.clone());
-            file_prefix = Some(file.prefix.clone());
-            let layer = fmt_layer::layer()
-                .with_writer(writer)
-                .with_ansi(false)
-                .with_target(true)
-                .with_file(true)
-                .with_line_number(true)
-                .with_thread_names(true)
-                .with_timer(SystemTime);
-            Some(match config.file_format {
-                LogFormat::Text => layer.boxed(),
-                LogFormat::Json => layer.json().boxed(),
-            })
-        }
+        Some(file) => match RollingFileAppender::builder()
+            .rotation(Rotation::DAILY)
+            .filename_prefix(&file.prefix)
+            .filename_suffix("log")
+            .max_log_files(file.max_files)
+            .build(&file.directory)
+        {
+            Ok(appender) => {
+                let (writer, guard) = tracing_appender::non_blocking(appender);
+                worker = Some(guard);
+                file_directory = Some(file.directory.clone());
+                file_prefix = Some(file.prefix.clone());
+                let layer = fmt_layer::layer()
+                    .with_writer(writer)
+                    .with_ansi(false)
+                    .with_target(true)
+                    .with_file(true)
+                    .with_line_number(true)
+                    .with_thread_names(true)
+                    .with_timer(SystemTime);
+                Some(match config.file_format {
+                    LogFormat::Text => layer.boxed(),
+                    LogFormat::Json => layer.json().boxed(),
+                })
+            }
+            Err(error) => {
+                file_error = Some(error);
+                None
+            }
+        },
         None => None,
     };
+    if !config.stderr && file_layer.is_none() {
+        return Err(match file_error {
+            Some(error) => InitError::File(error),
+            None => InitError::NoSink,
+        });
+    }
+    if let Some(error) = &file_error {
+        // File logging is an operational aid, not a startup prerequisite.
+        // Keep stderr logging and the panic hook working when the state
+        // directory is unavailable or read-only.
+        eprintln!("Logging file unavailable ({error}); continuing with stderr only");
+    }
 
     registry()
         .with(filter)

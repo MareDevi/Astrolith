@@ -29,7 +29,9 @@ before the previous hook runs.
 ## Configuration
 
 All settings come from environment variables. Invalid values are ignored and
-reported on stderr at startup; the process still starts with safe defaults.
+reported on stderr at startup; the process still starts with safe defaults. If
+the log directory cannot be created or written, file logging is skipped and
+stderr logging plus the panic hook still start.
 
 | Variable | Values | Default |
 | --- | --- | --- |
