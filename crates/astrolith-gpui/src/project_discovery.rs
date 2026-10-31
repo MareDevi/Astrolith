@@ -15,6 +15,7 @@ use astrolith_document::{
     DocumentIdentity, DocumentLoadTicket, DocumentRevision, DocumentSnapshot, FrontmatterValue,
     RecoveryRecord, RecoveryStore, SaveOutcome, parse_document, save_snapshot,
 };
+use astrolith_preview::RouteMapping;
 use astrolith_workspace::{CollectionEntry, CollectionWatcher, scan_collections};
 use gpui_kit::component::{
     ActiveTheme, Disableable, IndexPath, Sizable, StyledExt, WindowExt,
@@ -243,6 +244,37 @@ impl ProjectWorkspace {
                 }
             });
         }));
+    }
+
+    /// Project identity, root and default route mapping for the preview panel.
+    ///
+    /// The default mapping is `/<collection>/<entry id>`, matching the fixture
+    /// page layout. A project with custom page routes still resolves entries;
+    /// only the convention differs.
+    pub fn preview_context(&self) -> Option<(ProjectId, PathBuf, RouteMapping)> {
+        let manifest = self.manifest.as_ref()?;
+        let project = self.project_id.clone()?;
+        let mapping =
+            RouteMapping::from_collections(manifest.collections().iter().map(|collection| {
+                let name = collection.id().as_str().to_owned();
+                (name.clone(), name)
+            }));
+        Some((project, manifest.root().to_owned(), mapping))
+    }
+
+    /// The collection entry rendered by the active document, if any.
+    pub fn active_entry_id(&self) -> Option<astrolith_core::EntryId> {
+        let active = self.active.as_ref()?;
+        let root = self.manifest.as_ref()?.root();
+        let relative = active
+            .strip_prefix(root)
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/");
+        self.entries
+            .iter()
+            .find(|entry| entry.entry().source().as_str() == relative)
+            .map(|entry| entry.entry().id().clone())
     }
 
     /// Identity used to decide when the frontmatter form needs a refresh.

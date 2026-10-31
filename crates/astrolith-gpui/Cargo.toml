@@ -10,10 +10,12 @@ astrolith-workspace = { path = "../astrolith-workspace" }
 astrolith-core = { path = "../astrolith-core" }
 astrolith-astro = { path = "../astrolith-astro" }
 astrolith-document = { path = "../astrolith-document" }
+astrolith-preview = { path = "../astrolith-preview" }
 gpui-kit.workspace = true
 tokio.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+url = "2.5.8"
 tempfile = "3.27.0"
 
 [dev-dependencies]

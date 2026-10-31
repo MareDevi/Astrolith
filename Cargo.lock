@@ -315,12 +315,14 @@ dependencies = [
  "astrolith-astro",
  "astrolith-core",
  "astrolith-document",
+ "astrolith-preview",
  "astrolith-workspace",
  "gpui-kit",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]

@@ -6,12 +6,14 @@ use std::{
 
 use crate::{
     commands::{self, COMMANDS, CommandId},
+    editor::session::SessionChanged,
     file::{DocumentSource, read_document},
     frontmatter::{FrontmatterChanged, FrontmatterForm},
     layout::{
         panels::WorkspacePanel,
         state::{LayoutState, PanelKind},
     },
+    preview::PreviewPanel,
     project_discovery::ProjectWorkspace,
     runtime,
     settings::{Settings, SettingsStore, settings_path},
@@ -83,6 +85,7 @@ pub(crate) struct Shell {
     navigator: Entity<WorkspacePanel>,
     frontmatter: Entity<FrontmatterForm>,
     frontmatter_key: Option<(PathBuf, bool)>,
+    preview: Entity<PreviewPanel>,
     palette: Entity<CommandState>,
     palette_focus: FocusHandle,
     opening: bool,
@@ -136,7 +139,9 @@ impl Shell {
         inspector.update(cx, |panel, cx| {
             panel.set_view(frontmatter.clone().into(), cx)
         });
-        let preview = cx.new(|cx| WorkspacePanel::new("preview-panel", "Preview", "No preview running\n\nAstro preview will use your project's development server and an external browser.", window, cx));
+        let preview = cx.new(PreviewPanel::new);
+        let preview_panel = cx.new(|cx| WorkspacePanel::new("preview-panel", "Preview", "No preview running\n\nStart the Astro dev server, then open the active entry in your browser.", window, cx));
+        preview_panel.update(cx, |panel, cx| panel.set_view(preview.clone().into(), cx));
         let (dock, skin) = DockSkin::dock_area("astrolith-workspace", Some(1), window, cx);
         dock.update(cx, |area, cx| {
             area.set_center(
@@ -147,23 +152,23 @@ impl Shell {
             for (placement, panel, visible) in [
                 (
                     DockPlacement::Left,
-                    navigator.clone(),
+                    panel_handle(navigator.clone()),
                     settings.layout.sidebar_visible,
                 ),
                 (
                     DockPlacement::Right,
-                    inspector,
+                    panel_handle(inspector),
                     settings.layout.inspector_visible,
                 ),
                 (
                     DockPlacement::Bottom,
-                    preview,
+                    panel_handle(preview_panel),
                     settings.layout.preview_visible,
                 ),
             ] {
                 area.set_dock(
                     placement,
-                    DockLayout::tabs().panel_view(panel_handle(panel), cx),
+                    DockLayout::tabs().panel_view(panel, cx),
                     window,
                     cx,
                 );
@@ -210,6 +215,11 @@ impl Shell {
                 }
             }),
         ];
+        subscriptions.push(cx.subscribe_in(
+            &project,
+            window,
+            |this, _, _: &SessionChanged, _window, cx| this.sync_preview(cx),
+        ));
         let apply_owner = project.downgrade();
         subscriptions.push(cx.subscribe_in(
             &frontmatter,
@@ -262,6 +272,12 @@ impl Shell {
             }
         })
         .detach();
+        let preview_owner = preview.downgrade();
+        App::on_app_quit(cx, move |cx| {
+            let _ = preview_owner.update(cx, |preview, _| preview.abort());
+            async move {}
+        })
+        .detach();
         let focus = cx.focus_handle().tab_stop(true);
         focus.focus(window, cx);
         subscriptions.push(cx.observe(&dock, |_, _, cx| cx.notify()));
@@ -272,6 +288,7 @@ impl Shell {
             navigator,
             frontmatter,
             frontmatter_key: None,
+            preview,
             palette,
             palette_focus: cx.focus_handle().tab_stop(true),
             opening: false,
@@ -383,6 +400,24 @@ impl Shell {
 }
 
 impl Shell {
+    /// Attach the preview panel to the open project and its active entry.
+    ///
+    /// Reattaching to the same project only refreshes the mapping, so a session
+    /// change never restarts a running dev server.
+    fn sync_preview(&mut self, cx: &mut Context<Self>) {
+        let context = self.project.read(cx).preview_context();
+        let entry = self.project.read(cx).active_entry_id();
+        self.preview.update(cx, |preview, cx| {
+            match context {
+                Some((project, root, mapping)) => {
+                    preview.ensure_attached(project, root, mapping, cx)
+                }
+                None => preview.detach(cx),
+            }
+            preview.set_entry(entry, cx);
+        });
+    }
+
     fn execute(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         match command {
             CommandId::OpenFile => self.open_file(window, cx),
@@ -405,6 +440,15 @@ impl Shell {
             CommandId::ToggleSidebar => self.toggle_panel(PanelKind::Sidebar, window, cx),
             CommandId::ToggleInspector => self.toggle_panel(PanelKind::Inspector, window, cx),
             CommandId::TogglePreview => self.toggle_panel(PanelKind::Preview, window, cx),
+            CommandId::StartPreview => self.preview.update(cx, |preview, cx| preview.start(cx)),
+            CommandId::StopPreview => self.preview.update(cx, |preview, cx| preview.stop(cx)),
+            CommandId::OpenPreview => {
+                let entry = self.project.read(cx).active_entry_id();
+                self.preview.update(cx, |preview, cx| {
+                    preview.set_entry(entry, cx);
+                    preview.open_active(cx);
+                });
+            }
             CommandId::FocusDocument => self.document.read(cx).focus_handle(cx).focus(window, cx),
             CommandId::LightTheme | CommandId::DarkTheme | CommandId::SystemTheme => {
                 self.settings.theme = match command {
@@ -762,7 +806,47 @@ mod tests {
         cx.update_window(handle.into(), |_, window, cx| {
             assert!(view.read(cx).settings.layout.preview_visible);
             window.render_frame(cx);
+            window.render_frame(cx);
             assert!(window.find("preview-panel").visible());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn preview_commands_are_wired_and_report_without_a_project(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, Settings::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::StartPreview, window, cx)
+            });
+            let message = view
+                .read(cx)
+                .preview
+                .read(cx)
+                .message()
+                .unwrap_or_default()
+                .to_owned();
+            assert!(
+                message.contains("Open an Astro project"),
+                "start without a project must explain the requirement, was {message:?}"
+            );
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::OpenPreview, window, cx)
+            });
+            let message = view
+                .read(cx)
+                .preview
+                .read(cx)
+                .message()
+                .unwrap_or_default()
+                .to_owned();
+            assert!(
+                message.contains("Open a document"),
+                "open without an active entry must explain the requirement, was {message:?}"
+            );
         })
         .unwrap();
     }

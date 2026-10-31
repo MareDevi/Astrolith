@@ -433,6 +433,19 @@ impl DevServer {
         }
     }
 
+    /// Immediately kill the server's whole process tree without awaiting.
+    ///
+    /// This is the application-exit path: there is no time for a graceful stop,
+    /// and dropping the owned [`RunningProcess`] signals the process group (or
+    /// terminates the Job Object) and reaps the direct child. Callers use it
+    /// synchronously from a quit observer; normal shutdown should use
+    /// [`DevServer::stop`].
+    pub fn abort(&mut self) {
+        // Dropping the process applies the kill-on-drop safety net.
+        self.process = None;
+        self.status = ServerStatus::Stopped;
+    }
+
     /// Await natural child exit and reflect it in the status.
     ///
     /// A clean exit becomes [`ServerStatus::Stopped`]; a non-zero exit becomes
