@@ -95,6 +95,11 @@ pub struct SchemaGenerationReport {
 pub fn generate_collection_schemas(
     request: &SchemaGenerationRequest,
 ) -> Result<SchemaGenerationReport, SchemaError> {
+    let started = Instant::now();
+    tracing::debug!(
+        root = %request.root.display(),
+        "running Astro schema generation"
+    );
     let entry = resolve_astro_entry(&request.root)?;
     let run = run_astro_sync(request, &entry)?;
 
@@ -114,6 +119,13 @@ pub fn generate_collection_schemas(
             format!("astro sync produced no collection schemas: {detail}")
         }));
     }
+    tracing::debug!(
+        root = %request.root.display(),
+        collections = report.schemas.len(),
+        diagnostics = report.diagnostics.len(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "Astro schema generation finished"
+    );
     Ok(report)
 }
 

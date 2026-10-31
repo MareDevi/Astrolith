@@ -131,6 +131,12 @@ impl CollectionWatcher {
         let mut state = self.watch_state.lock().map_err(|_| {
             WorkspaceError::Model("collection watcher registration lock is poisoned".into())
         })?;
+        tracing::debug!(
+            root = %self.root.display(),
+            desired_registrations = desired.len(),
+            current_registrations = state.registrations.len(),
+            "refreshing collection watcher registrations"
+        );
         let stale = state
             .registrations
             .iter()
@@ -184,6 +190,7 @@ impl CollectionWatcher {
                 }
                 Err(error) => {
                     callback_flag.store(true, Ordering::Release);
+                    tracing::warn!(%error, "filesystem watcher reported an error");
                     let _ = callback_sender.try_send(Err(error));
                 }
             })
@@ -193,6 +200,11 @@ impl CollectionWatcher {
                 .watch(path, *mode)
                 .map_err(|source| watch_io_error(path.clone(), source))?;
         }
+        tracing::debug!(
+            root = %root.display(),
+            registrations = registrations.len(),
+            "collection watcher started"
+        );
 
         Ok(Self {
             root,
@@ -248,6 +260,13 @@ impl CollectionWatcher {
             return WatchBatch::default();
         }
         let batch = pending.batch;
+        if batch.changed || batch.needs_rescan {
+            tracing::trace!(
+                changed = batch.changed,
+                needs_rescan = batch.needs_rescan,
+                "drained a merged watcher batch"
+            );
+        }
         *pending = PendingBatch::default();
         batch
     }

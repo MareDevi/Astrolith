@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+tracing.workspace = true
 astrolith-core = { path = "../astrolith-core" }
 serde_json = "1.0.154"
 tokio = { workspace = true }

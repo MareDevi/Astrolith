@@ -8,6 +8,7 @@ use std::{
     fs::{self, File},
     io::{self, BufRead, BufReader, Read},
     path::{Component, Path, PathBuf},
+    time::Instant,
 };
 use yaml_rust2::{
     Yaml, YamlLoader,
@@ -241,6 +242,7 @@ pub fn scan_collections(
     cancellation: &Cancellation,
 ) -> Result<Vec<CollectionEntry>, WorkspaceError> {
     check_cancelled(cancellation)?;
+    let started = Instant::now();
     let root = canonical_dir(project.root())?;
     let mut entries = Vec::new();
     let mut logical_ids = HashSet::new();
@@ -343,6 +345,15 @@ pub fn scan_collections(
             .then_with(|| left.absolute_source.cmp(&right.absolute_source))
     });
     check_cancelled(cancellation)?;
+    tracing::debug!(
+        root = %root.display(),
+        collections = project.collections().len(),
+        entries = entries.len(),
+        directories = directories_visited,
+        nodes = nodes_visited,
+        elapsed_ms = started.elapsed().as_millis(),
+        "collection scan finished"
+    );
     Ok(entries)
 }
 

@@ -153,6 +153,11 @@ impl RecoveryStore {
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         fs::create_dir_all(&self.directory).map_err(io_error)?;
         let path = self.record_path(record.identity());
+        tracing::trace!(
+            source = %record.identity().canonical_source().as_str(),
+            revision = record.revision().get(),
+            "writing a recovery record"
+        );
         write_atomic(&path, &serialize_record(record)?).map_err(io_error)
     }
 
@@ -193,6 +198,12 @@ impl RecoveryStore {
         }
         load.records
             .sort_by_key(|record| std::cmp::Reverse(record.modified_unix_secs));
+        tracing::debug!(
+            records = load.records.len(),
+            diagnostics = load.diagnostics.len(),
+            directory = %self.directory.display(),
+            "loaded recovery records"
+        );
         Ok(load)
     }
 
@@ -203,6 +214,10 @@ impl RecoveryStore {
     ///
     /// Returns [`DocumentError::Io`] if the file exists but cannot be removed.
     pub fn clear(&self, identity: &DocumentIdentity) -> Result<bool, DocumentError> {
+        tracing::trace!(
+            source = %identity.canonical_source().as_str(),
+            "clearing a recovery record"
+        );
         remove_if_present(&self.record_path(identity))
     }
 
@@ -230,7 +245,13 @@ impl RecoveryStore {
             Err(error) => return Err(io_error(error)),
         };
         match parse_record(&text) {
-            Ok(record) if record.content() != saved_content => Ok(false),
+            Ok(record) if record.content() != saved_content => {
+                tracing::debug!(
+                    source = %identity.canonical_source().as_str(),
+                    "kept a recovery record with newer unsaved content"
+                );
+                Ok(false)
+            }
             _ => remove_if_present(&path),
         }
     }

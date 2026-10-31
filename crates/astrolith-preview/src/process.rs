@@ -250,6 +250,13 @@ impl RunningProcess {
             None => None,
         };
 
+        tracing::debug!(
+            program = %spec.program.display(),
+            current_dir = %spec.current_dir.display(),
+            pid = ?child.id(),
+            "spawned a preview child process"
+        );
+
         let stdout = OutputCapture::new();
         let stderr = OutputCapture::new();
         let stdout_task = child
@@ -322,7 +329,13 @@ impl RunningProcess {
     /// Graceful stop: request termination, wait up to `grace`, then force-kill
     /// the whole tree and reap the direct child.
     pub async fn stop(&mut self, grace: Duration) -> io::Result<ExitStatus> {
+        tracing::debug!(
+            pid = ?self.pid(),
+            grace_ms = grace.as_millis(),
+            "requesting preview process shutdown"
+        );
         if let Some(status) = self.child.try_wait()? {
+            tracing::debug!(%status, "preview process had already exited");
             self.signal_tree_force();
             self.forget_ownership();
             self.settle_drains().await;
@@ -344,6 +357,7 @@ impl RunningProcess {
 
     /// Force-terminate the child's whole tree immediately, then reap.
     pub async fn terminate(&mut self) -> io::Result<ExitStatus> {
+        tracing::debug!(pid = ?self.pid(), "force-terminating preview process tree");
         let already_exited = self.child.try_wait()?.is_some();
         if !already_exited {
             self.signal_tree_force();
@@ -414,6 +428,10 @@ impl RunningProcess {
 
 impl Drop for RunningProcess {
     fn drop(&mut self) {
+        tracing::debug!(
+            pid = ?self.child.id(),
+            "dropping a preview process owner; killing any remaining tree"
+        );
         // Safety net for project switch / application exit: never leave the
         // process tree running if the owner is dropped without an explicit stop.
         self.signal_tree_force();
@@ -435,7 +453,11 @@ where
         let mut buffer = [0u8; 8192];
         loop {
             match reader.read(&mut buffer).await {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(error) => {
+                    tracing::trace!(%error, "preview output stream ended with an error");
+                    break;
+                }
                 Ok(read) => capture.push(&buffer[..read]),
             }
         }

@@ -120,6 +120,12 @@ pub async fn save_snapshot(snapshot: &DocumentSnapshot) -> Result<SaveOutcome, D
     let content = snapshot.content.clone();
     let baseline = snapshot.baseline.clone();
     let revision = snapshot.revision.get();
+    tracing::debug!(
+        path = %path.display(),
+        revision,
+        bytes = content.len(),
+        "saving document snapshot"
+    );
 
     tokio::task::spawn_blocking(move || save_blocking(&path, &content, &baseline, revision))
         .await
@@ -136,19 +142,42 @@ fn save_blocking(
 ) -> Result<SaveOutcome, DocumentError> {
     let current = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(SaveOutcome::Conflict),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            tracing::warn!(
+                path = %path.display(),
+                "save conflict: the file no longer exists"
+            );
+            return Ok(SaveOutcome::Conflict);
+        }
         Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                %error,
+                "could not read a document before saving"
+            );
             return Err(DocumentError::Io {
                 message: format!("cannot read {}: {error}", path.display()),
             });
         }
     };
     if !baseline.matches(&current) {
+        tracing::warn!(
+            path = %path.display(),
+            "save conflict: the file changed on disk"
+        );
         return Ok(SaveOutcome::Conflict);
     }
-    write_atomic(path, content).map_err(|error| DocumentError::Io {
-        message: format!("cannot write {}: {error}", path.display()),
+    write_atomic(path, content).map_err(|error| {
+        tracing::error!(
+            path = %path.display(),
+            %error,
+            "atomic document write failed"
+        );
+        DocumentError::Io {
+            message: format!("cannot write {}: {error}", path.display()),
+        }
     })?;
+    tracing::debug!(path = %path.display(), revision, "document snapshot saved");
     Ok(SaveOutcome::Saved { revision })
 }
 

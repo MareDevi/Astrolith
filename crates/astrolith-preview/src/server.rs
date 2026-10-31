@@ -322,6 +322,11 @@ impl DevServer {
         }
 
         self.status = ServerStatus::Starting;
+        tracing::debug!(
+            project = %self.project.as_str(),
+            root = %self.config.root.display(),
+            "starting Astro dev server"
+        );
 
         let port = match self.config.port {
             Some(port) => port,
@@ -329,6 +334,7 @@ impl DevServer {
                 Ok(port) => port,
                 Err(error) => {
                     let message = format!("no available local port: {error}");
+                    tracing::error!(%message, "could not allocate a preview port");
                     self.status = ServerStatus::Failed(message.clone());
                     return Err(DevServerError::Io(message));
                 }
@@ -338,6 +344,7 @@ impl DevServer {
         let spec = match self.build_spec(port) {
             Ok(spec) => spec,
             Err(error) => {
+                tracing::error!(%error, "could not build the Astro dev server command");
                 self.status = ServerStatus::Failed(error.to_string());
                 return Err(error);
             }
@@ -347,10 +354,12 @@ impl DevServer {
             Ok(process) => process,
             Err(error) => {
                 let error = DevServerError::from(error);
+                tracing::error!(%error, "could not spawn the Astro dev server");
                 self.status = ServerStatus::Failed(error.to_string());
                 return Err(error);
             }
         };
+        tracing::debug!(pid = ?process.pid(), port, "Astro dev server process spawned");
 
         let deadline = Instant::now() + self.config.startup_timeout;
         loop {
@@ -364,12 +373,20 @@ impl DevServer {
 
             let text = process.combined_text();
             if let Some(url) = parse_ready_url(&text, port) {
+                tracing::info!(
+                    project = %self.project.as_str(),
+                    %url,
+                    pid = ?process.pid(),
+                    elapsed_ms = process.elapsed().as_millis(),
+                    "Astro dev server ready"
+                );
                 self.status = ServerStatus::Ready(url.clone());
                 self.process = Some(process);
                 return Ok(url);
             }
 
             if let Some(message) = port_in_use_message(&text, port) {
+                tracing::error!(port, %message, "Astro dev server port is in use");
                 let _ = process.terminate().await;
                 self.status = ServerStatus::Failed(message.clone());
                 return Err(DevServerError::PortInUse(port));
@@ -380,6 +397,7 @@ impl DevServer {
                     let _ = process.terminate().await;
                     let stderr = process.stderr().text_lossy();
                     let message = format!("exited ({exit}): {}", excerpt(&stderr));
+                    tracing::error!(%exit, stderr = %excerpt(&stderr), "Astro dev server exited during startup");
                     self.status = ServerStatus::Failed(message.clone());
                     return Err(DevServerError::Exited(message));
                 }
@@ -387,12 +405,17 @@ impl DevServer {
                 Err(error) => {
                     let _ = process.terminate().await;
                     let message = error.to_string();
+                    tracing::error!(%error, "could not poll the Astro dev server");
                     self.status = ServerStatus::Failed(message.clone());
                     return Err(DevServerError::Io(message));
                 }
             }
 
             if Instant::now() >= deadline {
+                tracing::error!(
+                    timeout_ms = self.config.startup_timeout.as_millis(),
+                    "Astro dev server startup timed out"
+                );
                 let _ = process.terminate().await;
                 self.status = ServerStatus::Failed(
                     DevServerError::Timeout(self.config.startup_timeout).to_string(),
@@ -415,14 +438,21 @@ impl DevServer {
             _ => {}
         }
         self.status = ServerStatus::Stopping;
+        tracing::debug!(
+            project = %self.project.as_str(),
+            pid = ?self.pid(),
+            "stopping the Astro dev server"
+        );
         if let Some(mut process) = self.process.take() {
             match process.stop(self.config.stop_grace).await {
-                Ok(_) => {
+                Ok(status) => {
+                    tracing::debug!(%status, "Astro dev server stopped");
                     self.status = ServerStatus::Stopped;
                     Ok(())
                 }
                 Err(error) => {
                     let message = error.to_string();
+                    tracing::warn!(%error, "Astro dev server did not stop cleanly");
                     self.status = ServerStatus::Failed(message.clone());
                     Err(DevServerError::Io(message))
                 }
@@ -441,6 +471,9 @@ impl DevServer {
     /// synchronously from a quit observer; normal shutdown should use
     /// [`DevServer::stop`].
     pub fn abort(&mut self) {
+        if let Some(pid) = self.pid() {
+            tracing::debug!(pid, "aborting the Astro dev server");
+        }
         // Dropping the process applies the kill-on-drop safety net.
         self.process = None;
         self.status = ServerStatus::Stopped;
@@ -459,11 +492,14 @@ impl DevServer {
             .wait()
             .await
             .map_err(|error| DevServerError::Io(error.to_string()))?;
-        self.status = if exit.success() {
-            ServerStatus::Stopped
+        if exit.success() {
+            tracing::info!(%exit, "Astro dev server exited");
+            self.status = ServerStatus::Stopped;
         } else {
-            ServerStatus::Failed(format!("Astro dev server exited unexpectedly ({exit})"))
-        };
+            tracing::warn!(%exit, "Astro dev server exited unexpectedly");
+            self.status =
+                ServerStatus::Failed(format!("Astro dev server exited unexpectedly ({exit})"));
+        }
         Ok(self.status.clone())
     }
 

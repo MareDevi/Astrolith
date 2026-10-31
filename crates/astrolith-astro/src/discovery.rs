@@ -214,6 +214,12 @@ fn json(path: &Path) -> Result<serde_json::Value, AstroError> {
 pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, AstroError> {
     let cancellation = request.cancellation();
     cancellation.check()?;
+    tracing::debug!(
+        project = %request.project.as_str(),
+        generation = request.generation,
+        root = %request.root.display(),
+        "inspecting an Astro project"
+    );
     let root = request.root.canonicalize()?;
     if !root.is_dir() {
         return Err(AstroError("Choose a project directory".into()));
@@ -260,9 +266,17 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
         requirement,
         installed,
     };
-    let unsupported = |message: String| DiscoveryOutcome::Unsupported {
-        metadata: metadata.clone(),
-        diagnostics: vec![message],
+    let unsupported = |message: String| {
+        tracing::warn!(
+            project = %request.project.as_str(),
+            root = %root.display(),
+            %message,
+            "Astro project is unsupported"
+        );
+        DiscoveryOutcome::Unsupported {
+            metadata: metadata.clone(),
+            diagnostics: vec![message],
+        }
     };
     if !metadata
         .installed_version()
@@ -370,6 +384,13 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
         });
     }
     cancellation.check()?;
+    tracing::debug!(
+        project = %request.project.as_str(),
+        generation = request.generation,
+        astro = metadata.installed_version().unwrap_or("<unknown>"),
+        collections = collections.len(),
+        "Astro project inspected"
+    );
     Ok(DiscoveryOutcome::Ready(ProjectManifest {
         metadata,
         project: request.project.clone(),
