@@ -309,3 +309,25 @@ fn value_type_helper_round_trips_through_serde() {
     let diagnostics = validate_frontmatter(&schema, &value);
     assert_eq!(paths(&diagnostics), ["<root>"]);
 }
+
+#[test]
+fn dates_reject_impossible_calendar_dates_but_accept_leap_days() {
+    let schema = schema(vec![field("when", true, FieldKind::Date)]);
+
+    for accepted in ["2024-02-29", "2024-01-31", "2023-02-28", "2024-12-31"] {
+        let diagnostics = validate_frontmatter(&schema, &json!({ "when": accepted }));
+        assert!(
+            diagnostics.is_empty(),
+            "valid date {accepted} was rejected: {diagnostics:?}"
+        );
+    }
+
+    for rejected in ["2024-02-31", "2023-02-29", "2024-13-01", "2024-04-31"] {
+        let diagnostics = validate_frontmatter(&schema, &json!({ "when": rejected }));
+        assert_eq!(
+            paths(&diagnostics),
+            ["when"],
+            "impossible date {rejected} was accepted"
+        );
+    }
+}

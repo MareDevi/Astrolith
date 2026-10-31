@@ -22,10 +22,13 @@ use std::{
 use serde_json::Value;
 
 use crate::{
+    config::parse_project_config,
     discovery::{Cancellation, read_bounded},
     schema::model::CollectionSchema,
     schema::parser::{SchemaError, normalize_schema},
 };
+
+use super::helpers::enhance_astro_fields;
 
 /// Default wall-clock bound for one `astro sync` run.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -158,10 +161,110 @@ pub fn load_generated_schemas(
             Err(error) => report.diagnostics.push(format!("{collection}: {error}")),
         }
     }
+    apply_astro_helpers(root, &mut report);
     report
         .schemas
         .sort_by(|a, b| a.collection.cmp(&b.collection));
     Ok(report)
+}
+
+/// Refine generated schemas with Astro `image()`/`reference()` helper semantics.
+///
+/// The generated JSON Schema loses these helpers (images look like strings and
+/// references like unsupported unions), so the project's own content config
+/// source is read and each generated collection is passed through
+/// [`enhance_astro_fields`]. A missing or unreadable config is non-fatal: the
+/// normalized schemas are still returned, with a diagnostic explaining why the
+/// helper pass was skipped. Malformed configs likewise only add diagnostics.
+fn apply_astro_helpers(root: &Path, report: &mut SchemaGenerationReport) {
+    let source = match resolve_content_config_source(root) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            if !report.schemas.is_empty() {
+                report
+                    .diagnostics
+                    .push("Astro helper resolution skipped: content config not found".to_owned());
+            }
+            return;
+        }
+        Err(error) => {
+            report
+                .diagnostics
+                .push(format!("Astro helper resolution skipped: {error}"));
+            return;
+        }
+    };
+
+    let mut messages = Vec::new();
+    for entry in &mut report.schemas {
+        for diagnostic in enhance_astro_fields(&mut entry.schema, &source) {
+            messages.push(format!(
+                "{}: {}: {}",
+                entry.collection, diagnostic.path, diagnostic.message
+            ));
+        }
+    }
+    for message in messages {
+        if !report.diagnostics.contains(&message) {
+            report.diagnostics.push(message);
+        }
+    }
+}
+
+/// Read the project's content config source, honouring the configured `srcDir`.
+fn resolve_content_config_source(root: &Path) -> Result<Option<String>, String> {
+    let mut directories = Vec::new();
+    if let Some(directory) = safe_join(root, &astro_src_dir(root)) {
+        directories.push(directory);
+    }
+    directories.push(root.to_path_buf());
+
+    for directory in directories {
+        if let Some(path) = find_config_file(&directory, "content.config") {
+            return read_bounded(&path, MAX_SCHEMA_FILE)
+                .map(Some)
+                .map_err(|error| format!("cannot read {}: {error}", path.display()));
+        }
+    }
+    Ok(None)
+}
+
+fn astro_src_dir(root: &Path) -> String {
+    if let Some(path) = find_config_file(root, "astro.config")
+        && let Ok(text) = read_bounded(&path, MAX_SCHEMA_FILE)
+        && let Ok(config) = parse_project_config(&text)
+    {
+        return config.src_dir;
+    }
+    "src".to_owned()
+}
+
+fn find_config_file(directory: &Path, name: &str) -> Option<PathBuf> {
+    for extension in ["ts", "mts", "js", "mjs", "cts", "cjs"] {
+        let path = directory.join(format!("{name}.{extension}"));
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
+    if relative.is_empty() {
+        return Some(root.to_path_buf());
+    }
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(root.join(relative_path))
 }
 
 /// Whether the generated schemas are missing or older than the content config.

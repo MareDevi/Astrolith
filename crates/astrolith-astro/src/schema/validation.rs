@@ -332,7 +332,22 @@ fn looks_like_date(text: &str) -> bool {
     ) else {
         return false;
     };
-    year >= 0 && (1..=12).contains(&month) && (1..=31).contains(&day)
+    year >= 0 && (1..=12).contains(&month) && (1..=days_in_month(year, month)).contains(&day)
+}
+
+/// Number of days in `month` for `year`, honouring Gregorian leap years.
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 fn looks_like_email(text: &str) -> bool {
