@@ -12,11 +12,17 @@ use std::{
     },
 };
 
-/// Exact releases whose loader semantics are checked by the fixture task.
-pub const SUPPORTED_ASTRO_VERSIONS: &[&str] = &["5.18.2", "6.4.8", "7.4.4"];
-/// Exact installed `@astrojs/mdx` release paired with each supported Astro release.
-const SUPPORTED_MDX_VERSIONS: [(&str, &str); 3] =
-    [("5.18.2", "4.3.14"), ("6.4.8", "6.0.3"), ("7.4.4", "8.1.2")];
+/// Astro major releases whose loader semantics are checked by the fixture task.
+/// Every installed release within these majors is accepted.
+pub const SUPPORTED_ASTRO_MAJORS: &[u64] = &[5, 6, 7];
+/// Installed `@astrojs/mdx` major paired with each supported Astro major.
+const SUPPORTED_MDX_MAJORS: [(u64, u64); 3] = [(5, 4), (6, 6), (7, 8)];
+
+/// Parse the major component of an installed release. Prerelease and build
+/// suffixes after the major do not affect loader compatibility.
+fn major_version(version: &str) -> Option<u64> {
+    version.split('.').next()?.parse().ok()
+}
 /// Cooperative cancellation shared by discovery and index services.
 #[derive(Clone, Default, Debug)]
 pub struct Cancellation(Arc<AtomicBool>);
@@ -282,12 +288,16 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
             diagnostics: vec![message],
         }
     };
-    if !metadata
+    let Some(astro_major) = metadata
         .installed_version()
-        .is_some_and(|v| SUPPORTED_ASTRO_VERSIONS.contains(&v))
-    {
-        return Ok(unsupported("Install a fixture-verified project-local Astro release; unsupported or missing installed version".into()));
-    }
+        .and_then(major_version)
+        .filter(|major| SUPPORTED_ASTRO_MAJORS.contains(major))
+    else {
+        return Ok(unsupported(
+            "Install a project-local Astro 5, 6, or 7 release; unsupported or missing installed version"
+                .into(),
+        ));
+    };
     let astro_config = match candidate(&root, &root, "astro.config") {
         Ok(path) => path,
         Err(error) => {
@@ -349,24 +359,21 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
                     .into(),
             ));
         }
-        let expected = metadata
-            .installed_version()
-            .and_then(|version| {
-                SUPPORTED_MDX_VERSIONS
-                    .iter()
-                    .find(|(astro, _)| *astro == version)
-                    .map(|(_, mdx)| *mdx)
-            })
+        let expected = SUPPORTED_MDX_MAJORS
+            .iter()
+            .find(|(astro, _)| *astro == astro_major)
+            .map(|(_, mdx)| *mdx)
             .ok_or_else(|| AstroError("Unsupported Astro/MDX version pair".into()))?;
         let mdx = json(&root.join("node_modules/@astrojs/mdx/package.json")).ok();
         if mdx
             .as_ref()
             .and_then(|value| value.get("version"))
             .and_then(|value| value.as_str())
+            .and_then(major_version)
             != Some(expected)
         {
             return Ok(unsupported(format!(
-                "MDX patterns require installed @astrojs/mdx {expected} for this Astro release"
+                "MDX patterns require installed @astrojs/mdx {expected}.x for Astro {astro_major}.x"
             )));
         }
     }

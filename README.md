@@ -52,7 +52,7 @@ Install the Vulkan driver for your GPU as well (for example `vulkan-radeon`, `vu
 | --- | --- |
 | `mise run doctor` | Check tool executables, lockfile metadata, and platform build prerequisites; a compilation is still required to prove compatibility. |
 | `mise run build` | Build `astrolith-desktop` with the lockfile. |
-| `mise run test:fixtures` | Run frozen Astro 5.18.2/7.4.4 fixtures and compare real loader IDs/source paths with the Rust index. |
+| `mise run test:fixtures` | Run the frozen Astro 5/6/7 fixtures and compare real loader IDs/source paths with the Rust index. |
 | `mise run test` | Run headless workspace tests. Includes preference, command, readonly-source, and UI interaction tests. |
 | `mise run fmt` | Check formatting without changing files. |
 | `mise run lint` | Run Clippy for every workspace target with warnings denied. |
@@ -69,7 +69,7 @@ The CI workflow configures Linux, macOS, and Windows builds/tests with the same 
 
 Run `mise run dev`. Use **Open project…** (`Ctrl+Shift+O`, `Cmd+Shift+O` on macOS) to select an Astro project. Select a collection entry to edit its source. Open-document tabs preserve text, selection and undo history. Dirty documents block project switching; closing them requires explicit discard. Changes stay in memory: saving is not available until M04.
 
-Static discovery currently supports only installed Astro **5.18.2** and **7.4.4**, literal local `glob()` collections and the three documented Markdown/MDX patterns. MDX patterns require the configured matching MDX integration (4.3.14 for Astro 5.18.2, 8.1.2 for Astro 7.4.4). Dynamic configs, custom IDs, legacy/experimental flags, unknown integrations, MDX options and local/imported schema constants receive diagnostics. Watcher refreshes the index and retains open buffers; close and reopen an unchanged document to load its disk version. See [M02 evidence and limits](docs/technical/m02-progress.md).
+Static discovery supports any installed release in Astro majors **5, 6, and 7**, literal local `glob()` collections and the three documented Markdown/MDX patterns. MDX patterns require the configured `@astrojs/mdx` integration at the matching major (4.x for Astro 5, 6.x for Astro 6, 8.x for Astro 7). Dynamic configs, custom IDs, legacy/experimental flags, unknown integrations, MDX options and local/imported schema constants receive diagnostics. Watcher refreshes the index and retains open buffers; close and reopen an unchanged document to load its disk version. See [M02 evidence and limits](docs/technical/m02-progress.md).
 
 Use **Open file…** to view a local UTF-8 source file (up to 8 MiB and 50,000 lines). The document is readonly: selection and copy work; edits and saving are unavailable. MDX bodies remain intact as source; MDX-aware highlighting is not promised. File errors and picker cancellation preserve the current document. Reads run off the UI thread.
 

@@ -2,7 +2,7 @@
 
 `mise run test:fixtures` installs committed frozen Bun locks into temporary copies and runs each project's actual Astro sync. A fixture-only wrapper delegates to the real `glob()` loader and records `store.set` IDs and source paths. The task then runs the production Rust discovery/index helper against that same installation and compares complete mappings. It also invokes the headless GPUI workflow on every installed project, checking picker selection, keyboard edits, MDX source, retained tabs and unchanged disk contents.
 
-Verified pairs are Astro 5.18.2 / MDX 4.3.14, Astro 6.4.8 / MDX 6.0.3 and Astro 7.4.4 / MDX 8.1.2. The regular `workspace` config is the supported static subset. The separate `oracle` config includes a custom-ID collection to demonstrate that logical IDs cannot be used to reconstruct source paths; production rejects that option. `unsupported/legacy` is diagnostic-only.
+Verified pairs are Astro 5.18.2 / MDX 4.3.14, Astro 6.4.8 / MDX 6.0.3 and Astro 7.4.4 / MDX 8.1.2. Discovery accepts any release within the Astro 5, 6 and 7 majors; the fixtures pin one verified representative per major. The regular `workspace` config is the supported static subset. The separate `oracle` config includes a custom-ID collection to demonstrate that logical IDs cannot be used to reconstruct source paths; production rejects that option. `unsupported/legacy` is diagnostic-only.
 
 ## Pattern arrays and negative globs
 

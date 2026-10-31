@@ -21,10 +21,7 @@ fn fixture() -> tempfile::TempDir {
     .unwrap();
     std::fs::write(
         dir.path().join("node_modules/astro/package.json"),
-        format!(
-            r#"{{"version":"{}"}}"#,
-            astrolith_astro::SUPPORTED_ASTRO_VERSIONS[0]
-        ),
+        r#"{"version":"5.18.2"}"#,
     )
     .unwrap();
     std::fs::write(dir.path().join("src/content.config.ts"), "import {defineCollection} from 'astro:content'; import {glob} from 'astro/loaders'; export const collections = {blog: defineCollection({loader: glob({base:'./src/posts',pattern:'**/*.md'})})};").unwrap();
@@ -167,15 +164,19 @@ fn special_metadata_files_are_rejected_before_opening() {
     );
 }
 
-#[test]
-fn mdx_patterns_require_configured_fixture_verified_mdx_integration() {
-    let dir = fixture();
-    let config = dir.path().join("src/content.config.ts");
+fn set_mdx_pattern(dir: &Path) {
+    let config = dir.join("src/content.config.ts");
     let code = std::fs::read_to_string(&config)
         .unwrap()
         .replace("**/*.{md,mdx}", "**/*.mdx")
         .replace("**/*.md'", "**/*.mdx'");
     std::fs::write(config, code).unwrap();
+}
+
+#[test]
+fn mdx_patterns_require_configured_matching_mdx_integration() {
+    let dir = fixture();
+    set_mdx_pattern(dir.path());
     assert!(
         matches!(
             inspect_project(&request(dir.path())).unwrap(),
@@ -192,7 +193,7 @@ fn mdx_patterns_require_configured_fixture_verified_mdx_integration() {
         "configured but missing MDX package"
     );
     std::fs::create_dir_all(dir.path().join("node_modules/@astrojs/mdx")).unwrap();
-    for version in ["4.0.0", "8.1.2"] {
+    for version in ["3.9.0", "5.0.0", "6.0.3", "8.1.2"] {
         std::fs::write(
             dir.path().join("node_modules/@astrojs/mdx/package.json"),
             format!(r#"{{"version":"{version}"}}"#),
@@ -203,53 +204,100 @@ fn mdx_patterns_require_configured_fixture_verified_mdx_integration() {
                 inspect_project(&request(dir.path())).unwrap(),
                 DiscoveryOutcome::Unsupported { .. }
             ),
-            "unverified MDX pair {version}"
+            "MDX {version} does not pair with Astro 5"
         );
     }
-    std::fs::write(
-        dir.path().join("node_modules/@astrojs/mdx/package.json"),
-        r#"{"version":"4.3.14"}"#,
-    )
-    .unwrap();
-    assert!(matches!(
-        inspect_project(&request(dir.path())).unwrap(),
-        DiscoveryOutcome::Ready(_)
-    ));
-}
-
-#[test]
-fn astro6_release_requires_its_verified_mdx_pair() {
-    let dir = fixture();
-    assert!(astrolith_astro::SUPPORTED_ASTRO_VERSIONS.contains(&"6.4.8"));
-    std::fs::write(
-        dir.path().join("node_modules/astro/package.json"),
-        r#"{"version":"6.4.8"}"#,
-    )
-    .unwrap();
-    let config = dir.path().join("src/content.config.ts");
-    let code = std::fs::read_to_string(&config)
-        .unwrap()
-        .replace("**/*.{md,mdx}", "**/*.mdx")
-        .replace("**/*.md'", "**/*.mdx'");
-    std::fs::write(config, code).unwrap();
-    std::fs::write(dir.path().join("astro.config.mjs"),"import {defineConfig} from 'astro/config'; import mdx from '@astrojs/mdx'; export default defineConfig({integrations:[mdx()]});").unwrap();
-    std::fs::create_dir_all(dir.path().join("node_modules/@astrojs/mdx")).unwrap();
-    for (version, supported) in [("4.3.14", false), ("8.1.2", false), ("6.0.3", true)] {
+    for version in ["4.3.14", "4.99.0"] {
         std::fs::write(
             dir.path().join("node_modules/@astrojs/mdx/package.json"),
             format!(r#"{{"version":"{version}"}}"#),
         )
         .unwrap();
-        let outcome = inspect_project(&request(dir.path())).unwrap();
-        if supported {
+        assert!(
+            matches!(
+                inspect_project(&request(dir.path())).unwrap(),
+                DiscoveryOutcome::Ready(_)
+            ),
+            "Astro 5 must accept MDX {version}"
+        );
+    }
+}
+
+#[test]
+fn supported_majors_accept_any_patch_release() {
+    let dir = fixture();
+    for version in ["5.0.0", "5.99.1", "6.0.0", "6.12.3", "7.0.0", "7.8.9"] {
+        std::fs::write(
+            dir.path().join("node_modules/astro/package.json"),
+            format!(r#"{{"version":"{version}"}}"#),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                inspect_project(&request(dir.path())).unwrap(),
+                DiscoveryOutcome::Ready(_)
+            ),
+            "Astro {version} is in a supported major"
+        );
+    }
+    for version in ["4.99.0", "8.0.0", "not-a-version", ""] {
+        std::fs::write(
+            dir.path().join("node_modules/astro/package.json"),
+            format!(r#"{{"version":"{version}"}}"#),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                inspect_project(&request(dir.path())).unwrap(),
+                DiscoveryOutcome::Unsupported { .. }
+            ),
+            "Astro {version:?} is outside the supported majors"
+        );
+    }
+}
+
+#[test]
+fn mdx_major_must_match_astro_major() {
+    let dir = fixture();
+    set_mdx_pattern(dir.path());
+    std::fs::write(dir.path().join("astro.config.mjs"),"import {defineConfig} from 'astro/config'; import mdx from '@astrojs/mdx'; export default defineConfig({integrations:[mdx()]});").unwrap();
+    std::fs::create_dir_all(dir.path().join("node_modules/@astrojs/mdx")).unwrap();
+    for (astro, accepted, rejected) in [
+        ("5.18.2", ["4.3.14", "4.99.0"], ["5.0.0", "6.0.3", "8.1.2"]),
+        ("6.4.8", ["6.0.3", "6.99.0"], ["4.3.14", "5.0.0", "8.1.2"]),
+        ("7.4.4", ["8.1.2", "8.99.0"], ["4.3.14", "5.0.0", "6.0.3"]),
+    ] {
+        std::fs::write(
+            dir.path().join("node_modules/astro/package.json"),
+            format!(r#"{{"version":"{astro}"}}"#),
+        )
+        .unwrap();
+        for version in rejected {
+            std::fs::write(
+                dir.path().join("node_modules/@astrojs/mdx/package.json"),
+                format!(r#"{{"version":"{version}"}}"#),
+            )
+            .unwrap();
             assert!(
-                matches!(outcome, DiscoveryOutcome::Ready(_)),
-                "Astro 6.4.8 must accept MDX {version}"
+                matches!(
+                    inspect_project(&request(dir.path())).unwrap(),
+                    DiscoveryOutcome::Unsupported { .. }
+                ),
+                "Astro {astro} must reject MDX {version}"
             );
-        } else {
+        }
+        for version in accepted {
+            std::fs::write(
+                dir.path().join("node_modules/@astrojs/mdx/package.json"),
+                format!(r#"{{"version":"{version}"}}"#),
+            )
+            .unwrap();
             assert!(
-                matches!(outcome, DiscoveryOutcome::Unsupported { .. }),
-                "Astro 6.4.8 must reject MDX {version}"
+                matches!(
+                    inspect_project(&request(dir.path())).unwrap(),
+                    DiscoveryOutcome::Ready(_)
+                ),
+                "Astro {astro} must accept MDX {version}"
             );
         }
     }
