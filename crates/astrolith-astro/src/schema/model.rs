@@ -37,6 +37,20 @@ pub enum FieldKind {
     Boolean,
     /// A calendar date or timestamp, regardless of the emitted representation.
     Date,
+    /// An Astro `image()` asset reference.
+    ///
+    /// Astro's generated JSON Schema renders `image()` as a plain string (it is
+    /// a `z.string().transform(...)`), so this kind can only be recovered from
+    /// the content config source by [`enhance_astro_fields`](super::enhance_astro_fields).
+    Image,
+    /// An Astro `reference()` to one or more other collections.
+    ///
+    /// Astro's generated JSON Schema renders `reference()` as a heterogeneous
+    /// union, which alone normalizes to [`FieldKind::Unsupported`]; the helper
+    /// resolution recovers the target collection names from the config.
+    Reference {
+        collections: Vec<String>,
+    },
     Enum {
         values: Vec<Value>,
     },
