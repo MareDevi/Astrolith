@@ -239,6 +239,16 @@ pub struct FrontmatterChanged {
 struct RowEditor {
     control: FieldControl,
     input: Option<Entity<InputState>>,
+    /// Presentation strings are built when the form loads, not per frame.
+    label: SharedString,
+    path: SharedString,
+    kind_label: &'static str,
+    hierarchy: usize,
+    is_object: bool,
+    read_only_label: Option<SharedString>,
+    aria_label: SharedString,
+    /// (display, raw) pairs for enum controls.
+    enum_values: Vec<(SharedString, SharedString)>,
     _subscription: Option<Subscription>,
 }
 
@@ -372,9 +382,37 @@ fn build_rows(
         } else {
             (None, None)
         };
+        let path = control.path.clone();
+        let is_object = control.kind == ControlKind::Object;
+        let enum_values = match &control.kind {
+            ControlKind::Enum { values } => values
+                .iter()
+                .map(|value| {
+                    let display = enum_display(value);
+                    (
+                        SharedString::from(display.clone()),
+                        SharedString::from(display),
+                    )
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let read_only_label =
+            (!control.editable && !is_object && enum_values.is_empty()).then(|| {
+                let refusal = control.refusal.as_deref().unwrap_or("read-only field");
+                SharedString::from(format!("Read-only · {refusal}"))
+            });
         rows.push(RowEditor {
             control: control.clone(),
             input,
+            label: SharedString::from(control.name.clone()),
+            aria_label: SharedString::from(format!("frontmatter field {}", control.path)),
+            path: SharedString::from(path),
+            kind_label: control_label(&control.kind),
+            hierarchy: control.path.matches('.').count().saturating_sub(1),
+            is_object,
+            read_only_label,
+            enum_values,
             _subscription: subscription,
         });
     }
@@ -419,8 +457,7 @@ impl Render for FrontmatterForm {
             .rows
             .iter()
             .enumerate()
-            .map(|(index, row)| render_row(index, row, editor, cx))
-            .collect::<Vec<_>>();
+            .map(|(index, row)| render_row(index, row, editor, cx));
         div()
             .id("frontmatter-form")
             .v_flex()
@@ -467,32 +504,30 @@ fn render_row(
     cx: &Context<FrontmatterForm>,
 ) -> impl IntoElement {
     let control = &row.control;
-    let nested = control.path.matches('.').count();
-    let hierarchy = nested.saturating_sub(1);
-    let diagnostics: Vec<String> = editor
-        .diagnostics_for(&control.path)
-        .map(|diagnostic| format!("{:?}: {}", diagnostic.severity, diagnostic.message))
-        .collect();
-    let is_object = control.kind == ControlKind::Object;
     let boolean_value = matches!(
-        editor.value(&control.path),
+        editor.value(&row.path),
         Some(FrontmatterValue::Boolean(true))
     );
-    let enum_values = match &control.kind {
-        ControlKind::Enum { values } => values.clone(),
-        _ => Vec::new(),
-    };
-    let path = control.path.clone();
-    let refusal = control
-        .refusal
-        .clone()
-        .unwrap_or_else(|| "read-only field".to_owned());
+    let mut diagnostics = String::new();
+    for diagnostic in editor.diagnostics_for(&row.path) {
+        use std::fmt::Write as _;
+        if !diagnostics.is_empty() {
+            diagnostics.push_str(" · ");
+        }
+        let _ = write!(
+            diagnostics,
+            "{:?}: {}",
+            diagnostic.severity, diagnostic.message
+        );
+    }
 
     let mut row_view = div()
         .id(("frontmatter-field", index))
         .v_flex()
         .gap_1()
-        .when(hierarchy > 0, |view| view.pl(px((hierarchy * 12) as f32)))
+        .when(row.hierarchy > 0, |view| {
+            view.pl(px((row.hierarchy * 12) as f32))
+        })
         .child(
             div()
                 .h_flex()
@@ -508,33 +543,29 @@ fn render_row(
                         .when(control.required, |label| {
                             label.child(div().text_color(cx.theme().warning).child("*"))
                         })
-                        .child(SharedString::from(control.name.clone())),
+                        .child(row.label.clone()),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(control_label(&control.kind)),
+                        .child(row.kind_label),
                 ),
         );
 
-    if is_object {
+    if row.is_object {
         row_view = row_view.child(
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(format!("{}.", control.name))),
+                .child(row.label.clone()),
         );
     } else if let Some(input) = row.input.as_ref() {
-        row_view = row_view.child(
-            Input::new(input)
-                .small()
-                .aria_label(format!("frontmatter field {}", control.path)),
-        );
+        row_view = row_view.child(Input::new(input).small().aria_label(row.aria_label.clone()));
     } else if matches!(control.kind, ControlKind::Boolean) {
-        let toggle_path = path.clone();
+        let toggle_path = row.path.clone();
         row_view = row_view.child(
-            Checkbox::new(format!("frontmatter-bool-{index}"))
+            Checkbox::new(("frontmatter-bool", index))
                 .checked(boolean_value)
                 .label(if boolean_value { "true" } else { "false" })
                 .on_click(cx.listener(move |this, checked: &bool, _window, cx| {
@@ -542,29 +573,27 @@ fn render_row(
                     this.apply_value(&toggle_path, raw, cx);
                 })),
         );
-    } else if !enum_values.is_empty() {
-        let buttons = enum_values
+    } else if !row.enum_values.is_empty() {
+        let current = editor.value(&row.path).map(scalar_display);
+        let buttons = row
+            .enum_values
             .iter()
             .enumerate()
-            .map(|(value_index, value)| {
-                let raw = enum_display(value);
-                let selected = editor
-                    .value(&path)
-                    .map(|current| scalar_display(current) == raw)
-                    .unwrap_or(false);
-                let enum_path = path.clone();
-                Button::new(format!("frontmatter-enum-{index}-{value_index}"))
+            .map(|(value_index, (display, raw))| {
+                let selected = current.as_deref() == Some(raw.as_ref());
+                let enum_path = row.path.clone();
+                let raw = raw.clone();
+                Button::new(("frontmatter-enum", index * 64 + value_index))
                     .xsmall()
                     .ghost()
                     .toggled(selected)
-                    .label(raw.clone())
+                    .label(display.clone())
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.apply_value(&enum_path, &raw, cx);
                     }))
-            })
-            .collect::<Vec<_>>();
+            });
         row_view = row_view.child(div().h_flex().flex_wrap().gap_1().children(buttons));
-    } else {
+    } else if let Some(label) = row.read_only_label.clone() {
         row_view = row_view.child(
             div()
                 .h_flex()
@@ -573,7 +602,7 @@ fn render_row(
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(Icon::new(IconName::Lock).xsmall())
-                .child(SharedString::from(format!("Read-only · {refusal}"))),
+                .child(label),
         );
     }
 
@@ -582,7 +611,7 @@ fn render_row(
             div()
                 .text_xs()
                 .text_color(cx.theme().danger)
-                .child(SharedString::from(diagnostics.join(" · "))),
+                .child(SharedString::from(diagnostics)),
         );
     }
     row_view
