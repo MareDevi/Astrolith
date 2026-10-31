@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkboxes for tracking.
 
-**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native IME, scaling and latency manually accepted by the user on 2026-10-29; M03.1 JSON Schema normalization and the R1 schema generation service complete on 2026-10-30; M04.1 lossless document model, M04.2 conflict-aware save, M04.3 recovery, and shell save/recovery integration complete on 2026-10-31 (fixture schema authoring, M03.2 helpers, M03.3 forms and M03.4 validation pending; remaining lifecycle polish: recovery auto-apply and native-exit flush)
+**Status:** M00 manually accepted by the user; M01 and all M02 tasks complete; M02.R runtime/responsiveness repairs complete; native IME, scaling and latency manually accepted by the user on 2026-10-29; M03.1 JSON Schema normalization and the R1 schema generation service complete on 2026-10-30; M04.1 lossless document model, M04.2 conflict-aware save, M04.3 recovery, and shell save/recovery integration complete on 2026-10-31; on 2026-10-31 the remaining backlog — fixture schema oracles, M03.2 Astro helper resolution, M03.4 frontmatter validation, M03.3 schema-driven forms, and recovery lifecycle polish (startup auto-apply + native-exit flush) — is implemented and headless-verified (`mise run check` PASS, 256 Rust tests). Two honest caveats: M03.2 helper resolution is pure and unit-tested but not yet wired into the live schema-generation path, so a real `image()`/`reference()` field is still shown as text/unsupported until that integration lands (see `docs/technical/m03-progress.md`); and native save/recovery/form acceptance is **pending human execution** per `docs/technical/native-acceptance-save-recovery.md` — headless tests do not establish native IME/focus/scaling/rendering behaviour.
 **Version:** 1.1
 **Date:** 2026-10-28  
 **Project:** Astrolith  
@@ -457,6 +457,8 @@ pub fn normalize_schema(
 
 **M03.1 update (2026-10-30):** The pure normalizer is implemented and tested against real generated Astro 5.18.2 (draft-07 `$ref`/`definitions`) and 7.4.4 (draft 2020-12) schema output; the two dialects normalize to one identical model. Astro 6 remains unverified (no fixture). The review-R1 generation service is now implemented in `schema/generation.rs`: it resolves the project-local Astro CLI, runs `astro sync` under a timeout/cancellation/bounded-output policy, and discovers, loads and normalizes `.astro/collections/*.schema.json` with a freshness check; it is verified end-to-end against both installed fixtures. Fixture schema authoring and shell/form wiring remain pending; per R3, editable forms (M03.3) remain blocked on the M04.2 save coordinator (the M04.1 lossless contract is complete). See `docs/technical/m03-progress.md`.
 
+**Fixture schema oracles (2026-10-31):** Both `fixtures/astro5` and `fixtures/astro7` now declare a schema-bearing `docs` collection (Zod) whose sample entries satisfy the schema, and the `astro sync` output captured from each install is committed unchanged as a regression oracle at `crates/astrolith-astro/src/schema/fixtures/{astro5,astro7}-docs.schema.json`. The schema exercises strings, an optional string, a coerced date with default, a boolean, a string array, an enum, a nested object, a nullable nested number, a heterogeneous union, a literal and a record across both fixtures. The two oracles normalize to the identical dialect-independent model asserted in `schema/tests.rs`. `fixtures/README.md` documents regeneration. Committed as `b647a88`.
+
 ### Task M03.2 — Astro Helper Resolution
 
 **Files**
@@ -473,6 +475,8 @@ pub fn enhance_astro_fields(
 
 **Tests:** `image()`, `reference()`, nested fields, arrays and helper parsing failures.
 
+**M03.2 update (2026-10-31):** `crates/astrolith-astro/src/schema/helpers.rs` implements `enhance_astro_fields(&mut CollectionSchema, config_source) -> Vec<SchemaDiagnostic>`. It parses the content config with the vendored tree-sitter TypeScript grammar (never executes project code) and refines `image()` → `FieldKind::Image` (Astro emits a plain string) and `reference("collection")` → `FieldKind::Reference { collections }` (Astro emits a heterogeneous union that would otherwise be `Unsupported`). It handles nested `object()`/`array()`/`optional()`/`nullable()`/`default()` wrappers, imported aliases, the `({ image }) => z.object(...)` schema-function form and local `const` schemas; it selects the matching collection by top-level field names, surfaces malformed configs as non-fatal diagnostics, and never silently string-coerces a field. Twelve new unit tests pass. **Known gap:** the function is not yet called from `generate_collection_schemas`/`load_collection_schemas`, so the live form does not yet benefit from it (see `docs/technical/m03-progress.md`).
+
 ### Task M03.3 — Frontmatter Controls
 
 **Files**
@@ -481,11 +485,17 @@ pub fn enhance_astro_fields(
 
 **Tests:** Field type mapping, editing, validation feedback, unsupported fields and read-only fallback.
 
+**M03.3 update (2026-10-31):** `crates/astrolith-gpui/src/frontmatter/{fields.rs,mod.rs}` implements schema-driven forms. `fields.rs` maps every `FieldKind` to a native control family and applies only supported scalar-leaf edits through the M04.1 `ParsedDocument::set_field` patch contract (byte-exact preservation of untouched regions). `mod.rs` provides the GUI-free `FrontmatterEditor` (parse, edit, re-serialize, re-parse, local validation feedback) and the `FrontmatterForm` GPUI entity (GPUI Kit `Editor`/`Checkbox`/`Button`), with explicit read-only refusal for arrays, records, literals, objects-as-containers and unsupported unions (never coerced to text). The Inspector panel mounts the form; schema-driven edits flow through the existing save coordinator with no filesystem work on the UI thread. Fifteen new form tests (+ one shell wiring test) pass. **Known gap:** forms hold a whole-document snapshot loaded when the active document/schema changes; a body edit made in the source editor afterwards and then a form edit can overwrite that unsaved body edit (see the independent-review P1 in `docs/technical/m03-progress.md`). Native form acceptance is pending.
+
 ### Task M03.4 — Validation Service
 
 Implement basic field checks and Astro tooling validation as separate operations.
 
+**M03.4 update (2026-10-31):** `crates/astrolith-astro/src/schema/{validation.rs,validation_tooling.rs}` implements two deliberately separate operations. (1) `validate_frontmatter(schema, &Value) -> Vec<ValidationDiagnostic>` is pure/fs-free/GUI-free and checks required, string/email format, number/integer/boolean, date, enum, literal, nested objects, arrays, records, nullable, image, reference, and warns on unsupported fields; diagnostics are structured (path, message, severity, source) and sorted. (2) `validate_with_astro_tooling(request)` reuses the R1 executable resolution and `run_astro_tool` to run `astro sync`, maps stderr error blocks to revision-tagged diagnostics with project-relative locations, and treats missing install as `Unavailable` and timeouts/cancellation as errors; a stale result is rejected via `reject_if_stale`/`accept_for_revision`, and `validate_with_astro_tooling_async` runs it on the blocking lane. Limits documented: `astro sync` validates on-disk content (not unsaved buffers), reference existence is deferred to `getEntry`, and `.astro` type checking needs `astro check`. The local operation is wired into the form's live validation; the tooling operation is implemented but not yet surfaced in the UI. Twenty-two new tests pass.
+
 **M03 Gate:** Common Frontmatter types work, invalid data is diagnosed, and unsupported types are not silently serialized as strings.
+
+**M03 Gate status (2026-10-31, headless):** Met in the model and form layers — common types map to native controls, invalid data is diagnosed locally, and unsupported unions/arrays/records are surfaced read-only with an explicit refusal rather than coerced to strings (unit-tested). **Not yet fully met at runtime:** the helper pass (M03.2) is not wired into live schema generation (so `image()`/`reference()` are not refined in the running form), the Astro-tooling validation operation is not surfaced in the UI, and the whole-form-vs-source-editor overwrite risk (P1) is open. Native acceptance of the form remains pending.
 
 ---
 
@@ -552,7 +562,11 @@ Use one writer per document and immutable snapshots. Test exit while save N is r
 
 **Shell save/recovery integration (2026-10-31):** `astrolith-gpui` now exposes a Save command (Ctrl/Cmd+S, palette, button) that snapshots the active buffer, runs `save_snapshot` off the UI thread, confirms the saved revision and clears the recovery record on success, and reports a conflict without overwriting on failure. Dirty edits are captured to the `RecoveryStore` after a 500 ms debounce and cleared when clean/saved/discarded; a `Recover unsaved changes…` command restores matching records as dirty sessions with disk reads off the UI thread. Four headless tests pass. Remaining lifecycle polish (startup auto-apply, exit flush) is shell scope. See `docs/technical/m04-progress.md`.
 
+**Recovery lifecycle polish (2026-10-31):** On project open `load_pending_recovery` filters records by project id + generation and now **auto-applies** them via `recover_pending` as dirty sessions (disk is only read as the buffer baseline; nothing is written; the manual "Recover unsaved changes" command stays idempotent and reports nothing to restore on a repeat). `start()` clears stale pending records when switching projects. On native exit, `ProjectWorkspace::flush_recovery_on_quit` snapshots every dirty session's editor text on the UI thread and submits a durable write through `runtime::flush_on_quit` (spawn_blocking outside ordinary file admission); `shell.rs` registers an `App::on_app_quit` observer that runs before windows are cleared, so content survives exit even when the 500 ms debounce has not fired. Reads/writes stay off the UI thread and conflict/discard semantics are unchanged. Two headless tests (`startup_auto_applies_pending_recovery_and_never_overwrites_disk`, `quitting_flushes_unsaved_debounced_content_to_recovery`) pass. Native exit-flush evidence is pending (see `docs/technical/native-acceptance-save-recovery.md`). Committed as `9692c94`.
+
 **M04 Gate:** No known path silently destroys unsaved content or overwrites conflicting disk changes.
+
+**M04 Gate status (2026-10-31, headless):** The document core (lossless patch, conflict-aware atomic save, recovery store) and the shell save/recovery/exit-flush paths are covered by headless tests and `mise run check`. **One open risk prevents declaring the gate fully met until resolved or accepted:** the M03.3 frontmatter form can overwrite an unsaved body edit made in the source editor after the form loaded (P1 in `docs/technical/m03-progress.md`). Native save/conflict/recovery/exit evidence is pending human execution (`docs/technical/native-acceptance-save-recovery.md`).
 
 ---
 

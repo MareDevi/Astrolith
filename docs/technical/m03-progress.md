@@ -10,7 +10,7 @@ The plan-review findings still govern M03 ordering and are not waived here:
 - **R3** makes the lossless document model and field-patch contract (M04.1) a prerequisite of editable frontmatter forms (M03.3).
 - **R6** requires locked fixtures before the first Astro integration task; the Astro 5.18.2 and 7.4.4 fixtures already exist.
 
-M03.1 is the pure JSON→model step. It does not execute project tooling, does not read the filesystem, and does not wire forms, so it is safe to land before the R1 generation service and before the R3 form gate. The R1 generation service is now implemented (below). Fixture schema authoring, M03.2 helper resolution, forms and validation remain outstanding; forms remain blocked on M04.
+M03.1 is the pure JSON→model step. It does not execute project tooling, does not read the filesystem, and does not wire forms, so it is safe to land before the R1 generation service and before the R3 form gate. The R1 generation service is now implemented (below). Fixture schema authoring, M03.2 helper resolution, M03.3 forms and M03.4 validation were completed on 2026-10-31 (below); forms landed after the M04.2/M04.3 save coordinator, satisfying R3.
 
 ## Verified generation contract (input to M03.1)
 
@@ -82,10 +82,74 @@ Independent review found no P0 and one [P1] plus several [P2]s, all addressed:
 - **[P2] Unbounded schema count.** Discovery now refuses more than 512 collection schema files.
 - Limits kept/documented: leftover `.schema.json` files from a removed collection are still reported (not cleared) — obsolete but not silently lost; Windows process-spawn tests are not run locally (Node-on-PATH is required and documented).
 
-## Remaining M03 scope (not done here)
+## Fixture schema authoring (2026-10-31, `b647a88`)
 
-1. **R1 schema generation service — done** (`src/schema/generation.rs`; see above). Wiring it into the shell/forms remains M03.3.
-2. **Fixture schema authoring:** add schema-bearing collections whose existing entries satisfy the schema so the whole M02 fixture pipeline keeps passing, and capture their generated schema as regression oracles.
-3. **M03.2 Astro helper resolution** (`image()`, `reference()`, nested/array fields) on top of the normalized model.
-4. **M03.3 forms** — blocked on M04.1's lossless document model and field-patch contract (R3); no persistent field editing before that gate.
-5. **M03.4 validation** — local JSON-schema checks and Astro tooling validation as separate operations.
+Both `fixtures/astro5` and `fixtures/astro7` gained a schema-bearing `docs` collection (Zod) and every `content/docs` entry was extended so `astro sync` validation exits zero. The captured output from each real install is committed unchanged as the regression oracles `crates/astrolith-astro/src/schema/fixtures/astro5-docs.schema.json` and `astro7-docs.schema.json`. The schema exercises strings, an optional string, a coerced date with default, a boolean, a string array, an enum, a nested object, a nullable nested number, a heterogeneous union, a literal and a record; the two oracles normalize to the identical dialect-independent model asserted in `schema/tests.rs`. `fixtures/README.md` documents regeneration from the frozen lockfiles. Verification: `mise run test:fixtures` PASS, `mise run test:astro` PASS, `mise run check` exit 0.
+
+## M03.2 Astro helper resolution (implemented, `3ac79d6`)
+
+`crates/astrolith-astro/src/schema/helpers.rs` adds `enhance_astro_fields(&mut CollectionSchema, config_source) -> Vec<SchemaDiagnostic>`. It parses the content config with the vendored tree-sitter TypeScript grammar (never executes project code) and refines normalized fields:
+
+- `image()` → `FieldKind::Image` (Astro emits a plain string, so the JSON Schema alone loses it).
+- `reference("collection")` / `reference(["a","b"])` → `FieldKind::Reference { collections }` (Astro emits a heterogeneous union that alone normalizes to `Unsupported`).
+- Handles nested `object()`/`array()`/`optional()`/`nullable()`/`default()` and other transparent wrappers, imported aliases, the `({ image }) => z.object(...)` schema-function form, and local `const` schemas; selects the matching collection by top-level field names.
+- Malformed/unsupported configs become non-fatal diagnostics; a field is never silently string-coerced; diagnostics for resolved fields are cleared and the diagnostic list is sorted/deduplicated.
+
+Twelve unit tests cover direct/nested/array helpers, nullable wrappers, alias imports, local const schemas, collection selection, malformed config, non-literal and missing reference arguments, no-helper configs, conflicting helpers across collections, and comma-separated reference collections. `mise run test:astro` (70 passed at this commit) and `mise run check` exit 0.
+
+**Known gap (release-relevant):** `enhance_astro_fields` is **not yet called** from `generate_collection_schemas`/`load_collection_schemas` or anywhere in the shell. From the running application's perspective it is therefore dead code: a real `image()` field still renders as a plain text control and a real `reference()` field still renders as an unsupported read-only control. Resolving this requires reading each project's content config source and running the helper pass per generated collection before injecting schemas into the form. This gap is why the M03 gate is only partially met at runtime (see plan status).
+
+## M03.3 Schema-driven frontmatter forms (implemented, `9f37f89`)
+
+`crates/astrolith-gpui/src/frontmatter/{fields.rs,mod.rs}` maps every normalized `FieldKind` to a native GPUI Kit control and edits only supported scalar leaves through the M04.1 `ParsedDocument::set_field` patch contract, so untouched frontmatter/body bytes are preserved exactly.
+
+| FieldKind | Control | Editable |
+|---|---|---|
+| String{format} | text Editor (format hint) | yes → string |
+| Number / Integer | text Editor | yes → float / integer |
+| Boolean | Checkbox | yes → boolean |
+| Date / Image / Reference | text Editor | yes → string |
+| Enum{values} | one Button per allowed value | yes → typed enum |
+| Literal{value} | read-only (fixed by schema) | no |
+| Object{fields} | heading + nested child controls (dotted paths) | container no; scalar children yes |
+| Array / Record | read-only with explicit refusal | no |
+| Nullable{inner} | inner control + nullable flag | when inner scalar |
+| Unsupported{reason} | read-only with explicit reason (never coerced to string) | no |
+
+`FrontmatterEditor` re-parses after each edit so reads/validation see the new value and runs the M03.4 `validate_frontmatter` over readable scalar leaves (filtered to authoritative paths so unreadable arrays/records never yield a false "required"). `FrontmatterForm` renders with real `Editor`/`Checkbox`/`Button` controls and emits `FrontmatterChanged` with the full re-serialized document; the Inspector panel mounts it and the shell applies the text to the active session, which the existing save coordinator persists (no filesystem work on the UI thread). Collection schemas are generated off-thread from the project's own Astro install; a missing/failing install is non-fatal and leaves the form unavailable. Fifteen form tests plus a shell wiring test (scalar edit persisted losslessly through save) pass.
+
+## M03.4 Frontmatter validation service (implemented, `1ae3e37`)
+
+Two deliberately separate operations:
+
+1. **Local** `validate_frontmatter(schema, &Value) -> Vec<ValidationDiagnostic>` (`schema/validation.rs`) is pure/fs-free/GUI-free. It checks required, string/email format, number/integer/boolean, date, enum, literal, nested objects, arrays, records, nullable, image and reference, and warns on unsupported fields. Diagnostics are structured `{path, message, severity, source}`, sorted and de-duplicated. Wired into the live form.
+2. **Astro tooling** `validate_with_astro_tooling(request)` (`schema/validation_tooling.rs`) reuses the R1 `resolve_astro_entry` + shared `run_astro_tool` to run `astro sync`, maps stderr error blocks to revision-tagged diagnostics with project-relative locations, returns `Unavailable` for a missing install, and returns errors on timeout/cancellation. Stale results are rejected via `reject_if_stale`/`accept_for_revision`; `validate_with_astro_tooling_async` runs it on the blocking lane.
+
+Documented limits: `astro sync` validates on-disk content (not unsaved buffers), reference existence is deferred to `getEntry()`, and `.astro` type checking needs `astro check`. Twenty-two tests cover every field kind, sorted/deterministic output, revision staleness, unavailable installs, timeout/cancellation, structured stderr mapping and the async blocking-lane wrapper. **Not yet surfaced in the UI** (local validation is).
+
+## M03 verification (2026-10-31)
+
+`mise run check` result: **PASS** — doctor, formatting, warnings-denied Clippy, locked build, workspace tests and the frozen Astro fixture task all succeeded. **256 Rust tests passed, 0 failed, 4 intentionally ignored**, and **Astro fixture compatibility: PASS**. Crate-local counts: `astrolith-astro` 92 passed / 1 ignored (adds 12 helper and 22 validation tests; the ignored test is the opt-in installed-project generation test), `astrolith-document` 50, `astrolith-gpui` 51 passed / 2 ignored (15 form tests + lifecycle + wiring), plus core/workspace/desktop. `mise run test:astro` and `mise run test:gpui` were also green at their commits.
+
+## Independent review (2026-10-31)
+
+An independent read-only review of the changed crates found **no P0**. Findings:
+
+- **[P1] Frontmatter form can overwrite unsaved source-editor edits.** `FrontmatterForm::set_document` loads a whole-document snapshot only when the active document/schema key `(path, has_schema)` changes (`frontmatter/mod.rs:270`, `shell.rs:548-566`); the form then holds its own `ParsedDocument`. If the user edits the body in the source editor after the form loaded and then edits a form field, `apply_value` re-serializes the *stale* snapshot and `apply_frontmatter_text` (`project_discovery.rs:270`) replaces the whole editor text, silently discarding the in-memory body edit. This is a known path in which unsaved content can be lost and must be fixed (or formally accepted) before the M04 gate is declared met. Suggested fix: re-read the current session text and apply a single-field patch to the live buffer, or re-key/re-sync the form on buffer revision.
+- **[P1] M03.2 helper resolution is unwired.** `enhance_astro_fields` (`helpers.rs:95`) has no caller in `generation.rs`/`project_discovery.rs`; the live form does not refine `image()`/`reference()` fields. See the known gap above.
+- **[P2] `looks_like_date` accepts impossible calendar dates** (e.g. `2024-02-31`) because it only bounds month 1–12 and day 1–31 (`validation.rs:319`). Local validation only; Astro tooling is the authority.
+- **[P2] `select_collections` heuristic can merge helpers from unrelated collections** when no collection's top-level field-name set matches the schema (`helpers.rs:193`); conflicts surface a diagnostic, but a same-named field could be refined by the wrong collection. Prefer matching by the generated collection id once wired.
+- **[P2] Per-keystroke whole-document round-trip.** Each form text keystroke re-parses, re-serializes and rewrites the main editor's entire text (`frontmatter/mod.rs:299-308` → `project_discovery.rs:270`). Correct but heavier than necessary; a debounce or targeted field patch would reduce churn.
+- **[P2] Astro tooling validation is not surfaced in the UI**, and `load_collection_schemas` runs `astro sync` automatically on project open (`project_discovery.rs:216`), which can add a visible delay and writes `.astro/collections`; it is cancellable and non-fatal, which is the required posture.
+
+None of these change the "unsupported types are never silently serialized as strings" behaviour, which remains enforced and tested.
+
+## Remaining M03 scope
+
+1. **R1 schema generation service — done** (`src/schema/generation.rs`).
+2. **Fixture schema authoring — done** (`b647a88`).
+3. **M03.2 Astro helper resolution — implemented and unit-tested (`3ac79d6`); wiring into generation/form path outstanding** (see P1 above).
+4. **M03.3 forms — implemented and headless-tested (`9f37f89`);** open P1 overwrite risk and native acceptance outstanding.
+5. **M03.4 validation — implemented (`1ae3e37`);** local is wired, Astro tooling operation not yet surfaced in the UI.
+6. **Native form acceptance** (IME, focus, scaling, rendering) — pending human execution; see `docs/technical/native-acceptance-save-recovery.md`.
+
