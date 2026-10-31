@@ -14,7 +14,7 @@ use std::{
     ffi::OsString,
     io,
     net::TcpListener,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -385,16 +385,18 @@ impl DevServer {
                 return Ok(url);
             }
 
-            if let Some(message) = port_in_use_message(&text, port) {
-                tracing::error!(port, %message, "Astro dev server port is in use");
-                let _ = process.terminate().await;
-                self.status = ServerStatus::Failed(message.clone());
-                return Err(DevServerError::PortInUse(port));
-            }
-
             match process.try_wait() {
                 Ok(Some(exit)) => {
+                    // Astro prints "Port … is in use, trying another one…" and
+                    // then binds the next port, so an in-use message is only a
+                    // failure if the process actually exited.
+                    let text = process.combined_text();
                     let _ = process.terminate().await;
+                    if let Some(message) = port_in_use_message(&text, port) {
+                        tracing::error!(port, %message, "Astro dev server port is in use");
+                        self.status = ServerStatus::Failed(message.clone());
+                        return Err(DevServerError::PortInUse(port));
+                    }
                     let stderr = process.stderr().text_lossy();
                     let message = format!("exited ({exit}): {}", excerpt(&stderr));
                     tracing::error!(%exit, stderr = %excerpt(&stderr), "Astro dev server exited during startup");
@@ -479,6 +481,46 @@ impl DevServer {
         self.status = ServerStatus::Stopped;
     }
 
+    /// Poll for an unexpected child exit without waiting for it.
+    ///
+    /// This is the UI-safe counterpart of [`DevServer::wait_for_exit`]: it takes
+    /// the process check synchronously, so a caller polling it never holds the
+    /// server across an `await` and a concurrent [`DevServer::stop`] can still
+    /// acquire it. Returns the new status once the ready process has exited.
+    pub fn poll_exit(&mut self) -> Result<Option<ServerStatus>, DevServerError> {
+        if !matches!(self.status, ServerStatus::Ready(_)) {
+            return Ok(None);
+        }
+        let Some(process) = self.process.as_mut() else {
+            return Ok(None);
+        };
+        match process.try_wait() {
+            Ok(Some(exit)) => {
+                // Dropping the owner applies the kill-on-drop safety net to any
+                // descendants that outlived the direct child.
+                self.process = None;
+                if exit.success() {
+                    tracing::info!(%exit, "Astro dev server exited");
+                    self.status = ServerStatus::Stopped;
+                } else {
+                    tracing::warn!(%exit, "Astro dev server exited unexpectedly");
+                    self.status = ServerStatus::Failed(format!(
+                        "Astro dev server exited unexpectedly ({exit})"
+                    ));
+                }
+                Ok(Some(self.status.clone()))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => {
+                self.process = None;
+                let message = error.to_string();
+                tracing::error!(%error, "could not poll the Astro dev server");
+                self.status = ServerStatus::Failed(message);
+                Ok(Some(self.status.clone()))
+            }
+        }
+    }
+
     /// Await natural child exit and reflect it in the status.
     ///
     /// A clean exit becomes [`ServerStatus::Stopped`]; a non-zero exit becomes
@@ -523,6 +565,16 @@ impl DevServer {
         args.push("127.0.0.1".into());
         args.push("--port".into());
         args.push(port.to_string().into());
+        // Astro 7 auto-backgrounds `astro dev` when it detects an agent
+        // environment, detaching into its own session so a process-group stop
+        // cannot reach it. `--ignore-lock` opts out of that inference (and of
+        // the cross-process lock file we do not want) while staying a
+        // foreground child we own. Astro 5 and 6 do not know the flag.
+        if matches!(self.config.launch, Launch::Astro { .. })
+            && installed_astro_major(&self.config.root).is_some_and(|major| major >= 7)
+        {
+            args.push("--ignore-lock".into());
+        }
 
         Ok(SpawnSpec {
             program,
@@ -534,6 +586,24 @@ impl DevServer {
             )],
         })
     }
+}
+
+/// Major version of the project-local Astro package, when it is readable.
+///
+/// The process-lifecycle flags differ across releases (Astro 7 can background
+/// itself), so startup inspects the installed release rather than the declared
+/// range. A missing or malformed package is not fatal here: resolution already
+/// failed or succeeded independently.
+fn installed_astro_major(root: &Path) -> Option<u64> {
+    let source = std::fs::read_to_string(root.join("node_modules/astro/package.json")).ok()?;
+    let package: serde_json::Value = serde_json::from_str(&source).ok()?;
+    package
+        .get("version")?
+        .as_str()?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// Pick an available ephemeral port on the loopback interface.

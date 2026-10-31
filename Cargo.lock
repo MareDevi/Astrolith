@@ -348,6 +348,7 @@ dependencies = [
  "astrolith-astro",
  "astrolith-core",
  "nix",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

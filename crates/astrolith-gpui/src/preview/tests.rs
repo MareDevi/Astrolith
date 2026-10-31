@@ -13,6 +13,7 @@ use crate::runtime;
 struct TestBackend {
     start: Mutex<Result<Url, String>>,
     stop: Mutex<Result<(), String>>,
+    exit: Mutex<Option<ServerStatus>>,
     started: AtomicBool,
     stopped: AtomicBool,
     aborted: AtomicBool,
@@ -23,6 +24,7 @@ impl TestBackend {
         Arc::new(Self {
             start: Mutex::new(Ok(Url::parse(url).unwrap())),
             stop: Mutex::new(Ok(())),
+            exit: Mutex::new(None),
             started: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             aborted: AtomicBool::new(false),
@@ -33,10 +35,15 @@ impl TestBackend {
         Arc::new(Self {
             start: Mutex::new(Err(message.to_owned())),
             stop: Mutex::new(Ok(())),
+            exit: Mutex::new(None),
             started: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             aborted: AtomicBool::new(false),
         })
+    }
+
+    fn exit_with(&self, status: ServerStatus) {
+        *self.exit.lock().unwrap() = Some(status);
     }
 }
 
@@ -51,6 +58,11 @@ impl PreviewBackend for TestBackend {
         self.stopped.store(true, Ordering::SeqCst);
         let result = self.stop.lock().unwrap().clone();
         Box::pin(async move { result })
+    }
+
+    fn poll_exit(&self) -> PreviewFuture<Result<Option<ServerStatus>, String>> {
+        let status = self.exit.lock().unwrap().take();
+        Box::pin(async move { Ok(status) })
     }
 
     fn abort(&self) {
@@ -159,6 +171,57 @@ async fn start_becomes_ready_and_reports_the_url(cx: &mut gpui_kit::TestAppConte
                 .message()
                 .unwrap_or_default()
                 .contains("Preview ready"),
+            "message was {:?}",
+            panel.message()
+        );
+    });
+}
+
+#[gpui_kit::test]
+async fn start_while_ready_keeps_the_running_server(cx: &mut gpui_kit::TestAppContext) {
+    let _serial = Serial::acquire();
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, _surface) = mount(cx, backend.clone());
+    panel.update(cx, |panel, cx| panel.start(cx));
+    cx.condition(&panel, |panel, _| panel.status().is_ready())
+        .await;
+    *backend.start.lock().unwrap() = Err("must not start again".to_owned());
+    panel.update(cx, |panel, cx| panel.start(cx));
+    panel.read_with(cx, |panel, _| {
+        assert!(panel.status().is_ready(), "status was {:?}", panel.status());
+        assert!(
+            panel
+                .message()
+                .unwrap_or_default()
+                .contains("already running"),
+            "message was {:?}",
+            panel.message()
+        );
+    });
+}
+
+#[gpui_kit::test]
+async fn unexpected_server_exit_is_reported(cx: &mut gpui_kit::TestAppContext) {
+    let _serial = Serial::acquire();
+    cx.executor().allow_parking();
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, _surface) = mount(cx, backend.clone());
+    panel.update(cx, |panel, cx| panel.start(cx));
+    cx.condition(&panel, |panel, _| panel.status().is_ready())
+        .await;
+    backend.exit_with(ServerStatus::Failed(
+        "Astro dev server exited unexpectedly (exit status: 1)".to_owned(),
+    ));
+    cx.condition(&panel, |panel, _| {
+        matches!(panel.status(), ServerStatus::Failed(_))
+    })
+    .await;
+    panel.read_with(cx, |panel, _| {
+        assert!(
+            panel
+                .message()
+                .unwrap_or_default()
+                .contains("stopped unexpectedly"),
             "message was {:?}",
             panel.message()
         );

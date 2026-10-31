@@ -234,6 +234,10 @@ impl Shell {
             window,
             |this, _, _: &SessionChanged, _window, cx| this.sync_preview(cx),
         ));
+        // Project load, entry activation and watcher refreshes notify the
+        // workspace without emitting a text-edit event; the preview panel must
+        // still attach on open and follow the active entry.
+        subscriptions.push(cx.observe(&project, |this, _, cx| this.sync_preview(cx)));
         let apply_owner = project.downgrade();
         subscriptions.push(cx.subscribe_in(
             &frontmatter,
@@ -837,6 +841,65 @@ mod tests {
             assert!(window.find("preview-panel").visible());
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn opening_a_project_attaches_the_preview_without_an_edit(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("node_modules/astro")).unwrap();
+        std::fs::write(
+            root.join("node_modules/astro/package.json"),
+            r#"{"version":"7.4.4"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"astro":"7.4.4"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("astro.config.mjs"),
+            "import { defineConfig } from 'astro/config';\nexport default defineConfig({});\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/content")).unwrap();
+        std::fs::write(
+            root.join("src/content.config.ts"),
+            "import { defineCollection } from 'astro:content';\nimport { glob } from 'astro/loaders';\nconst blog = defineCollection({ loader: glob({ base: './src/content', pattern: '**/*.md' }) });\nexport const collections = { blog };\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/content/intro.md"), "# Intro\n").unwrap();
+
+        let (handle, view) = mount(cx, Settings::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::OpenProject, window, cx)
+            })
+        })
+        .unwrap();
+        assert!(cx.did_prompt_for_paths());
+        let selected = root.to_path_buf();
+        cx.simulate_path_prompt_response(move |_| Some(vec![selected.clone()]));
+        let preview = view.read_with(cx, |shell, _| shell.preview.clone());
+        cx.condition(&preview, |preview, _| preview.project().is_some())
+            .await;
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell
+                    .preview
+                    .read(cx)
+                    .project()
+                    .map(|project| project.as_str()),
+                Some("workspace-1"),
+                "opening a project must attach the preview without an edit"
+            );
+            assert!(
+                shell.project.read(cx).preview_context().is_some(),
+                "the workspace must expose the preview context after open"
+            );
+        });
     }
 
     #[gpui_kit::test]

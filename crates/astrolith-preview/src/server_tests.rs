@@ -169,6 +169,89 @@ fn occupied_port_reports_recoverable_failure() {
 }
 
 #[test]
+fn auto_incremented_port_warning_is_not_a_failure() {
+    block_on(async {
+        let dir = TempDir::new().unwrap();
+        // Astro warns, then binds the next port a moment later. The warning alone
+        // must not terminate a server that is still starting.
+        let body = format!(
+            "{PRELUDE}\nprintf 'Port %s is in use, trying another one...\\n' \"$PORT\" >&2\nsleep 0.2\nprintf '  ┃ Local    http://127.0.0.1:45679/\\n'\nwhile true; do sleep 0.1; done\n"
+        );
+        let script = write_script(dir.path(), "astro.sh", &body);
+        let mut server = direct_server(&script, dir.path());
+
+        let url = server
+            .start()
+            .await
+            .expect("an auto-incremented port must still start");
+        assert_eq!(url.port(), Some(45679));
+        server.stop().await.expect("stop");
+    });
+}
+
+#[test]
+fn astro7_starts_foreground_with_ignore_lock() {
+    block_on(async {
+        let dir = TempDir::new().unwrap();
+        let astro = dir.path().join("node_modules/astro");
+        fs::create_dir_all(&astro).unwrap();
+        fs::write(
+            astro.join("package.json"),
+            r#"{"name":"astro","version":"7.4.4","bin":"cli.sh"}"#,
+        )
+        .unwrap();
+        let body =
+            format!("printf '%s\\n' \"$@\" > args.txt\n{READY}\nwhile true; do sleep 0.1; done\n");
+        write_script(&astro, "cli.sh", &body);
+
+        let config = DevServerConfig::new(dir.path())
+            .with_node("/bin/sh")
+            .with_startup_timeout(Duration::from_secs(5))
+            .with_stop_grace(Duration::from_secs(1));
+        let mut server = DevServer::new(project(), config);
+        server.start().await.expect("Astro 7 fixture becomes ready");
+        server.stop().await.expect("stop");
+
+        let args = fs::read_to_string(dir.path().join("args.txt")).unwrap();
+        assert!(
+            args.lines().any(|line| line == "--ignore-lock"),
+            "Astro 7 must run in the foreground: {args:?}"
+        );
+    });
+}
+
+#[test]
+fn astro5_has_no_astro7_only_flag() {
+    block_on(async {
+        let dir = TempDir::new().unwrap();
+        let astro = dir.path().join("node_modules/astro");
+        fs::create_dir_all(&astro).unwrap();
+        fs::write(
+            astro.join("package.json"),
+            r#"{"name":"astro","version":"5.18.2","bin":"cli.sh"}"#,
+        )
+        .unwrap();
+        let body =
+            format!("printf '%s\\n' \"$@\" > args.txt\n{READY}\nwhile true; do sleep 0.1; done\n");
+        write_script(&astro, "cli.sh", &body);
+
+        let config = DevServerConfig::new(dir.path())
+            .with_node("/bin/sh")
+            .with_startup_timeout(Duration::from_secs(5))
+            .with_stop_grace(Duration::from_secs(1));
+        let mut server = DevServer::new(project(), config);
+        server.start().await.expect("Astro 5 fixture becomes ready");
+        server.stop().await.expect("stop");
+
+        let args = fs::read_to_string(dir.path().join("args.txt")).unwrap();
+        assert!(
+            !args.lines().any(|line| line == "--ignore-lock"),
+            "Astro 5 must not receive an unknown flag: {args:?}"
+        );
+    });
+}
+
+#[test]
 fn startup_timeout_transitions_to_failed() {
     block_on(async {
         let dir = TempDir::new().unwrap();

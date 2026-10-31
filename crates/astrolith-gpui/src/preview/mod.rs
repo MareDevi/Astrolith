@@ -31,6 +31,8 @@ pub(crate) trait PreviewBackend: Send + Sync + 'static {
     fn start(&self) -> PreviewFuture<Result<Url, String>>;
     /// Stop the dev server gracefully.
     fn stop(&self) -> PreviewFuture<Result<(), String>>;
+    /// Poll once for a natural exit of the ready server (non-blocking).
+    fn poll_exit(&self) -> PreviewFuture<Result<Option<ServerStatus>, String>>;
     /// Kill the server immediately (application exit).
     fn abort(&self);
 }
@@ -76,6 +78,14 @@ impl PreviewBackend for AstroPreviewBackend {
         })
     }
 
+    fn poll_exit(&self) -> PreviewFuture<Result<Option<ServerStatus>, String>> {
+        let server = self.server.clone();
+        Box::pin(async move {
+            let mut server = server.lock().await;
+            server.poll_exit().map_err(|error| error.to_string())
+        })
+    }
+
     fn abort(&self) {
         if let Ok(mut server) = self.server.try_lock() {
             server.abort();
@@ -95,6 +105,10 @@ pub(crate) struct PreviewPanel {
     /// Entry the "Open in browser" button resolves, updated by the shell.
     pending_entry: Option<EntryId>,
     task: Option<Task<()>>,
+    /// Watches a ready server for an unexpected exit.
+    exit_task: Option<Task<()>>,
+    /// Invalidates exit watchers when the panel restarts or reattaches.
+    generation: u64,
     focus: FocusHandle,
 }
 
@@ -116,6 +130,8 @@ impl PreviewPanel {
             message: None,
             pending_entry: None,
             task: None,
+            exit_task: None,
+            generation: 0,
             focus: cx.focus_handle(),
         }
     }
@@ -158,9 +174,11 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) {
         if self.project.as_ref() == Some(&project) {
-            tracing::debug!(project = %project.as_str(), "refreshed the preview route mapping");
-            self.mapping = mapping;
-            cx.notify();
+            if self.mapping != mapping {
+                tracing::debug!(project = %project.as_str(), "refreshed the preview route mapping");
+                self.mapping = mapping;
+                cx.notify();
+            }
             return;
         }
         tracing::info!(
@@ -194,6 +212,7 @@ impl PreviewPanel {
         if self.project.is_some() {
             tracing::debug!("detaching the preview panel from its project");
         }
+        self.invalidate_exit_watch();
         self.task = None;
         if let Some(backend) = self.backend.take() {
             backend.abort();
@@ -208,11 +227,67 @@ impl PreviewPanel {
 
     /// Kill the server synchronously for the application-exit path.
     pub(crate) fn abort(&mut self) {
+        self.invalidate_exit_watch();
         self.task = None;
         if let Some(backend) = self.backend.take() {
             backend.abort();
         }
         self.status = ServerStatus::Stopped;
+    }
+
+    /// Abandon the current exit watcher; its generation no longer matches.
+    fn invalidate_exit_watch(&mut self) {
+        self.exit_task = None;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Start watching a ready server for an unexpected exit.
+    fn watch_exit(&mut self, backend: Arc<dyn PreviewBackend>, cx: &mut Context<Self>) {
+        let generation = self.generation;
+        self.exit_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                let polled = runtime::spawn(cx, backend.poll_exit()).await;
+                let keep_watching = this
+                    .update(cx, |this, cx| {
+                        if this.generation != generation {
+                            return false;
+                        }
+                        match polled {
+                            Ok(Ok(Some(status))) => {
+                                tracing::info!(status = status.label(), "Astro preview server exited");
+                                this.message = Some(match &status {
+                                    ServerStatus::Failed(error) => format!(
+                                        "The preview server stopped unexpectedly: {error}"
+                                    ),
+                                    _ => "The preview server stopped.".to_owned(),
+                                });
+                                this.status = status;
+                                cx.notify();
+                                false
+                            }
+                            Ok(Ok(None)) => true,
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "could not observe the Astro preview server");
+                                this.message =
+                                    Some(format!("Could not observe the preview server: {error}"));
+                                cx.notify();
+                                false
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "preview exit watcher failed");
+                                false
+                            }
+                        }
+                    })
+                    .unwrap_or(false);
+                if !keep_watching {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Start the dev server (no-op while a start/stop task is in flight).
@@ -225,6 +300,12 @@ impl PreviewPanel {
         if self.task.is_some() {
             return;
         }
+        if self.status.is_ready() {
+            self.message = Some("The preview server is already running.".to_owned());
+            cx.notify();
+            return;
+        }
+        self.invalidate_exit_watch();
         self.status = ServerStatus::Starting;
         self.message = Some("Starting the Astro dev server…".to_owned());
         let started = runtime::spawn(cx, backend.start());
@@ -236,6 +317,7 @@ impl PreviewPanel {
                         tracing::info!(url = %url, "Astro preview ready");
                         this.message = Some(format!("Preview ready at {url}"));
                         this.status = ServerStatus::Ready(url);
+                        this.watch_exit(backend.clone(), cx);
                     }
                     Ok(Err(error)) | Err(error) => {
                         tracing::error!(%error, "could not start the Astro preview");
@@ -258,6 +340,7 @@ impl PreviewPanel {
         if self.task.is_some() {
             return;
         }
+        self.invalidate_exit_watch();
         self.status = ServerStatus::Stopping;
         self.message = Some("Stopping the Astro dev server…".to_owned());
         let stopped = runtime::spawn(cx, backend.stop());

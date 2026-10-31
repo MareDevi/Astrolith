@@ -60,8 +60,13 @@ impl Opener for SystemOpener {
 /// The platform opener command for `url`.
 ///
 /// - macOS: `open <url>`
-/// - Windows: `cmd /C start "" <url>`
+/// - Windows: `rundll32.exe url.dll,FileProtocolHandler <url>`
 /// - other Unix/supported desktops: `xdg-open <url>`
+///
+/// Windows deliberately does not use `cmd /C start`: `cmd` re-parses `&`, `|`,
+/// `^`, parentheses and `%`, and entry ids legitimately contain characters such
+/// as `&` that URL encoding leaves intact. `rundll32` receives the URL as one
+/// argument with no shell in between.
 pub fn open_command(url: &Url) -> Result<OpenCommand, SurfaceError> {
     validate_preview_url(url)?;
     let url = url.to_string();
@@ -72,8 +77,8 @@ pub fn open_command(url: &Url) -> Result<OpenCommand, SurfaceError> {
         }
     } else if cfg!(windows) {
         OpenCommand {
-            program: "cmd".to_owned(),
-            args: vec!["/C".to_owned(), "start".to_owned(), String::new(), url],
+            program: "rundll32.exe".to_owned(),
+            args: vec!["url.dll,FileProtocolHandler".to_owned(), url],
         }
     } else if cfg!(unix) {
         OpenCommand {
@@ -220,11 +225,26 @@ mod tests {
         if cfg!(target_os = "macos") {
             assert_eq!(command.program, "open");
         } else if cfg!(windows) {
-            assert_eq!(command.program, "cmd");
+            assert_eq!(command.program, "rundll32.exe");
+            assert_eq!(command.args[0], "url.dll,FileProtocolHandler");
         } else {
             assert_eq!(command.program, "xdg-open");
         }
         assert!(command.args.contains(&url().to_string()));
+    }
+
+    #[test]
+    fn reserved_characters_stay_in_a_single_argument() {
+        let command =
+            open_command(&Url::parse("http://127.0.0.1:4321/docs/Q&A%20notes").expect("valid url"))
+                .expect("a loopback url launches");
+        let matching: Vec<_> = command
+            .args
+            .iter()
+            .filter(|argument| argument.contains("Q&A"))
+            .collect();
+        assert_eq!(matching.len(), 1, "args were {:?}", command.args);
+        assert_eq!(matching[0], "http://127.0.0.1:4321/docs/Q&A%20notes");
     }
 
     #[test]

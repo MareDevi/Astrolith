@@ -120,6 +120,36 @@ fn wait_for(deadline: Duration, mut attempt: impl FnMut() -> bool) -> bool {
     false
 }
 
+/// Publish `contents` the way the document save path does: a same-directory
+/// temporary file, flushed to disk, then renamed over the entry. A truncating
+/// in-place write would not exercise the watcher on atomic replacement.
+fn save_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("entry has no parent directory"))?;
+    let temporary = directory.join(format!(".{}.astrolith-save", std::process::id()));
+    {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temporary, path)?;
+    if let Ok(directory) = std::fs::File::open(directory) {
+        let _ = directory.sync_all();
+    }
+    Ok(())
+}
+
+/// Whether the process group led by `pid` still has a live member.
+#[cfg(unix)]
+fn process_group_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", "--", &format!("-{pid}")])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -171,7 +201,7 @@ fn saved_edit_is_reflected_by_the_running_astro_preview() {
         .replace("title: Introduction", "title: Preview Gate Updated")
         .replace("# Introduction", "# Preview Gate Body 中文");
     assert_ne!(original, edited, "the edit must change the entry");
-    std::fs::write(&source, &edited).expect("write entry");
+    save_atomically(&source, &edited).expect("save entry atomically");
 
     // 3. Astro's file watcher must re-serve the page with the new content.
     let refreshed = wait_for(REFRESH_DEADLINE, || {
@@ -187,6 +217,7 @@ fn saved_edit_is_reflected_by_the_running_astro_preview() {
     );
 
     // 4. Stopping releases the port and leaves no orphaned dev server behind.
+    let pid = server.pid().expect("the dev server has a pid");
     runtime.block_on(server.stop()).expect("stop server");
     assert!(
         matches!(server.status(), ServerStatus::Stopped),
@@ -198,4 +229,12 @@ fn saved_edit_is_reflected_by_the_running_astro_preview() {
         TcpStream::connect(("127.0.0.1", port)).is_err()
     });
     assert!(released, "the dev server port must be released after stop");
+    #[cfg(unix)]
+    {
+        let group_gone = wait_for(Duration::from_secs(10), || !process_group_alive(pid));
+        assert!(
+            group_gone,
+            "the preview process group {pid} must not survive stop"
+        );
+    }
 }
