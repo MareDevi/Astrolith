@@ -681,6 +681,8 @@ This task remains experimental until real-platform tests pass. It must not delay
 
 ## 11. M07 — Alpha Release
 
+> **Superseded in scope (2026-10-31):** the reference comparison in [`2026-10-31-astrolith-post-m06-plan.md`](2026-10-31-astrolith-post-m06-plan.md) re-scopes the next milestones (M07–M11). This section remains the original alpha gate and is not deleted; the new plan adds the writing-workflow and frontmatter-depth work needed before that gate can pass.
+
 **Goal:** Deliver a reproducible, usable Alpha build.
 
 ### Task M07.1 — CI Matrix
