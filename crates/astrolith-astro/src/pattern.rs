@@ -2,9 +2,10 @@
 //!
 //! Astro passes `pattern` to `tinyglobby`, which accepts a string or an array
 //! of strings. Array entries beginning with `!` exclude matching paths; every
-//! exclusion wins regardless of ordering. This module accepts only the
-//! Markdown/MDX include patterns verified by the fixtures and a bounded glob
-//! subset for exclusions, so discovery never guesses about selecting sources.
+//! exclusion wins regardless of ordering. This module accepts only include
+//! patterns for extensions whose loader semantics are verified (Markdown, MDX
+//! and YAML data entries) plus a bounded glob subset for exclusions, so
+//! discovery never guesses about selecting sources.
 
 use std::fmt;
 use std::path::{Component, Path};
@@ -13,12 +14,22 @@ const MAX_PATTERN_BYTES: usize = 1024;
 const MAX_PATTERN_SEGMENTS: usize = 128;
 const MAX_BRACE_EXPANSIONS: usize = 64;
 
+/// The loader semantics required by one selected source extension.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum EntryKind {
+    /// Markdown content with optional frontmatter.
+    Markdown,
+    /// MDX content with optional frontmatter.
+    Mdx,
+    /// YAML data without Markdown frontmatter.
+    Yaml,
+}
+
 /// A validated glob pattern set from a `glob()` loader.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectionPattern {
     declared: Vec<String>,
-    includes_markdown: bool,
-    includes_mdx: bool,
+    extensions: Vec<&'static str>,
     excludes: Vec<GlobPattern>,
 }
 
@@ -28,8 +39,7 @@ impl CollectionPattern {
         if declared.is_empty() {
             return Err("glob loader `pattern` must not be empty".into());
         }
-        let mut includes_markdown = false;
-        let mut includes_mdx = false;
+        let mut extensions = Vec::new();
         let mut excludes = Vec::new();
 
         for entry in &declared {
@@ -48,26 +58,23 @@ impl CollectionPattern {
                 }
                 continue;
             }
-            match entry.as_str() {
-                "**/*.md" => includes_markdown = true,
-                "**/*.mdx" => includes_mdx = true,
-                "**/*.{md,mdx}" => {
-                    includes_markdown = true;
-                    includes_mdx = true;
+            let supported = supported_extensions(entry)
+                .ok_or_else(|| format!("unsupported glob pattern `{entry}`"))?;
+            for extension in supported {
+                if !extensions.contains(&extension) {
+                    extensions.push(extension);
                 }
-                _ => return Err(format!("unsupported glob pattern `{entry}`")),
             }
         }
-        if !includes_markdown && !includes_mdx {
+        if extensions.is_empty() {
             return Err(
-                "glob loader `pattern` requires at least one supported Markdown include".into(),
+                "glob loader `pattern` requires at least one supported content include".into(),
             );
         }
 
         Ok(Self {
             declared,
-            includes_markdown,
-            includes_mdx,
+            extensions,
             excludes,
         })
     }
@@ -79,29 +86,75 @@ impl CollectionPattern {
 
     /// Whether the include patterns select MDX sources.
     pub fn includes_mdx(&self) -> bool {
-        self.includes_mdx
+        self.extensions.contains(&"mdx")
+    }
+
+    /// Return the loader semantics for a selected path, or `None` when the
+    /// path is not selected by the include and exclusion patterns.
+    pub fn entry_kind(&self, relative: &Path) -> Option<EntryKind> {
+        let extension = relative.extension().and_then(|value| value.to_str())?;
+        let kind = match extension {
+            "md" => EntryKind::Markdown,
+            "mdx" => EntryKind::Mdx,
+            "yaml" | "yml" => EntryKind::Yaml,
+            _ => return None,
+        };
+        if !self.extensions.contains(&extension) {
+            return None;
+        }
+        if self.excludes.is_empty() {
+            return Some(kind);
+        }
+        let segments = path_segments(relative)?;
+        if self
+            .excludes
+            .iter()
+            .any(|exclude| exclude.matches(&segments))
+        {
+            return None;
+        }
+        Some(kind)
     }
 
     /// Whether a path relative to the collection base is selected.
     pub fn matches(&self, relative: &Path) -> bool {
-        let Some(extension) = relative.extension().and_then(|value| value.to_str()) else {
-            return false;
-        };
-        let included = match extension {
-            "md" => self.includes_markdown,
-            "mdx" => self.includes_mdx,
-            _ => false,
-        };
-        if !included {
-            return false;
+        self.entry_kind(relative).is_some()
+    }
+}
+
+fn supported_extensions(entry: &str) -> Option<Vec<&'static str>> {
+    let rest = entry.strip_prefix("**/*.")?;
+    let names: Vec<&str> = if let Some(body) = rest
+        .strip_prefix('{')
+        .and_then(|body| body.strip_suffix('}'))
+    {
+        if body.is_empty() || body.contains(['{', '}']) {
+            return None;
         }
-        let Some(segments) = path_segments(relative) else {
-            return false;
+        body.split(',').collect()
+    } else {
+        if rest.contains(['{', '}', '/']) {
+            return None;
+        }
+        vec![rest]
+    };
+    let mut extensions = Vec::new();
+    for name in names {
+        let extension = match name {
+            "md" => "md",
+            "mdx" => "mdx",
+            "yaml" => "yaml",
+            "yml" => "yml",
+            _ => return None,
         };
-        !self
-            .excludes
-            .iter()
-            .any(|exclude| exclude.matches(&segments))
+        if !extensions.contains(&extension) {
+            extensions.push(extension);
+        }
+    }
+    if extensions.is_empty() {
+        None
+    } else {
+        Some(extensions)
     }
 }
 
@@ -370,7 +423,7 @@ fn expand_braces(pattern: &str) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::CollectionPattern;
+    use super::{CollectionPattern, EntryKind};
     use std::path::Path;
 
     fn pattern(entries: &[&str]) -> CollectionPattern {
@@ -387,6 +440,33 @@ mod tests {
         let both = pattern(&["**/*.{md,mdx}"]);
         assert!(both.matches(Path::new("nested/entry.mdx")));
         assert!(both.includes_mdx());
+    }
+
+    #[test]
+    fn selects_yaml_and_yml_data_entries_without_frontmatter_semantics() {
+        let yaml = pattern(&["**/*.yaml"]);
+        assert_eq!(
+            yaml.entry_kind(Path::new("nested/entry.yaml")),
+            Some(EntryKind::Yaml)
+        );
+        assert!(!yaml.matches(Path::new("nested/entry.yml")));
+        assert!(!yaml.matches(Path::new("nested/entry.md")));
+
+        let mixed = pattern(&["**/*.{md,mdx,yaml,yml}", "!**/drafts/**"]);
+        assert_eq!(
+            mixed.entry_kind(Path::new("entry.md")),
+            Some(EntryKind::Markdown)
+        );
+        assert_eq!(
+            mixed.entry_kind(Path::new("entry.mdx")),
+            Some(EntryKind::Mdx)
+        );
+        assert_eq!(
+            mixed.entry_kind(Path::new("entry.yml")),
+            Some(EntryKind::Yaml)
+        );
+        assert_eq!(mixed.entry_kind(Path::new("drafts/entry.yaml")), None);
+        assert!(mixed.includes_mdx());
     }
 
     #[test]
@@ -421,6 +501,7 @@ mod tests {
         for entries in [
             Vec::<String>::new(),
             vec!["**/*.json".into()],
+            vec!["**/*.{md,json}".into()],
             vec!["!**/drafts/**".into()],
             vec!["**/*.md".into(), "!../outside/**".into()],
             vec!["**/*.md".into(), "!/absolute/**".into()],

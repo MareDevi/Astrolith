@@ -127,6 +127,113 @@ fn scans_nested_supported_sources_and_uses_astro_ids() {
     }
 }
 
+fn yaml_manifest(root: &Path) -> astrolith_astro::ProjectManifest {
+    fs::create_dir_all(root.join("node_modules/astro")).unwrap();
+    fs::write(
+        root.join("package.json"),
+        r#"{"dependencies":{"astro":"6.3.7"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("node_modules/astro/package.json"),
+        r#"{"version":"6.3.7"}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/content.config.ts"),
+        r#"import {defineCollection} from 'astro:content';
+import {glob} from 'astro/loaders';
+const data = defineCollection({loader:glob({base:'src/data',pattern:'**/*.{yaml,yml}'})});
+export const collections = {data};
+"#,
+    )
+    .unwrap();
+    discover(root)
+}
+
+#[test]
+fn scans_yaml_data_entries_and_applies_top_level_slugs() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(temp.path().join("src/data/nested")).unwrap();
+    fs::write(
+        temp.path().join("src/data/default.yaml"),
+        "title: Default
+",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("src/data/nested/item.yml"),
+        "title: Item
+",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("src/data/custom.yaml"),
+        "slug: custom-id
+",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("src/data/quoted.yaml"),
+        "slug: \"quoted slug\"\n",
+    )
+    .unwrap();
+    fs::write(temp.path().join("src/data/ignored.json"), "{}\n").unwrap();
+    fs::write(temp.path().join("src/data/ignored.md"), "---\n---\n").unwrap();
+    let manifest = yaml_manifest(temp.path());
+
+    let entries = scan_collections(&manifest, &Cancellation::default()).unwrap();
+    let actual = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.entry().id().id().to_owned(),
+                entry.entry().source().as_str().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            ("custom-id".into(), "src/data/custom.yaml".into()),
+            ("default".into(), "src/data/default.yaml".into()),
+            ("nested/item".into(), "src/data/nested/item.yml".into()),
+            ("quoted slug".into(), "src/data/quoted.yaml".into()),
+        ]
+    );
+}
+
+#[test]
+fn invalid_yaml_data_and_non_string_data_slugs_are_explicit() {
+    let invalid = tempfile::tempdir().unwrap();
+    fs::create_dir_all(invalid.path().join("src/data")).unwrap();
+    fs::write(
+        invalid.path().join("src/data/broken.yaml"),
+        "title: [unclosed\n",
+    )
+    .unwrap();
+    let manifest = yaml_manifest(invalid.path());
+    let error = scan_collections(&manifest, &Cancellation::default()).unwrap_err();
+    assert!(matches!(
+        error,
+        astrolith_workspace::WorkspaceError::InvalidFrontmatter { .. }
+    ));
+
+    let non_string = tempfile::tempdir().unwrap();
+    fs::create_dir_all(non_string.path().join("src/data")).unwrap();
+    fs::write(
+        non_string.path().join("src/data/slugged.yaml"),
+        "slug: 42\n",
+    )
+    .unwrap();
+    let manifest = yaml_manifest(non_string.path());
+    let error = scan_collections(&manifest, &Cancellation::default()).unwrap_err();
+    assert!(matches!(
+        error,
+        astrolith_workspace::WorkspaceError::UnsupportedSlug(_)
+    ));
+}
+
 #[test]
 fn cancelled_scan_stops_before_filesystem_work() {
     let (_temp, manifest) = project();

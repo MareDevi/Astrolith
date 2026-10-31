@@ -4,4 +4,4 @@ pub mod discovery;
 pub mod pattern;
 pub mod schema;
 pub use discovery::*;
-pub use pattern::CollectionPattern;
+pub use pattern::{CollectionPattern, EntryKind};

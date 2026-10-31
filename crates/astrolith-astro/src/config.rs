@@ -178,6 +178,7 @@ pub fn parse_project_config(source: &str) -> Result<ProjectConfig, String> {
     )?;
     let config_object =
         direct_call_object(default_value, source, define_config_alias, "Astro config")?;
+    reject_nested_proto_keys(config_object, source)?;
     let pairs = strict_object_pairs(config_object, source, "Astro config")?;
     let mut src_dir = None;
     let mut mdx = false;
@@ -200,7 +201,10 @@ pub fn parse_project_config(source: &str) -> Result<ProjectConfig, String> {
             "integrations" => {
                 mdx = validate_integrations(value, source, &imports.mdx_default_aliases)?;
             }
-            _ => validate_inert_config_value(value, source, &key)?,
+            // Other Astro settings (adapter, site, markdown, vite, fonts, ...)
+            // cannot change which files a `glob()` collection selects, so their
+            // values are intentionally not inspected or evaluated.
+            _ => {}
         }
     }
 
@@ -680,6 +684,27 @@ fn property_name(node: Node<'_>, source: &str, context: &str) -> Result<String, 
     Ok(name)
 }
 
+/// Reject prototype keys even inside settings whose values are not interpreted.
+fn reject_nested_proto_keys(root: Node<'_>, source: &str) -> Result<(), String> {
+    for node in descendants_including(root) {
+        if node.kind() != "pair" {
+            continue;
+        }
+        let Some(key) = node.child_by_field_name("key") else {
+            continue;
+        };
+        let name = match key.kind() {
+            "property_identifier" => node_text(key, source, "config key").ok().map(str::to_owned),
+            "string" => literal_string(key, source, "config key").ok(),
+            _ => None,
+        };
+        if name.as_deref() == Some("__proto__") {
+            return Err("`__proto__` keys are unsupported in Astro config".into());
+        }
+    }
+    Ok(())
+}
+
 fn reject_proto_key(name: &str, context: &str) -> Result<(), String> {
     if name == "__proto__" {
         return Err(format!("`__proto__` keys are unsupported in {context}"));
@@ -806,45 +831,6 @@ fn ensure_declared_before_export(
     Ok(())
 }
 
-fn validate_inert_config_value(value: Node<'_>, source: &str, context: &str) -> Result<(), String> {
-    match value.kind() {
-        "string" | "number" | "true" | "false" | "null" => Ok(()),
-        "identifier" => {
-            let text = node_text(value, source, "config identifier")?;
-            if text == "undefined" {
-                Ok(())
-            } else {
-                Err(format!(
-                    "dynamic identifier `{text}` is unsupported for config key `{context}`"
-                ))
-            }
-        }
-        "array" => {
-            for item in named_children(value) {
-                if is_comment(item) {
-                    continue;
-                }
-                if item.kind() == "spread_element" {
-                    return Err(format!("spreads are unsupported in config key `{context}`"));
-                }
-                validate_inert_config_value(item, source, context)?;
-            }
-            Ok(())
-        }
-        "object" => {
-            for (key, item) in
-                strict_object_pairs(value, source, &format!("config key `{context}`"))?
-            {
-                validate_inert_config_value(item, source, &key)?;
-            }
-            Ok(())
-        }
-        kind => Err(format!(
-            "dynamic `{kind}` values are unsupported for config key `{context}`"
-        )),
-    }
-}
-
 fn validate_integrations(
     value: Node<'_>,
     source: &str,
@@ -859,26 +845,26 @@ fn validate_integrations(
         if is_comment(integration) {
             continue;
         }
-        if integration.kind() != "call_expression" {
-            return Err(format!(
-                "unsupported integrations member `{}`",
-                integration.kind()
-            ));
+        if integration.kind() == "spread_element" {
+            return Err("spreads are unsupported in `integrations`".into());
         }
-        let function = integration
-            .child_by_field_name("function")
-            .ok_or_else(|| "integration call has no function".to_owned())?;
+        // Non-MDX integrations do not change glob selection or entry IDs, so
+        // their factories and options are intentionally not interpreted.
+        if integration.kind() != "call_expression" {
+            continue;
+        }
+        let Some(function) = integration.child_by_field_name("function") else {
+            continue;
+        };
         if function.kind() != "identifier" {
-            return Err("integration calls must use a direct imported identifier".into());
+            continue;
         }
         let function_name = node_text(function, source, "integration call target")?;
         if !mdx_default_aliases
             .iter()
             .any(|alias| alias == function_name)
         {
-            return Err(format!(
-                "integration factory `{function_name}` is unsupported; only a verified default import from `@astrojs/mdx` is allowed"
-            ));
+            continue;
         }
         if integration.child_by_field_name("type_arguments").is_some()
             || has_direct_token(integration, "?.")

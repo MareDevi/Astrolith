@@ -421,12 +421,24 @@ fn project_config_reports_src_dir_and_verified_mdx_default_imports() {
 }
 
 #[test]
-fn rejects_mdx_options_type_only_imports_and_non_mdx_integrations() {
+fn rejects_mdx_options_and_spreads_but_ignores_unverified_integrations() {
     let options = r#"
         import mdx from "@astrojs/mdx";
         import { defineConfig } from "astro/config";
         export default defineConfig({ integrations: [mdx({})] });
     "#;
+    let spread = r#"
+        import mdx from "@astrojs/mdx";
+        import { defineConfig } from "astro/config";
+        export default defineConfig({ integrations: [...[mdx()]] });
+    "#;
+    for source in [options, spread] {
+        assert!(
+            parse_project_config(source).is_err(),
+            "accepted unsafe integrations: {source}"
+        );
+    }
+
     let type_only = r#"
         import type mdx from "@astrojs/mdx";
         import { defineConfig } from "astro/config";
@@ -440,20 +452,42 @@ fn rejects_mdx_options_type_only_imports_and_non_mdx_integrations() {
     let unknown = r#"
         import integration from "some-integration";
         import { defineConfig } from "astro/config";
-        export default defineConfig({ integrations: [integration()] });
+        export default defineConfig({ integrations: [integration({ option: true })] });
     "#;
-    let spread = r#"
-        import mdx from "@astrojs/mdx";
-        import { defineConfig } from "astro/config";
-        export default defineConfig({ integrations: [...[mdx()]] });
-    "#;
-
-    for source in [options, type_only, named_import, unknown, spread] {
+    for source in [type_only, named_import, unknown] {
         assert!(
-            parse_project_config(source).is_err(),
-            "accepted unsafe integrations: {source}"
+            !parse_project_config(source).unwrap().mdx,
+            "unverified integration factory was treated as MDX: {source}"
         );
     }
+}
+
+#[test]
+fn ignores_dynamic_non_content_settings_used_by_real_projects() {
+    let source = r#"
+        import { defineConfig } from "astro/config";
+        import cloudflare from "@astrojs/cloudflare";
+        import svelte from "@astrojs/svelte";
+        import mdx from "@astrojs/mdx";
+        import siteConfig from "./site.config";
+        import reading from "./src/lib/reading";
+        export default defineConfig({
+            adapter: cloudflare({ imageService: "compile" }),
+            site: "https://example.com",
+            i18n: { ...siteConfig.i18n, routing: { prefixDefaultLocale: false } },
+            markdown: {
+                remarkPlugins: [[reading, { singleTilde: false }]],
+                rehypePlugins: [reading],
+            },
+            vite: { plugins: [reading()] },
+            integrations: [svelte(), mdx(), reading()],
+            fonts: [{ name: "Serif", provider: "google" }],
+        });
+    "#;
+
+    let config = parse_project_config(source).unwrap();
+    assert_eq!(config.src_dir, "src");
+    assert!(config.mdx);
 }
 
 #[test]

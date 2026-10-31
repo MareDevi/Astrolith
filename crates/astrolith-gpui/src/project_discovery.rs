@@ -302,6 +302,9 @@ impl ProjectWorkspace {
     /// Identity used to decide when the frontmatter form needs a refresh.
     pub fn active_frontmatter_key(&self) -> Option<(PathBuf, bool)> {
         let path = self.active.clone()?;
+        if !supports_frontmatter(&path) {
+            return None;
+        }
         let has_schema = self
             .session_collections
             .get(&path)
@@ -312,6 +315,9 @@ impl ProjectWorkspace {
     /// Return the active document's resolved schema and current text, if any.
     pub fn active_frontmatter(&self, cx: &App) -> Option<(Arc<CollectionSchema>, String)> {
         let path = self.active.as_ref()?;
+        if !supports_frontmatter(path) {
+            return None;
+        }
         let collection = self.session_collections.get(path)?;
         let schema = self.schemas.get(collection)?.clone();
         let session = self.sessions.get(path)?;
@@ -337,6 +343,9 @@ impl ProjectWorkspace {
         let Some(active) = self.active.clone() else {
             return;
         };
+        if !supports_frontmatter(&active) {
+            return;
+        }
         let Some(session) = self.sessions.get(&active).cloned() else {
             return;
         };
@@ -1352,6 +1361,13 @@ impl Render for ProjectWorkspace {
             })
     }
 }
+/// Markdown and MDX define frontmatter; YAML data entries are whole documents.
+fn supports_frontmatter(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| matches!(extension, "md" | "mdx"))
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1394,6 +1410,22 @@ mod tests {
         .unwrap();
         dir
     }
+    #[test]
+    fn frontmatter_tools_are_limited_to_markdown_sources() {
+        for supported in ["entry.md", "entry.mdx", "nested/ENTRY.md"] {
+            assert!(
+                supports_frontmatter(std::path::Path::new(supported)),
+                "{supported}"
+            );
+        }
+        for rejected in ["entry.yaml", "entry.yml", "entry.json", "entry"] {
+            assert!(
+                !supports_frontmatter(std::path::Path::new(rejected)),
+                "{rejected}"
+            );
+        }
+    }
+
     struct TestHost {
         navigation: Entity<ProjectWorkspace>,
         document: Entity<WorkspacePanel>,
@@ -2199,6 +2231,80 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("src/posts/a.md")).unwrap(),
             "# A\n"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn yaml_data_entries_open_without_the_frontmatter_form(cx: &mut TestAppContext) {
+        use astrolith_astro::schema::{CollectionSchema, Field, FieldKind, SchemaDialect};
+
+        let dir = fixture();
+        std::fs::write(
+            dir.path().join("src/content.config.ts"),
+            "import {defineCollection} from 'astro:content'; import {glob} from 'astro/loaders'; const blog=defineCollection({loader:glob({base:'src/posts',pattern:'**/*.{md,mdx,yaml}'})}); export const collections={blog};",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/posts/data.yaml"), "title: Data\n").unwrap();
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        view.update(cx, |view, cx| {
+            view.set_collection_schemas(
+                vec![(
+                    "blog".to_owned(),
+                    CollectionSchema {
+                        dialect: SchemaDialect::Draft202012,
+                        fields: vec![Field {
+                            name: "title".to_owned(),
+                            required: true,
+                            default: None,
+                            kind: FieldKind::String { format: None },
+                        }],
+                        diagnostics: Vec::new(),
+                    },
+                )],
+                cx,
+            );
+        });
+
+        let yaml = dir.path().join("src/posts/data.yaml");
+        let index = view.read_with(cx, |view, _| {
+            view.entries
+                .iter()
+                .position(|entry| entry.entry().source().as_str() == "src/posts/data.yaml")
+                .expect("the YAML entry must be indexed")
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(index, window, cx))
+        })
+        .unwrap();
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.sessions.contains_key(&yaml)) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert!(
+            view.read_with(cx, |view, _| view.sessions.contains_key(&yaml)),
+            "the YAML source must load as a raw-text document"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.active_frontmatter_key()),
+            None,
+            "YAML data entries must not expose the frontmatter form"
+        );
+        assert!(
+            view.read_with(cx, |view, cx| view.active_frontmatter(cx))
+                .is_none(),
+            "YAML data entries must not be parsed as Markdown frontmatter"
         );
     }
 

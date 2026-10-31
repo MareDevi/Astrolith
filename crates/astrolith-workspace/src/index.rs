@@ -1,6 +1,6 @@
 //! Bounded collection indexing implementation.
 
-use astrolith_astro::{Cancellation, ProjectManifest};
+use astrolith_astro::{Cancellation, EntryKind, ProjectManifest};
 use astrolith_core::{Entry, EntryId, SourcePath};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -28,6 +28,8 @@ const MAX_SCAN_NODES: usize = 100_000;
 const MAX_SCAN_ENTRIES: usize = 100_000;
 /// Maximum frontmatter prefix read while deriving an entry ID.
 const MAX_FRONTMATTER_BYTES: usize = 1024 * 1024;
+/// Maximum whole YAML data entry read while deriving its ID.
+const MAX_DATA_BYTES: usize = 1024 * 1024;
 /// Maximum parser events accepted from one frontmatter document.
 const MAX_YAML_EVENTS: usize = 256 * 1024;
 
@@ -287,9 +289,12 @@ pub fn scan_collections(
                 let relative_to_base = path
                     .strip_prefix(&base)
                     .map_err(|_| WorkspaceError::InvalidSourcePath { path: path.clone() })?;
-                if !file_type.is_file() || !descriptor.pattern().matches(relative_to_base) {
+                if !file_type.is_file() {
                     continue;
                 }
+                let Some(kind) = descriptor.pattern().entry_kind(relative_to_base) else {
+                    continue;
+                };
                 if entries.len() >= MAX_SCAN_ENTRIES {
                     return Err(WorkspaceError::EntryLimit {
                         collection: collection.clone(),
@@ -298,8 +303,13 @@ pub fn scan_collections(
                 }
 
                 let (source, absolute_source) = source_path(&root, &path)?;
-                let slug = frontmatter_slug(&absolute_source, cancellation)?
-                    .unwrap_or_else(|| default_logical_id(relative_to_base));
+                let declared_slug = match kind {
+                    EntryKind::Yaml => data_slug(&absolute_source, cancellation)?,
+                    EntryKind::Markdown | EntryKind::Mdx => {
+                        frontmatter_slug(&absolute_source, cancellation)?
+                    }
+                };
+                let slug = declared_slug.unwrap_or_else(|| default_logical_id(relative_to_base));
                 let id = EntryId::new(collection.clone(), slug)
                     .map_err(|error| WorkspaceError::Model(error.to_string()))?;
                 if !logical_ids.insert(id.clone()) {
@@ -459,6 +469,32 @@ fn frontmatter_slug(
             message: error.to_string(),
         }
     })?;
+    slug_from_document(path, &documents, "frontmatter")
+}
+
+/// Derive the slug override from a whole YAML data entry.
+///
+/// Astro's data entry types parse the complete file and pass the resulting
+/// object to the same `generateId` contract as Markdown frontmatter, so a
+/// top-level string `slug` replaces the path-derived ID.
+fn data_slug(path: &Path, cancellation: &Cancellation) -> Result<Option<String>, WorkspaceError> {
+    check_cancelled(cancellation)?;
+    let source = read_data_file(path)?;
+    validate_yaml_events(path, &source, cancellation)?;
+    check_cancelled(cancellation)?;
+    let documents =
+        YamlLoader::load_from_str(&source).map_err(|error| WorkspaceError::InvalidFrontmatter {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    slug_from_document(path, &documents, "YAML data")
+}
+
+fn slug_from_document(
+    path: &Path,
+    documents: &[Yaml],
+    context: &str,
+) -> Result<Option<String>, WorkspaceError> {
     let Some(document) = documents.first() else {
         return Ok(None);
     };
@@ -468,7 +504,7 @@ fn frontmatter_slug(
         }
         return Err(WorkspaceError::InvalidFrontmatter {
             path: path.to_path_buf(),
-            message: "frontmatter must be a mapping".into(),
+            message: format!("{context} must be a mapping"),
         });
     };
     let slug = data.iter().find_map(|(key, value)| match key {
@@ -480,10 +516,48 @@ fn frontmatter_slug(
         Some(value) if yaml_slug_is_falsey(value) => Ok(None),
         Some(Yaml::String(value)) => Ok(Some(value.clone())),
         Some(value) => Err(WorkspaceError::UnsupportedSlug(format!(
-            "truthy frontmatter slug in {} has unsupported type {value:?}; refusing to guess an Astro ID",
+            "truthy {context} slug in {} has unsupported type {value:?}; refusing to guess an Astro ID",
             path.display()
         ))),
     }
+}
+
+fn read_data_file(path: &Path) -> Result<String, WorkspaceError> {
+    let canonical = fs::canonicalize(path).map_err(|source| WorkspaceError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let file = File::open(&canonical).map_err(|source| WorkspaceError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let metadata = file.metadata().map_err(|source| WorkspaceError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_DATA_BYTES as u64 {
+        return Err(WorkspaceError::InvalidFrontmatter {
+            path: path.to_path_buf(),
+            message: format!("YAML data entry exceeds {MAX_DATA_BYTES} bytes"),
+        });
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_DATA_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| WorkspaceError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if bytes.len() > MAX_DATA_BYTES {
+        return Err(WorkspaceError::InvalidFrontmatter {
+            path: path.to_path_buf(),
+            message: format!("YAML data entry exceeds {MAX_DATA_BYTES} bytes"),
+        });
+    }
+    String::from_utf8(bytes).map_err(|error| WorkspaceError::InvalidFrontmatter {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })
 }
 
 fn yaml_slug_is_falsey(value: &Yaml) -> bool {
