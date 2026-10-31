@@ -2,6 +2,7 @@
 use crate::config::{parse_content_config, parse_project_config};
 use crate::pattern::CollectionPattern;
 use astrolith_core::{CollectionId, ProjectId};
+use semver::{Version, VersionReq};
 use std::{
     fs,
     io::{self, Read},
@@ -15,13 +16,10 @@ use std::{
 /// Astro major releases whose loader semantics are checked by the fixture task.
 /// Every installed release within these majors is accepted.
 pub const SUPPORTED_ASTRO_MAJORS: &[u64] = &[5, 6, 7];
-/// Installed `@astrojs/mdx` major paired with each supported Astro major.
-const SUPPORTED_MDX_MAJORS: [(u64, u64); 3] = [(5, 4), (6, 6), (7, 8)];
 
-/// Parse the major component of an installed release. Prerelease and build
-/// suffixes after the major do not affect loader compatibility.
-fn major_version(version: &str) -> Option<u64> {
-    version.split('.').next()?.parse().ok()
+/// Parse an installed release without accepting partial versions.
+fn parse_version(version: &str) -> Option<Version> {
+    Version::parse(version).ok()
 }
 /// Cooperative cancellation shared by discovery and index services.
 #[derive(Clone, Default, Debug)]
@@ -288,10 +286,13 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
             diagnostics: vec![message],
         }
     };
-    let Some(astro_major) = metadata
-        .installed_version()
-        .and_then(major_version)
-        .filter(|major| SUPPORTED_ASTRO_MAJORS.contains(major))
+    let Some(astro_version) =
+        metadata
+            .installed_version()
+            .and_then(parse_version)
+            .filter(|version| {
+                version.pre.is_empty() && SUPPORTED_ASTRO_MAJORS.contains(&version.major)
+            })
     else {
         return Ok(unsupported(
             "Install a project-local Astro 5, 6, or 7 release; unsupported or missing installed version"
@@ -359,21 +360,22 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
                     .into(),
             ));
         }
-        let expected = SUPPORTED_MDX_MAJORS
-            .iter()
-            .find(|(astro, _)| *astro == astro_major)
-            .map(|(_, mdx)| *mdx)
-            .ok_or_else(|| AstroError("Unsupported Astro/MDX version pair".into()))?;
         let mdx = json(&root.join("node_modules/@astrojs/mdx/package.json")).ok();
-        if mdx
+        let installed_mdx = mdx
             .as_ref()
             .and_then(|value| value.get("version"))
-            .and_then(|value| value.as_str())
-            .and_then(major_version)
-            != Some(expected)
-        {
+            .and_then(|value| value.as_str());
+        let peer = mdx
+            .as_ref()
+            .and_then(|value| value.get("peerDependencies"))
+            .and_then(|value| value.get("astro"))
+            .and_then(|value| value.as_str());
+        let compatible = peer
+            .and_then(|range| VersionReq::parse(range).ok())
+            .is_some_and(|requirement| requirement.matches(&astro_version));
+        if !compatible {
             return Ok(unsupported(format!(
-                "MDX patterns require installed @astrojs/mdx {expected}.x for Astro {astro_major}.x"
+                "MDX patterns require an installed @astrojs/mdx release that declares Astro {astro_version} as a peer; installed version {installed_mdx:?}"
             )));
         }
     }

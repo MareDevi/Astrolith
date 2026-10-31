@@ -278,6 +278,7 @@ name = "astrolith-astro"
 version = "0.1.0"
 dependencies = [
  "astrolith-core",
+ "semver",
  "serde_json",
  "tempfile",
  "tokio",

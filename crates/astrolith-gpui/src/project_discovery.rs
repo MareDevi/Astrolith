@@ -1370,7 +1370,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("node_modules/@astrojs/mdx")).unwrap();
         std::fs::write(
             dir.path().join("node_modules/@astrojs/mdx/package.json"),
-            r#"{"version":"4.3.14"}"#,
+            r#"{"version":"4.3.14","peerDependencies":{"astro":"^5.0.0"}}"#,
         )
         .unwrap();
         std::fs::write(dir.path().join("astro.config.mjs"),"import {defineConfig} from 'astro/config'; import mdx from '@astrojs/mdx'; export default defineConfig({integrations:[mdx()]});").unwrap();

@@ -37,15 +37,15 @@ fn fixture_entries(fixture: &str, version: &str) -> BTreeSet<(String, String, St
     )
     .unwrap();
     fs::create_dir_all(temp.path().join("node_modules/@astrojs/mdx")).unwrap();
-    let mdx_version = match version {
-        "5.18.2" => "4.3.14",
-        "6.4.8" => "6.0.3",
-        "7.4.4" => "8.1.2",
+    let (mdx_version, mdx_peer) = match version {
+        "5.18.2" => ("4.3.14", "^5.0.0"),
+        "6.4.8" => ("6.0.3", "^6.4.0"),
+        "7.4.4" => ("8.1.2", "^7.2.10"),
         other => panic!("unmapped fixture version {other}"),
     };
     fs::write(
         temp.path().join("node_modules/@astrojs/mdx/package.json"),
-        format!(r#"{{"version":"{mdx_version}"}}"#),
+        format!(r#"{{"version":"{mdx_version}","peerDependencies":{{"astro":"{mdx_peer}"}}}}"#),
     )
     .unwrap();
     let request = DiscoveryRequest::new(
