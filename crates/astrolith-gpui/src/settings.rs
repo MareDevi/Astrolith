@@ -55,6 +55,7 @@ fn read_existing(path: &Path) -> io::Result<Option<Vec<u8>>> {
 
 impl SettingsStore {
     pub fn load(path: PathBuf) -> (Self, Settings, Option<String>) {
+        tracing::debug!(path = %path.display(), "loading preferences");
         let loaded = read_existing(&path).and_then(|bytes| {
             let settings: Settings = match &bytes {
                 Some(bytes) => serde_json::from_slice(bytes).map_err(io::Error::other)?,
@@ -121,6 +122,11 @@ impl SettingsStore {
         temporary.persist(&self.path).map_err(|error| error.error)?;
         stored.baseline = Some(bytes);
         stored.revision = revision;
+        tracing::debug!(
+            path = %self.path.display(),
+            revision,
+            "preferences saved"
+        );
         Ok(true)
     }
 }

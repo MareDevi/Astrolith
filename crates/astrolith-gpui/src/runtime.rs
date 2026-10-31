@@ -17,6 +17,7 @@ impl Global for ServiceRuntime {}
 impl Drop for ServiceRuntime {
     fn drop(&mut self) {
         if let Some(runtime) = self.owned.take() {
+            tracing::debug!("shutting down the application service runtime");
             // Quit observers drain important work before global disposal. Dropping
             // a runtime normally would block the native event thread here.
             // Bound the final drain: GPUI only gives quit observers 200 ms.
@@ -38,6 +39,12 @@ pub(crate) fn init(cx: &mut App) -> io::Result<()> {
             owned: Some(runtime),
             blocking_slots: Arc::new(Semaphore::new(2)),
         });
+        tracing::info!(
+            async_workers = 2,
+            blocking_threads = 4,
+            blocking_jobs = 2,
+            "application service runtime started"
+        );
     }
     Ok(())
 }

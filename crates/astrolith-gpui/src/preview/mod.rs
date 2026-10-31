@@ -43,6 +43,11 @@ pub(crate) struct AstroPreviewBackend {
 impl AstroPreviewBackend {
     /// Build a backend for the project at `root`.
     pub(crate) fn new(project: ProjectId, root: PathBuf) -> Self {
+        tracing::debug!(
+            project = %project.as_str(),
+            root = %root.display(),
+            "creating the Astro preview backend"
+        );
         Self {
             server: Arc::new(tokio::sync::Mutex::new(DevServer::new(
                 project,
@@ -56,6 +61,7 @@ impl PreviewBackend for AstroPreviewBackend {
     fn start(&self) -> PreviewFuture<Result<Url, String>> {
         let server = self.server.clone();
         Box::pin(async move {
+            tracing::info!("starting the Astro preview server");
             let mut server = server.lock().await;
             server.start().await.map_err(|error| error.to_string())
         })
@@ -64,6 +70,7 @@ impl PreviewBackend for AstroPreviewBackend {
     fn stop(&self) -> PreviewFuture<Result<(), String>> {
         let server = self.server.clone();
         Box::pin(async move {
+            tracing::info!("stopping the Astro preview server");
             let mut server = server.lock().await;
             server.stop().await.map_err(|error| error.to_string())
         })
@@ -151,10 +158,16 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) {
         if self.project.as_ref() == Some(&project) {
+            tracing::debug!(project = %project.as_str(), "refreshed the preview route mapping");
             self.mapping = mapping;
             cx.notify();
             return;
         }
+        tracing::info!(
+            project = %project.as_str(),
+            root = %root.display(),
+            "attaching the preview panel to a project"
+        );
         let backend = Arc::new(AstroPreviewBackend::new(project.clone(), root.clone()));
         self.attach(backend, project, root, mapping, cx);
     }
@@ -178,6 +191,9 @@ impl PreviewPanel {
 
     /// Drop the backend, killing any running server, and reset the panel.
     pub(crate) fn detach(&mut self, cx: &mut Context<Self>) {
+        if self.project.is_some() {
+            tracing::debug!("detaching the preview panel from its project");
+        }
         self.task = None;
         if let Some(backend) = self.backend.take() {
             backend.abort();
@@ -217,10 +233,12 @@ impl PreviewPanel {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(url)) => {
+                        tracing::info!(url = %url, "Astro preview ready");
                         this.message = Some(format!("Preview ready at {url}"));
                         this.status = ServerStatus::Ready(url);
                     }
                     Ok(Err(error)) | Err(error) => {
+                        tracing::error!(%error, "could not start the Astro preview");
                         this.message = Some(format!("Could not start the preview: {error}"));
                         this.status = ServerStatus::Failed(error);
                     }
@@ -248,10 +266,12 @@ impl PreviewPanel {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(Ok(())) => {
+                        tracing::info!("Astro preview stopped");
                         this.status = ServerStatus::Stopped;
                         this.message = Some("Preview stopped.".to_owned());
                     }
                     Ok(Err(error)) | Err(error) => {
+                        tracing::error!(%error, "could not stop the Astro preview");
                         this.status = ServerStatus::Failed(error.clone());
                         this.message = Some(format!("Could not stop the preview: {error}"));
                     }
@@ -267,8 +287,14 @@ impl PreviewPanel {
     pub(crate) fn open_entry(&mut self, entry: &EntryId, cx: &mut Context<Self>) {
         let session = PreviewSession::new(self.mapping.clone(), self.surface.clone());
         match session.open_entry(entry, &self.status) {
-            Ok(url) => self.message = Some(format!("Opened {url} in the browser.")),
-            Err(error) => self.message = Some(error.to_string()),
+            Ok(url) => {
+                tracing::info!(url = %url, entry = %entry.id(), "opened a preview in the browser");
+                self.message = Some(format!("Opened {url} in the browser."));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not open a preview route");
+                self.message = Some(error.to_string());
+            }
         }
         cx.notify();
     }

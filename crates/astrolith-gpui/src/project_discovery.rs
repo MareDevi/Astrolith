@@ -133,6 +133,10 @@ pub(crate) struct ProjectWorkspace {
 }
 impl Drop for ProjectWorkspace {
     fn drop(&mut self) {
+        tracing::debug!(
+            generation = self.generation,
+            "dropping the project workspace"
+        );
         self.cancellation.cancel();
     }
 }
@@ -207,6 +211,10 @@ impl ProjectWorkspace {
             .into_iter()
             .map(|(collection, schema)| (collection, Arc::new(schema)))
             .collect();
+        tracing::debug!(
+            collections = self.schemas.len(),
+            "collection schemas installed"
+        );
         cx.notify();
     }
 
@@ -222,6 +230,11 @@ impl ProjectWorkspace {
         let project = self.project_id.clone();
         let root = manifest.root().to_owned();
         let cancellation = self.cancellation.clone();
+        tracing::debug!(
+            project = %project.as_ref().map_or("<unknown>", |project| project.as_str()),
+            root = %root.display(),
+            "generating collection schemas"
+        );
         let task = runtime::blocking(cx, move || {
             let request = SchemaGenerationRequest::new(root, cancellation);
             generate_collection_schemas(&request)
@@ -234,13 +247,22 @@ impl ProjectWorkspace {
                 if this.generation != generation || this.project_id != project {
                     return;
                 }
-                if let Ok(report) = result {
-                    let schemas = report
-                        .schemas
-                        .into_iter()
-                        .map(|entry| (entry.collection, entry.schema))
-                        .collect();
-                    this.set_collection_schemas(schemas, cx);
+                match result {
+                    Ok(report) => {
+                        tracing::info!(
+                            collections = report.schemas.len(),
+                            "collection schemas generated"
+                        );
+                        let schemas = report
+                            .schemas
+                            .into_iter()
+                            .map(|entry| (entry.collection, entry.schema))
+                            .collect();
+                        this.set_collection_schemas(schemas, cx);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "collection schema generation failed");
+                    }
                 }
             });
         }));
@@ -341,6 +363,7 @@ impl ProjectWorkspace {
                 cx.notify();
             }
             Err(error) => {
+                tracing::warn!(field = %path, %error, "could not edit a frontmatter field");
                 self.status = format!("Could not edit frontmatter field `{path}`: {error}");
                 cx.notify();
             }
@@ -383,6 +406,7 @@ impl ProjectWorkspace {
         }));
     }
     fn start(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        tracing::info!(root = %root.display(), "opening Astro project");
         if self.has_dirty(cx) {
             self.status = "Close unsaved documents before switching projects.".into();
             cx.notify();
@@ -458,6 +482,12 @@ impl ProjectWorkspace {
                 this.loading = false;
                 match result {
                     Ok((manifest, entries, watcher)) => {
+                        tracing::info!(
+                            project = %project.as_str(),
+                            generation,
+                            entries = entries.len(),
+                            "Astro project opened"
+                        );
                         this.manifest = Some(Arc::new(manifest));
                         this.sessions.clear();
                         this.active = None;
@@ -472,7 +502,15 @@ impl ProjectWorkspace {
                         this.load_pending_recovery(window, cx);
                         this.load_collection_schemas(cx);
                     }
-                    Err(error) => this.status = format!("Could not open project: {error}"),
+                    Err(error) => {
+                        tracing::warn!(
+                            project = %project.as_str(),
+                            generation,
+                            %error,
+                            "could not open Astro project"
+                        );
+                        this.status = format!("Could not open project: {error}");
+                    }
                 }
                 cx.notify();
             });
@@ -493,6 +531,12 @@ impl ProjectWorkspace {
         self.watcher_owner = Some(watcher);
         let generation = self.generation;
         let root = manifest.root().to_owned();
+        tracing::debug!(
+            project = %manifest.project().as_str(),
+            generation,
+            root = %root.display(),
+            "project watcher started"
+        );
         let request = DiscoveryRequest::new(
             manifest.project().clone(),
             generation,
@@ -515,6 +559,11 @@ impl ProjectWorkspace {
                     let Some(watcher) = watcher.upgrade() else { return Err("Watcher stopped".into()); };
                     let batch = watcher.drain();
                     if !batch.changed && !batch.needs_rescan { return Ok(None); }
+                    tracing::debug!(
+                        changed = batch.changed,
+                        needs_rescan = batch.needs_rescan,
+                        "project watcher produced a change batch"
+                    );
                     // Compare retained and in-flight sources even when reindexing fails.
                     let changes = snapshots.into_iter().map(|path| {
                         let fingerprint = contained_path(&root, path.strip_prefix(&root).unwrap_or(&path)).ok()
@@ -553,6 +602,7 @@ impl ProjectWorkspace {
                                     this.status = "Index refreshed; open buffers retained. Close and reopen an unchanged document to reload it.".into();
                                 }
                                 Err(error) => {
+                                    tracing::warn!(%error, "project reindex failed; buffers retained");
                                     this.publish_entries(Vec::new(), cx);
                                     this.index_error = Some(error);
                                     this.status = "Project index unavailable. Open buffers retained.".into();
@@ -561,6 +611,7 @@ impl ProjectWorkspace {
                             cx.notify();
                         }
                         Err(error) => {
+                            tracing::warn!(%error, "project watcher failed; buffers retained");
                             this.publish_entries(Vec::new(), cx);
                             this.index_error = Some(error);
                             this.status = "Project index unavailable. Open buffers retained.".into();
@@ -581,6 +632,11 @@ impl ProjectWorkspace {
             .expect("index revision exhausted");
         self.loads.clear();
         self.entries = Arc::new(entries);
+        tracing::debug!(
+            entries = self.entries.len(),
+            index_revision = self.index_revision,
+            "published project entries"
+        );
         self.list.update(cx, |list, cx| {
             list.delegate_mut().entries = self.entries.clone();
             cx.notify();
@@ -596,6 +652,12 @@ impl ProjectWorkspace {
         let source = entry.entry().source().clone();
         let collection = entry.entry().id().collection().as_str().to_owned();
         let path = manifest.root().join(source.as_str());
+        tracing::debug!(
+            path = %path.display(),
+            collection = %collection,
+            source = %source.as_str(),
+            "opening a collection entry"
+        );
         if self.sessions.contains_key(&path) {
             self.activate_session(&path, window, cx);
             return;
@@ -696,6 +758,11 @@ impl ProjectWorkspace {
         self.loads.remove(&key);
         match result {
             Ok(source) => {
+                tracing::info!(
+                    path = %key.display(),
+                    bytes = source.len(),
+                    "document loaded"
+                );
                 // Only a coalesced first load can create an editor. Refresh never replaces it.
                 let session =
                     cx.new(|cx| DocumentSession::new(identity.clone(), source, window, cx));
@@ -712,6 +779,7 @@ impl ProjectWorkspace {
                 }
             }
             Err(error) => {
+                tracing::warn!(path = %key.display(), %error, "could not load a collection entry");
                 if self.active.as_ref() == Some(&key) {
                     self.active = None;
                 }
@@ -785,6 +853,7 @@ impl ProjectWorkspace {
             });
             task.detach();
         }
+        tracing::debug!(path = %path.display(), "closing a retained document");
         self.sessions.remove(path);
         self.session_subscriptions.remove(path);
         self.session_collections.remove(path);
@@ -841,6 +910,11 @@ impl ProjectWorkspace {
             cx.notify();
         });
         let snapshot = DocumentSnapshot::capture(&session.read(cx).buffer, path.clone());
+        tracing::debug!(
+            path = %path.display(),
+            revision = snapshot.revision().get(),
+            "starting document save"
+        );
         self.status = "Saving…".into();
         cx.notify();
         let save = runtime::spawn(cx, async move { save_snapshot(&snapshot).await });
@@ -868,6 +942,11 @@ impl ProjectWorkspace {
         };
         match result {
             Ok(SaveOutcome::Saved { revision }) => {
+                tracing::info!(
+                    path = %path.display(),
+                    revision,
+                    "document saved"
+                );
                 let content = session.read(cx).buffer.current_text().to_owned();
                 let identity = session.read(cx).buffer.identity().clone();
                 let marked = session.update(cx, |session, cx| {
@@ -894,13 +973,20 @@ impl ProjectWorkspace {
                 };
             }
             Ok(SaveOutcome::Conflict) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "save conflict: the file changed on disk; edits retained"
+                );
                 session.update(cx, |session, cx| {
                     session.externally_changed = true;
                     cx.notify();
                 });
                 self.status = "Save conflict: the file changed on disk. Your edits are kept; reopen the document to reload, then try again.".into();
             }
-            Err(error) => self.status = format!("Could not save: {error}"),
+            Err(error) => {
+                tracing::error!(path = %path.display(), %error, "document save failed");
+                self.status = format!("Could not save: {error}");
+            }
         }
         cx.notify();
     }
@@ -921,15 +1007,42 @@ impl ProjectWorkspace {
             if dirty.is_empty() && clean.is_empty() {
                 return;
             }
-            let _ = runtime::blocking(cx, move || {
+            let result = runtime::blocking(cx, move || {
+                let mut written = 0usize;
+                let mut cleared = 0usize;
                 for record in dirty {
-                    let _ = store.save(&record);
+                    match store.save(&record) {
+                        Ok(()) => written += 1,
+                        Err(error) => {
+                            tracing::warn!(
+                                source = %record.identity().canonical_source().as_str(),
+                                %error,
+                                "could not write a recovery record"
+                            );
+                        }
+                    }
                 }
                 for identity in clean {
-                    let _ = store.clear(&identity);
+                    match store.clear(&identity) {
+                        Ok(_) => cleared += 1,
+                        Err(error) => {
+                            tracing::warn!(
+                                source = %identity.canonical_source().as_str(),
+                                %error,
+                                "could not clear a recovery record"
+                            );
+                        }
+                    }
                 }
+                (written, cleared)
             })
             .await;
+            match result {
+                Ok((written, cleared)) => {
+                    tracing::debug!(written, cleared, "recovery records persisted")
+                }
+                Err(error) => tracing::warn!(%error, "recovery persistence task failed"),
+            }
         }));
     }
 
@@ -968,9 +1081,19 @@ impl ProjectWorkspace {
         if dirty.is_empty() {
             return None;
         }
+        tracing::debug!(
+            documents = dirty.len(),
+            "flushing unsaved recovery records on exit"
+        );
         Some(runtime::flush_on_quit(cx, move || {
             for record in dirty {
-                let _ = store.save(&record);
+                if let Err(error) = store.save(&record) {
+                    tracing::error!(
+                        source = %record.identity().canonical_source().as_str(),
+                        %error,
+                        "could not flush a recovery record on exit"
+                    );
+                }
             }
         }))
     }
@@ -991,13 +1114,16 @@ impl ProjectWorkspace {
         let generation = self.generation;
         let task = runtime::blocking(cx, move || {
             store.load().map(|load| {
-                load.records()
+                let diagnostics = load.diagnostics().to_vec();
+                let records = load
+                    .records()
                     .iter()
                     .filter(|record| {
                         sources.contains(record.identity().canonical_source().as_str())
                     })
                     .cloned()
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                (records, diagnostics)
             })
         });
         self.recovery_load_task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -1008,13 +1134,24 @@ impl ProjectWorkspace {
                 if this.generation != generation {
                     return;
                 }
-                let Ok(records) = result else {
-                    return;
+                let (records, diagnostics) = match result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error, "could not load recovery records");
+                        return;
+                    }
                 };
+                for diagnostic in diagnostics {
+                    tracing::warn!(%diagnostic, "recovery record skipped");
+                }
                 let records: Vec<_> = records
                     .into_iter()
                     .filter(|record| this.project_id.as_ref() == Some(record.identity().project()))
                     .collect();
+                tracing::debug!(
+                    records = records.len(),
+                    "recovery records matched the open project"
+                );
                 if records.is_empty() {
                     this.pending_recovery.clear();
                     cx.notify();
@@ -1044,15 +1181,24 @@ impl ProjectWorkspace {
         };
         let root = manifest.root().to_owned();
         let records = std::mem::take(&mut self.pending_recovery);
+        tracing::info!(documents = records.len(), "restoring unsaved documents");
         let reads = runtime::blocking(cx, move || {
             let mut loaded = Vec::new();
             for record in records {
                 let source = record.identity().canonical_source().clone();
                 let Ok(actual) = contained_path(&root, std::path::Path::new(source.as_str()))
                 else {
+                    tracing::warn!(
+                        source = %source.as_str(),
+                        "recovery record path is outside the project"
+                    );
                     continue;
                 };
                 let Ok(disk) = read_bounded(&actual, 8 * 1024 * 1024) else {
+                    tracing::warn!(
+                        path = %actual.display(),
+                        "could not read the current document while restoring recovery"
+                    );
                     continue;
                 };
                 loaded.push((
@@ -1089,6 +1235,7 @@ impl ProjectWorkspace {
                     this.install(&key, session.clone(), cx);
                     restored += 1;
                 }
+                tracing::info!(restored, "recovered unsaved documents");
                 this.status = format!("Restored {restored} unsaved document(s) from recovery.");
                 cx.notify();
             });

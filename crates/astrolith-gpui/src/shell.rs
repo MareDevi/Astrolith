@@ -35,6 +35,7 @@ type LatestSettings = Arc<Mutex<(u64, Settings)>>;
 /// Open the shell after background preference loading; bootstrap owns no services.
 pub fn open(cx: &mut App) {
     if let Err(error) = runtime::init(cx) {
+        tracing::error!(%error, "could not start background services");
         eprintln!("Could not start background services: {error}");
         cx.quit();
         return;
@@ -52,12 +53,22 @@ pub fn open(cx: &mut App) {
         .and_then(|result| result);
         cx.update(|cx| {
             let (store, settings, warning) = match loaded {
-                Ok((store, settings, warning)) => (Some(store), settings, warning),
-                Err(error) => (
-                    None,
-                    Settings::default(),
-                    Some(format!("Preferences unavailable: {error}")),
-                ),
+                Ok((store, settings, warning)) => {
+                    if let Some(warning) = &warning {
+                        tracing::warn!(%warning, "preferences loaded with a warning");
+                    } else {
+                        tracing::info!(theme = ?settings.theme, "preferences loaded");
+                    }
+                    (Some(store), settings, warning)
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "preferences unavailable; using defaults");
+                    (
+                        None,
+                        Settings::default(),
+                        Some(format!("Preferences unavailable: {error}")),
+                    )
+                }
             };
             if let Err(error) = gpui_kit::open_window(
                 WindowOptions {
@@ -70,8 +81,11 @@ pub fn open(cx: &mut App) {
                     cx.new(|cx| Shell::new(settings, store, warning, window, cx))
                 },
             ) {
+                tracing::error!(error = %format_args!("{error:#}"), "could not open the main window");
                 eprintln!("Could not open Astrolith: {error:#}");
                 cx.quit();
+            } else {
+                tracing::info!("main window opened");
             }
         });
     })
@@ -243,12 +257,16 @@ impl Shell {
                     if let Some((revision, settings)) = snapshot
                         && let Err(error) = store.save(revision, &settings)
                     {
+                        tracing::error!(%error, "could not save preferences on exit");
                         eprintln!("Could not save preferences on exit: {error}");
                     }
                 });
                 cx.background_executor().spawn(async move {
                     if let Err(error) = flush.await {
+                        tracing::error!(%error, "could not finish the preference flush");
                         eprintln!("Could not finish preference flush: {error}");
+                    } else {
+                        tracing::debug!("preference flush finished");
                     }
                 })
             })
@@ -267,6 +285,7 @@ impl Shell {
                 if let Some(flush) = flush
                     && let Err(error) = flush.await
                 {
+                    tracing::error!(%error, "could not flush unsaved recovery on exit");
                     eprintln!("Could not flush unsaved recovery on exit: {error}");
                 }
             }
@@ -553,7 +572,10 @@ impl Shell {
                 this.opening = false;
                 match result {
                     Some(Ok(source)) => this.show_document(source, window, cx),
-                    Some(Err(error)) => this.file_status = format!("Could not open file: {error}"),
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "could not open a text file");
+                        this.file_status = format!("Could not open file: {error}");
+                    }
                     None => {}
                 }
                 cx.notify();
@@ -567,6 +589,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        tracing::info!(
+            path = %source.path.display(),
+            bytes = source.source.len(),
+            "opened a readonly text file"
+        );
         self.navigator.update(cx, |panel, cx| {
             panel.set_content(source.path.display().to_string(), cx)
         });
