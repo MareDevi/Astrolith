@@ -11,6 +11,30 @@ import {
   selectSupportedSources,
 } from "../scripts/test-astro-fixtures.mjs";
 
+test("array patterns apply negative globs regardless of ordering", () => {
+  const patterns = ["!**/drafts/**", "**/*.{md,mdx}"];
+  assert.equal(matchesSupportedPattern("guides/entry.md", patterns), true);
+  assert.equal(matchesSupportedPattern("drafts/entry.md", patterns), false);
+  assert.equal(matchesSupportedPattern("drafts/nested/entry.mdx", patterns), false);
+  assert.equal(
+    matchesSupportedPattern("introduction.md", ["**/*.md", "!**/introduction.md"]),
+    false,
+  );
+  assert.equal(
+    matchesSupportedPattern("chapter-3.md", ["**/*.md", "!**/chapter-[0-9].md"]),
+    false,
+  );
+  assert.equal(
+    matchesSupportedPattern("template.md", ["**/*.md", "!**/{draft,template}.md"]),
+    false,
+  );
+  assert.throws(() => matchesSupportedPattern("entry.md", []), /must not be empty/);
+  assert.throws(
+    () => matchesSupportedPattern("entry.md", ["**/*.md", "!../outside/**"]),
+    /traverse parents|relative/,
+  );
+});
+
 test("supported patterns match root and nested Markdown sources", () => {
   assert.equal(matchesSupportedPattern("root.md", "**/*.md"), true);
   assert.equal(matchesSupportedPattern("nested/deep/entry.md", "**/*.md"), true);
@@ -77,6 +101,10 @@ test("source selection stays inside the literal base and supported pattern", () 
     );
     assert.deepEqual(
       selectSupportedSources(root, "content/docs", "**/*.md"),
+      ["content/docs/root.md"],
+    );
+    assert.deepEqual(
+      selectSupportedSources(root, "content/docs", ["**/*.{md,mdx}", "!**/nested/**"]),
       ["content/docs/root.md"],
     );
   } finally {

@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use super::{CollectionSchema, Field, FieldKind, SchemaDialect, normalize_schema};
 
 const ASTRO5_SCHEMA: &str = include_str!("fixtures/astro5-docs.schema.json");
+const ASTRO6_SCHEMA: &str = include_str!("fixtures/astro6-docs.schema.json");
 const ASTRO7_SCHEMA: &str = include_str!("fixtures/astro7-docs.schema.json");
 
 fn parse(source: &str) -> CollectionSchema {
@@ -42,6 +43,19 @@ fn astro5_and_astro7_normalize_to_the_same_dialect_independent_model() {
         "both real dialects must normalize to one identical model"
     );
     assert_eq!(astro5.diagnostics, astro7.diagnostics);
+}
+
+#[test]
+fn astro6_oracle_matches_the_astro7_dialect_independent_model() {
+    let astro6 = parse(ASTRO6_SCHEMA);
+    let astro7 = parse(ASTRO7_SCHEMA);
+
+    assert_eq!(astro6.dialect, SchemaDialect::Draft202012);
+    assert_eq!(
+        astro6.fields, astro7.fields,
+        "Astro 6's generated draft 2020-12 schema must normalize like Astro 7"
+    );
+    assert_eq!(astro6.diagnostics, astro7.diagnostics);
 }
 
 #[test]

@@ -1,0 +1,13 @@
+{
+  "name": "astrolith-astro6-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync": "astro sync",
+    "sync:oracle": "astro sync --config oracle.astro.config.mjs"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "6.0.3",
+    "astro": "6.4.8"
+  }
+}

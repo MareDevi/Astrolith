@@ -37,10 +37,11 @@ fn fixture_entries(fixture: &str, version: &str) -> BTreeSet<(String, String, St
     )
     .unwrap();
     fs::create_dir_all(temp.path().join("node_modules/@astrojs/mdx")).unwrap();
-    let mdx_version = if version == "5.18.2" {
-        "4.3.14"
-    } else {
-        "8.1.2"
+    let mdx_version = match version {
+        "5.18.2" => "4.3.14",
+        "6.4.8" => "6.0.3",
+        "7.4.4" => "8.1.2",
+        other => panic!("unmapped fixture version {other}"),
     };
     fs::write(
         temp.path().join("node_modules/@astrojs/mdx/package.json"),
@@ -69,49 +70,128 @@ fn fixture_entries(fixture: &str, version: &str) -> BTreeSet<(String, String, St
         .collect()
 }
 
-fn assert_oracle_mappings(entries: &BTreeSet<(String, String, String)>) {
-    let expected = [
-        ("archive", "guides", "content/docs/guides/index.md"),
-        ("archive", "guides/nested", "content/docs/guides/nested.md"),
-        (
-            "archive",
-            "stable-source-slug",
-            "content/docs/introduction.md",
-        ),
-        ("archive", "深い/日本語", "content/docs/深い/日本語.mdx"),
-        ("docs", "guides", "content/docs/guides/index.md"),
-        ("docs", "guides/nested", "content/docs/guides/nested.md"),
-        ("docs", "stable-source-slug", "content/docs/introduction.md"),
-        ("docs", "深い/日本語", "content/docs/深い/日本語.mdx"),
-        ("markdownDocs", "guides", "content/docs/guides/index.md"),
-        (
-            "markdownDocs",
-            "guides/nested",
-            "content/docs/guides/nested.md",
-        ),
-        (
-            "markdownDocs",
-            "stable-source-slug",
-            "content/docs/introduction.md",
-        ),
-    ];
+fn assert_oracle_mappings(
+    entries: &BTreeSet<(String, String, String)>,
+    expected: &[(&str, &str, &str)],
+) {
     assert_eq!(
         entries,
         &expected
-            .into_iter()
+            .iter()
             .map(|(collection, id, file_path)| {
-                (collection.to_owned(), id.to_owned(), file_path.to_owned())
+                (
+                    (*collection).to_owned(),
+                    (*id).to_owned(),
+                    (*file_path).to_owned(),
+                )
             })
             .collect()
     );
 }
 
+const SINGLE_PATTERN_ORACLE: &[(&str, &str, &str)] = &[
+    ("archive", "guides", "content/docs/guides/index.md"),
+    ("archive", "guides/nested", "content/docs/guides/nested.md"),
+    (
+        "archive",
+        "stable-source-slug",
+        "content/docs/introduction.md",
+    ),
+    ("archive", "深い/日本語", "content/docs/深い/日本語.mdx"),
+    ("docs", "guides", "content/docs/guides/index.md"),
+    ("docs", "guides/nested", "content/docs/guides/nested.md"),
+    ("docs", "stable-source-slug", "content/docs/introduction.md"),
+    ("docs", "深い/日本語", "content/docs/深い/日本語.mdx"),
+    ("markdownDocs", "guides", "content/docs/guides/index.md"),
+    (
+        "markdownDocs",
+        "guides/nested",
+        "content/docs/guides/nested.md",
+    ),
+    (
+        "markdownDocs",
+        "stable-source-slug",
+        "content/docs/introduction.md",
+    ),
+];
+
+const ARRAY_PATTERN_ORACLE: &[(&str, &str, &str)] = &[
+    ("archive", "drafts/wip", "content/docs/drafts/wip.md"),
+    ("archive", "guides", "content/docs/guides/index.md"),
+    ("archive", "guides/nested", "content/docs/guides/nested.md"),
+    (
+        "archive",
+        "stable-source-slug",
+        "content/docs/introduction.md",
+    ),
+    ("archive", "深い/日本語", "content/docs/深い/日本語.mdx"),
+    ("docs", "drafts/wip", "content/docs/drafts/wip.md"),
+    ("docs", "guides", "content/docs/guides/index.md"),
+    ("docs", "guides/nested", "content/docs/guides/nested.md"),
+    ("docs", "stable-source-slug", "content/docs/introduction.md"),
+    ("docs", "深い/日本語", "content/docs/深い/日本語.mdx"),
+    ("markdownDocs", "drafts/wip", "content/docs/drafts/wip.md"),
+    ("markdownDocs", "guides", "content/docs/guides/index.md"),
+    (
+        "markdownDocs",
+        "guides/nested",
+        "content/docs/guides/nested.md",
+    ),
+    (
+        "markdownDocs",
+        "stable-source-slug",
+        "content/docs/introduction.md",
+    ),
+    (
+        "negativeFirstDocs",
+        "guides",
+        "content/docs/guides/index.md",
+    ),
+    (
+        "negativeFirstDocs",
+        "guides/nested",
+        "content/docs/guides/nested.md",
+    ),
+    (
+        "negativeFirstDocs",
+        "stable-source-slug",
+        "content/docs/introduction.md",
+    ),
+    (
+        "negativeFirstDocs",
+        "深い/日本語",
+        "content/docs/深い/日本語.mdx",
+    ),
+    ("publishedDocs", "guides", "content/docs/guides/index.md"),
+    (
+        "publishedDocs",
+        "guides/nested",
+        "content/docs/guides/nested.md",
+    ),
+    (
+        "publishedDocs",
+        "stable-source-slug",
+        "content/docs/introduction.md",
+    ),
+    (
+        "publishedDocs",
+        "深い/日本語",
+        "content/docs/深い/日本語.mdx",
+    ),
+    ("selectedDocs", "drafts/wip", "content/docs/drafts/wip.md"),
+];
+
 #[test]
 fn astro5_fixture_matches_the_real_loader_oracle() {
-    assert_oracle_mappings(&fixture_entries("astro5", "5.18.2"));
+    assert_oracle_mappings(&fixture_entries("astro5", "5.18.2"), SINGLE_PATTERN_ORACLE);
+}
+
+#[test]
+fn astro6_fixture_matches_the_real_loader_oracle() {
+    assert_oracle_mappings(&fixture_entries("astro6", "6.4.8"), ARRAY_PATTERN_ORACLE);
 }
 
 #[test]
 fn astro7_fixture_matches_the_real_loader_oracle() {
-    assert_oracle_mappings(&fixture_entries("astro7", "7.4.4"));
+    assert_oracle_mappings(&fixture_entries("astro7", "7.4.4"), SINGLE_PATTERN_ORACLE);
 }
