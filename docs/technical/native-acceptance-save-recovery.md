@@ -8,7 +8,7 @@ completed result yet.
 
 AGENTS.md requires real-platform evidence for native IME, focus, scaling and rendering: a
 successful headless test or build **does not** establish those results. The save/recovery code
-paths listed below are covered by headless tests (`mise run check` PASS — 256 Rust tests, 0
+paths listed below are covered by headless tests (`mise run check` PASS — 260 Rust tests, 0
 failed, 4 ignored; Astro fixture compatibility PASS), but those tests run without a native window,
 compositor, GPU, real keyboard or OS quit path. In particular:
 
@@ -119,9 +119,11 @@ input-method details as you go. For each step record **Observed** vs **Expected*
 While the window is open, also note for the human reviewer: Chinese/Japanese IME composition in the
 source editor and in a frontmatter text field, focus movement between the main editor and the
 Inspector form, HiDPI/fractional scaling of the Inspector, and whether the frontmatter form reflects
-edits. **Known open issue to watch:** editing the body in the source editor and then editing a
-frontmatter field can overwrite the body edit (P1 in `docs/technical/m03-progress.md`). If observed,
-record it explicitly; it is not fixed by this runbook.
+edits. **Regression to verify natively (formerly-open P1, fixed in `fddbd34`):** edit the document
+body in the source editor (unsaved), then edit a frontmatter field — the body edit must survive.
+Headless evidence says it does (`frontmatter_form_field_edit_preserves_concurrent_body_edit`), but this
+is exactly the kind of cross-surface interaction that only a real window can fully confirm; if the
+body edit is still lost natively, record **FAIL** and reopen the finding.
 
 ## Result template (fill in after a real run)
 
