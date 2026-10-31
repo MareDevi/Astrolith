@@ -36,7 +36,7 @@ fn main() {
         tracing::info!("starting the editor spike");
     }
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             cx.on_window_closed(|cx, _| {
