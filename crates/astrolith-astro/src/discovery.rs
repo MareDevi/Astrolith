@@ -1,5 +1,6 @@
 //! Bounded synchronous inspection. Call only from the application's blocking lane.
 use crate::config::{parse_content_config, parse_project_config};
+use crate::pattern::CollectionPattern;
 use astrolith_core::{CollectionId, ProjectId};
 use std::{
     fs,
@@ -12,7 +13,10 @@ use std::{
 };
 
 /// Exact releases whose loader semantics are checked by the fixture task.
-pub const SUPPORTED_ASTRO_VERSIONS: &[&str] = &["5.18.2", "7.4.4"];
+pub const SUPPORTED_ASTRO_VERSIONS: &[&str] = &["5.18.2", "6.4.8", "7.4.4"];
+/// Exact installed `@astrojs/mdx` release paired with each supported Astro release.
+const SUPPORTED_MDX_VERSIONS: [(&str, &str); 3] =
+    [("5.18.2", "4.3.14"), ("6.4.8", "6.0.3"), ("7.4.4", "8.1.2")];
 /// Cooperative cancellation shared by discovery and index services.
 #[derive(Clone, Default, Debug)]
 pub struct Cancellation(Arc<AtomicBool>);
@@ -94,7 +98,7 @@ impl ProjectMetadata {
 pub struct CollectionDescriptor {
     id: CollectionId,
     base: PathBuf,
-    pattern: String,
+    pattern: CollectionPattern,
     config: PathBuf,
 }
 impl CollectionDescriptor {
@@ -104,7 +108,7 @@ impl CollectionDescriptor {
     pub fn base(&self) -> &Path {
         &self.base
     }
-    pub fn pattern(&self) -> &str {
+    pub fn pattern(&self) -> &CollectionPattern {
         &self.pattern
     }
     pub fn config(&self) -> &Path {
@@ -337,7 +341,7 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
     };
     if parsed
         .iter()
-        .any(|collection| collection.pattern().contains("mdx"))
+        .any(|collection| collection.pattern().includes_mdx())
     {
         if !mdx_integration {
             return Ok(unsupported(
@@ -345,11 +349,15 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
                     .into(),
             ));
         }
-        let expected = match metadata.installed_version() {
-            Some("5.18.2") => "4.3.14",
-            Some("7.4.4") => "8.1.2",
-            _ => return Ok(unsupported("Unsupported Astro/MDX version pair".into())),
-        };
+        let expected = metadata
+            .installed_version()
+            .and_then(|version| {
+                SUPPORTED_MDX_VERSIONS
+                    .iter()
+                    .find(|(astro, _)| *astro == version)
+                    .map(|(_, mdx)| *mdx)
+            })
+            .ok_or_else(|| AstroError("Unsupported Astro/MDX version pair".into()))?;
         let mdx = json(&root.join("node_modules/@astrojs/mdx/package.json")).ok();
         if mdx
             .as_ref()
@@ -379,7 +387,7 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
         collections.push(CollectionDescriptor {
             id,
             base,
-            pattern: item.pattern().into(),
+            pattern: item.pattern().clone(),
             config: config.clone(),
         });
     }

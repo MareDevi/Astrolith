@@ -74,13 +74,6 @@ impl SourceGroup {
 pub enum WorkspaceError {
     /// Cooperative cancellation was requested.
     Cancelled,
-    /// A collection uses a pattern outside the fixture-verified set.
-    UnsupportedPattern {
-        /// The collection identity.
-        collection: String,
-        /// The unsupported declared pattern.
-        pattern: String,
-    },
     /// A collection base no longer resolves inside the project root.
     BaseOutsideProject(PathBuf),
     /// A filesystem operation failed.
@@ -149,15 +142,6 @@ impl std::fmt::Display for WorkspaceError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => formatter.write_str("workspace scan cancelled"),
-            Self::UnsupportedPattern {
-                collection,
-                pattern,
-            } => {
-                write!(
-                    formatter,
-                    "unsupported pattern {pattern:?} in collection {collection:?}"
-                )
-            }
             Self::BaseOutsideProject(path) => {
                 write!(
                     formatter,
@@ -251,12 +235,6 @@ pub fn scan_collections(
 
     for descriptor in project.collections() {
         check_cancelled(cancellation)?;
-        let pattern = SupportedPattern::parse(descriptor.pattern()).ok_or_else(|| {
-            WorkspaceError::UnsupportedPattern {
-                collection: descriptor.id().as_str().to_owned(),
-                pattern: descriptor.pattern().to_owned(),
-            }
-        })?;
         let base = canonical_dir(descriptor.base())?;
         if !base.starts_with(&root) {
             return Err(WorkspaceError::BaseOutsideProject(base));
@@ -306,7 +284,10 @@ pub fn scan_collections(
                     stack.push((path, depth + 1));
                     continue;
                 }
-                if !file_type.is_file() || !pattern.matches(&path) {
+                let relative_to_base = path
+                    .strip_prefix(&base)
+                    .map_err(|_| WorkspaceError::InvalidSourcePath { path: path.clone() })?;
+                if !file_type.is_file() || !descriptor.pattern().matches(relative_to_base) {
                     continue;
                 }
                 if entries.len() >= MAX_SCAN_ENTRIES {
@@ -316,9 +297,6 @@ pub fn scan_collections(
                     });
                 }
 
-                let relative_to_base = path
-                    .strip_prefix(&base)
-                    .map_err(|_| WorkspaceError::InvalidSourcePath { path: path.clone() })?;
                 let (source, absolute_source) = source_path(&root, &path)?;
                 let slug = frontmatter_slug(&absolute_source, cancellation)?
                     .unwrap_or_else(|| default_logical_id(relative_to_base));
@@ -376,33 +354,6 @@ pub fn coalesce_by_source(entries: Vec<CollectionEntry>) -> Vec<SourceGroup> {
             }
         })
         .collect()
-}
-
-#[derive(Clone, Copy)]
-enum SupportedPattern {
-    Markdown,
-    Mdx,
-    MarkdownOrMdx,
-}
-
-impl SupportedPattern {
-    fn parse(pattern: &str) -> Option<Self> {
-        match pattern {
-            "**/*.md" => Some(Self::Markdown),
-            "**/*.mdx" => Some(Self::Mdx),
-            "**/*.{md,mdx}" => Some(Self::MarkdownOrMdx),
-            _ => None,
-        }
-    }
-
-    fn matches(self, path: &Path) -> bool {
-        matches!(
-            (self, path.extension().and_then(OsStr::to_str)),
-            (Self::Markdown, Some("md"))
-                | (Self::Mdx, Some("mdx"))
-                | (Self::MarkdownOrMdx, Some("md" | "mdx"))
-        )
-    }
 }
 
 fn check_cancelled(cancellation: &Cancellation) -> Result<(), WorkspaceError> {

@@ -16,6 +16,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const SUPPORTED_PATTERNS = new Set(["**/*.md", "**/*.mdx", "**/*.{md,mdx}"]);
+const MAX_BRACE_EXPANSIONS = 64;
 const COMMAND_TIMEOUT_MS = 60_000;
 const MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_JSON_OUTPUT = join(tmpdir(), "astrolith-fixtures-oracle.json");
@@ -40,6 +41,29 @@ const FIXTURES = [
       { name: "markdownDocs", base: "content/docs", pattern: "**/*.md" },
       { name: "archive", base: "content/docs", pattern: "**/*.{md,mdx}" },
       { name: "customIds", base: "content/custom", pattern: "**/*.md" },
+    ],
+  },
+  {
+    id: "astro6",
+    astro: "6.4.8",
+    mdx: "6.0.3",
+    identity: {
+      defaultId: "Truthy frontmatter data.slug is returned unchanged; otherwise strip the final source extension, github-slugger each path segment, join with '/', and remove a trailing '/index'.",
+      generatedIdCoercion: "No additional coercion is applied by glob() after generateId.",
+    },
+    identityMarkers: ["return data.slug;"],
+    sourceSha256: {
+      "node_modules/astro/dist/content/loaders/glob.js": "7d83443a719ee64b53f120116cc61941ea6aa56ead17ddfacdee396cb8fc815a",
+      "node_modules/astro/dist/content/utils.js": "72dc845283b43d4dcf332dd7984cb09492c3fd62062a7c6a81e9b66dca75cfad",
+    },
+    collections: [
+      { name: "docs", base: "content/docs", pattern: "**/*.{md,mdx}" },
+      { name: "markdownDocs", base: "content/docs", pattern: "**/*.md" },
+      { name: "archive", base: "content/docs", pattern: "**/*.{md,mdx}" },
+      { name: "customIds", base: "content/custom", pattern: "**/*.md" },
+      { name: "publishedDocs", base: "content/docs", pattern: ["**/*.{md,mdx}", "!**/drafts/**"] },
+      { name: "selectedDocs", base: "content/docs", pattern: ["**/*.md", "!**/guides/**", "!**/introduction.md"] },
+      { name: "negativeFirstDocs", base: "content/docs", pattern: ["!**/drafts/**", "**/*.{md,mdx}"] },
     ],
   },
   {
@@ -78,15 +102,169 @@ export function assertProductionMappings(production, oracle) {
   }
 }
 
+function expandBraces(pattern) {
+  const open = pattern.indexOf("{");
+  if (open === -1) return [pattern];
+  const close = pattern.indexOf("}", open + 1);
+  if (close === -1) throw new Error(`Unterminated brace expansion in ${pattern}`);
+  if (pattern.slice(close + 1).includes("{") || pattern.slice(close + 1).includes("}")) {
+    throw new Error(`Nested brace expansions are unsupported in ${pattern}`);
+  }
+  const prefix = pattern.slice(0, open);
+  const suffix = pattern.slice(close + 1);
+  const body = pattern.slice(open + 1, close);
+  const expanded = [];
+  for (const alternative of body.split(",")) {
+    if (alternative.length === 0) throw new Error(`Empty brace alternative in ${pattern}`);
+    for (const value of expandBraces(`${prefix}${alternative}${suffix}`)) {
+      if (expanded.length >= MAX_BRACE_EXPANSIONS) {
+        throw new Error(`Brace expansion exceeds ${MAX_BRACE_EXPANSIONS} patterns`);
+      }
+      expanded.push(value);
+    }
+  }
+  return expanded;
+}
+
+function parseCharacterClass(segment, start) {
+  const close = segment.indexOf("]", start + 1);
+  if (close === -1) throw new Error(`Unterminated character class in ${segment}`);
+  let index = start + 1;
+  const negated = segment[index] === "!" || segment[index] === "^";
+  if (negated) index += 1;
+  const ranges = [];
+  while (index < close) {
+    const first = segment[index];
+    if (index + 2 < close && segment[index + 1] === "-") {
+      const last = segment[index + 2];
+      if (last < first) throw new Error(`Descending character class range in ${segment}`);
+      ranges.push([first, last]);
+      index += 3;
+    } else {
+      ranges.push([first, first]);
+      index += 1;
+    }
+  }
+  if (ranges.length === 0) throw new Error(`Empty character class in ${segment}`);
+  return [{ type: "class", negated, ranges }, close + 1];
+}
+
+function tokenizeSegment(segment) {
+  if (segment.length === 0) throw new Error("Glob patterns must not contain empty segments");
+  const tokens = [];
+  for (let index = 0; index < segment.length;) {
+    const character = segment[index];
+    if (character === "*") {
+      if (segment[index + 1] === "*") throw new Error("`**` must form a complete glob segment");
+      tokens.push({ type: "star" });
+      index += 1;
+    } else if (character === "?") {
+      tokens.push({ type: "any" });
+      index += 1;
+    } else if (character === "[") {
+      const [token, next] = parseCharacterClass(segment, index);
+      tokens.push(token);
+      index = next;
+    } else if (character === "\\" || character === "{" || character === "}" || character === "]") {
+      throw new Error(`Unsupported character ${character} in glob pattern`);
+    } else {
+      tokens.push({ type: "literal", value: character });
+      index += 1;
+    }
+  }
+  return tokens;
+}
+
+function segmentMatches(tokens, text) {
+  const characters = [...text];
+  let next = new Array(characters.length + 1).fill(false);
+  next[0] = true;
+  for (const token of tokens) {
+    const current = new Array(characters.length + 1).fill(false);
+    if (token.type === "star") {
+      current[0] = next[0];
+      for (let index = 0; index < characters.length; index += 1) {
+        current[index + 1] = next[index + 1] || current[index];
+      }
+    } else {
+      for (let index = 0; index < characters.length; index += 1) {
+        const character = characters[index];
+        const accepts = token.type === "any"
+          || (token.type === "literal" && character === token.value)
+          || (token.type === "class"
+            && ((token.ranges.some(([first, last]) => first <= character && character <= last))
+              !== token.negated));
+        current[index + 1] = next[index] && accepts;
+      }
+    }
+    next = current;
+  }
+  return next[characters.length];
+}
+
+function globMatchesPath(filePath, pattern) {
+  if (pattern.length === 0) throw new Error("Glob exclusion must not be empty");
+  if (pattern.startsWith("/") || pattern.startsWith("\\") || pattern.startsWith("!")) {
+    throw new Error(`Glob exclusion must be relative: ${pattern}`);
+  }
+  if (pattern.includes("\\")) throw new Error(`Glob exclusion must use '/': ${pattern}`);
+  if (pattern.split("/").some((segment) => segment === "..")) {
+    throw new Error(`Glob exclusion must not traverse parents: ${pattern}`);
+  }
+  const pathSegments = filePath.replaceAll("\\", "/").split("/");
+  if (pathSegments.some((segment) => segment === "..")) {
+    throw new Error(`Glob exclusion must not traverse parents: ${pattern}`);
+  }
+  return expandBraces(pattern).some((alternative) => {
+    const patternSegments = alternative.split("/").map((segment) =>
+      segment === "**" ? "**" : tokenizeSegment(segment));
+    const usable = pathSegments.length;
+    let next = new Array(usable + 1).fill(false);
+    next[usable] = true;
+    for (let patternIndex = patternSegments.length - 1; patternIndex >= 0; patternIndex -= 1) {
+      const segment = patternSegments[patternIndex];
+      const current = new Array(usable + 1).fill(false);
+      for (let pathIndex = usable; pathIndex >= 0; pathIndex -= 1) {
+        if (segment === "**") {
+          current[pathIndex] = next[pathIndex]
+            || (pathIndex < usable && current[pathIndex + 1]);
+        } else {
+          current[pathIndex] = pathIndex < usable
+            && segmentMatches(segment, pathSegments[pathIndex])
+            && next[pathIndex + 1];
+        }
+      }
+      next = current;
+    }
+    return next[0];
+  });
+}
+
 export function matchesSupportedPattern(filePath, pattern) {
-  if (!SUPPORTED_PATTERNS.has(pattern)) {
-    throw new Error(`Unsupported fixture pattern: ${pattern}`);
+  const patterns = Array.isArray(pattern) ? pattern : [pattern];
+  if (patterns.length === 0) throw new Error("Fixture pattern arrays must not be empty");
+  const normalized = filePath.replaceAll("\\", "/");
+
+  for (const entry of patterns) {
+    if (!entry.startsWith("!")) continue;
+    const exclusion = entry.slice(1);
+    if (exclusion.length === 0 || exclusion.startsWith("!")) {
+      throw new Error(`Unsupported fixture exclusion: ${entry}`);
+    }
+    if (globMatchesPath(normalized, exclusion)) return false;
   }
 
-  const normalized = filePath.replaceAll("\\", "/");
-  if (pattern === "**/*.md") return normalized.endsWith(".md");
-  if (pattern === "**/*.mdx") return normalized.endsWith(".mdx");
-  return normalized.endsWith(".md") || normalized.endsWith(".mdx");
+  let included = false;
+  for (const entry of patterns) {
+    if (entry.startsWith("!")) continue;
+    if (!SUPPORTED_PATTERNS.has(entry)) {
+      throw new Error(`Unsupported fixture pattern: ${entry}`);
+    }
+    if (entry === "**/*.md") included ||= normalized.endsWith(".md");
+    else if (entry === "**/*.mdx") included ||= normalized.endsWith(".mdx");
+    else included ||= normalized.endsWith(".md") || normalized.endsWith(".mdx");
+  }
+  return included;
 }
 
 function walkFiles(directory) {
@@ -313,6 +491,30 @@ function assertFixtureMappings(projectRoot, fixture, events) {
     "docs and archive emit the same ordered ID/path pairs",
   );
 
+  if (fixture.collections.some((collection) => collection.name === "publishedDocs")) {
+    const published = events.filter((event) => event.collection === "publishedDocs");
+    const selected = events.filter((event) => event.collection === "selectedDocs");
+    const negativeFirst = events.filter((event) => event.collection === "negativeFirstDocs");
+    addAssertion(
+      assertions,
+      "negative directory glob excludes nested drafts",
+      published.length > 0 && published.every((event) => !event.filePath.includes("/drafts/")),
+      `${published.length} publishedDocs events omit content/docs/drafts`,
+    );
+    addAssertion(
+      assertions,
+      "negative file and directory globs leave only the intended source",
+      selected.length === 1 && selected[0].filePath === "content/docs/drafts/wip.md",
+      `selectedDocs -> ${selected.map((event) => event.filePath).join(", ") || "none"}`,
+    );
+    addAssertion(
+      assertions,
+      "negative globs win regardless of declared order",
+      JSON.stringify(published.map((event) => event.filePath)) === JSON.stringify(negativeFirst.map((event) => event.filePath)),
+      "publishedDocs and negativeFirstDocs select the same sources",
+    );
+  }
+
   const findEvent = (collection, filePath) => events.find((event) => event.collection === collection && event.filePath === filePath);
   const introduction = findEvent("docs", "content/docs/introduction.md");
   addAssertion(
@@ -369,7 +571,7 @@ function formatMarkdown(report, jsonOutput) {
     `Project Mise Bun: \`${report.bunVersion ?? "unavailable"}\``,
     `Machine-readable oracle: \`${jsonOutput}\``,
     "",
-    "Registry-selected exact releases on 2026-10-29:",
+    "Registry-selected exact releases on 2026-10-31:",
     "",
     "| Fixture | Astro | @astrojs/mdx |",
     "| --- | --- | --- |",
@@ -422,7 +624,7 @@ async function main() {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
     registrySource: "https://registry.npmjs.org/astro",
-    registryVerifiedDate: "2026-10-29",
+    registryVerifiedDate: "2026-10-31",
     bunVersion: null,
     ok: false,
     fixtures: [],
@@ -484,11 +686,15 @@ async function main() {
         record.productionMappings = JSON.parse(production.stdout);
         assertProductionMappings(record.productionMappings, record.mappings);
         record.assertions.push({ name: "production Rust index matches real Astro IDs and filePaths", ok: true, detail: `${record.productionMappings.length} mappings compared` });
+        const expectedEntries = record.productionMappings.length;
         const editing = runCommand("cargo", ["test", "--quiet", "--locked", "--package", "astrolith-gpui", "installed_astro_fixture_editing_workflow", "--", "--ignored"], {
-          cwd: process.cwd(), timeoutMs: options.timeoutMs, env: { ASTROLITH_FIXTURE_PROJECT: projectRoot },
+          cwd: process.cwd(), timeoutMs: options.timeoutMs, env: {
+            ASTROLITH_FIXTURE_PROJECT: projectRoot,
+            ASTROLITH_FIXTURE_EXPECTED_ENTRIES: String(expectedEntries),
+          },
         });
         if (!/1 passed; 0 failed/.test(editing.stdout)) throw new Error("Installed-project editor workflow did not run exactly one passing test");
-        record.assertions.push({ name: "real installed project opens in retained GPUI editor", ok: true, detail: "picker, 11 indexed entries, keyboard editing, MDX body and tab retention; source unchanged" });
+        record.assertions.push({ name: "real installed project opens in retained GPUI editor", ok: true, detail: `picker, ${expectedEntries} indexed entries, keyboard editing, MDX body and tab retention; source unchanged` });
 
       } catch (error) {
         record.error = error.stack ?? error.message;

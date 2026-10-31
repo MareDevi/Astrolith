@@ -8,7 +8,7 @@ The plan-review findings still govern M03 ordering and are not waived here:
 
 - **R1** requires a schema-generation owner (project-local executable, working directory, `astro sync`, output discovery, diagnostics, cancellation, timeouts, freshness) before schemas are consumed in forms.
 - **R3** makes the lossless document model and field-patch contract (M04.1) a prerequisite of editable frontmatter forms (M03.3).
-- **R6** requires locked fixtures before the first Astro integration task; the Astro 5.18.2 and 7.4.4 fixtures already exist.
+- **R6** requires locked fixtures before the first Astro integration task; the Astro 5.18.2, 6.4.8 and 7.4.4 fixtures already exist.
 
 M03.1 is the pure JSON→model step. It does not execute project tooling, does not read the filesystem, and does not wire forms, so it is safe to land before the R1 generation service and before the R3 form gate. The R1 generation service is now implemented (below). Fixture schema authoring, M03.2 helper resolution, M03.3 forms and M03.4 validation were completed on 2026-10-31 (below); forms landed after the M04.2/M04.3 save coordinator, satisfying R3.
 
@@ -17,13 +17,14 @@ M03.1 is the pure JSON→model step. It does not execute project tooling, does n
 The generated schema is produced by each fixture's own `astro sync` script (`bun run sync -- --force`, i.e. `astro sync`) and written to `.astro/collections/<collection>.schema.json`. This was confirmed by running the real fixture installs in temporary copies. Two important observations:
 
 1. **`astro sync` writes the schema file before content validation runs**, so the schema is available even when the sample entries do not yet satisfy a newly added schema. A generation service must not treat a non-zero `astro sync` exit as "no schema produced".
-2. **The two supported Astro releases emit different JSON Schema shapes for the same Zod source:**
+2. **The supported Astro releases emit different JSON Schema shapes for the same Zod source:**
    - **Astro 5.18.2 — draft-07:** a top-level `$ref: "#/definitions/<name>"` wrapper with a `definitions` map; `z.coerce.date()` becomes an `anyOf` of `string/date-time`, `string/date` and `integer/unix-time`; nested objects carry `additionalProperties: false`; email is `format: "email"`.
+   - **Astro 6.4.8 — draft 2020-12:** byte-identical to the Astro 7 output below: the object schema is inline, dates are a single `string`/`date-time`, `z.literal` becomes `const`, and `z.record` uses `propertyNames` + `additionalProperties`.
    - **Astro 7.4.4 — draft 2020-12:** the object schema is inline at the top level; dates are a single `string`/`date-time`; `z.literal` becomes `const`; `z.record` uses `propertyNames` + `additionalProperties`; email carries both `format` and `pattern`.
 
-Both releases inject a synthetic `$schema` *property* into the object's `properties` (an editor convenience), which is not a user field and is excluded from the model.
+Both draft-2020-12 releases inject a synthetic `$schema` *property* into the object's `properties` (an editor convenience), which is not a user field and is excluded from the model.
 
-The committed fixtures `crates/astrolith-astro/src/schema/fixtures/astro5-docs.schema.json` and `astro7-docs.schema.json` are the exact generated output captured from those runs; the normalizer is tested against both.
+The committed fixtures `crates/astrolith-astro/src/schema/fixtures/astro5-docs.schema.json`, `astro6-docs.schema.json` and `astro7-docs.schema.json` are the exact generated output captured from those runs; the normalizer is tested against all three.
 
 ## Implemented contract (M03.1)
 
@@ -39,7 +40,7 @@ Field order is deterministic: fields are sorted by name, because `serde_json`'s 
 
 ## Verification
 
-Sixteen behavioral tests cover both real dialect fixtures, the shared dialect-independent model, scalar/object/container fields, nested objects, nullable scalars, heterogeneous unions, `anyOf` dates (including nullable dates), arrays and defaults, empty schemas, structural errors, `$defs` references, `$ref` cycles, open objects, tuple arrays, null-only fields, nested unresolved references, deterministic multi-diagnostic ordering, and depth bounding. The two fixtures differ in raw bytes but normalize to identical `fields` and `diagnostics`.
+Sixteen behavioral tests cover all three fixture oracles, the shared dialect-independent model, scalar/object/container fields, nested objects, nullable scalars, heterogeneous unions, `anyOf` dates (including nullable dates), arrays and defaults, empty schemas, structural errors, `$defs` references, `$ref` cycles, open objects, tuple arrays, null-only fields, nested unresolved references, deterministic multi-diagnostic ordering, and depth bounding. The fixtures differ in raw bytes but normalize to identical `fields` and `diagnostics` within each dialect.
 
 ## Independent review and resolutions
 
@@ -84,7 +85,7 @@ Independent review found no P0 and one [P1] plus several [P2]s, all addressed:
 
 ## Fixture schema authoring (2026-10-31, `b647a88`)
 
-Both `fixtures/astro5` and `fixtures/astro7` gained a schema-bearing `docs` collection (Zod) and every `content/docs` entry was extended so `astro sync` validation exits zero. The captured output from each real install is committed unchanged as the regression oracles `crates/astrolith-astro/src/schema/fixtures/astro5-docs.schema.json` and `astro7-docs.schema.json`. The schema exercises strings, an optional string, a coerced date with default, a boolean, a string array, an enum, a nested object, a nullable nested number, a heterogeneous union, a literal and a record; the two oracles normalize to the identical dialect-independent model asserted in `schema/tests.rs`. `fixtures/README.md` documents regeneration from the frozen lockfiles. Verification: `mise run test:fixtures` PASS, `mise run test:astro` PASS, `mise run check` exit 0.
+Both `fixtures/astro5` and `fixtures/astro7` gained a schema-bearing `docs` collection (Zod) and every `content/docs` entry was extended so `astro sync` validation exits zero. On 2026-10-31 the Astro 6.4.8 fixture was added with the same schema. The captured output from each real install is committed unchanged as the regression oracles `crates/astrolith-astro/src/schema/fixtures/astro5-docs.schema.json`, `astro6-docs.schema.json` and `astro7-docs.schema.json`; the Astro 6 file is byte-identical to the Astro 7 oracle. The schema exercises strings, an optional string, a coerced date with default, a boolean, a string array, an enum, a nested object, a nullable nested number, a heterogeneous union, a literal and a record; all three oracles normalize to the identical dialect-independent model asserted in `schema/tests.rs`. `fixtures/README.md` documents regeneration from the frozen lockfiles. Verification: `mise run test:fixtures` PASS, `mise run test:astro` PASS, `mise run check` exit 0.
 
 ## M03.2 Astro helper resolution (implemented, `3ac79d6`)
 

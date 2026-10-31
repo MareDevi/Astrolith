@@ -1796,10 +1796,14 @@ mod tests {
         assert!(cx.did_prompt_for_paths());
         cx.simulate_path_prompt_response(|_| Some(vec![root.clone()]));
         cx.condition(&view, |view, _| !view.loading).await;
+        let expected_entries = std::env::var("ASTROLITH_FIXTURE_EXPECTED_ENTRIES")
+            .expect("fixture harness supplies the expected entry count")
+            .parse::<usize>()
+            .expect("fixture harness supplies a numeric entry count");
         let (markdown, mdx) = view.read_with(cx, |view, _| {
             assert_eq!(
                 view.entries.len(),
-                11,
+                expected_entries,
                 "real installed fixture must remain fully indexed"
             );
             (

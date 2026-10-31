@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use tree_sitter::{Node, Parser, Tree};
 
+use crate::pattern::CollectionPattern;
+
 const DEFAULT_SRC_DIR: &str = "src";
-const SUPPORTED_PATTERNS: [&str; 3] = ["**/*.md", "**/*.mdx", "**/*.{md,mdx}"];
 const MAX_AST_NODES: usize = 100_000;
 const MAX_AST_DEPTH: usize = 128;
 
@@ -17,7 +18,7 @@ pub struct ProjectConfig {
 pub struct CollectionConfig {
     collection: String,
     base: String,
-    pattern: String,
+    pattern: CollectionPattern,
 }
 
 impl CollectionConfig {
@@ -29,7 +30,7 @@ impl CollectionConfig {
         &self.base
     }
 
-    pub fn pattern(&self) -> &str {
+    pub fn pattern(&self) -> &CollectionPattern {
         &self.pattern
     }
 }
@@ -494,14 +495,11 @@ fn parse_collection_call(
         "glob base",
     )?;
     validate_project_relative_path(&base, "glob base")?;
-    let pattern = literal_string(
+    let pattern = literal_pattern(
         pattern.ok_or_else(|| "glob loader is missing `pattern`".to_owned())?,
         source,
         "glob pattern",
     )?;
-    if !SUPPORTED_PATTERNS.contains(&pattern.as_str()) {
-        return Err(format!("unsupported glob pattern `{pattern}`"));
-    }
 
     Ok(CollectionConfig {
         collection: String::new(),
@@ -687,6 +685,35 @@ fn reject_proto_key(name: &str, context: &str) -> Result<(), String> {
         return Err(format!("`__proto__` keys are unsupported in {context}"));
     }
     Ok(())
+}
+
+fn literal_pattern(
+    node: Node<'_>,
+    source: &str,
+    context: &str,
+) -> Result<CollectionPattern, String> {
+    let entries = match node.kind() {
+        "string" => vec![literal_string(node, source, context)?],
+        "array" => {
+            let mut entries = Vec::new();
+            for item in named_children(node) {
+                if is_comment(item) {
+                    continue;
+                }
+                if item.kind() == "spread_element" {
+                    return Err(format!("spreads are unsupported in {context}"));
+                }
+                entries.push(literal_string(item, source, context)?);
+            }
+            entries
+        }
+        kind => {
+            return Err(format!(
+                "{context} must be a literal string or array of strings, found `{kind}`"
+            ));
+        }
+    };
+    CollectionPattern::new(entries).map_err(|error| format!("{context}: {error}"))
 }
 
 fn literal_string(node: Node<'_>, source: &str, context: &str) -> Result<String, String> {

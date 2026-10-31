@@ -43,11 +43,14 @@ fn accepts_direct_collections_with_verified_import_aliases() {
     let parsed = parse_content_config(source).unwrap();
     assert_eq!(parsed.len(), 2);
     assert_eq!(collection(&parsed, "articles").base(), "content/articles");
-    assert_eq!(collection(&parsed, "articles").pattern(), "**/*.md");
+    assert_eq!(
+        collection(&parsed, "articles").pattern().declared(),
+        ["**/*.md"]
+    );
     assert_eq!(collection(&parsed, "field-notes").base(), "content/notes");
     assert_eq!(
-        collection(&parsed, "field-notes").pattern(),
-        "**/*.{md,mdx}"
+        collection(&parsed, "field-notes").pattern().declared(),
+        ["**/*.{md,mdx}"]
     );
 }
 
@@ -73,7 +76,10 @@ fn accepts_local_const_references_and_preserves_exported_names() {
         collection(&parsed, "updates").base(),
         "src/content/articles"
     );
-    assert_eq!(collection(&parsed, "posts").pattern(), "**/*.mdx");
+    assert_eq!(
+        collection(&parsed, "posts").pattern().declared(),
+        ["**/*.mdx"]
+    );
 }
 
 #[test]
@@ -555,28 +561,92 @@ fn rejects_absolute_or_empty_src_dir_literals() {
 
 #[test]
 fn parses_checked_in_astro_fixture_configs_and_rejects_custom_id_oracles() {
-    for (astro_config, content_config, oracle_config) in [
+    for (name, astro_config, content_config, oracle_config, expected) in [
         (
+            "astro5",
             include_str!("../../../fixtures/astro5/astro.config.mjs"),
             include_str!("../../../fixtures/astro5/workspace/content.config.mjs"),
             include_str!("../../../fixtures/astro5/oracle/content.config.mjs"),
+            3,
         ),
         (
+            "astro6",
+            include_str!("../../../fixtures/astro6/astro.config.mjs"),
+            include_str!("../../../fixtures/astro6/workspace/content.config.mjs"),
+            include_str!("../../../fixtures/astro6/oracle/content.config.mjs"),
+            6,
+        ),
+        (
+            "astro7",
             include_str!("../../../fixtures/astro7/astro.config.mjs"),
             include_str!("../../../fixtures/astro7/workspace/content.config.mjs"),
             include_str!("../../../fixtures/astro7/oracle/content.config.mjs"),
+            3,
         ),
     ] {
-        assert_eq!(parse_src_dir(astro_config).unwrap(), "./workspace");
+        assert_eq!(
+            parse_src_dir(astro_config).unwrap(),
+            "./workspace",
+            "{name}"
+        );
 
         let parsed = parse_content_config(content_config).unwrap();
-        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed.len(), expected, "{name}");
         assert_eq!(collection(&parsed, "docs").base(), "./content/docs");
-        assert_eq!(collection(&parsed, "archive").pattern(), "**/*.{md,mdx}");
+        assert_eq!(
+            collection(&parsed, "archive").pattern().declared(),
+            ["**/*.{md,mdx}"]
+        );
 
         assert!(
             parse_content_config(oracle_config).is_err(),
-            "custom-ID oracle config must remain unsupported"
+            "{name} custom-ID oracle config must remain unsupported"
+        );
+    }
+}
+
+#[test]
+fn accepts_array_patterns_with_negative_globs() {
+    let source = content_source(
+        r#"
+        const posts = defineCollection({
+            loader: glob({
+                base: "content/posts",
+                pattern: ["**/*.{md,mdx}", "!**/drafts/**", "!**/hidden.md"],
+            }),
+        });
+        export const collections = { posts };
+    "#,
+    );
+
+    let parsed = parse_content_config(&source).unwrap();
+    assert_eq!(
+        collection(&parsed, "posts").pattern().declared(),
+        ["**/*.{md,mdx}", "!**/drafts/**", "!**/hidden.md"]
+    );
+}
+
+#[test]
+fn rejects_empty_mixed_or_dynamic_pattern_arrays() {
+    for pattern in [
+        "[]",
+        r#"["**/drafts/**"]"#,
+        r#"["**/*.md", "**/*.json"]"#,
+        r#"["**/*.md", ...extra]"#,
+        r#"[prefix + "*.md"]"#,
+        r#"[["**/*.md"]]"#,
+    ] {
+        let source = content_source(&format!(
+            r#"
+            const posts = defineCollection({{
+                loader: glob({{ base: "content/posts", pattern: {pattern} }}),
+            }});
+            export const collections = {{ posts }};
+        "#
+        ));
+        assert!(
+            parse_content_config(&source).is_err(),
+            "accepted pattern {pattern}"
         );
     }
 }
