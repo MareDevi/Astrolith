@@ -41,6 +41,7 @@ pub fn open(cx: &mut App) {
         return;
     }
     commands::bind_keys(cx);
+    commands::install_menus(cx);
     cx.spawn(async move |cx| {
         let loaded = runtime::blocking(cx, || {
             settings_path().map(|path| {
@@ -471,6 +472,16 @@ impl Shell {
                     preview.set_entry(entry, cx);
                     preview.open_active(cx);
                 });
+            }
+            CommandId::Quit => {
+                // Reuse the window-close guard so unsaved work prompts exactly
+                // as a titlebar close would.
+                let clean = self
+                    .project
+                    .update(cx, |project, cx| project.guard_window_close(window, cx));
+                if clean {
+                    cx.quit();
+                }
             }
             CommandId::FocusDocument => self.document.read(cx).focus_handle(cx).focus(window, cx),
             CommandId::LightTheme | CommandId::DarkTheme | CommandId::SystemTheme => {
