@@ -31,15 +31,6 @@ impl Default for LayoutState {
 }
 
 impl LayoutState {
-    pub fn toggle(&mut self, panel: PanelKind) {
-        let visible = match panel {
-            PanelKind::Sidebar => &mut self.sidebar_visible,
-            PanelKind::Inspector => &mut self.inspector_visible,
-            PanelKind::Preview => &mut self.preview_visible,
-        };
-        *visible = !*visible;
-    }
-
     /// Stored logical pixels cross the native Dock API boundary here.
     pub fn clamp(&mut self, viewport_width: f32) {
         let maximum = ((viewport_width - 320.) / 2.).clamp(160., 400.);
@@ -73,15 +64,17 @@ mod tests {
     }
 
     #[test]
-    fn toggling_one_panel_preserves_other_visibility_and_widths() {
-        let mut layout = LayoutState::default();
-        layout.toggle(PanelKind::Sidebar);
+    fn panel_visibility_flags_are_independent_and_widths_survive() {
+        let mut layout = LayoutState {
+            sidebar_visible: false,
+            ..LayoutState::default()
+        };
         assert!(!layout.sidebar_visible);
         assert!(layout.inspector_visible);
         assert!(!layout.preview_visible);
         assert_eq!(layout.sidebar_width, 240.);
-        layout.toggle(PanelKind::Preview);
-        layout.toggle(PanelKind::Inspector);
+        layout.preview_visible = true;
+        layout.inspector_visible = false;
         assert!(layout.preview_visible);
         assert!(!layout.inspector_visible);
     }

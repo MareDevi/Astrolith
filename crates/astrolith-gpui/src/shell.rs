@@ -30,7 +30,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, PathPromptOptions,
-    Render, Subscription, Task, TestSupportExt, Window, WindowOptions, div, prelude::*, px, size,
+    Render, SharedString, Subscription, Task, TestSupportExt, Window, WindowOptions, div,
+    prelude::*, px, size,
 };
 
 type LatestSettings = Arc<Mutex<(u64, Settings)>>;
@@ -109,6 +110,8 @@ pub(crate) struct Shell {
     opening: bool,
     opening_task: Option<Task<()>>,
     file_status: String,
+    preview_sync_key: Option<(u64, Option<PathBuf>)>,
+    last_viewport: gpui_kit::Size<gpui_kit::Pixels>,
     _skin: Rc<DockSkin>,
     settings: Settings,
     store: Option<Arc<SettingsStore>>,
@@ -219,13 +222,19 @@ impl Shell {
         let palette = cx.new(|cx| CommandState::new(window, cx));
         let latest = Arc::new(Mutex::new((0, settings.clone())));
         let mut subscriptions = vec![
-            cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, window, cx| {
+            cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, _, cx| {
                 if matches!(event, DockEvent::LayoutChanged) {
-                    this.constrain_docks(window, cx);
+                    // Dock events already carry the new geometry. Clamping here
+                    // would mutate the dock on every splitter move.
                     this.capture_layout(cx);
                 }
             }),
             cx.observe_window_bounds(window, |this, window, cx| {
+                let viewport = window.viewport_size();
+                if viewport == this.last_viewport {
+                    return;
+                }
+                this.last_viewport = viewport;
                 this.constrain_docks(window, cx);
                 this.capture_layout(cx);
             }),
@@ -309,7 +318,6 @@ impl Shell {
         .detach();
         let focus = cx.focus_handle().tab_stop(true);
         focus.focus(window, cx);
-        subscriptions.push(cx.observe(&dock, |_, _, cx| cx.notify()));
         Self {
             dock,
             document,
@@ -323,6 +331,8 @@ impl Shell {
             opening: false,
             opening_task: None,
             file_status: "Readonly · No file open".into(),
+            preview_sync_key: None,
+            last_viewport: window.viewport_size(),
             _skin: skin,
             settings,
             store,
@@ -340,12 +350,14 @@ impl Shell {
         let side_maximum = ((f32::from(viewport.width) - 320.) / 2.).clamp(160., 400.);
         // Reserve vertical room for document content, tabs, toolbar, and status.
         let bottom_maximum = (f32::from(viewport.height) - 300.).max(80.);
-        self.dock.update(cx, |dock, cx| {
-            for (placement, maximum) in [
+        let mut next = [None; 3];
+        {
+            let dock = self.dock.read(cx);
+            for (slot, (placement, maximum)) in next.iter_mut().zip([
                 (DockPlacement::Left, side_maximum),
                 (DockPlacement::Right, side_maximum),
                 (DockPlacement::Bottom, bottom_maximum),
-            ] {
+            ]) {
                 if let Some(current) = dock.dock_size(placement) {
                     let minimum = if placement == DockPlacement::Bottom {
                         80.
@@ -354,11 +366,18 @@ impl Shell {
                     };
                     let constrained = f32::from(current).clamp(minimum, maximum);
                     if current != px(constrained) {
-                        dock.set_dock_size(placement, px(constrained), window, cx);
+                        *slot = Some((placement, px(constrained)));
                     }
                 }
             }
-        });
+        }
+        if next.iter().any(Option::is_some) {
+            self.dock.update(cx, |dock, cx| {
+                for (placement, size) in next.into_iter().flatten() {
+                    dock.set_dock_size(placement, size, window, cx);
+                }
+            });
+        }
     }
 
     fn capture_layout(&mut self, cx: &mut Context<Self>) {
@@ -376,11 +395,18 @@ impl Shell {
                 .map(f32::from)
                 .unwrap_or(260.),
         };
+        let visibility_changed = layout.sidebar_visible != self.settings.layout.sidebar_visible
+            || layout.inspector_visible != self.settings.layout.inspector_visible
+            || layout.preview_visible != self.settings.layout.preview_visible;
         if layout != self.settings.layout {
             self.settings.layout = layout;
             self.persist(cx);
         }
-        cx.notify();
+        // Width-only changes are carried by the dock itself. Notifying here
+        // would rebuild the whole shell once per resize frame.
+        if visibility_changed {
+            cx.notify();
+        }
     }
 
     fn persist(&mut self, cx: &mut Context<Self>) {
@@ -419,8 +445,6 @@ impl Shell {
             PanelKind::Inspector => DockPlacement::Right,
             PanelKind::Preview => DockPlacement::Bottom,
         };
-        let mut target = self.settings.layout.clone();
-        target.toggle(kind);
         self.dock
             .update(cx, |area, cx| area.toggle_dock(placement, window, cx));
         // LayoutChanged also captures native collapse/resize controls.
@@ -434,6 +458,14 @@ impl Shell {
     /// Reattaching to the same project only refreshes the mapping, so a session
     /// change never restarts a running dev server.
     fn sync_preview(&mut self, cx: &mut Context<Self>) {
+        let key = {
+            let project = self.project.read(cx);
+            (project.index_revision(), project.active_path())
+        };
+        if self.preview_sync_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.preview_sync_key = Some(key);
         let context = self.project.read(cx).preview_context();
         let entry = self.project.read(cx).active_entry_id();
         self.preview.update(cx, |preview, cx| {
@@ -724,16 +756,22 @@ impl Render for Shell {
             }
         }
         let layout = &self.settings.layout;
-        let project_name = self.project.read(cx).project_name();
-        let tabs = self.project.read(cx).open_tabs();
-        let active_tab = tabs.get(self.project.read(cx).active_tab_index());
-        let document_state = match active_tab {
-            None if self.opening => "Opening file…".to_owned(),
-            None if self.document.read(cx).is_editable() => self.file_status.clone(),
-            None => "No file open".to_owned(),
-            Some(tab) if tab.externally_changed => "Changed on disk".to_owned(),
-            Some(tab) if tab.dirty => "Unsaved changes".to_owned(),
-            Some(_) => "Saved".to_owned(),
+        let (project_name, tabs, active_index) = {
+            let project = self.project.read(cx);
+            (
+                project.project_name(),
+                project.open_tabs(),
+                project.active_tab_index(),
+            )
+        };
+        let active_tab = tabs.get(active_index);
+        let document_state: SharedString = match active_tab {
+            None if self.opening => "Opening file…".into(),
+            None if self.document.read(cx).is_editable() => self.file_status.clone().into(),
+            None => "No file open".into(),
+            Some(tab) if tab.externally_changed => "Changed on disk".into(),
+            Some(tab) if tab.dirty => "Unsaved changes".into(),
+            Some(_) => "Saved".into(),
         };
         let language = active_tab
             .map(|tab| {
@@ -780,7 +818,7 @@ impl Render for Shell {
                                     .text_color(cx.theme().accent),
                             )
                             .child(div().text_sm().child("Astrolith"))
-                            .when_some(project_name, |row, name| {
+                            .when_some(project_name.clone(), |row, name| {
                                 row.child(
                                     div()
                                         .text_xs()
@@ -854,12 +892,7 @@ impl Render for Shell {
                     .border_color(cx.theme().window_border)
                     .text_color(cx.theme().muted_foreground)
                     .left(Icon::new(IconName::Folder).xsmall())
-                    .left(
-                        self.project
-                            .read(cx)
-                            .project_name()
-                            .unwrap_or_else(|| "No project".into()),
-                    )
+                    .left(project_name.unwrap_or_else(|| "No project".into()))
                     .left(div().w_2())
                     .left(document_state)
                     .right(language)
@@ -1063,6 +1096,45 @@ mod tests {
             );
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn splitter_drag_updates_geometry_without_repainting_the_shell(cx: &mut TestAppContext) {
+        use std::rc::Rc;
+        let (handle, view) = mount(cx, Settings::default());
+        let notifications = Rc::new(std::cell::Cell::new(0usize));
+        let count = notifications.clone();
+        cx.update(|cx| {
+            cx.observe(&view, move |_, _| count.set(count.get() + 1))
+                .detach();
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let start = window.find("resize-handle-left").bounds().center();
+            window.drag(start, point(start.x + px(36.), start.y), cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).settings.layout.sidebar_width > 250.,
+                "the drag must still be captured"
+            );
+            assert_eq!(
+                notifications.get(),
+                0,
+                "a width-only dock resize must not notify the shell"
+            );
+        });
+        cx.simulate_window_resize(handle.into(), size(px(800.), px(600.)));
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        cx.update(|_| {
+            assert_eq!(
+                notifications.get(),
+                0,
+                "a window resize must not schedule an extra shell frame"
+            );
+        });
     }
 
     #[gpui_kit::test]
@@ -1299,6 +1371,111 @@ mod tests {
         let (_, restored, warning) = SettingsStore::load(path);
         assert!(warning.is_none());
         assert_eq!(restored.layout.sidebar_width, 275.);
+    }
+
+    #[gpui_kit::test]
+    #[ignore = "bounded window-resize measurements; run with --ignored --nocapture"]
+    async fn window_resize_workload(cx: &mut TestAppContext) {
+        use std::time::Instant;
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("node_modules/astro")).unwrap();
+        std::fs::write(
+            root.join("node_modules/astro/package.json"),
+            r#"{"version":"7.4.4"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"astro":"7.4.4"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("astro.config.mjs"),
+            "import { defineConfig } from 'astro/config';\nexport default defineConfig({});\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/content")).unwrap();
+        std::fs::write(
+            root.join("src/content.config.ts"),
+            "import { defineCollection } from 'astro:content';\nimport { glob } from 'astro/loaders';\nconst blog = defineCollection({ loader: glob({ base: './src/content', pattern: '**/*.md' }) });\nexport const collections = { blog };\n",
+        )
+        .unwrap();
+        let paragraph = "# 中文 🦀\nA multilingual paragraph with **emphasis**, `inline code`, 日本語, and enough ordinary words to represent a real article.\n";
+        std::fs::write(root.join("src/content/intro.md"), paragraph.repeat(8000)).unwrap();
+
+        let (handle, view) = mount(cx, Settings::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::OpenProject, window, cx)
+            })
+        })
+        .unwrap();
+        let selected = root.to_path_buf();
+        cx.simulate_path_prompt_response(move |_| Some(vec![selected.clone()]));
+        let project = view.read_with(cx, |view, _| view.project.clone());
+        cx.condition(&project, |project, _| {
+            !project.is_loading() && !project.is_refreshing()
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.project.update(cx, |project, cx| {
+                    project.open_first_entry_for_tests(window, cx)
+                })
+            })
+        })
+        .unwrap();
+        cx.condition(&project, |project, _| project.open_tabs().len() == 1)
+            .await;
+        // Install a wide schema so the inspector renders a realistic dense form.
+        let fields = (0..80)
+            .map(|index| astrolith_astro::schema::Field {
+                name: format!("field{index:02}"),
+                required: index % 3 == 0,
+                default: None,
+                kind: astrolith_astro::schema::FieldKind::String { format: None },
+            })
+            .collect();
+        let schema = astrolith_astro::schema::CollectionSchema {
+            dialect: astrolith_astro::schema::SchemaDialect::Draft7,
+            fields,
+            diagnostics: Vec::new(),
+        };
+        cx.update_window(handle.into(), |_, window, cx| {
+            project.update(cx, |project, cx| {
+                project.set_collection_schemas(vec![("blog".to_owned(), schema)], cx)
+            });
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+
+        let mut times = Vec::new();
+        for index in 0..90 {
+            let width = 820. + (index % 30) as f32 * 22.;
+            let height = 620. + (index % 20) as f32 * 16.;
+            cx.simulate_window_resize(handle.into(), size(px(width), px(height)));
+            let elapsed = cx
+                .update_window(handle.into(), |_, window, cx| {
+                    let start = Instant::now();
+                    window.render_frame(cx);
+                    start.elapsed().as_secs_f64() * 1000.
+                })
+                .unwrap();
+            times.push(elapsed);
+        }
+        let average = times.iter().sum::<f64>() / times.len() as f64;
+        let worst = times.iter().copied().fold(0.0_f64, f64::max);
+        let mut sorted = times.clone();
+        sorted.sort_by(|left, right| left.total_cmp(right));
+        let p95 = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];
+        println!(
+            "SHELL_RESIZE frames={} avg_ms={average:.3} p95_ms={p95:.3} worst_ms={worst:.3} bytes={}",
+            times.len(),
+            paragraph.len() * 8000
+        );
     }
 
     #[gpui_kit::test]

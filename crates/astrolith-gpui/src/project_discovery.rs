@@ -288,6 +288,7 @@ pub(crate) struct ProjectWorkspace {
     list: Entity<ListState<EntryList>>,
     tabs: Arc<Vec<OpenTab>>,
     tab_order: Vec<PathBuf>,
+    display_name: Option<SharedString>,
     generation: u64,
     index_revision: u64,
     project_id: Option<ProjectId>,
@@ -352,6 +353,7 @@ impl ProjectWorkspace {
             list,
             tabs: Arc::new(Vec::new()),
             tab_order: Vec::new(),
+            display_name: None,
             generation: 0,
             index_revision: 0,
             project_id: None,
@@ -387,13 +389,11 @@ impl ProjectWorkspace {
 
     /// Project name shown in window chrome; `None` until a project is open.
     pub(crate) fn project_name(&self) -> Option<SharedString> {
-        let root = self.manifest.as_ref()?.root();
-        Some(
-            root.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| root.display().to_string())
-                .into(),
-        )
+        self.display_name.clone()
+    }
+
+    pub(crate) fn index_revision(&self) -> u64 {
+        self.index_revision
     }
 
     pub(crate) fn project_root(&self) -> Option<PathBuf> {
@@ -404,6 +404,16 @@ impl ProjectWorkspace {
 
     pub(crate) fn open_tabs(&self) -> Arc<Vec<OpenTab>> {
         self.tabs.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_refreshing(&self) -> bool {
+        self.refreshing
     }
 
     pub(crate) fn active_tab_index(&self) -> usize {
@@ -714,6 +724,7 @@ impl ProjectWorkspace {
         self.session_subscriptions.clear();
         self.session_collections.clear();
         self.tab_order.clear();
+        self.display_name = None;
         self.schemas.clear();
         self.pending_recovery.clear();
         self.manifest = None;
@@ -909,6 +920,13 @@ impl ProjectWorkspace {
             .expect("index revision exhausted");
         self.loads.clear();
         self.entries = Arc::new(entries);
+        self.display_name = self.manifest.as_ref().map(|manifest| {
+            let root = manifest.root();
+            root.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.display().to_string())
+                .into()
+        });
         self.sync_tabs(cx);
         tracing::debug!(
             entries = self.entries.len(),
@@ -929,6 +947,15 @@ impl ProjectWorkspace {
             cx.notify();
         });
     }
+    #[cfg(test)]
+    pub(crate) fn open_first_entry_for_tests(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_entry(0, window, cx);
+    }
+
     fn open_entry(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.entries.get(ix) else {
             return;
