@@ -7,6 +7,7 @@ pub(crate) enum CommandId {
     OpenFile,
     OpenProject,
     Save,
+    CloseDocument,
     RecoverUnsaved,
     OpenPalette,
     ToggleSidebar,
@@ -27,6 +28,7 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::OpenFile,
     CommandId::OpenProject,
     CommandId::Save,
+    CommandId::CloseDocument,
     CommandId::RecoverUnsaved,
     CommandId::OpenPalette,
     CommandId::ToggleSidebar,
@@ -49,6 +51,7 @@ impl CommandId {
             Self::OpenFile => "Open file…",
             Self::OpenProject => "Open project…",
             Self::Save => "Save",
+            Self::CloseDocument => "Close file",
             Self::RecoverUnsaved => "Recover unsaved changes…",
             Self::OpenPalette => "Commands…",
             Self::ToggleSidebar => "Toggle files",
@@ -88,6 +91,13 @@ impl CommandId {
                     "cmd-s"
                 } else {
                     "ctrl-s"
+                }
+            }
+            Self::CloseDocument => {
+                if mac {
+                    "cmd-w"
+                } else {
+                    "ctrl-w"
                 }
             }
             Self::OpenPalette => {
@@ -157,6 +167,7 @@ pub(crate) fn install_menus(cx: &mut App) {
             CommandId::OpenFile,
             CommandId::OpenProject,
             CommandId::Save,
+            CommandId::CloseDocument,
             CommandId::RecoverUnsaved,
         ]);
         items.push(gpui_kit::MenuItem::separator());

@@ -24,8 +24,8 @@ impl Default for LayoutState {
             sidebar_visible: true,
             inspector_visible: true,
             preview_visible: false,
-            sidebar_width: 224.,
-            inspector_width: 224.,
+            sidebar_width: 240.,
+            inspector_width: 260.,
         }
     }
 }
@@ -45,7 +45,7 @@ impl LayoutState {
         let maximum = ((viewport_width - 320.) / 2.).clamp(160., 400.);
         for width in [&mut self.sidebar_width, &mut self.inspector_width] {
             if !width.is_finite() {
-                *width = 224.;
+                *width = 240.;
             }
             *width = width.clamp(160., maximum);
         }
@@ -64,7 +64,7 @@ mod tests {
             ..Default::default()
         };
         layout.clamp(800.);
-        assert_eq!(layout.sidebar_width, 224.);
+        assert_eq!(layout.sidebar_width, 240.);
         assert_eq!(layout.inspector_width, 160.);
         layout.sidebar_width = 10000.;
         layout.inspector_width = 10000.;
@@ -79,7 +79,7 @@ mod tests {
         assert!(!layout.sidebar_visible);
         assert!(layout.inspector_visible);
         assert!(!layout.preview_visible);
-        assert_eq!(layout.sidebar_width, 224.);
+        assert_eq!(layout.sidebar_width, 240.);
         layout.toggle(PanelKind::Preview);
         layout.toggle(PanelKind::Inspector);
         assert!(layout.preview_visible);

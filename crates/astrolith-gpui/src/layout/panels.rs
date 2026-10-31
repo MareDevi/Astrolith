@@ -1,5 +1,6 @@
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme,
+    ActiveTheme, Icon, Sizable, StyledExt,
     dock::{BasePanel, Panel, PanelEvent},
     input::{Editor, EditorState},
 };
@@ -15,6 +16,7 @@ pub(crate) struct WorkspacePanel {
     focus: FocusHandle,
     pub editor: Option<Entity<EditorState>>,
     readonly: bool,
+    header: Option<gpui_kit::AnyView>,
     view: Option<gpui_kit::AnyView>,
 }
 
@@ -52,6 +54,12 @@ impl WorkspacePanel {
 
     pub fn set_view(&mut self, view: gpui_kit::AnyView, cx: &mut Context<Self>) {
         self.view = Some(view);
+        cx.notify();
+    }
+
+    /// Install chrome drawn above the panel body (for example document tabs).
+    pub fn set_header(&mut self, header: gpui_kit::AnyView, cx: &mut Context<Self>) {
+        self.header = Some(header);
         cx.notify();
     }
 
@@ -102,6 +110,7 @@ impl WorkspacePanel {
             focus: cx.focus_handle().tab_stop(true),
             editor,
             readonly: true,
+            header: None,
             view: None,
         }
     }
@@ -128,11 +137,30 @@ impl BasePanel for WorkspacePanel {
     }
 }
 impl Panel for WorkspacePanel {
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.title.clone()
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let icon = match self.id {
+            "navigator-panel" => IconName::FolderTree,
+            "inspector-panel" => IconName::SlidersHorizontal,
+            "preview-panel" => IconName::Globe,
+            _ => IconName::FileText,
+        };
+        div()
+            .h_flex()
+            .items_center()
+            .gap_1p5()
+            .child(
+                Icon::new(icon)
+                    .small()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(self.title.clone())
     }
     fn tab_name(&self, _: &App) -> Option<SharedString> {
         Some(self.title.clone())
+    }
+    fn title_bar(&self, _: &App) -> bool {
+        // The document panel draws its own Zed-style tab strip and breadcrumb.
+        self.id != "document-panel"
     }
 }
 impl Render for WorkspacePanel {
@@ -141,32 +169,38 @@ impl Render for WorkspacePanel {
             .id(self.id)
             .test_support()
             .track_focus(&self.focus)
+            .v_flex()
             .size_full()
             .min_w_0()
             .min_h_0()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .focus_visible(|style| style.border_1().border_color(cx.theme().ring))
+            .when_some(self.header.as_ref(), |view, header| {
+                view.child(header.clone())
+            })
             .when_some(self.editor.as_ref(), |view, editor| {
                 view.child(
-                    Editor::new(editor)
-                        .readonly(self.readonly)
-                        .bordered(false)
-                        .aria_label(if self.readonly {
-                            "Document source, readonly"
-                        } else {
-                            "Document source, editable"
-                        })
-                        .size_full(),
+                    div().flex_1().min_h_0().child(
+                        Editor::new(editor)
+                            .readonly(self.readonly)
+                            .bordered(false)
+                            .aria_label(if self.readonly {
+                                "Document source, readonly"
+                            } else {
+                                "Document source, editable"
+                            })
+                            .size_full(),
+                    ),
                 )
             })
             .when_some(self.view.as_ref(), |view, content| {
-                view.child(content.clone())
+                view.child(div().flex_1().min_h_0().child(content.clone()))
             })
             .when(self.editor.is_none() && self.view.is_none(), |view| {
                 view.child(
                     div()
-                        .p_3()
+                        .p_4()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(self.content.clone()),

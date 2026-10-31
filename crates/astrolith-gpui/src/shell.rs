@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     commands::{self, COMMANDS, CommandId},
-    editor::session::SessionChanged,
+    editor::{header::DocumentHeader, session::SessionChanged},
     file::{DocumentSource, read_document},
     frontmatter::{FrontmatterChanged, FrontmatterForm},
     layout::{
@@ -19,15 +19,18 @@ use crate::{
     settings::{Settings, SettingsStore, settings_path},
     theme::{self, ThemeMode},
 };
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Sizable, StyledExt, WindowExt,
+    ActiveTheme, Disableable, Icon, Sizable, StyledExt, TitleBar, WindowExt,
     button::{Button, ButtonVariants},
     command::{Command, CommandItem, CommandState},
     dock::{DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
+    kbd::Kbd,
+    status_bar::StatusBar,
 };
 use gpui_kit::{
     App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, PathPromptOptions,
-    Render, Subscription, Task, Window, WindowOptions, div, prelude::*, px, size,
+    Render, Subscription, Task, TestSupportExt, Window, WindowOptions, div, prelude::*, px, size,
 };
 
 type LatestSettings = Arc<Mutex<(u64, Settings)>>;
@@ -74,7 +77,7 @@ pub fn open(cx: &mut App) {
             if let Err(error) = gpui_kit::open_window(
                 WindowOptions {
                     window_min_size: Some(size(px(800.), px(600.))),
-                    ..Default::default()
+                    ..TitleBar::window_options()
                 },
                 cx,
                 |window, cx| {
@@ -132,8 +135,8 @@ impl Shell {
         let navigator = cx.new(|cx| {
             WorkspacePanel::new(
                 "navigator-panel",
-                "Files",
-                "No file open\n\nOpen a local document to view its source.",
+                "Project",
+                "No project open\n\nOpen a local document to view its source.",
                 window,
                 cx,
             )
@@ -143,6 +146,8 @@ impl Shell {
         navigator.update(cx, |navigator, cx| {
             navigator.set_view(project.clone().into(), cx)
         });
+        let header = cx.new(|cx| DocumentHeader::new(project.clone(), cx));
+        document.update(cx, |document, cx| document.set_header(header.into(), cx));
         let project_owner = project.downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             project_owner
@@ -365,11 +370,11 @@ impl Shell {
             sidebar_width: dock
                 .dock_size(DockPlacement::Left)
                 .map(f32::from)
-                .unwrap_or(224.),
+                .unwrap_or(240.),
             inspector_width: dock
                 .dock_size(DockPlacement::Right)
                 .map(f32::from)
-                .unwrap_or(224.),
+                .unwrap_or(260.),
         };
         if layout != self.settings.layout {
             self.settings.layout = layout;
@@ -448,6 +453,10 @@ impl Shell {
             CommandId::Save => {
                 self.project
                     .update(cx, |project, cx| project.save_active(window, cx));
+            }
+            CommandId::CloseDocument => {
+                self.project
+                    .update(cx, |project, cx| project.close_active(window, cx));
             }
             CommandId::RecoverUnsaved => {
                 self.project
@@ -536,16 +545,58 @@ impl Shell {
         window.open_dialog(cx, move |dialog, _, _| {
             let owner = owner.clone();
             let commands_for_confirm = commands.clone();
-            dialog.title("Commands").child(
+            dialog.title("Command palette").w_128().child(
                 Command::new(&palette)
                     .bordered(false)
                     .placeholder("Search commands…")
                     .items(commands.iter().map(|command| {
+                        let label: gpui_kit::SharedString = command.label().into();
+                        let shortcut: gpui_kit::SharedString = command
+                            .shortcut()
+                            .and_then(|key| gpui_kit::Keystroke::parse(key).ok())
+                            .map(|key| Kbd::format(&key).into())
+                            .unwrap_or_default();
+                        let command = *command;
                         CommandItem::new()
-                            .label(command.label())
-                            .disabled(*command == CommandId::OpenFile && opening)
+                            .label(label.clone())
+                            .icon(command_icon(command))
+                            .child(move |_, cx| {
+                                div()
+                                    .h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_4()
+                                    .child(
+                                        div()
+                                            .h_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                Icon::new(command_icon(command))
+                                                    .small()
+                                                    .text_color(cx.theme().muted_foreground),
+                                            )
+                                            .child(label.clone()),
+                                    )
+                                    .when(!shortcut.is_empty(), |row| {
+                                        row.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(shortcut.clone()),
+                                        )
+                                    })
+                            })
+                            .disabled(command == CommandId::OpenFile && opening)
                     }))
-                    .empty(|_, _, _| div().p_3().child("No matching commands"))
+                    .empty(|_, _, cx| {
+                        div()
+                            .p_4()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No matching commands")
+                    })
                     .on_confirm(move |index, window, cx| {
                         let Some(command) = commands_for_confirm.get(index.row).copied() else {
                             return;
@@ -631,6 +682,29 @@ impl Shell {
     }
 }
 
+fn command_icon(command: CommandId) -> IconName {
+    match command {
+        CommandId::OpenFile => IconName::FileText,
+        CommandId::OpenProject => IconName::FolderOpen,
+        CommandId::Save => IconName::Save,
+        CommandId::CloseDocument => IconName::X,
+        CommandId::RecoverUnsaved => IconName::RotateCcw,
+        CommandId::OpenPalette => IconName::Command,
+        CommandId::ToggleSidebar => IconName::PanelLeft,
+        CommandId::ToggleInspector => IconName::PanelRight,
+        CommandId::TogglePreview => IconName::PanelBottom,
+        CommandId::StartPreview => IconName::Play,
+        CommandId::StopPreview => IconName::Square,
+        CommandId::OpenPreview => IconName::Globe,
+        CommandId::FocusDocument => IconName::FileText,
+        CommandId::LightTheme => IconName::Sun,
+        CommandId::DarkTheme => IconName::Moon,
+        CommandId::SystemTheme => IconName::Monitor,
+        CommandId::ResetLayout => IconName::RotateCcw,
+        CommandId::Quit => IconName::X,
+    }
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Activate the frontmatter form whenever the active document (or its
@@ -650,6 +724,28 @@ impl Render for Shell {
             }
         }
         let layout = &self.settings.layout;
+        let project_name = self.project.read(cx).project_name();
+        let tabs = self.project.read(cx).open_tabs();
+        let active_tab = tabs.get(self.project.read(cx).active_tab_index());
+        let document_state = match active_tab {
+            None if self.opening => "Opening file…".to_owned(),
+            None if self.document.read(cx).is_editable() => self.file_status.clone(),
+            None => "No file open".to_owned(),
+            Some(tab) if tab.externally_changed => "Changed on disk".to_owned(),
+            Some(tab) if tab.dirty => "Unsaved changes".to_owned(),
+            Some(_) => "Saved".to_owned(),
+        };
+        let language = active_tab
+            .map(|tab| {
+                if tab.label.ends_with(".mdx") {
+                    "MDX"
+                } else {
+                    "Markdown"
+                }
+            })
+            .unwrap_or("—");
+
+        let close_owner = self.project.downgrade();
         div()
             .v_flex()
             .track_focus(&self.focus)
@@ -661,104 +757,125 @@ impl Render for Shell {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(
-                div()
-                    .h_flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
+                TitleBar::new()
+                    .on_close_window(move |_, window, cx| {
+                        let clean = close_owner
+                            .update(cx, |project, cx| project.guard_window_close(window, cx))
+                            .unwrap_or(true);
+                        if clean {
+                            window.remove_window();
+                        }
+                    })
                     .child(
-                        Button::new("open-project-toolbar")
-                            .small()
-                            .ghost()
-                            .label(CommandId::OpenProject.label())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.execute(CommandId::OpenProject, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("open-file")
-                            .small()
-                            .ghost()
-                            .label(CommandId::OpenFile.label())
-                            .disabled(self.opening)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.execute(CommandId::OpenFile, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("command-palette")
-                            .small()
-                            .ghost()
-                            .label(CommandId::OpenPalette.label())
-                            .track_focus(&self.palette_focus)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.palette_focus.focus(window, cx);
-                                this.execute(CommandId::OpenPalette, window, cx);
-                            })),
-                    )
-                    .children(
-                        [
-                            (
-                                "toggle-sidebar",
-                                CommandId::ToggleSidebar,
-                                if layout.sidebar_visible {
-                                    "Hide files"
-                                } else {
-                                    "Show files"
-                                },
+                        div()
+                            .h_flex()
+                            .flex_1()
+                            .h_full()
+                            .items_center()
+                            .gap_2()
+                            .pr_2()
+                            .child(
+                                Icon::new(IconName::Asterisk)
+                                    .small()
+                                    .text_color(cx.theme().accent),
+                            )
+                            .child(div().text_sm().child("Astrolith"))
+                            .when_some(project_name, |row, name| {
+                                row.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(name),
+                                )
+                            })
+                            .child(div().flex_1())
+                            .child(
+                                Button::new("command-palette")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Search)
+                                    .label("Search or run a command…")
+                                    .tooltip(CommandId::OpenPalette.label())
+                                    .track_focus(&self.palette_focus)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.palette_focus.focus(window, cx);
+                                        this.execute(CommandId::OpenPalette, window, cx);
+                                    })),
+                            )
+                            .child(div().flex_1())
+                            .children(
+                                [
+                                    (
+                                        "toggle-sidebar",
+                                        CommandId::ToggleSidebar,
+                                        IconName::PanelLeft,
+                                        layout.sidebar_visible,
+                                        "Toggle project panel",
+                                    ),
+                                    (
+                                        "toggle-preview",
+                                        CommandId::TogglePreview,
+                                        IconName::PanelBottom,
+                                        layout.preview_visible,
+                                        "Toggle preview panel",
+                                    ),
+                                    (
+                                        "toggle-inspector",
+                                        CommandId::ToggleInspector,
+                                        IconName::PanelRight,
+                                        layout.inspector_visible,
+                                        "Toggle inspector",
+                                    ),
+                                ]
+                                .map(
+                                    |(id, kind, icon, visible, tooltip)| {
+                                        Button::new(id)
+                                            .xsmall()
+                                            .ghost()
+                                            .icon(icon)
+                                            .tooltip(tooltip)
+                                            .toggled(visible)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.execute(kind, window, cx)
+                                            }))
+                                    },
+                                ),
                             ),
-                            (
-                                "toggle-inspector",
-                                CommandId::ToggleInspector,
-                                if layout.inspector_visible {
-                                    "Hide inspector"
-                                } else {
-                                    "Show inspector"
-                                },
-                            ),
-                            (
-                                "toggle-preview",
-                                CommandId::TogglePreview,
-                                if layout.preview_visible {
-                                    "Hide preview"
-                                } else {
-                                    "Show preview"
-                                },
-                            ),
-                        ]
-                        .map(|(id, kind, label)| {
-                            Button::new(id)
-                                .small()
-                                .ghost()
-                                .label(label)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.execute(kind, window, cx)
-                                }))
-                        }),
                     ),
             )
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
-            .child(
-                div()
+            .child({
+                let bar = StatusBar::new()
+                    .h_6()
                     .px_3()
-                    .py_1()
                     .text_xs()
+                    .bg(cx.theme().status_bar)
                     .border_t_1()
-                    .border_color(cx.theme().border)
+                    .border_color(cx.theme().window_border)
                     .text_color(cx.theme().muted_foreground)
-                    .child(if self.opening {
-                        "Opening file…".to_owned()
-                    } else if self.document.read(cx).is_editable() {
-                        "Editing in memory · Ctrl/Cmd+S saves.".into()
+                    .left(Icon::new(IconName::Folder).xsmall())
+                    .left(
+                        self.project
+                            .read(cx)
+                            .project_name()
+                            .unwrap_or_else(|| "No project".into()),
+                    )
+                    .left(div().w_2())
+                    .left(document_state)
+                    .right(language)
+                    .right("UTF-8")
+                    .right(if cx.theme().is_dark() {
+                        "One Dark"
                     } else {
-                        self.file_status.clone()
-                    })
-                    .when_some(self.warning.as_ref(), |view, warning| {
-                        view.child(div().text_color(cx.theme().warning).child(warning.clone()))
-                    }),
-            )
+                        "One Light"
+                    });
+                let bar = if let Some(warning) = self.warning.as_ref() {
+                    bar.left(div().text_color(cx.theme().warning).child(warning.clone()))
+                } else {
+                    bar
+                };
+                div().id("status-bar").test_support().child(bar)
+            })
     }
 }
 
@@ -832,16 +949,12 @@ mod tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(window.find("document-panel").bounds(), initial);
-            window.click("toggle-dock:Right", cx);
+            window.click("toggle-inspector", cx);
         })
         .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             assert!(!view.read(cx).settings.layout.inspector_visible);
             window.render_frame(cx);
-            assert_eq!(
-                window.find("toggle-inspector").label(),
-                Some("Show inspector")
-            );
             window.click("toggle-preview", cx);
         })
         .unwrap();
@@ -1021,6 +1134,9 @@ mod tests {
             cx.simulate_window_resize(handle.into(), size(px(800.), px(600.)));
             cx.update_window(handle.into(), |_, window, cx| {
                 window.render_frame(cx);
+                assert!(window.find("title-bar").visible());
+                assert!(window.find("status-bar").visible());
+                assert!(window.find("document-header").visible());
                 for id in ["navigator-panel", "document-panel", "inspector-panel"] {
                     let bounds = window.find(id).bounds();
                     assert!(bounds.size.width > px(50.) && bounds.size.height > px(100.));

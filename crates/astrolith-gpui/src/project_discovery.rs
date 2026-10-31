@@ -18,10 +18,9 @@ use astrolith_document::{
 use astrolith_preview::RouteMapping;
 use astrolith_workspace::{CollectionEntry, CollectionWatcher, scan_collections};
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IndexPath, Sizable, StyledExt, WindowExt,
+    ActiveTheme, Disableable, Icon, IconName, IndexPath, Sizable, StyledExt, WindowExt,
     button::{Button, ButtonVariants},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
-    tab::{Tab, TabBar},
 };
 use gpui_kit::{
     App, AppContext, Context, Entity, EventEmitter, Focusable, IntoElement, PathPromptOptions,
@@ -57,44 +56,229 @@ impl Drop for ServiceWatcher {
     }
 }
 
+/// One rendered project-panel row; labels are built only when the index or
+/// filter changes, never during a frame.
+struct EntryRow {
+    index: usize,
+    id: SharedString,
+    label: SharedString,
+    detail: SharedString,
+    search: SharedString,
+    path: PathBuf,
+}
+
+struct EntrySection {
+    title: SharedString,
+    rows: Vec<EntryRow>,
+}
+
 struct EntryList {
     entries: Arc<Vec<CollectionEntry>>,
+    sections: Vec<EntrySection>,
+    query: String,
+    selected: Option<IndexPath>,
+    active: Option<PathBuf>,
+    root: Option<PathBuf>,
+}
+impl EntryList {
+    fn new(entries: Arc<Vec<CollectionEntry>>) -> Self {
+        let mut list = Self {
+            entries,
+            sections: Vec::new(),
+            query: String::new(),
+            selected: None,
+            active: None,
+            root: None,
+        };
+        list.rebuild();
+        list
+    }
+
+    fn rebuild(&mut self) {
+        let query = self.query.to_lowercase();
+        let mut rows: Vec<(usize, &CollectionEntry)> = self.entries.iter().enumerate().collect();
+        rows.sort_by(|(_, left), (_, right)| {
+            left.entry()
+                .id()
+                .collection()
+                .as_str()
+                .cmp(right.entry().id().collection().as_str())
+                .then_with(|| {
+                    left.entry()
+                        .source()
+                        .as_str()
+                        .cmp(right.entry().source().as_str())
+                })
+        });
+        let mut sections: Vec<EntrySection> = Vec::new();
+        for (index, entry) in rows {
+            let collection = entry.entry().id().collection().as_str();
+            let source = entry.entry().source().as_str();
+            let source_lower = source.to_lowercase();
+            if !query.is_empty()
+                && !source_lower.contains(&query)
+                && !collection.to_lowercase().contains(&query)
+            {
+                continue;
+            }
+            let label = source.rsplit('/').next().unwrap_or(source);
+            let detail = source
+                .strip_suffix(label)
+                .unwrap_or_default()
+                .trim_end_matches('/');
+            let id = SharedString::from(format!("entry:{collection}:{}", entry.entry().id().id()));
+            if sections
+                .last()
+                .is_none_or(|section| section.title.as_ref() != collection)
+            {
+                sections.push(EntrySection {
+                    title: collection.to_owned().into(),
+                    rows: Vec::new(),
+                });
+            }
+            let path = self
+                .root
+                .as_ref()
+                .map(|root| root.join(source))
+                .unwrap_or_else(|| PathBuf::from(source));
+            sections
+                .last_mut()
+                .expect("a section was just pushed")
+                .rows
+                .push(EntryRow {
+                    index,
+                    id,
+                    label: label.to_owned().into(),
+                    detail: detail.to_owned().into(),
+                    search: source_lower.into(),
+                    path,
+                });
+        }
+        self.sections = sections;
+    }
+
+    fn entry_index(&self, ix: IndexPath) -> Option<usize> {
+        self.sections
+            .get(ix.section)?
+            .rows
+            .get(ix.row)
+            .map(|row| row.index)
+    }
+
+    fn selected_row(&self) -> Option<(usize, usize)> {
+        self.sections
+            .iter()
+            .enumerate()
+            .find_map(|(section, group)| {
+                group
+                    .rows
+                    .iter()
+                    .position(|row| Some(&row.path) == self.active.as_ref())
+                    .map(|row| (section, row))
+            })
+    }
 }
 impl ListDelegate for EntryList {
     type Item = ListItem;
-    fn items_count(&self, _: usize, _: &App) -> usize {
-        self.entries.len()
+    fn sections_count(&self, _: &App) -> usize {
+        self.sections.len().max(1)
+    }
+    fn items_count(&self, section: usize, _: &App) -> usize {
+        self.sections
+            .get(section)
+            .map_or(0, |section| section.rows.len())
+    }
+    fn render_section_header(
+        &mut self,
+        section: usize,
+        _: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Option<impl IntoElement> {
+        let section = self.sections.get(section)?;
+        Some(
+            div()
+                .h_flex()
+                .items_center()
+                .justify_between()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .text_color(cx.theme().muted_foreground)
+                .child(section.title.clone())
+                .child(SharedString::from(section.rows.len().to_string())),
+        )
     }
     fn render_item(
         &mut self,
         ix: IndexPath,
         _: &mut Window,
-        _: &mut Context<ListState<Self>>,
+        cx: &mut Context<ListState<Self>>,
     ) -> Option<ListItem> {
-        let entry = self.entries.get(ix.row)?;
-        let id = entry.entry().id();
-        let label = format!(
-            "{} / {}",
-            id.collection().as_str(),
-            entry.entry().source().as_str()
-        );
+        let row = self.sections.get(ix.section)?.rows.get(ix.row)?;
+        let active = Some(&row.path) == self.active.as_ref();
+        let selected = active || self.selected == Some(ix);
+        let detail = row.detail.clone();
         Some(
-            ListItem::new(SharedString::from(format!(
-                "entry:{}:{}",
-                id.collection().as_str(),
-                id.id()
-            )))
-            .accessibility_label(label.clone())
-            .child(div().text_sm().truncate().child(label)),
+            ListItem::new(row.id.clone())
+                .selected(selected)
+                .accessibility_label(row.search.clone())
+                .child(
+                    div()
+                        .h_flex()
+                        .min_w_0()
+                        .items_center()
+                        .gap_2()
+                        .child(Icon::new(IconName::FileText).small().text_color(if active {
+                            cx.theme().foreground
+                        } else {
+                            cx.theme().muted_foreground
+                        }))
+                        .child(div().min_w_0().truncate().child(row.label.clone()))
+                        .when(!detail.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(detail),
+                            )
+                        }),
+                ),
         )
     }
     fn set_selected_index(
         &mut self,
-        _: Option<IndexPath>,
+        ix: Option<IndexPath>,
         _: &mut Window,
         _: &mut Context<ListState<Self>>,
     ) {
+        self.selected = ix;
     }
+    fn perform_search(
+        &mut self,
+        query: &str,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) -> Task<()> {
+        if self.query != query {
+            self.query.clear();
+            self.query.push_str(query);
+            self.rebuild();
+        }
+        Task::ready(())
+    }
+}
+
+/// A retained document as displayed by the editor tab strip.
+#[derive(Clone, Debug)]
+pub(crate) struct OpenTab {
+    pub path: PathBuf,
+    pub label: SharedString,
+    pub collection: Option<SharedString>,
+    pub dirty: bool,
+    pub externally_changed: bool,
 }
 
 pub(crate) struct ProjectWorkspace {
@@ -102,6 +286,8 @@ pub(crate) struct ProjectWorkspace {
     manifest: Option<Arc<ProjectManifest>>,
     entries: Arc<Vec<CollectionEntry>>,
     list: Entity<ListState<EntryList>>,
+    tabs: Arc<Vec<OpenTab>>,
+    tab_order: Vec<PathBuf>,
     generation: u64,
     index_revision: u64,
     project_id: Option<ProjectId>,
@@ -148,19 +334,15 @@ impl ProjectWorkspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let entries = Arc::new(Vec::new());
-        let list = cx.new(|cx| {
-            ListState::new(
-                EntryList {
-                    entries: entries.clone(),
-                },
-                window,
-                cx,
-            )
-        });
+        let list = cx
+            .new(|cx| ListState::new(EntryList::new(entries.clone()), window, cx).searchable(true));
         let subscription =
             cx.subscribe_in(&list, window, |this, _, event: &ListEvent, window, cx| {
                 if let ListEvent::Confirm(ix) = event {
-                    this.open_entry(ix.row, window, cx);
+                    let index = this.list.read(cx).delegate().entry_index(*ix);
+                    if let Some(index) = index {
+                        this.open_entry(index, window, cx);
+                    }
                 }
             });
         Self {
@@ -168,6 +350,8 @@ impl ProjectWorkspace {
             manifest: None,
             entries,
             list,
+            tabs: Arc::new(Vec::new()),
+            tab_order: Vec::new(),
             generation: 0,
             index_revision: 0,
             project_id: None,
@@ -199,6 +383,90 @@ impl ProjectWorkspace {
         self.sessions
             .values()
             .any(|session| session.read(cx).is_dirty(cx))
+    }
+
+    /// Project name shown in window chrome; `None` until a project is open.
+    pub(crate) fn project_name(&self) -> Option<SharedString> {
+        let root = self.manifest.as_ref()?.root();
+        Some(
+            root.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.display().to_string())
+                .into(),
+        )
+    }
+
+    pub(crate) fn project_root(&self) -> Option<PathBuf> {
+        self.manifest
+            .as_ref()
+            .map(|manifest| manifest.root().to_path_buf())
+    }
+
+    pub(crate) fn open_tabs(&self) -> Arc<Vec<OpenTab>> {
+        self.tabs.clone()
+    }
+
+    pub(crate) fn active_tab_index(&self) -> usize {
+        self.active
+            .as_ref()
+            .and_then(|active| self.tabs.iter().position(|tab| &tab.path == active))
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn active_path(&self) -> Option<PathBuf> {
+        self.active.clone()
+    }
+
+    /// Rebuild the tab strip model from retained sessions. Called only when a
+    /// session is opened, closed, saved or reports a state change.
+    fn sync_tabs(&mut self, cx: &App) {
+        let root = self
+            .manifest
+            .as_ref()
+            .map(|manifest| manifest.root().to_path_buf());
+        let mut tabs = Vec::with_capacity(self.sessions.len());
+        for path in &self.tab_order {
+            let Some(session) = self.sessions.get(path) else {
+                continue;
+            };
+            let session = session.read(cx);
+            let relative = root
+                .as_ref()
+                .and_then(|root| path.strip_prefix(root).ok())
+                .unwrap_or(path);
+            let label = relative
+                .file_name()
+                .unwrap_or(relative.as_os_str())
+                .to_string_lossy()
+                .into_owned();
+            tabs.push(OpenTab {
+                path: path.clone(),
+                label: label.into(),
+                collection: self
+                    .session_collections
+                    .get(path)
+                    .map(|collection| collection.as_str().into()),
+                dirty: session.dirty,
+                externally_changed: session.externally_changed,
+            });
+        }
+        self.tabs = Arc::new(tabs);
+    }
+
+    fn update_tab_state(&mut self, path: &std::path::Path, cx: &App) {
+        let Some(session) = self.sessions.get(path) else {
+            return;
+        };
+        let session = session.read(cx);
+        let dirty = session.dirty;
+        let externally_changed = session.externally_changed;
+        if let Some(tab) = Arc::make_mut(&mut self.tabs)
+            .iter_mut()
+            .find(|tab| tab.path == path)
+        {
+            tab.dirty = dirty;
+            tab.externally_changed = externally_changed;
+        }
     }
 
     /// Install normalized collection schemas (from the R1 generation service).
@@ -363,9 +631,7 @@ impl ProjectWorkspace {
                     session
                         .editor
                         .update(cx, |editor, cx| editor.set_value(text.clone(), window, cx));
-                    let current = session.editor.read(cx).text().to_string();
-                    let _ = session.buffer.apply_text(current);
-                    session.dirty = session.buffer.is_dirty();
+                    session.sync_buffer(cx);
                     cx.emit(SessionChanged);
                     cx.notify();
                 });
@@ -447,6 +713,7 @@ impl ProjectWorkspace {
         self.sessions.clear();
         self.session_subscriptions.clear();
         self.session_collections.clear();
+        self.tab_order.clear();
         self.schemas.clear();
         self.pending_recovery.clear();
         self.manifest = None;
@@ -601,6 +868,7 @@ impl ProjectWorkspace {
                             for (path, fingerprint) in changes {
                                 if let Some(session) = this.sessions.get(&path) {
                                     session.update(cx, |session, _| session.externally_changed = fingerprint != Some(session.disk_fingerprint));
+                                    this.update_tab_state(&path, cx);
                                 }
                             }
                             match index {
@@ -641,13 +909,23 @@ impl ProjectWorkspace {
             .expect("index revision exhausted");
         self.loads.clear();
         self.entries = Arc::new(entries);
+        self.sync_tabs(cx);
         tracing::debug!(
             entries = self.entries.len(),
             index_revision = self.index_revision,
             "published project entries"
         );
+        let root = self.project_root();
+        let active = self.active.clone();
         self.list.update(cx, |list, cx| {
-            list.delegate_mut().entries = self.entries.clone();
+            let delegate = list.delegate_mut();
+            delegate.entries = self.entries.clone();
+            delegate.root = root;
+            delegate.active = active;
+            delegate.rebuild();
+            delegate.selected = delegate
+                .selected_row()
+                .map(|(section, row)| IndexPath::new(row).section(section));
             cx.notify();
         });
     }
@@ -775,13 +1053,20 @@ impl ProjectWorkspace {
                 // Only a coalesced first load can create an editor. Refresh never replaces it.
                 let session =
                     cx.new(|cx| DocumentSession::new(identity.clone(), source, window, cx));
-                let subscription = cx.subscribe(&session, |this, _, _: &SessionChanged, cx| {
-                    this.schedule_recovery(cx);
-                    cx.emit(SessionChanged);
-                    cx.notify();
-                });
+                let tab_key = key.clone();
+                let subscription =
+                    cx.subscribe(&session, move |this, _, _: &SessionChanged, cx| {
+                        this.update_tab_state(&tab_key, cx);
+                        this.schedule_recovery(cx);
+                        cx.emit(SessionChanged);
+                        cx.notify();
+                    });
                 self.session_subscriptions.insert(key.clone(), subscription);
                 self.sessions.insert(key.clone(), session.clone());
+                if !self.tab_order.contains(&key) {
+                    self.tab_order.push(key.clone());
+                }
+                self.sync_tabs(cx);
                 if self.active.as_ref() == Some(&key) {
                     self.install(&key, session, cx);
                     self.document.read(cx).focus_handle(cx).focus(window, cx);
@@ -797,7 +1082,7 @@ impl ProjectWorkspace {
         }
         cx.notify();
     }
-    fn activate_session(
+    pub(crate) fn activate_session(
         &mut self,
         path: &std::path::Path,
         window: &mut Window,
@@ -808,7 +1093,20 @@ impl ProjectWorkspace {
         };
         self.active = Some(path.to_owned());
         self.install(path, session, cx);
+        self.refresh_entry_selection(cx);
         self.document.read(cx).focus_handle(cx).focus(window, cx);
+    }
+
+    fn refresh_entry_selection(&mut self, cx: &mut Context<Self>) {
+        let active = self.active.clone();
+        self.list.update(cx, |list, cx| {
+            let delegate = list.delegate_mut();
+            delegate.active = active;
+            delegate.selected = delegate
+                .selected_row()
+                .map(|(section, row)| IndexPath::new(row).section(section));
+            cx.notify();
+        });
     }
     fn install(
         &mut self,
@@ -827,25 +1125,58 @@ impl ProjectWorkspace {
         self.status = if session.read(cx).externally_changed {"Source changed on disk. This buffer is retained; close and reopen an unchanged document to reload."} else {"Editing in memory · Ctrl/Cmd+S saves."}.into();
         cx.notify();
     }
-    fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.active.clone() else {
             return;
         };
+        self.close_path(path, window, cx);
+    }
+
+    /// Close one retained document. Dirty content is never discarded without
+    /// an explicit confirmation naming the affected document.
+    pub(crate) fn close_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self
             .sessions
             .get(&path)
             .is_some_and(|session| session.read(cx).is_dirty(cx))
         {
+            let title = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
             let owner = cx.weak_entity();
-            window.open_dialog(cx,move|dialog,_,_| {
-                let owner=owner.clone();let path=path.clone();
-                dialog.title("Discard unsaved changes?")
-                    .child("Saving is not available yet. Keep editing to preserve this document in memory.")
-                    .footer(div().h_flex().gap_2()
-                        .child(Button::new("keep-editing").primary().label("Keep editing").on_click(|_,window,cx|window.close_dialog(cx)))
-                        .child(Button::new("discard-document").danger().label("Discard changes").on_click(move|_,window,cx| {
-                            let _=owner.update(cx,|this,cx|this.remove_session(&path,cx));window.close_dialog(cx);
-                        })))
+            window.open_dialog(cx, move |dialog, _, _| {
+                let owner = owner.clone();
+                let path = path.clone();
+                dialog
+                    .title(format!("Discard changes to “{title}”?"))
+                    .child("The document has unsaved changes. Keeping it open preserves them.")
+                    .footer(
+                        div()
+                            .h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("keep-editing")
+                                    .primary()
+                                    .label("Keep editing")
+                                    .on_click(|_, window, cx| window.close_dialog(cx)),
+                            )
+                            .child(
+                                Button::new("discard-document")
+                                    .danger()
+                                    .label("Discard changes")
+                                    .on_click(move |_, window, cx| {
+                                        let _ = owner
+                                            .update(cx, |this, cx| this.remove_session(&path, cx));
+                                        window.close_dialog(cx);
+                                    }),
+                            ),
+                    )
             });
         } else {
             self.remove_session(&path, cx);
@@ -866,7 +1197,10 @@ impl ProjectWorkspace {
         self.sessions.remove(path);
         self.session_subscriptions.remove(path);
         self.session_collections.remove(path);
+        self.tab_order.retain(|retained| retained != path);
         self.active = None;
+        self.sync_tabs(cx);
+        self.refresh_entry_selection(cx);
         self.document
             .update(cx, |document, cx| document.clear_editor(cx));
         cx.emit(SessionChanged);
@@ -913,9 +1247,7 @@ impl ProjectWorkspace {
         // Capture the latest editor text into the buffer before snapshotting so a
         // queued Change event cannot cause a stale snapshot.
         session.update(cx, |session, cx| {
-            let text = session.editor.read(cx).text().to_string();
-            let _ = session.buffer.apply_text(text);
-            session.dirty = session.buffer.is_dirty();
+            session.sync_buffer(cx);
             cx.notify();
         });
         let snapshot = DocumentSnapshot::capture(&session.read(cx).buffer, path.clone());
@@ -956,9 +1288,12 @@ impl ProjectWorkspace {
                     revision,
                     "document saved"
                 );
-                let content = session.read(cx).buffer.current_text().to_owned();
                 let identity = session.read(cx).buffer.identity().clone();
-                let marked = session.update(cx, |session, cx| {
+                let (marked, content) = session.update(cx, |session, cx| {
+                    // A newer edit after the snapshot may still be pending;
+                    // materialize it so `confirm_saved` sees the newer revision.
+                    session.sync_buffer(cx);
+                    let content = session.buffer.current_text().to_owned();
                     let marked = session
                         .buffer
                         .confirm_saved(DocumentRevision::new(revision), &content);
@@ -967,7 +1302,7 @@ impl ProjectWorkspace {
                         session.externally_changed = false;
                     }
                     cx.notify();
-                    marked
+                    (marked, content)
                 });
                 if marked && let Some(store) = self.recovery.clone() {
                     let task = runtime::blocking(cx, move || {
@@ -1055,16 +1390,23 @@ impl ProjectWorkspace {
         }));
     }
 
-    fn persist_recovery_records(&self, cx: &App) -> (Vec<RecoveryRecord>, Vec<DocumentIdentity>) {
+    fn persist_recovery_records(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> (Vec<RecoveryRecord>, Vec<DocumentIdentity>) {
         let now = now_secs();
         let mut dirty = Vec::new();
         let mut clean = Vec::new();
-        for session in self.sessions.values() {
+        for session in self.sessions.values().cloned().collect::<Vec<_>>() {
+            let (is_dirty, identity) = session.update(cx, |session, cx| {
+                session.sync_buffer(cx);
+                (session.buffer.is_dirty(), session.buffer.identity().clone())
+            });
             let session = session.read(cx);
-            if session.is_dirty(cx) {
+            if is_dirty {
                 dirty.push(RecoveryRecord::capture(&session.buffer, now));
             } else {
-                clean.push(session.buffer.identity().clone());
+                clean.push(identity);
             }
         }
         (dirty, clean)
@@ -1254,110 +1596,105 @@ impl ProjectWorkspace {
 
 impl Render for ProjectWorkspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_session = self
-            .active
-            .as_ref()
-            .and_then(|path| self.sessions.get(path));
-        let active_loaded = active_session.is_some();
-        let paths: Vec<_> = self.sessions.keys().cloned().collect();
-        let selected = paths
-            .iter()
-            .position(|path| Some(path) == self.active.as_ref())
-            .unwrap_or(0);
-        let tabs = TabBar::new("open-documents")
-            .selected_index(selected)
-            .children(paths.iter().map(|path| {
-                Tab::new().label(
-                    path.strip_prefix(
-                        self.manifest
-                            .as_ref()
-                            .map_or(std::path::Path::new(""), |manifest| manifest.root()),
-                    )
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .into_owned(),
-                )
-            }))
-            .on_click(cx.listener(move |this, ix: &usize, window, cx| {
-                if let Some(path) = paths.get(*ix) {
-                    this.activate_session(path, window, cx);
-                }
-            }));
-        let external = active_session.is_some_and(|session| session.read(cx).externally_changed);
-        let dirty = active_session.is_some_and(|session| session.read(cx).dirty);
+        let has_project = self.manifest.is_some();
+        let count = self.entries.len();
         div()
             .v_flex()
             .size_full()
             .min_h_0()
             .min_w_0()
-            .child(
-                div().p_2().child(
-                    Button::new("open-project")
-                        .small()
-                        .ghost()
-                        .label("Open project…")
-                        .disabled(self.loading)
-                        .on_click(cx.listener(|this, _, window, cx| this.prompt(window, cx))),
-                ),
-            )
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(self.status.clone()),
-            )
-            .when_some(self.index_error.as_ref(), |view, error| {
+            .when(!has_project, |view| {
                 view.child(
                     div()
-                        .px_3()
-                        .text_xs()
-                        .text_color(cx.theme().warning)
-                        .child(format!("Index unavailable: {error}")),
-                )
-            })
-            .when(!self.sessions.is_empty(), |view| view.child(tabs))
-            .child(div().flex_1().min_h_0().child(List::new(&self.list)))
-            .when(active_loaded, |view| {
-                view.child(
-                    div()
-                        .p_2()
                         .v_flex()
-                        .gap_1()
-                        .when(external, |view| {
-                            view.child(
-                                div()
-                                    .text_color(cx.theme().warning)
-                                    .child("Source changed on disk · Buffer retained"),
-                            )
-                        })
-                        .child(if dirty {
-                            "Unsaved changes"
-                        } else {
-                            "Unchanged"
-                        })
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .p_6()
                         .child(
-                            Button::new("save-document")
-                                .small()
-                                .ghost()
-                                .label("Save")
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.save_active(window, cx)),
-                                ),
+                            Icon::new(IconName::FolderOpen)
+                                .size_8()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(div().text_sm().child("No project open"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_center()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Open an Astro project to browse its content collections."),
                         )
                         .child(
-                            Button::new("close-document")
+                            Button::new("open-project")
                                 .small()
-                                .ghost()
-                                .label("Close document")
+                                .label("Open project…")
+                                .disabled(self.loading)
                                 .on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.close_active(window, cx)
-                                    }),
+                                    cx.listener(|this, _, window, cx| this.prompt(window, cx)),
                                 ),
                         ),
                 )
+            })
+            .when(has_project, |view| {
+                view.child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .justify_between()
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(cx.theme().window_border)
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(format!("{count} entries"))),
+                        )
+                        .child(
+                            Button::new("open-project")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::FolderOpen)
+                                .tooltip("Open project…")
+                                .disabled(self.loading)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.prompt(window, cx)),
+                                ),
+                        ),
+                )
+                .child(
+                    div().flex_1().min_h_0().child(
+                        List::new(&self.list)
+                            .small()
+                            .search_placeholder("Filter by file or folder"),
+                    ),
+                )
+                .when_some(self.index_error.as_ref(), |view, error| {
+                    view.child(
+                        div()
+                            .border_t_1()
+                            .border_color(cx.theme().window_border)
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .text_color(cx.theme().warning)
+                            .child(format!("Index unavailable: {error}")),
+                    )
+                })
+                .when(self.loading || self.refreshing, |view| {
+                    view.child(
+                        div()
+                            .border_t_1()
+                            .border_color(cx.theme().window_border)
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.status.clone()),
+                    )
+                })
             })
     }
 }
@@ -1539,12 +1876,7 @@ mod tests {
             cx.run_until_parked();
         }
         assert!(view.read_with(cx, |view, cx| {
-            view.sessions
-                .get(&first)
-                .unwrap()
-                .read(cx)
-                .buffer
-                .is_dirty()
+            view.sessions.get(&first).unwrap().read(cx).is_dirty(cx)
         }));
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| assert!(!view.guard_window_close(window, cx)));
@@ -1564,8 +1896,7 @@ mod tests {
         view.read_with(cx, |view, cx| {
             let session = view.sessions.get(&first).unwrap().read(cx);
             assert_eq!(session.editor.read(cx).value(), "# Changed\n");
-            assert!(session.buffer.is_dirty());
-            assert!(session.buffer.revision().get() > 0);
+            assert!(session.is_dirty(cx));
         });
         let next = fixture();
         let generation = view.read_with(cx, |view, _| view.generation);
@@ -1982,7 +2313,7 @@ mod tests {
 
         edit_active(cx, handle, &view, "# Saved\n").await;
         assert!(view.read_with(cx, |view, cx| {
-            view.sessions.get(&path).unwrap().read(cx).buffer.is_dirty()
+            view.sessions.get(&path).unwrap().read(cx).is_dirty(cx)
         }));
 
         cx.update_window(handle.into(), |_, window, cx| {

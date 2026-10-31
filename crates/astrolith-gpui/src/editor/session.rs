@@ -9,6 +9,9 @@ pub(crate) struct DocumentSession {
     pub externally_changed: bool,
     pub dirty: bool,
     pub disk_fingerprint: u64,
+    /// Editor changes are materialized into the retained text buffer lazily:
+    /// typing stays O(1), while save/recovery read the latest Rope once.
+    pending: bool,
     _change: Subscription,
 }
 pub(crate) struct SessionChanged;
@@ -50,15 +53,13 @@ impl DocumentSession {
                 .language("markdown")
                 .default_value(current)
         });
-        let change = cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
+        let change = cx.subscribe(&editor, |this, _editor, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                // Changes are captured on editor events, never during render.
-                // Keeping the retained editor preserves selection, history and IME state.
-                let text = editor.read(cx).text().to_string();
-                if let Err(error) = this.buffer.apply_text(text) {
-                    eprintln!("{error}");
-                }
-                this.dirty = this.buffer.is_dirty();
+                // Materializing a whole document per keystroke makes typing
+                // linear in file size. Record the dirty state (length first)
+                // and sync the buffer only when a save or recovery needs it.
+                this.pending = true;
+                this.dirty = this.is_dirty(cx);
                 cx.emit(SessionChanged);
                 cx.notify();
             }
@@ -69,14 +70,39 @@ impl DocumentSession {
             externally_changed: false,
             dirty,
             disk_fingerprint,
+            pending: false,
             _change: change,
         }
     }
 
     pub fn is_dirty(&self, cx: &App) -> bool {
+        if !self.pending {
+            return self.buffer.is_dirty();
+        }
         // The event queue may not have delivered the last Change at close time.
-        // Read the real editor before permitting a destructive transition.
-        self.editor.read(cx).text() != self.buffer.original_text()
+        // Compare the live Rope against the baseline without allocating; an
+        // equal length is the only case that can still be clean.
+        let text = self.editor.read(cx).text();
+        if text.len() != self.buffer.original_text().len() {
+            return true;
+        }
+        !text.chars().eq(self.buffer.original_text().chars())
+    }
+
+    /// Materialize the live editor text into the retained buffer.
+    ///
+    /// Called by save and recovery only; the editor event path never copies a
+    /// whole document.
+    pub fn sync_buffer(&mut self, cx: &App) {
+        if !self.pending {
+            return;
+        }
+        let text = self.editor.read(cx).text().to_string();
+        if let Err(error) = self.buffer.apply_text(text) {
+            eprintln!("{error}");
+        }
+        self.dirty = self.buffer.is_dirty();
+        self.pending = false;
     }
 }
 
