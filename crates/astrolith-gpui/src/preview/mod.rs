@@ -14,9 +14,13 @@ use astrolith_preview::{
     DevServer, DevServerConfig, ExternalBrowser, PreviewSession, PreviewSurface, RouteMapping,
     ServerStatus,
 };
-use gpui_kit::component::{ActiveTheme, StyledExt, button::Button};
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Sizable, StyledExt,
+    button::{Button, ButtonVariants},
+};
 use gpui_kit::{
-    App, Context, FocusHandle, Focusable, IntoElement, Render, Task, Window, div, prelude::*,
+    App, Context, FocusHandle, Focusable, IntoElement, Render, SharedString, Task, Window, div,
+    prelude::*,
 };
 use url::Url;
 
@@ -409,6 +413,15 @@ impl Render for PreviewPanel {
         let start_owner = owner.clone();
         let stop_owner = owner.clone();
         let open_owner = owner.clone();
+        let ready = self.status.is_ready();
+        let running = !matches!(self.status, ServerStatus::Stopped | ServerStatus::Failed(_));
+        let url = self.status.url().map(|url| url.to_string());
+        let status_color = match &self.status {
+            ServerStatus::Ready(_) => cx.theme().success,
+            ServerStatus::Starting | ServerStatus::Stopping => cx.theme().warning,
+            ServerStatus::Failed(_) => cx.theme().danger,
+            ServerStatus::Stopped => cx.theme().muted_foreground,
+        };
         div()
             .id("preview-panel")
             .track_focus(&self.focus)
@@ -416,42 +429,85 @@ impl Render for PreviewPanel {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .gap_2()
-            .p_3()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(div().id("preview-status").text_sm().child(status_line))
-            .when_some(message, |view, message| {
-                view.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(message),
-                )
-            })
             .child(
                 div()
                     .h_flex()
+                    .items_center()
                     .gap_2()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(cx.theme().window_border)
+                    .child(div().size_2().rounded_full().bg(status_color))
+                    .child(div().id("preview-status").text_sm().child(status_line))
+                    .child(div().flex_1())
+                    .when_some(url.clone(), |row, url| {
+                        row.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(url),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .v_flex()
+                    .gap_3()
+                    .p_3()
                     .child(
-                        Button::new("preview-start")
-                            .label("Start preview")
-                            .on_click(move |_, _, cx| {
-                                let _ = start_owner.update(cx, |this, cx| this.start(cx));
-                            }),
+                        div()
+                            .h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("preview-start")
+                                    .small()
+                                    .label("Start server")
+                                    .disabled(running)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = start_owner.update(cx, |this, cx| this.start(cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new("preview-stop")
+                                    .small()
+                                    .ghost()
+                                    .label("Stop")
+                                    .disabled(!running)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = stop_owner.update(cx, |this, cx| this.stop(cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new("preview-open")
+                                    .small()
+                                    .outline()
+                                    .label("Open in browser")
+                                    .disabled(!ready)
+                                    .on_click(move |_, _, cx| {
+                                        let _ =
+                                            open_owner.update(cx, |this, cx| this.open_active(cx));
+                                    }),
+                            ),
                     )
-                    .child(Button::new("preview-stop").label("Stop preview").on_click(
-                        move |_, _, cx| {
-                            let _ = stop_owner.update(cx, |this, cx| this.stop(cx));
-                        },
-                    ))
-                    .child(
-                        Button::new("preview-open")
-                            .label("Open in browser")
-                            .on_click(move |_, _, cx| {
-                                let _ = open_owner.update(cx, |this, cx| this.open_active(cx));
-                            }),
-                    ),
+                    .when_some(message, |view, message| {
+                        view.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(message),
+                        )
+                    })
+                    .when_some(url, |view, url| {
+                        view.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(format!("Serving {url}"))),
+                        )
+                    }),
             )
     }
 }

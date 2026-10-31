@@ -18,11 +18,12 @@ use astrolith_astro::schema::{
     CollectionSchema, FieldKind, ValidationDiagnostic, validate_frontmatter,
 };
 use astrolith_document::{DocumentError, FrontmatterValue, ParsedDocument, parse_document};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, Sizable, StyledExt,
+    ActiveTheme, Icon, Sizable, StyledExt,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
-    input::{Editor, EditorState, InputEvent},
+    input::{Input, InputEvent, InputState},
 };
 use gpui_kit::{
     AppContext, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription,
@@ -232,19 +233,20 @@ pub struct FrontmatterChanged {
     pub value: FrontmatterValue,
 }
 
-/// One editable row: the control plus, for text-like controls, a retained editor
-/// whose changes drive the model.
+/// One editable row: the control plus, for text-like controls, a lightweight
+/// single-line input. The inspector never instantiates a syntax-highlighting
+/// editor per field.
 struct RowEditor {
     control: FieldControl,
-    input: Option<Entity<EditorState>>,
+    input: Option<Entity<InputState>>,
     _subscription: Option<Subscription>,
 }
 
 /// A GPUI entity that renders a [`FrontmatterEditor`] with native controls.
 ///
-/// Text-like fields use GPUI Kit [`Editor`]s, booleans a [`Checkbox`], enums one
-/// [`Button`] per allowed value, object containers a heading plus their children,
-/// and read-only fields an explicit refusal. Edits update the model and emit
+/// Text-like fields use single-line [`Input`]s, booleans a [`Checkbox`], enums
+/// one [`Button`] per allowed value, object containers a heading plus their
+/// children, and read-only fields an explicit refusal. Edits update the model and emit
 /// [`FrontmatterChanged`] with the edited field path and its typed value; the
 /// shell applies that as a targeted patch to the live document text.
 pub struct FrontmatterForm {
@@ -358,19 +360,14 @@ fn build_rows(
                 .value(&control.path)
                 .map(scalar_display)
                 .unwrap_or_default();
-            let state = cx.new(|cx| {
-                EditorState::new(window, cx)
-                    .language("markdown")
-                    .default_value(initial)
-            });
+            let state = cx.new(|cx| InputState::new(window, cx).default_value(initial));
             let path = control.path.clone();
-            let subscription =
-                cx.subscribe(&state, move |this, editor_state, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        let raw = editor_state.read(cx).text().to_string();
-                        this.apply_value(&path, &raw, cx);
-                    }
-                });
+            let subscription = cx.subscribe(&state, move |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let raw = input.read(cx).value().to_string();
+                    this.apply_value(&path, &raw, cx);
+                }
+            });
             (Some(state), Some(subscription))
         } else {
             (None, None)
@@ -399,10 +396,24 @@ impl Render for FrontmatterForm {
         let Some(editor) = self.editor.as_ref() else {
             return div()
                 .id("frontmatter-form")
-                .p_3()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("No frontmatter schema is available for this document yet.");
+                .v_flex()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .p_6()
+                .text_center()
+                .child(
+                    Icon::new(IconName::SlidersHorizontal)
+                        .size_6()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(div().text_sm().child("No frontmatter form"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Select a collection entry with a schema to edit its metadata."),
+                );
         };
         let rows = self
             .rows
@@ -413,15 +424,39 @@ impl Render for FrontmatterForm {
         div()
             .id("frontmatter-form")
             .v_flex()
-            .gap_2()
-            .p_3()
             .size_full()
             .overflow_y_scroll()
-            .child(div().text_sm().child(SharedString::from(format!(
-                "Frontmatter · {} field(s)",
-                editor.controls().len()
-            ))))
-            .children(rows)
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(cx.theme().window_border)
+                    .child(
+                        div()
+                            .v_flex()
+                            .gap_0p5()
+                            .child(div().text_sm().child("Frontmatter"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(SharedString::from(format!(
+                                        "{} fields",
+                                        editor.controls().len()
+                                    ))),
+                            ),
+                    )
+                    .child(
+                        Icon::new(IconName::FileText)
+                            .small()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+            )
+            .child(div().v_flex().gap_3().p_3().children(rows))
     }
 }
 
@@ -433,11 +468,7 @@ fn render_row(
 ) -> impl IntoElement {
     let control = &row.control;
     let nested = control.path.matches('.').count();
-    let label = if control.required {
-        format!("{} *", control.name)
-    } else {
-        control.name.clone()
-    };
+    let hierarchy = nested.saturating_sub(1);
     let diagnostics: Vec<String> = editor
         .diagnostics_for(&control.path)
         .map(|diagnostic| format!("{:?}: {}", diagnostic.severity, diagnostic.message))
@@ -461,25 +492,43 @@ fn render_row(
         .id(("frontmatter-field", index))
         .v_flex()
         .gap_1()
-        .pl(px((nested * 12) as f32))
+        .when(hierarchy > 0, |view| view.pl(px((hierarchy * 12) as f32)))
         .child(
             div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(label)),
+                .h_flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .when(control.required, |label| {
+                            label.child(div().text_color(cx.theme().warning).child("*"))
+                        })
+                        .child(SharedString::from(control.name.clone())),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(control_label(&control.kind)),
+                ),
         );
 
     if is_object {
         row_view = row_view.child(
             div()
                 .text_xs()
-                .text_color(cx.theme().foreground)
+                .text_color(cx.theme().muted_foreground)
                 .child(SharedString::from(format!("{}.", control.name))),
         );
     } else if let Some(input) = row.input.as_ref() {
         row_view = row_view.child(
-            Editor::new(input)
-                .bordered(true)
+            Input::new(input)
+                .small()
                 .aria_label(format!("frontmatter field {}", control.path)),
         );
     } else if matches!(control.kind, ControlKind::Boolean) {
@@ -505,8 +554,9 @@ fn render_row(
                     .unwrap_or(false);
                 let enum_path = path.clone();
                 Button::new(format!("frontmatter-enum-{index}-{value_index}"))
-                    .small()
-                    .when(!selected, |button| button.ghost())
+                    .xsmall()
+                    .ghost()
+                    .toggled(selected)
                     .label(raw.clone())
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.apply_value(&enum_path, &raw, cx);
@@ -517,8 +567,12 @@ fn render_row(
     } else {
         row_view = row_view.child(
             div()
+                .h_flex()
+                .items_center()
+                .gap_1()
                 .text_xs()
-                .text_color(cx.theme().warning)
+                .text_color(cx.theme().muted_foreground)
+                .child(Icon::new(IconName::Lock).xsmall())
                 .child(SharedString::from(format!("Read-only · {refusal}"))),
         );
     }
