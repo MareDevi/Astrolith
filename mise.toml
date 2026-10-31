@@ -35,6 +35,18 @@ run = [{ task = "check" }]
 description = "Open the native desktop window"
 run = "cargo run --locked --package astrolith-desktop"
 
+[tasks."dev:release"]
+description = "Open the native desktop window with release optimizations"
+run = "cargo run --release --locked --package astrolith-desktop"
+
+[tasks."test:resize-perf"]
+description = "Measure native window resize frames in the development profile"
+run = "cargo test -p astrolith-gpui --locked window_resize_workload -- --ignored --nocapture"
+
+[tasks."test:resize-perf:release"]
+description = "Measure native window resize frames in release"
+run = "cargo test -p astrolith-gpui --release --locked window_resize_workload -- --ignored --nocapture"
+
 [tasks."dev:editor"]
 description = "Open the disposable M00.2 Markdown editor spike"
 run = "cargo run --locked --package astrolith-desktop -- --spike=editor"
