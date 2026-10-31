@@ -258,18 +258,13 @@ impl std::fmt::Display for FieldEditError {
 
 impl std::error::Error for FieldEditError {}
 
-/// Apply a raw string edit to `document` for the scalar control `kind`.
+/// Parse a raw string into the typed [`FrontmatterValue`] for scalar `kind`.
 ///
-/// Parses the input into the appropriate [`FrontmatterValue`] and records a
-/// lossless in-place patch through [`ParsedDocument::set_field`]. Read-only
-/// control families are refused with [`FieldEditError::NotEditable`].
-pub fn apply_edit(
-    document: &mut ParsedDocument,
-    path: &str,
-    kind: &ControlKind,
-    raw: &str,
-) -> Result<(), FieldEditError> {
-    let value = match kind {
+/// This is pure and does not touch any document, so a caller can obtain the
+/// typed value for a targeted single-field patch against the live session text.
+/// Read-only control families are refused with [`FieldEditError::NotEditable`].
+pub fn parse_value(kind: &ControlKind, raw: &str) -> Result<FrontmatterValue, FieldEditError> {
+    Ok(match kind {
         ControlKind::Text { .. }
         | ControlKind::Date
         | ControlKind::Image
@@ -299,7 +294,21 @@ pub fn apply_edit(
         | ControlKind::Array
         | ControlKind::Record
         | ControlKind::Unsupported { .. } => return Err(FieldEditError::NotEditable),
-    };
+    })
+}
+
+/// Apply a raw string edit to `document` for the scalar control `kind`.
+///
+/// Parses the input into the appropriate [`FrontmatterValue`] and records a
+/// lossless in-place patch through [`ParsedDocument::set_field`]. Read-only
+/// control families are refused with [`FieldEditError::NotEditable`].
+pub fn apply_edit(
+    document: &mut ParsedDocument,
+    path: &str,
+    kind: &ControlKind,
+    raw: &str,
+) -> Result<(), FieldEditError> {
+    let value = parse_value(kind, raw)?;
     document
         .set_field(path, value)
         .map_err(FieldEditError::Document)

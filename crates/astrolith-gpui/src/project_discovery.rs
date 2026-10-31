@@ -12,8 +12,8 @@ use astrolith_astro::{
 };
 use astrolith_core::ProjectId;
 use astrolith_document::{
-    DocumentIdentity, DocumentLoadTicket, DocumentRevision, DocumentSnapshot, RecoveryRecord,
-    RecoveryStore, SaveOutcome, save_snapshot,
+    DocumentIdentity, DocumentLoadTicket, DocumentRevision, DocumentSnapshot, FrontmatterValue,
+    RecoveryRecord, RecoveryStore, SaveOutcome, parse_document, save_snapshot,
 };
 use astrolith_workspace::{CollectionEntry, CollectionWatcher, scan_collections};
 use gpui_kit::component::{
@@ -265,31 +265,54 @@ impl ProjectWorkspace {
         Some((schema, text))
     }
 
-    /// Apply full document text produced by the frontmatter form to the active
-    /// session. This never touches disk; the normal save coordinator persists it.
-    pub fn apply_frontmatter_text(
+    /// Apply one frontmatter field edit to the active session's *current* text.
+    ///
+    /// Parses the live editor text, patches exactly `path` through the lossless
+    /// [`astrolith_document::ParsedDocument::set_field`] contract, and replaces
+    /// the session text with the result. Because the patch is computed from the
+    /// live text, concurrent unsaved edits to the document body are preserved
+    /// exactly; a stale form snapshot is never written back. No disk I/O happens
+    /// here — the conflict-aware save coordinator persists the edit later.
+    pub fn apply_frontmatter_field(
         &mut self,
-        text: String,
+        path: String,
+        value: FrontmatterValue,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = self.active.clone() else {
+        let Some(active) = self.active.clone() else {
             return;
         };
-        let Some(session) = self.sessions.get(&path).cloned() else {
+        let Some(session) = self.sessions.get(&active).cloned() else {
             return;
         };
-        session.update(cx, |session, cx| {
-            session
-                .editor
-                .update(cx, |editor, cx| editor.set_value(text.clone(), window, cx));
-            let current = session.editor.read(cx).text().to_string();
-            let _ = session.buffer.apply_text(current);
-            session.dirty = session.buffer.is_dirty();
-            cx.emit(SessionChanged);
-            cx.notify();
-        });
-        cx.notify();
+        let live = session.read(cx).editor.read(cx).text().to_string();
+        let patched = (|| -> Result<String, String> {
+            let mut document = parse_document(&live).map_err(|error| error.to_string())?;
+            document
+                .set_field(&path, value)
+                .map_err(|error| error.to_string())?;
+            document.serialize().map_err(|error| error.to_string())
+        })();
+        match patched {
+            Ok(text) => {
+                session.update(cx, |session, cx| {
+                    session
+                        .editor
+                        .update(cx, |editor, cx| editor.set_value(text.clone(), window, cx));
+                    let current = session.editor.read(cx).text().to_string();
+                    let _ = session.buffer.apply_text(current);
+                    session.dirty = session.buffer.is_dirty();
+                    cx.emit(SessionChanged);
+                    cx.notify();
+                });
+                cx.notify();
+            }
+            Err(error) => {
+                self.status = format!("Could not edit frontmatter field `{path}`: {error}");
+                cx.notify();
+            }
+        }
     }
     pub fn prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading {
@@ -1997,7 +2020,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    async fn frontmatter_form_wiring_persists_a_scalar_edit_losslessly(cx: &mut TestAppContext) {
+    async fn frontmatter_form_field_edit_preserves_concurrent_body_edit(cx: &mut TestAppContext) {
         use astrolith_astro::schema::{CollectionSchema, Field, FieldKind, SchemaDialect};
 
         let dir = fixture();
@@ -2072,29 +2095,55 @@ mod tests {
             Some((path.clone(), true))
         );
 
-        // Apply a full-document edit produced by the form; only the title changes.
-        let edited = "---\ntitle: Edited\ndraft: false\n---\n\n# Body 中文\n";
+        // The user edits the document BODY in the source editor (unsaved, in memory).
+        let body_edited = "---\ntitle: Old\ndraft: false\n---\n\n# Body EDITED 中文\n";
+        edit_active(cx, handle, &view, body_edited).await;
+        view.read_with(cx, |view, cx| {
+            assert_eq!(
+                view.sessions
+                    .get(&path)
+                    .unwrap()
+                    .read(cx)
+                    .editor
+                    .read(cx)
+                    .value(),
+                body_edited
+            );
+        });
+
+        // A form field edit patches ONLY that field on the live text; the
+        // concurrent body edit must survive exactly.
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
-                view.apply_frontmatter_text(edited.to_owned(), window, cx)
+                view.apply_frontmatter_field(
+                    "title".to_owned(),
+                    FrontmatterValue::String("Edited".to_owned()),
+                    window,
+                    cx,
+                )
             })
         })
         .unwrap();
+        let expected = "---\ntitle: Edited\ndraft: false\n---\n\n# Body EDITED 中文\n";
         view.read_with(cx, |view, cx| {
             let session = view.sessions.get(&path).unwrap().read(cx);
-            assert_eq!(session.editor.read(cx).value(), edited);
-            assert_eq!(session.buffer.current_text(), edited);
+            assert_eq!(
+                session.editor.read(cx).value(),
+                expected,
+                "only the title field may change; the unsaved body edit must survive"
+            );
+            assert_eq!(session.buffer.current_text(), expected);
             assert!(session.buffer.is_dirty());
         });
 
-        // The normal save coordinator persists the lossless result.
+        // The normal save coordinator persists the combined result.
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| view.save_active(window, cx))
         })
         .unwrap();
         for _ in 0..300 {
             cx.run_until_parked();
-            if std::fs::read_to_string(&path).unwrap() == edited {
+            if std::fs::read_to_string(&path).unwrap() == expected {
                 break;
             }
             runtime::blocking(cx, || {
@@ -2103,6 +2152,6 @@ mod tests {
             .await
             .unwrap();
         }
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
     }
 }

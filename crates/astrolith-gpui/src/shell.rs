@@ -215,9 +215,10 @@ impl Shell {
             &frontmatter,
             window,
             move |_this, _form, event: &FrontmatterChanged, window, cx| {
-                let text = event.text.clone();
+                let path = event.path.clone();
+                let value = event.value.clone();
                 let _ = apply_owner.update(cx, |project, cx| {
-                    project.apply_frontmatter_text(text, window, cx)
+                    project.apply_frontmatter_field(path, value, window, cx)
                 });
             },
         ));

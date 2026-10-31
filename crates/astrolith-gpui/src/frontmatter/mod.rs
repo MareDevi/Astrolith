@@ -218,11 +218,18 @@ pub fn kind_label(kind: &FieldKind) -> &'static str {
     }
 }
 
-/// Emitted when the form produces a new full document text from an edit.
+/// Emitted when the user edits one frontmatter field.
+///
+/// Carries only the field `path` and its new typed `value` — never a
+/// whole-document snapshot — so the shell applies a targeted single-field patch
+/// to the *live* session text. This preserves any concurrent unsaved edits to
+/// the document body instead of overwriting them with a stale snapshot.
 #[derive(Clone, Debug)]
 pub struct FrontmatterChanged {
-    /// The complete re-serialized document text to persist through the session.
-    pub text: String,
+    /// Dot-separated path of the edited field.
+    pub path: String,
+    /// The field's new typed value.
+    pub value: FrontmatterValue,
 }
 
 /// One editable row: the control plus, for text-like controls, a retained editor
@@ -238,8 +245,8 @@ struct RowEditor {
 /// Text-like fields use GPUI Kit [`Editor`]s, booleans a [`Checkbox`], enums one
 /// [`Button`] per allowed value, object containers a heading plus their children,
 /// and read-only fields an explicit refusal. Edits update the model and emit
-/// [`FrontmatterChanged`] with the new full document text; the shell applies that
-/// text through the save coordinator.
+/// [`FrontmatterChanged`] with the edited field path and its typed value; the
+/// shell applies that as a targeted patch to the live document text.
 pub struct FrontmatterForm {
     editor: Option<FrontmatterEditor>,
     rows: Vec<RowEditor>,
@@ -296,15 +303,33 @@ impl FrontmatterForm {
         cx.notify();
     }
 
-    /// Apply a raw edit at `path`, update the model and emit the new text.
+    /// Apply a raw edit at `path` and emit a targeted field change.
+    ///
+    /// The emitted [`FrontmatterChanged`] carries only the field path and typed
+    /// value; the caller patches the live session text, so a stale whole-document
+    /// snapshot is never written back. The local model is refreshed best-effort
+    /// so validation feedback and boolean/enum selection stay in sync.
     pub fn apply_value(&mut self, path: &str, raw: &str, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_mut() else {
             return;
         };
-        if let Ok(text) = editor.set_value(path, raw) {
-            cx.emit(FrontmatterChanged { text });
-            cx.notify();
+        let Some(control) = editor.control(path).cloned() else {
+            return;
+        };
+        if !control.editable {
+            return;
         }
+        let Ok(value) = fields::parse_value(&control.kind, raw) else {
+            return;
+        };
+        // Local-only refresh for validation/selection; body bytes here are
+        // irrelevant because the authoritative document is the live session.
+        let _ = editor.set_value(path, raw);
+        cx.emit(FrontmatterChanged {
+            path: path.to_owned(),
+            value,
+        });
+        cx.notify();
     }
 
     /// Return the row control paths currently rendered (test/diagnostic helper).

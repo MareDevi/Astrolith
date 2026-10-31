@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use astrolith_astro::schema::{CollectionSchema, Field, FieldKind, SchemaDialect};
 
@@ -417,6 +417,9 @@ async fn form_entity_renders_controls_and_applies_edits(cx: &mut gpui_kit::TestA
         }
     }
 
+    let events: Arc<Mutex<Vec<(String, FrontmatterValue)>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = events.clone();
+
     let (handle, form) = cx.update(|cx| {
         gpui_kit::init(cx);
         let mut created = None;
@@ -443,10 +446,16 @@ async fn form_entity_renders_controls_and_applies_edits(cx: &mut gpui_kit::TestA
             });
             created = Some(form.clone());
             let subscriber = form.clone();
+            let recorder = recorder.clone();
             cx.new(|cx| {
                 let sub = cx.subscribe(
                     &subscriber,
-                    |_host, _form, _event: &FrontmatterChanged, _cx| {},
+                    move |_host, _form, event: &FrontmatterChanged, _cx| {
+                        recorder
+                            .lock()
+                            .unwrap()
+                            .push((event.path.clone(), event.value.clone()));
+                    },
                 );
                 Host {
                     form: subscriber.clone(),
@@ -472,4 +481,16 @@ async fn form_entity_renders_controls_and_applies_edits(cx: &mut gpui_kit::TestA
         form.read_with(cx, |form, _| form.editor().unwrap().text().to_owned())
             .contains("title: New")
     );
+    // The form emits a targeted (path, value) change, never a whole-document text.
+    assert_eq!(
+        events.lock().unwrap().as_slice(),
+        &[(
+            "title".to_owned(),
+            FrontmatterValue::String("New".to_owned())
+        )]
+    );
+
+    // A read-only field emits nothing.
+    form.update(cx, |form, cx| form.apply_value("tags", "[a]", cx));
+    assert_eq!(events.lock().unwrap().len(), 1);
 }
