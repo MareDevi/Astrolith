@@ -12,7 +12,8 @@
 
 ## Minimal tests, minimal code
 
-- Write only necessary tests: enough to prove the task's behavior, boundaries, invariants, and error paths. Do not add redundant tests, tautologies, duplicates of an existing case, tests that restate the implementation or configuration, or tests for incidental behavior that no consumer can observe.
+- Tests cover only important logic and functionality: the behavior and domain rules the task is about, plus the boundaries, invariants, and error paths that matter for them. Do not test trivial glue, configuration, UI wiring, getters/setters, or incidental behavior no consumer can observe.
+- Write only necessary tests: do not add redundant tests, tautologies, duplicates of an existing case, or tests that restate the implementation.
 - Verification beyond a focused test is a throwaway smoke run, not a committed test; do not turn every manual check into a permanent test.
 - Write only the code the task requires. Do not add speculative abstractions, unused helpers, dead branches, defensive checks with no failure mode, or duplicated logic; delete code made obsolete by the change.
 
