@@ -32,12 +32,56 @@ const MAX_FRONTMATTER_BYTES: usize = 1024 * 1024;
 const MAX_DATA_BYTES: usize = 1024 * 1024;
 /// Maximum parser events accepted from one frontmatter document.
 const MAX_YAML_EVENTS: usize = 256 * 1024;
+/// Maximum top-level scalar fields retained from one entry's YAML.
+const MAX_METADATA_FIELDS: usize = 256;
+
+/// One top-level YAML scalar from an entry's frontmatter or data document.
+///
+/// Containers are deliberately absent: the file list only sorts and filters on
+/// the scalar values that the mapped title, date and draft fields can hold.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MetaValue {
+    /// A YAML string, including quoted dates and timestamps.
+    String(String),
+    /// A YAML boolean.
+    Boolean(bool),
+    /// A YAML integer.
+    Integer(i64),
+    /// A YAML floating-point number.
+    Real(f64),
+}
+
+/// Bounded presentation metadata derived from one entry source.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EntryMetadata {
+    fields: BTreeMap<String, MetaValue>,
+    modified_unix_millis: Option<u64>,
+}
+
+impl EntryMetadata {
+    /// Return one top-level scalar field by its exact YAML key.
+    pub fn field(&self, name: &str) -> Option<&MetaValue> {
+        self.fields.get(name)
+    }
+
+    /// Return the source's last-modified time in Unix milliseconds.
+    pub fn modified_unix_millis(&self) -> Option<u64> {
+        self.modified_unix_millis
+    }
+
+    fn set_modified(&mut self, modified: Option<std::time::SystemTime>) {
+        self.modified_unix_millis = modified
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64);
+    }
+}
 
 /// One logical entry and its authoritative canonical source file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CollectionEntry {
     entry: Entry,
     absolute_source: PathBuf,
+    metadata: EntryMetadata,
 }
 
 impl CollectionEntry {
@@ -49,6 +93,11 @@ impl CollectionEntry {
     /// Return the canonical source path used to open the document.
     pub fn absolute_source(&self) -> &Path {
         &self.absolute_source
+    }
+
+    /// Return the bounded scalar metadata used by the file list.
+    pub fn metadata(&self) -> &EntryMetadata {
+        &self.metadata
     }
 }
 
@@ -303,12 +352,13 @@ pub fn scan_collections(
                 }
 
                 let (source, absolute_source) = source_path(&root, &path)?;
-                let declared_slug = match kind {
-                    EntryKind::Yaml => data_slug(&absolute_source, cancellation)?,
+                let (declared_slug, mut metadata) = match kind {
+                    EntryKind::Yaml => data_metadata(&absolute_source, cancellation)?,
                     EntryKind::Markdown | EntryKind::Mdx => {
-                        frontmatter_slug(&absolute_source, cancellation)?
+                        frontmatter_metadata(&absolute_source, cancellation)?
                     }
                 };
+                metadata.set_modified(metadata_modified(&path));
                 let slug = declared_slug.unwrap_or_else(|| default_logical_id(relative_to_base));
                 let id = EntryId::new(collection.clone(), slug)
                     .map_err(|error| WorkspaceError::Model(error.to_string()))?;
@@ -321,6 +371,7 @@ pub fn scan_collections(
                 entries.push(CollectionEntry {
                     entry: Entry::new(id, source),
                     absolute_source,
+                    metadata,
                 });
             }
         }
@@ -452,13 +503,13 @@ fn source_path(root: &Path, path: &Path) -> Result<(SourcePath, PathBuf), Worksp
     Ok((source, canonical))
 }
 
-fn frontmatter_slug(
+fn frontmatter_metadata(
     path: &Path,
     cancellation: &Cancellation,
-) -> Result<Option<String>, WorkspaceError> {
+) -> Result<(Option<String>, EntryMetadata), WorkspaceError> {
     check_cancelled(cancellation)?;
     let Some(frontmatter) = read_frontmatter(path)? else {
-        return Ok(None);
+        return Ok((None, EntryMetadata::default()));
     };
     check_cancelled(cancellation)?;
     validate_yaml_events(path, &frontmatter, cancellation)?;
@@ -469,15 +520,18 @@ fn frontmatter_slug(
             message: error.to_string(),
         }
     })?;
-    slug_from_document(path, &documents, "frontmatter")
+    slug_and_metadata(path, &documents, "frontmatter")
 }
 
-/// Derive the slug override from a whole YAML data entry.
+/// Derive the slug override and scalar metadata from a whole YAML data entry.
 ///
 /// Astro's data entry types parse the complete file and pass the resulting
 /// object to the same `generateId` contract as Markdown frontmatter, so a
 /// top-level string `slug` replaces the path-derived ID.
-fn data_slug(path: &Path, cancellation: &Cancellation) -> Result<Option<String>, WorkspaceError> {
+fn data_metadata(
+    path: &Path,
+    cancellation: &Cancellation,
+) -> Result<(Option<String>, EntryMetadata), WorkspaceError> {
     check_cancelled(cancellation)?;
     let source = read_data_file(path)?;
     validate_yaml_events(path, &source, cancellation)?;
@@ -487,20 +541,20 @@ fn data_slug(path: &Path, cancellation: &Cancellation) -> Result<Option<String>,
             path: path.to_path_buf(),
             message: error.to_string(),
         })?;
-    slug_from_document(path, &documents, "YAML data")
+    slug_and_metadata(path, &documents, "YAML data")
 }
 
-fn slug_from_document(
+fn slug_and_metadata(
     path: &Path,
     documents: &[Yaml],
     context: &str,
-) -> Result<Option<String>, WorkspaceError> {
+) -> Result<(Option<String>, EntryMetadata), WorkspaceError> {
     let Some(document) = documents.first() else {
-        return Ok(None);
+        return Ok((None, EntryMetadata::default()));
     };
     let Yaml::Hash(data) = document else {
         if matches!(document, Yaml::BadValue | Yaml::Null) {
-            return Ok(None);
+            return Ok((None, EntryMetadata::default()));
         }
         return Err(WorkspaceError::InvalidFrontmatter {
             path: path.to_path_buf(),
@@ -511,15 +565,51 @@ fn slug_from_document(
         Yaml::String(key) if key == "slug" => Some(value),
         _ => None,
     });
-    match slug {
-        None => Ok(None),
-        Some(value) if yaml_slug_is_falsey(value) => Ok(None),
-        Some(Yaml::String(value)) => Ok(Some(value.clone())),
-        Some(value) => Err(WorkspaceError::UnsupportedSlug(format!(
-            "truthy {context} slug in {} has unsupported type {value:?}; refusing to guess an Astro ID",
-            path.display()
-        ))),
+    let slug = match slug {
+        None => None,
+        Some(value) if yaml_slug_is_falsey(value) => None,
+        Some(Yaml::String(value)) => Some(value.clone()),
+        Some(value) => {
+            return Err(WorkspaceError::UnsupportedSlug(format!(
+                "truthy {context} slug in {} has unsupported type {value:?}; refusing to guess an Astro ID",
+                path.display()
+            )));
+        }
+    };
+    Ok((slug, metadata_from_document(data)))
+}
+
+fn metadata_from_document(data: &yaml_rust2::yaml::Hash) -> EntryMetadata {
+    let mut fields = BTreeMap::new();
+    for (key, value) in data.iter().take(MAX_METADATA_FIELDS) {
+        let Yaml::String(key) = key else {
+            continue;
+        };
+        let Some(value) = meta_value(value) else {
+            continue;
+        };
+        fields.insert(key.clone(), value);
     }
+    EntryMetadata {
+        fields,
+        modified_unix_millis: None,
+    }
+}
+
+fn meta_value(value: &Yaml) -> Option<MetaValue> {
+    match value {
+        Yaml::String(text) => Some(MetaValue::String(text.clone())),
+        Yaml::Boolean(flag) => Some(MetaValue::Boolean(*flag)),
+        Yaml::Integer(number) => Some(MetaValue::Integer(*number)),
+        Yaml::Real(text) => text.parse::<f64>().ok().map(MetaValue::Real),
+        _ => None,
+    }
+}
+
+fn metadata_modified(path: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
 }
 
 fn read_data_file(path: &Path) -> Result<String, WorkspaceError> {

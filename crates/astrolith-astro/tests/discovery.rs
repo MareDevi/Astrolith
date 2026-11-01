@@ -377,3 +377,40 @@ fn legacy_compatibility_flags_are_explicitly_unsupported() {
         );
     }
 }
+
+#[test]
+fn collection_base_override_replaces_the_configured_base_or_reports_the_reason() {
+    let dir = fixture();
+    std::fs::create_dir_all(dir.path().join("src/notes")).unwrap();
+    std::fs::create_dir_all(dir.path().join("outside")).unwrap();
+    let overridden =
+        request(dir.path()).with_collection_bases(std::collections::BTreeMap::from([(
+            "blog".to_owned(),
+            Path::new("src/notes").to_path_buf(),
+        )]));
+    let DiscoveryOutcome::Ready(manifest) = inspect_project(&overridden).unwrap() else {
+        panic!("a contained directory override stays supported")
+    };
+    assert_eq!(
+        manifest.collections()[0].base(),
+        dir.path().join("src/notes").canonicalize().unwrap()
+    );
+
+    for (base, expected) in [
+        ("src/missing", "content directory override"),
+        ("../outside", "content directory override"),
+        ("/tmp", "content directory override"),
+    ] {
+        let invalid = request(dir.path()).with_collection_bases(std::collections::BTreeMap::from(
+            [("blog".to_owned(), Path::new(base).to_path_buf())],
+        ));
+        let DiscoveryOutcome::Unsupported { diagnostics, .. } = inspect_project(&invalid).unwrap()
+        else {
+            panic!("invalid override {base} must not fall back silently")
+        };
+        assert!(
+            diagnostics.iter().any(|message| message.contains(expected)),
+            "{base}: {diagnostics:?}"
+        );
+    }
+}

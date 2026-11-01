@@ -23,6 +23,8 @@ tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-t
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt", "json", "registry", "tracing-log"] }
 tracing-appender = "=0.2.5"
+trash = "=5.2.9"
+chrono = "=0.4.45"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

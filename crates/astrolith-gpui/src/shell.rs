@@ -183,6 +183,9 @@ impl Shell {
         });
         let document = cx.new(|cx| WorkspacePanel::new("document-panel", "Welcome", "# Astrolith\n\nOpen an Astro project to edit Markdown and MDX.\n\nPress Ctrl/Cmd+S to save the active document.\n\n中文 · 日本語", window, cx));
         let project = cx.new(|cx| ProjectWorkspace::new(document.clone(), window, cx));
+        project.update(cx, |project, cx| {
+            project.set_preferences(settings.clone(), None, cx)
+        });
         navigator.update(cx, |navigator, cx| {
             navigator.set_view(project.clone().into(), cx)
         });
@@ -633,14 +636,28 @@ impl Shell {
         let resolved = resolve(&global, Some(&preferences), None);
         self.project_scope = Some(ProjectScope {
             root,
-            preferences,
+            preferences: preferences.clone(),
             revision,
         });
+        self.sync_project_preferences(cx);
         self.apply_layout(resolved.layout, window, cx);
         self.project.update(cx, |project, cx| {
             project.reopen_last_entry(resolved.last_entry.as_deref(), window, cx)
         });
         cx.notify();
+    }
+
+    /// Push the resolved preference snapshots the workspace uses for the file
+    /// list and entry creation.
+    fn sync_project_preferences(&mut self, cx: &mut Context<Self>) {
+        let global = self.settings.clone();
+        let preferences = self
+            .project_scope
+            .as_ref()
+            .map(|scope| scope.preferences.clone());
+        self.project.update(cx, |project, cx| {
+            project.set_preferences(global, preferences, cx)
+        });
     }
 
     /// Apply a resolved layout to the dock without persisting it back.
@@ -748,6 +765,17 @@ impl Shell {
                 self.project
                     .update(cx, |project, cx| project.recover_pending(window, cx));
             }
+            CommandId::NewEntry
+            | CommandId::DuplicateEntry
+            | CommandId::RenameEntry
+            | CommandId::DeleteEntry
+            | CommandId::RevealEntry
+            | CommandId::CopyPathAbsolute
+            | CommandId::CopyPathRelative => {
+                self.project.update(cx, |project, cx| {
+                    project.entry_command(command, None, window, cx)
+                });
+            }
             CommandId::OpenProject => {
                 if !self.dock.read(cx).is_dock_open(DockPlacement::Left) {
                     self.toggle_panel(PanelKind::Sidebar, window, cx);
@@ -827,10 +855,13 @@ impl Shell {
             .update(cx, |state, cx| state.set_query("", window, cx));
         let palette = self.palette.clone();
         let owner = cx.weak_entity();
+        let availability = self.project.read(cx).command_availability(cx);
         let commands: Vec<_> = COMMANDS
             .iter()
             .copied()
-            .filter(|command| *command != CommandId::OpenPalette)
+            .filter(|command| {
+                *command != CommandId::OpenPalette && command.is_available(availability)
+            })
             .collect();
         let opening = self.opening;
         window.open_dialog(cx, move |dialog, _, _| {
@@ -977,6 +1008,12 @@ fn command_icon(command: CommandId) -> IconName {
     match command {
         CommandId::OpenFile => IconName::FileText,
         CommandId::OpenProject => IconName::FolderOpen,
+        CommandId::NewEntry => IconName::FilePlus,
+        CommandId::DuplicateEntry => IconName::Copy,
+        CommandId::RenameEntry => IconName::SquarePen,
+        CommandId::DeleteEntry => IconName::Trash,
+        CommandId::RevealEntry => IconName::FolderOpen,
+        CommandId::CopyPathAbsolute | CommandId::CopyPathRelative => IconName::Copy,
         CommandId::Save => IconName::Save,
         CommandId::CloseDocument => IconName::X,
         CommandId::RecoverUnsaved => IconName::RotateCcw,
@@ -1099,6 +1136,18 @@ impl Render for Shell {
                                         this.execute(CommandId::OpenPalette, window, cx);
                                     })),
                             )
+                            .child({
+                                let availability = self.project.read(cx).command_availability(cx);
+                                Button::new("toolbar-new-entry")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::FilePlus)
+                                    .tooltip(CommandId::NewEntry.label())
+                                    .disabled(!CommandId::NewEntry.is_available(availability))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.execute(CommandId::NewEntry, window, cx)
+                                    }))
+                            })
                             .child(div().flex_1())
                             .children(
                                 [
@@ -2345,6 +2394,97 @@ mod tests {
             "without a project the live layout keeps persisting globally"
         );
         assert!(!workspace.path().join("preferences/projects").exists());
+    }
+
+    #[gpui_kit::test]
+    async fn entry_commands_share_availability_across_toolbar_and_palette(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let project = project_fixture("availability-site");
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("toolbar-new-entry").disabled(),
+                Some(true),
+                "no project means no new entry"
+            );
+        })
+        .unwrap();
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        let project_handle = view.read_with(cx, |shell, _| shell.project.clone());
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.read_with(cx, |shell, cx| !shell.project.read(cx).is_loading()) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert!(view.read_with(cx, |shell, cx| { !shell.project.read(cx).is_loading() }));
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_ne!(window.find("toolbar-new-entry").disabled(), Some(true));
+            assert_ne!(window.find("entry-new").disabled(), Some(true));
+            assert_eq!(
+                window.find("entry-rename").disabled(),
+                Some(true),
+                "row commands need an active entry"
+            );
+            window.click("command-palette", cx);
+            window.input("Duplicate file", cx);
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert_eq!(
+                view.read(cx).palette.read(cx).matched_count(),
+                0,
+                "the palette hides entry commands without an active entry"
+            );
+            window.press("escape", cx);
+            window.press("escape", cx);
+            assert!(!window.has_active_dialog(cx));
+        })
+        .unwrap();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            project_handle.update(cx, |project, cx| {
+                project.open_first_entry_for_tests(window, cx)
+            });
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.read_with(cx, |shell, cx| {
+                shell.project.read(cx).open_tabs().len() == 1
+            }) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            for id in ["entry-rename", "entry-delete", "entry-reveal", "copy-path"] {
+                assert_ne!(window.find(id).disabled(), Some(true), "{id}");
+            }
+            window.click("command-palette", cx);
+            assert!(window.has_active_dialog(cx));
+            window.input("Duplicate file", cx);
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert_eq!(view.read(cx).palette.read(cx).matched_count(), 1);
+            window.press("escape", cx);
+            window.press("escape", cx);
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

@@ -6,6 +6,13 @@ use gpui_kit::{App, KeyBinding};
 pub(crate) enum CommandId {
     OpenFile,
     OpenProject,
+    NewEntry,
+    DuplicateEntry,
+    RenameEntry,
+    DeleteEntry,
+    RevealEntry,
+    CopyPathAbsolute,
+    CopyPathRelative,
     Save,
     CloseDocument,
     RecoverUnsaved,
@@ -27,6 +34,13 @@ pub(crate) enum CommandId {
 pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::OpenFile,
     CommandId::OpenProject,
+    CommandId::NewEntry,
+    CommandId::DuplicateEntry,
+    CommandId::RenameEntry,
+    CommandId::DeleteEntry,
+    CommandId::RevealEntry,
+    CommandId::CopyPathAbsolute,
+    CommandId::CopyPathRelative,
     CommandId::Save,
     CommandId::CloseDocument,
     CommandId::RecoverUnsaved,
@@ -45,11 +59,46 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::Quit,
 ];
 
+/// Live application state that decides whether a command can run.
+///
+/// The palette, toolbar and file context menu all read this one value, so the
+/// same [`CommandId`] is enabled or disabled identically everywhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CommandAvailability {
+    /// A project with a published index is open.
+    pub project_open: bool,
+    /// An entry is selected and can be operated on.
+    pub active_entry: bool,
+    /// The initial project scan is running; entry files must not change yet.
+    pub busy: bool,
+}
+
 impl CommandId {
+    /// Whether this command can run in the given application state.
+    pub fn is_available(self, state: CommandAvailability) -> bool {
+        match self {
+            Self::NewEntry => state.project_open && !state.busy,
+            Self::DuplicateEntry
+            | Self::RenameEntry
+            | Self::DeleteEntry
+            | Self::RevealEntry
+            | Self::CopyPathAbsolute
+            | Self::CopyPathRelative => state.active_entry && !state.busy,
+            _ => true,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::OpenFile => "Open file…",
             Self::OpenProject => "Open project…",
+            Self::NewEntry => "New file",
+            Self::DuplicateEntry => "Duplicate file",
+            Self::RenameEntry => "Rename or move file…",
+            Self::DeleteEntry => "Move file to Trash…",
+            Self::RevealEntry => "Reveal in file manager",
+            Self::CopyPathAbsolute => "Copy absolute path",
+            Self::CopyPathRelative => "Copy project-relative path",
             Self::Save => "Save",
             Self::CloseDocument => "Close file",
             Self::RecoverUnsaved => "Recover unsaved changes…",
@@ -84,6 +133,13 @@ impl CommandId {
                     "cmd-shift-o"
                 } else {
                     "ctrl-shift-o"
+                }
+            }
+            Self::NewEntry => {
+                if mac {
+                    "cmd-n"
+                } else {
+                    "ctrl-n"
                 }
             }
             Self::Save => {
@@ -166,10 +222,20 @@ pub(crate) fn install_menus(cx: &mut App) {
         let mut items = items_for(&[
             CommandId::OpenFile,
             CommandId::OpenProject,
+            CommandId::NewEntry,
             CommandId::Save,
             CommandId::CloseDocument,
-            CommandId::RecoverUnsaved,
+            CommandId::DuplicateEntry,
+            CommandId::RenameEntry,
+            CommandId::DeleteEntry,
         ]);
+        items.push(gpui_kit::MenuItem::separator());
+        items.extend(items_for(&[
+            CommandId::RevealEntry,
+            CommandId::CopyPathAbsolute,
+            CommandId::CopyPathRelative,
+            CommandId::RecoverUnsaved,
+        ]));
         items.push(gpui_kit::MenuItem::separator());
         items.push(gpui_kit::MenuItem::action(
             CommandId::Quit.label(),
@@ -222,6 +288,50 @@ mod tests {
                 assert!(keys.insert(key));
             }
         }
+    }
+
+    #[test]
+    fn entry_commands_share_one_availability_rule() {
+        let empty = CommandAvailability::default();
+        let ready = CommandAvailability {
+            project_open: true,
+            active_entry: true,
+            busy: false,
+        };
+        assert!(!CommandId::NewEntry.is_available(empty));
+        assert!(CommandId::NewEntry.is_available(ready));
+        for command in [
+            CommandId::DuplicateEntry,
+            CommandId::RenameEntry,
+            CommandId::DeleteEntry,
+            CommandId::RevealEntry,
+            CommandId::CopyPathAbsolute,
+            CommandId::CopyPathRelative,
+        ] {
+            assert!(!command.is_available(empty), "{}", command.label());
+            assert!(
+                !command.is_available(CommandAvailability {
+                    project_open: true,
+                    active_entry: false,
+                    busy: false
+                }),
+                "{} must require an entry",
+                command.label()
+            );
+            assert!(command.is_available(ready), "{}", command.label());
+            assert!(
+                !command.is_available(CommandAvailability {
+                    busy: true,
+                    ..ready
+                }),
+                "{} must be disabled while the index is busy",
+                command.label()
+            );
+        }
+        // Existing commands stay available; their handlers report their own
+        // preconditions instead of disappearing from the palette.
+        assert!(CommandId::Save.is_available(empty));
+        assert!(CommandId::OpenProject.is_available(empty));
     }
 
     #[gpui_kit::test]

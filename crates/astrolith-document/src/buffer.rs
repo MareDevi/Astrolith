@@ -188,6 +188,14 @@ impl DocumentBuffer {
         &self.identity
     }
 
+    /// Rebind this buffer to a new canonical source after a rename or move.
+    ///
+    /// Only the identity changes: the baseline, current text, revision and dirty
+    /// state are retained, so an in-flight edit is never discarded or rewritten.
+    pub fn retarget(&mut self, identity: DocumentIdentity) {
+        self.identity = identity;
+    }
+
     /// Return the source baseline used for dirty-state comparison.
     pub fn original_text(&self) -> &str {
         &self.original_text

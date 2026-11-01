@@ -4,6 +4,7 @@ use crate::pattern::CollectionPattern;
 use astrolith_core::{CollectionId, ProjectId};
 use semver::{Version, VersionReq};
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, Read},
     path::{Component, Path, PathBuf},
@@ -56,6 +57,7 @@ pub struct DiscoveryRequest {
     generation: u64,
     root: PathBuf,
     cancellation: Cancellation,
+    collection_bases: BTreeMap<String, PathBuf>,
 }
 impl DiscoveryRequest {
     pub fn new(
@@ -69,6 +71,7 @@ impl DiscoveryRequest {
             generation,
             root,
             cancellation,
+            collection_bases: BTreeMap::new(),
         }
     }
     pub fn project(&self) -> &ProjectId {
@@ -79,6 +82,20 @@ impl DiscoveryRequest {
     }
     pub fn cancellation(&self) -> &Cancellation {
         &self.cancellation
+    }
+    /// Replace the collection base of every named collection with a project-relative root.
+    ///
+    /// The manifest produced by [`inspect_project`] then carries the override base, so
+    /// collection scanning and watcher registration use it without further plumbing. A
+    /// missing, non-directory or escaping override is reported as unsupported instead of
+    /// silently falling back to the Astro configuration base.
+    pub fn with_collection_bases(mut self, bases: BTreeMap<String, PathBuf>) -> Self {
+        self.collection_bases = bases;
+        self
+    }
+    /// Project-relative base override for one collection, when configured.
+    pub fn collection_base(&self, collection: &str) -> Option<&Path> {
+        self.collection_bases.get(collection).map(PathBuf::as_path)
     }
 }
 #[derive(Clone, Debug)]
@@ -382,13 +399,22 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
     let mut collections = Vec::new();
     for item in parsed {
         cancellation.check()?;
-        let base = match contained_path(&root, Path::new(item.base())) {
+        let reference = match request.collection_base(item.collection()) {
+            Some(override_base) => override_base.to_path_buf(),
+            None => PathBuf::from(item.base()),
+        };
+        let base = match contained_path(&root, &reference) {
             Ok(path) if path.is_dir() => path,
             _ => {
-                return Ok(unsupported(format!(
-                    "Invalid local collection base: {}",
-                    item.base()
-                )));
+                let message = match request.collection_base(item.collection()) {
+                    Some(override_base) => format!(
+                        "Invalid content directory override for collection {}: {}",
+                        item.collection(),
+                        override_base.display()
+                    ),
+                    None => format!("Invalid local collection base: {}", item.base()),
+                };
+                return Ok(unsupported(message));
             }
         };
         let id =
