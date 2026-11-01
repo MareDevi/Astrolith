@@ -6242,10 +6242,16 @@ export const collections = {blog, dataAuthors};
             (1024 * 1024, false),
             (100 * 1024, true),
         ] {
+            // Same body generator as the P0 plain-editor spike, so the two
+            // measurements compare identical source text.
+            const MATCHED_SAMPLE: &str = "# Astrolith editor spike\n\n中文 · 日本語 · 🦀 · e\u{301}\n\n**Bold** and *emphasis*, `inline code`, [link](https://example.com).\n\n- First item\n- Second item\n\n```rust\nfn main() {}\n```\n";
             let unit = if long_line {
-                "中文日本語🦀 **bold** `code` "
+                "中文日本語🦀 **bold** `code` ".to_owned()
             } else {
-                "# 中文 🦀\n\nA multilingual paragraph with **emphasis**, `code`, 日本語 and 中文.\n"
+                format!(
+                    "{MATCHED_SAMPLE}{}\n\n",
+                    "中文・日本語・🦀 **bold** and `inline code`. ".repeat(16)
+                )
             };
             let body = unit.repeat(bytes.div_ceil(unit.len()));
             let source = format!("{frontmatter}{body}");

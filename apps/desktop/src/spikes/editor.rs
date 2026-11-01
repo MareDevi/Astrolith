@@ -664,26 +664,48 @@ mod tests {
             let text = workload(bytes, long_line);
             let actual_bytes = text.len();
             let lines = text.lines().count();
-            cx.update_window(handle.into(), |_, window, cx| {
-                let state = view.read(cx).editor.clone();
-                let start = Instant::now();
-                state.update(cx, |state, cx| state.set_value(text, window, cx));
-                let replace_ms = start.elapsed().as_secs_f64() * 1000.;
-                let frame_start = Instant::now();
-                window.render_frame(cx);
-                let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.;
-                window.click(("input", state.entity_id()), cx);
-                window.press(if cfg!(target_os = "macos") { "cmd-up" } else { "ctrl-home" }, cx);
-                let mut samples = Vec::with_capacity(100);
-                for _ in 0..100 {
+            let state = view.read_with(cx, |view, _| view.editor.clone());
+            let (replace_ms, frame_ms) = cx
+                .update_window(handle.into(), |_, window, cx| {
                     let start = Instant::now();
+                    state.update(cx, |state, cx| state.set_value(text, window, cx));
+                    let replace_ms = start.elapsed().as_secs_f64() * 1000.;
+                    let frame_start = Instant::now();
+                    window.render_frame(cx);
+                    let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.;
+                    window.click(("input", state.entity_id()), cx);
+                    window.press(
+                        if cfg!(target_os = "macos") {
+                            "cmd-up"
+                        } else {
+                            "ctrl-home"
+                        },
+                        cx,
+                    );
+                    (replace_ms, frame_ms)
+                })
+                .unwrap();
+            // One keystroke per application update, so the dispatched `Change`
+            // and the frame are inside the measured interval.
+            let mut samples = Vec::with_capacity(100);
+            for _ in 0..100 {
+                let start = Instant::now();
+                cx.update_window(handle.into(), |_, window, cx| {
                     window.input("中", cx);
-                    samples.push(start.elapsed().as_secs_f64() * 1000.);
-                }
-                samples.sort_by(f64::total_cmp);
-                println!("EDITOR_WORKLOAD bytes={actual_bytes} lines={lines} long_line={long_line} set_value_ms={replace_ms:.3} frame_ms={frame_ms:.3} headless_input_frame_samples=100 p50_ms={:.3} p95_ms={:.3} max_ms={:.3}", samples[49], samples[94], samples[99]);
+                    window.render_frame(cx);
+                })
+                .unwrap();
+                samples.push(start.elapsed().as_secs_f64() * 1000.);
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "EDITOR_WORKLOAD bytes={actual_bytes} lines={lines} long_line={long_line} set_value_ms={replace_ms:.3} frame_ms={frame_ms:.3} headless_input_frame_samples=100 p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
+                samples[49], samples[94], samples[99]
+            );
+            cx.update_window(handle.into(), |_, _, cx| {
                 assert_eq!(state.read(cx).value().len(), actual_bytes + 300);
-            }).unwrap();
+            })
+            .unwrap();
         }
     }
 }
