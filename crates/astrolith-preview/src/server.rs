@@ -389,9 +389,11 @@ impl DevServer {
                 Ok(Some(exit)) => {
                     // Astro prints "Port … is in use, trying another one…" and
                     // then binds the next port, so an in-use message is only a
-                    // failure if the process actually exited.
-                    let text = process.combined_text();
+                    // failure if the process actually exited. Settle both drains
+                    // first: the final stderr bytes may still be in flight when
+                    // `try_wait` reports the exit.
                     let _ = process.terminate().await;
+                    let text = process.combined_text();
                     if let Some(message) = port_in_use_message(&text, port) {
                         tracing::error!(port, %message, "Astro dev server port is in use");
                         self.status = ServerStatus::Failed(message.clone());
