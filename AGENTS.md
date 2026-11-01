@@ -10,6 +10,12 @@
 - Native IME, focus, scaling, and rendering acceptance require real-platform evidence; a successful headless test or build does not establish those results. External browser preview remains the normal Wayland path; embedded preview must remain optional.
 - Commit often. Every atomic, self-contained change gets its own commit — never batch unrelated work or wait until a task is finished. End each implementation task with verification and at least one commit. Preserve unrelated changes and the existing review documents.
 
+## Minimal tests, minimal code
+
+- Write only necessary tests: enough to prove the task's behavior, boundaries, invariants, and error paths. Do not add redundant tests, tautologies, duplicates of an existing case, tests that restate the implementation or configuration, or tests for incidental behavior that no consumer can observe.
+- Verification beyond a focused test is a throwaway smoke run, not a committed test; do not turn every manual check into a permanent test.
+- Write only the code the task requires. Do not add speculative abstractions, unused helpers, dead branches, defensive checks with no failure mode, or duplicated logic; delete code made obsolete by the change.
+
 ## Commits
 
 - Use Conventional Commits: `<type>(<scope>): <description>`, with `feat`, `fix`, `refactor`, `test`, `docs`, `build`, `ci`, `chore` as the allowed types; imperative, lowercase description. Add a body only when the change needs rationale.
