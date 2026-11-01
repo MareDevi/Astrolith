@@ -7,18 +7,15 @@ use gpui_kit::{App, WindowAppearance, component::Theme};
 pub use tokens::ThemeTokens;
 
 /// User appearance preference; System remains distinct from its resolved mode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ThemeMode {
-    Light,
-    Dark,
-    #[default]
-    System,
+pub use astrolith_core::preferences::ThemePreference as ThemeMode;
+
+/// Resolve a preference against the native appearance.
+pub(crate) trait ResolveTheme {
+    fn resolve(self, appearance: WindowAppearance) -> Self;
 }
 
-impl ThemeMode {
-    /// Resolve all native appearance variants without changing the preference.
-    pub fn resolve(self, appearance: WindowAppearance) -> Self {
+impl ResolveTheme for ThemeMode {
+    fn resolve(self, appearance: WindowAppearance) -> Self {
         match self {
             Self::System => match appearance {
                 WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::Dark,

@@ -11,6 +11,8 @@
 pub mod collection;
 /// Logical entry identity and explicit source-file mapping.
 pub mod entry;
+/// Scoped preferences, resolution and the project registry.
+pub mod preferences;
 /// Opaque workspace project identity.
 pub mod project;
 

@@ -14,9 +14,11 @@ use crate::{
         state::{LayoutState, PanelKind},
     },
     preview::PreviewPanel,
-    project_discovery::ProjectWorkspace,
+    project_discovery::{ProjectOpened, ProjectWorkspace, now_secs},
     runtime,
-    settings::{Settings, SettingsStore, settings_path},
+    settings::{
+        GlobalPreferencesV2, PreferencesStore, ProjectPreferencesV1, resolve, settings_path,
+    },
     theme::{self, ThemeMode},
 };
 use gpui_kit::assets::IconName;
@@ -34,7 +36,25 @@ use gpui_kit::{
     prelude::*, px, size,
 };
 
-type LatestSettings = Arc<Mutex<(u64, Settings)>>;
+/// Latest global and project snapshots, flushed by the quit observer.
+#[derive(Clone)]
+struct LatestPreferences {
+    global: (u64, GlobalPreferencesV2),
+    project: Option<(u64, ProjectPreferencesV1)>,
+}
+type LatestSettings = Arc<Mutex<LatestPreferences>>;
+
+/// Preference scope of the project open in the shell.
+///
+/// The registry identity is the stable preferences key; the runtime
+/// `ProjectId` (`workspace-{generation}`) must never address a preferences file.
+struct ProjectScope {
+    /// Canonical project root this scope was loaded for.
+    root: PathBuf,
+    preferences: ProjectPreferencesV1,
+    /// Last revision accepted by the store for this project's file.
+    revision: u64,
+}
 
 /// Open the shell after background preference loading; bootstrap owns no services.
 pub fn open(cx: &mut App) {
@@ -49,7 +69,7 @@ pub fn open(cx: &mut App) {
     cx.spawn(async move |cx| {
         let loaded = runtime::blocking(cx, || {
             settings_path().map(|path| {
-                let (store, settings, warning) = SettingsStore::load(path);
+                let (store, settings, warning) = PreferencesStore::load(path);
                 (Arc::new(store), settings, warning)
             })
         })
@@ -70,7 +90,7 @@ pub fn open(cx: &mut App) {
                     tracing::warn!(%error, "preferences unavailable; using defaults");
                     (
                         None,
-                        Settings::default(),
+                        GlobalPreferencesV2::default(),
                         Some(format!("Preferences unavailable: {error}")),
                     )
                 }
@@ -113,11 +133,23 @@ pub(crate) struct Shell {
     preview_sync_key: Option<(u64, Option<PathBuf>)>,
     last_viewport: gpui_kit::Size<gpui_kit::Pixels>,
     _skin: Rc<DockSkin>,
-    settings: Settings,
-    store: Option<Arc<SettingsStore>>,
+    settings: GlobalPreferencesV2,
+    /// Layout last written to (or loaded from) the global scope.
+    global_layout: LayoutState,
+    /// Project scope currently open, if any; absorbs layout and last-entry writes.
+    project_scope: Option<ProjectScope>,
+    /// A project is opening: its scope is not installed yet, so layout writes
+    /// are held back until the registry lookup finishes.
+    scope_loading: Option<PathBuf>,
+    /// The dock is being set programmatically; its intermediate events are not
+    /// user changes and must not be persisted.
+    applying_layout: bool,
+    store: Option<Arc<PreferencesStore>>,
     latest: LatestSettings,
     revision: u64,
     settings_task: Option<Task<()>>,
+    project_task: Option<Task<()>>,
+    scope_task: Option<Task<()>>,
     warning: Option<String>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -125,8 +157,8 @@ pub(crate) struct Shell {
 
 impl Shell {
     fn new(
-        mut settings: Settings,
-        store: Option<Arc<SettingsStore>>,
+        mut settings: GlobalPreferencesV2,
+        store: Option<Arc<PreferencesStore>>,
         warning: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -134,7 +166,12 @@ impl Shell {
         settings
             .layout
             .clamp(f32::from(window.viewport_size().width));
-        theme::apply(settings.theme, window.appearance(), cx);
+        let global_layout = settings.layout.clone();
+        theme::apply(
+            resolve(&settings, None, None).theme,
+            window.appearance(),
+            cx,
+        );
         let navigator = cx.new(|cx| {
             WorkspacePanel::new(
                 "navigator-panel",
@@ -214,13 +251,16 @@ impl Shell {
             );
             area.set_dock_size(
                 DockPlacement::Bottom,
-                gpui_kit::rems(10.).to_pixels(window.rem_size()),
+                px(settings.layout.preview_height),
                 window,
                 cx,
             );
         });
         let palette = cx.new(|cx| CommandState::new(window, cx));
-        let latest = Arc::new(Mutex::new((0, settings.clone())));
+        let latest = Arc::new(Mutex::new(LatestPreferences {
+            global: (0, settings.clone()),
+            project: None,
+        }));
         let mut subscriptions = vec![
             cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, _, cx| {
                 if matches!(event, DockEvent::LayoutChanged) {
@@ -249,10 +289,22 @@ impl Shell {
             window,
             |this, _, _: &SessionChanged, _window, cx| this.sync_preview(cx),
         ));
+        // Recording the open, restoring the project layout and reopening its
+        // last entry all need the window the project open completed in.
+        subscriptions.push(cx.subscribe_in(
+            &project,
+            window,
+            |this, _, event: &ProjectOpened, window, cx| {
+                this.open_project_scope(event.root.clone(), window, cx)
+            },
+        ));
         // Project load, entry activation and watcher refreshes notify the
         // workspace without emitting a text-edit event; the preview panel must
         // still attach on open and follow the active entry.
-        subscriptions.push(cx.observe(&project, |this, _, cx| this.sync_preview(cx)));
+        subscriptions.push(cx.observe(&project, |this, _, cx| {
+            this.sync_preview(cx);
+            this.track_active_entry(cx);
+        }));
         let apply_owner = project.downgrade();
         subscriptions.push(cx.subscribe_in(
             &frontmatter,
@@ -273,11 +325,18 @@ impl Shell {
                 let latest = latest.clone();
                 let flush = runtime::flush_on_quit(cx, move || {
                     let snapshot = latest.lock().ok().map(|snapshot| snapshot.clone());
-                    if let Some((revision, settings)) = snapshot
-                        && let Err(error) = store.save(revision, &settings)
-                    {
-                        tracing::error!(%error, "could not save preferences on exit");
-                        eprintln!("Could not save preferences on exit: {error}");
+                    if let Some(snapshot) = snapshot {
+                        let (revision, settings) = &snapshot.global;
+                        if let Err(error) = store.save_global(*revision, settings) {
+                            tracing::error!(%error, "could not save preferences on exit");
+                            eprintln!("Could not save preferences on exit: {error}");
+                        }
+                        if let Some((revision, preferences)) = &snapshot.project
+                            && let Err(error) = store.save_project(*revision, preferences)
+                        {
+                            tracing::error!(%error, "could not save project preferences on exit");
+                            eprintln!("Could not save project preferences on exit: {error}");
+                        }
                     }
                 });
                 cx.background_executor().spawn(async move {
@@ -335,10 +394,16 @@ impl Shell {
             last_viewport: window.viewport_size(),
             _skin: skin,
             settings,
+            global_layout,
+            project_scope: None,
+            scope_loading: None,
+            applying_layout: false,
             store,
             latest,
             revision: 0,
             settings_task: None,
+            project_task: None,
+            scope_task: None,
             warning,
             focus,
             _subscriptions: subscriptions,
@@ -380,9 +445,10 @@ impl Shell {
         }
     }
 
-    fn capture_layout(&mut self, cx: &mut Context<Self>) {
+    /// The layout the dock currently reports.
+    fn read_dock_layout(&self, cx: &App) -> LayoutState {
         let dock = self.dock.read(cx);
-        let layout = LayoutState {
+        LayoutState {
             sidebar_visible: dock.is_dock_open(DockPlacement::Left),
             inspector_visible: dock.is_dock_open(DockPlacement::Right),
             preview_visible: dock.is_dock_open(DockPlacement::Bottom),
@@ -394,13 +460,36 @@ impl Shell {
                 .dock_size(DockPlacement::Right)
                 .map(f32::from)
                 .unwrap_or(260.),
-        };
+            // A closed bottom dock has no settled size; keep the stored value.
+            preview_height: dock
+                .dock_size(DockPlacement::Bottom)
+                .map(f32::from)
+                .filter(|_| self.settings.layout.preview_visible)
+                .unwrap_or(self.settings.layout.preview_height),
+        }
+    }
+
+    fn capture_layout(&mut self, cx: &mut Context<Self>) {
+        // A project's scope is being looked up; there is no owner for this
+        // change yet and the loaded project layout will replace it anyway.
+        if self.scope_loading.is_some() || self.applying_layout {
+            return;
+        }
+        let layout = self.read_dock_layout(cx);
         let visibility_changed = layout.sidebar_visible != self.settings.layout.sidebar_visible
             || layout.inspector_visible != self.settings.layout.inspector_visible
             || layout.preview_visible != self.settings.layout.preview_visible;
-        if layout != self.settings.layout {
-            self.settings.layout = layout;
-            self.persist(cx);
+        if layout == self.settings.layout {
+            return;
+        }
+        self.settings.layout = layout.clone();
+        // With a project open the dock belongs to that project's scope; a
+        // project file records both visibility and the live widths.
+        if let Some(scope) = self.project_scope.as_mut() {
+            scope.preferences.layout = Some(layout);
+            self.persist_project(cx);
+        } else {
+            self.persist_global(cx);
         }
         // Width-only changes are carried by the dock itself. Notifying here
         // would rebuild the whole shell once per resize frame.
@@ -409,34 +498,199 @@ impl Shell {
         }
     }
 
-    fn persist(&mut self, cx: &mut Context<Self>) {
+    /// Persist the global scope, keeping a project layout out of the global file.
+    fn persist_global(&mut self, cx: &mut Context<Self>) {
         self.revision += 1;
         let revision = self.revision;
-        let settings = self.settings.clone();
-        if let Ok(mut latest) = self.latest.lock() {
-            *latest = (revision, settings.clone());
+        let mut settings = self.settings.clone();
+        if self.project_scope.is_some() || self.scope_loading.is_some() {
+            settings.layout = self.global_layout.clone();
+        } else {
+            self.global_layout = settings.layout.clone();
         }
+        self.record_latest(|latest| latest.global = (revision, settings.clone()));
         let Some(store) = self.store.clone() else {
             return;
         };
-        let timer = cx
-            .background_executor()
-            .timer(std::time::Duration::from_millis(250));
-        self.settings_task = Some(cx.spawn(async move |this, cx| {
-            timer.await;
-            let result = runtime::blocking(cx, move || store.save(revision, &settings))
-                .await
-                .map_err(std::io::Error::other)
-                .and_then(|result| result);
-            let _ = this.update(cx, |this, cx| {
-                if this.revision == revision {
-                    this.warning = result
+        self.settings_task = Some(debounced_save(cx, SaveScope::Global, revision, move || {
+            store.save_global(revision, &settings)
+        }));
+    }
+
+    /// Persist the open project's scope; a no-op when no project is open.
+    fn persist_project(&mut self, cx: &mut Context<Self>) {
+        let Some(scope) = self.project_scope.as_mut() else {
+            return;
+        };
+        scope.revision += 1;
+        let revision = scope.revision;
+        let preferences = scope.preferences.clone();
+        self.record_latest(|latest| latest.project = Some((revision, preferences.clone())));
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        self.project_task = Some(debounced_save(
+            cx,
+            SaveScope::Project,
+            revision,
+            move || store.save_project(revision, &preferences),
+        ));
+    }
+
+    fn record_latest(&self, update: impl FnOnce(&mut LatestPreferences)) {
+        if let Ok(mut latest) = self.latest.lock() {
+            update(&mut latest);
+        }
+    }
+
+    /// Take the pending project snapshot so a scope switch can flush it before
+    /// the registry revision moves.
+    fn take_pending_project(&self) -> Option<(u64, ProjectPreferencesV1)> {
+        self.latest
+            .lock()
+            .ok()
+            .and_then(|mut latest| latest.project.take())
+    }
+
+    /// Store the open project as the active preferences scope, then restore it.
+    fn open_project_scope(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // A newly opened project owns the scope immediately: its layout must
+        // never be written into the previously open project's file while the
+        // registry lookup is still running.
+        self.project_scope = None;
+        self.scope_loading = Some(root.clone());
+        let Some(store) = self.store.clone() else {
+            self.scope_loading = None;
+            return;
+        };
+        // The outgoing project's debounced write may still be pending. Flush it
+        // here, before this open bumps the registry revision, so a newer layout
+        // cannot be rejected as stale or overwritten by the stored snapshot.
+        let pending = self.take_pending_project();
+        let work = {
+            let root = root.clone();
+            move || {
+                let flush_warning = pending.and_then(|(revision, preferences)| {
+                    store
+                        .save_project(revision, &preferences)
                         .err()
-                        .map(|error| format!("Could not save preferences: {error}"));
-                    cx.notify();
+                        .map(|error| {
+                            format!("Could not save previous project preferences: {error}")
+                        })
+                });
+                let package_name = project_package_name(&root);
+                let open = store
+                    .record_project_open(&root, package_name.as_deref(), now_secs())
+                    .map_err(|error| error.to_string())?;
+                let (preferences, revision, warning) =
+                    store.project(&open.id).map_err(|error| error.to_string())?;
+                Ok((preferences, revision, warning.or(flush_warning)))
+            }
+        };
+        let task = runtime::blocking(cx, work);
+        self.scope_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let loaded = task.await.and_then(|result| result);
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.project.read(cx).project_root().as_ref() != Some(&root)
+                    || this.scope_loading.as_ref() != Some(&root)
+                {
+                    return;
                 }
+                this.install_project_scope(root, loaded, window, cx);
             });
         }));
+    }
+
+    fn install_project_scope(
+        &mut self,
+        root: PathBuf,
+        loaded: Result<(ProjectPreferencesV1, u64, Option<String>), String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scope_loading = None;
+        let (preferences, revision, warning) = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                tracing::warn!(%error, "could not load project preferences");
+                self.warning = Some(format!("Could not load project preferences: {error}"));
+                // The scope is global again; make the visible layout match it
+                // so later changes are persisted where they belong.
+                let layout = self.global_layout.clone();
+                self.apply_layout(layout, window, cx);
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(warning) = warning {
+            tracing::warn!(%warning, "project preferences loaded with a warning");
+            self.warning = Some(warning);
+        }
+        let global = GlobalPreferencesV2 {
+            layout: self.global_layout.clone(),
+            ..self.settings.clone()
+        };
+        let resolved = resolve(&global, Some(&preferences), None);
+        self.project_scope = Some(ProjectScope {
+            root,
+            preferences,
+            revision,
+        });
+        self.apply_layout(resolved.layout, window, cx);
+        self.project.update(cx, |project, cx| {
+            project.reopen_last_entry(resolved.last_entry.as_deref(), window, cx)
+        });
+        cx.notify();
+    }
+
+    /// Apply a resolved layout to the dock without persisting it back.
+    fn apply_layout(
+        &mut self,
+        mut layout: LayoutState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        layout.clamp(f32::from(window.viewport_size().width));
+        // Set the model first: dock events arrive afterwards and must not look
+        // like a user change.
+        self.settings.layout = layout.clone();
+        self.applying_layout = true;
+        self.dock.update(cx, |dock, cx| {
+            for (placement, visible) in [
+                (DockPlacement::Left, layout.sidebar_visible),
+                (DockPlacement::Right, layout.inspector_visible),
+                (DockPlacement::Bottom, layout.preview_visible),
+            ] {
+                if dock.is_dock_open(placement) != visible {
+                    dock.toggle_dock(placement, window, cx);
+                }
+            }
+            dock.set_dock_size(DockPlacement::Left, px(layout.sidebar_width), window, cx);
+            dock.set_dock_size(DockPlacement::Right, px(layout.inspector_width), window, cx);
+            if layout.preview_visible {
+                dock.set_dock_size(DockPlacement::Bottom, px(layout.preview_height), window, cx);
+            }
+        });
+        self.applying_layout = false;
+    }
+
+    /// Record the active document as the open project's last entry.
+    fn track_active_entry(&mut self, cx: &mut Context<Self>) {
+        let Some(scope) = self.project_scope.as_ref() else {
+            return;
+        };
+        if self.project.read(cx).project_root().as_ref() != Some(&scope.root) {
+            return;
+        }
+        let Some(relative) = self.project.read(cx).active_relative_source() else {
+            return;
+        };
+        let scope = self.project_scope.as_mut().expect("scope checked above");
+        if scope.preferences.last_entry.as_deref() == Some(relative.as_str()) {
+            return;
+        }
+        scope.preferences.last_entry = Some(relative);
+        self.persist_project(cx);
     }
 
     fn toggle_panel(&mut self, kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -497,6 +751,11 @@ impl Shell {
             CommandId::OpenProject => {
                 if !self.dock.read(cx).is_dock_open(DockPlacement::Left) {
                     self.toggle_panel(PanelKind::Sidebar, window, cx);
+                    // Revealing the navigator is a transient UI action for the
+                    // project about to open. Mirror the dock so the deferred
+                    // layout event compares equal, but never persist it into
+                    // the outgoing project's or the global scope.
+                    self.settings.layout = self.read_dock_layout(cx);
                 }
                 self.project
                     .update(cx, |project, cx| project.prompt(window, cx));
@@ -532,7 +791,7 @@ impl Shell {
                     _ => ThemeMode::System,
                 };
                 theme::apply(self.settings.theme, window.appearance(), cx);
-                self.persist(cx);
+                self.persist_global(cx);
             }
             CommandId::ResetLayout => {
                 let mut layout = LayoutState::default();
@@ -912,6 +1171,68 @@ impl Render for Shell {
     }
 }
 
+/// Scope a debounced write reports its outcome to.
+#[derive(Clone, Copy)]
+enum SaveScope {
+    Global,
+    Project,
+}
+
+/// Debounce one scoped preference write by 250 ms.
+///
+/// A drag replaces the pending task instead of writing every intermediate
+/// width; the last snapshot always wins.
+fn debounced_save<F>(cx: &mut Context<Shell>, scope: SaveScope, revision: u64, work: F) -> Task<()>
+where
+    F: FnOnce() -> std::io::Result<bool> + Send + 'static,
+{
+    let timer = cx
+        .background_executor()
+        .timer(std::time::Duration::from_millis(250));
+    cx.spawn(async move |this, cx| {
+        timer.await;
+        let result = runtime::blocking(cx, work)
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(|result| result);
+        let _ = this.update(cx, |this, cx| {
+            // A stale result must not overwrite the status of a newer snapshot.
+            let current = match scope {
+                SaveScope::Global => this.revision == revision,
+                SaveScope::Project => this
+                    .project_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.revision == revision),
+            };
+            if current {
+                this.warning = result
+                    .err()
+                    .map(|error| format!("Could not save preferences: {error}"));
+            }
+            // Test and status consumers wait for this notification, not just
+            // for the file to appear.
+            cx.notify();
+        });
+    })
+}
+
+/// The project's declared package name, used as the registry's move identity.
+fn project_package_name(root: &std::path::Path) -> Option<String> {
+    let path = root.join("package.json");
+    let metadata = std::fs::metadata(&path).ok()?;
+    if metadata.len() > 1024 * 1024 {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -920,7 +1241,10 @@ mod tests {
         point, px, size, test::TestWindowExt,
     };
 
-    fn mount(cx: &mut TestAppContext, settings: Settings) -> (WindowHandle<Root>, Entity<Shell>) {
+    fn mount(
+        cx: &mut TestAppContext,
+        settings: GlobalPreferencesV2,
+    ) -> (WindowHandle<Root>, Entity<Shell>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             runtime::init(cx).unwrap();
@@ -943,8 +1267,13 @@ mod tests {
 
     #[gpui_kit::test]
     async fn opening_project_reveals_hidden_navigator(cx: &mut TestAppContext) {
-        let mut settings = Settings::default();
-        settings.layout.sidebar_visible = false;
+        let settings = GlobalPreferencesV2 {
+            layout: LayoutState {
+                sidebar_visible: false,
+                ..LayoutState::default()
+            },
+            ..GlobalPreferencesV2::default()
+        };
         let (handle, view) = mount(cx, settings);
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
@@ -962,7 +1291,7 @@ mod tests {
     fn toolbar_and_native_collapse_share_live_visibility_and_restore_document_space(
         cx: &mut TestAppContext,
     ) {
-        let (handle, view) = mount(cx, Settings::default());
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         let initial = cx
             .update_window(handle.into(), |_, window, cx| {
                 window.render_frame(cx);
@@ -1029,7 +1358,7 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("src/content/intro.md"), "# Intro\n").unwrap();
 
-        let (handle, view) = mount(cx, Settings::default());
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.execute(CommandId::OpenProject, window, cx)
@@ -1061,7 +1390,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn preview_commands_are_wired_and_report_without_a_project(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, Settings::default());
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.execute(CommandId::StartPreview, window, cx)
@@ -1101,7 +1430,7 @@ mod tests {
     #[gpui_kit::test]
     fn splitter_drag_updates_geometry_without_repainting_the_shell(cx: &mut TestAppContext) {
         use std::rc::Rc;
-        let (handle, view) = mount(cx, Settings::default());
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         let notifications = Rc::new(std::cell::Cell::new(0usize));
         let count = notifications.clone();
         cx.update(|cx| {
@@ -1139,7 +1468,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn native_drag_is_captured_and_preferences_restore_in_a_new_window(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, Settings::default());
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             let start = window.find("resize-handle-left").bounds().center();
@@ -1168,7 +1497,7 @@ mod tests {
     fn shrinking_after_expanded_docks_preserves_document_and_panel_geometry(
         cx: &mut TestAppContext,
     ) {
-        let (handle, view) = mount(cx, Settings::default());
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         cx.simulate_window_resize(handle.into(), size(px(1800.), px(1100.)));
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
@@ -1200,8 +1529,10 @@ mod tests {
     #[gpui_kit::test]
     fn shell_panels_stay_inside_minimum_viewport_in_both_themes(cx: &mut TestAppContext) {
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
-            let mut settings = Settings::default();
-            settings.theme = mode;
+            let settings = GlobalPreferencesV2 {
+                theme: mode,
+                ..GlobalPreferencesV2::default()
+            };
             let (handle, _) = mount(cx, settings);
             cx.simulate_window_resize(handle.into(), size(px(800.), px(600.)));
             cx.update_window(handle.into(), |_, window, cx| {
@@ -1223,7 +1554,7 @@ mod tests {
     fn palette_filters_confirms_original_command_and_restores_trigger_focus(
         cx: &mut TestAppContext,
     ) {
-        let (handle, view) = mount(cx, Settings::default());
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click("command-palette", cx);
@@ -1258,7 +1589,7 @@ mod tests {
     fn shortcuts_work_from_document_focus_and_palette_cancel_returns_there(
         cx: &mut TestAppContext,
     ) {
-        let (handle, view) = mount(cx, Settings::default());
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         cx.update_window(handle.into(), |_, window, cx| {
             let state = view.read(cx).document.read(cx).editor.clone().unwrap();
             window.render_frame(cx);
@@ -1296,7 +1627,7 @@ mod tests {
         let path = directory.path().join("中文.mdx");
         let source = "# 日本語\n<Example>{42}</Example> 🦀\n";
         std::fs::write(&path, source).unwrap();
-        let (handle, view) = mount(cx, Settings::default());
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.press(crate::commands::CommandId::OpenFile.shortcut().unwrap(), cx);
@@ -1344,13 +1675,13 @@ mod tests {
     async fn settings_burst_does_not_write_intermediate_drag_positions(cx: &mut TestAppContext) {
         use std::time::Duration;
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("preferences.json");
-        let (store, settings, _) = SettingsStore::load(path.clone());
+        let path = directory.path().join("preferences/global.json");
+        let (store, settings, _) = PreferencesStore::load(path.clone());
         let (_, view) = mount(cx, settings);
         view.update(cx, |shell, cx| {
             shell.store = Some(Arc::new(store));
             shell.settings.layout.sidebar_width = 230.;
-            shell.persist(cx);
+            shell.persist_global(cx);
         });
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(200));
@@ -1360,7 +1691,7 @@ mod tests {
         );
         view.update(cx, |shell, cx| {
             shell.settings.layout.sidebar_width = 275.;
-            shell.persist(cx);
+            shell.persist_global(cx);
         });
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(200));
@@ -1368,9 +1699,652 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(50));
         cx.executor().allow_parking();
         cx.condition(&view, |_, _| path.exists()).await;
-        let (_, restored, warning) = SettingsStore::load(path);
+        let (_, restored, warning) = PreferencesStore::load(path);
         assert!(warning.is_none());
         assert_eq!(restored.layout.sidebar_width, 275.);
+    }
+
+    /// Minimal Astro project with one `blog` collection holding two entries.
+    fn project_fixture(package_name: &str) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir_all(root.join("node_modules/astro")).unwrap();
+        std::fs::write(
+            root.join("node_modules/astro/package.json"),
+            r#"{"version":"7.4.4"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            format!(r#"{{"name":"{package_name}","dependencies":{{"astro":"7.4.4"}}}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("astro.config.mjs"),
+            "import { defineConfig } from 'astro/config';\nexport default defineConfig({});\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/content")).unwrap();
+        std::fs::write(
+            root.join("src/content.config.ts"),
+            "import { defineCollection } from 'astro:content';\nimport { glob } from 'astro/loaders';\nconst blog = defineCollection({ loader: glob({ base: './src/content', pattern: '**/*.md' }) });\nexport const collections = { blog };\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/content/first.md"), "# First\n").unwrap();
+        std::fs::write(root.join("src/content/second.md"), "# Second\n").unwrap();
+        directory
+    }
+
+    /// Persist one project scope before the app opens it, as a restart would find it.
+    fn seed_project(
+        store: &PreferencesStore,
+        root: &std::path::Path,
+        preferences: impl FnOnce(&mut ProjectPreferencesV1),
+    ) -> String {
+        let open = store.record_project_open(root, Some("site"), 1).unwrap();
+        let (mut stored, revision, _) = store.project(&open.id).unwrap();
+        preferences(&mut stored);
+        assert!(store.save_project(revision + 1, &stored).unwrap());
+        open.id
+    }
+
+    fn open_project(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+        view: &Entity<Shell>,
+        root: std::path::PathBuf,
+    ) {
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::OpenProject, window, cx)
+            })
+        })
+        .unwrap();
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(move |_| Some(vec![root.clone()]));
+    }
+
+    fn project_file(preferences_root: &std::path::Path, id: &str) -> serde_json::Value {
+        let path = preferences_root.join("projects").join(format!("{id}.json"));
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[gpui_kit::test]
+    async fn project_layout_overrides_the_global_layout(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let preferences_root = workspace.path().join("preferences");
+        let global_path = preferences_root.join("global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path.clone());
+        store.save_global(1, &settings).unwrap();
+        let project = project_fixture("layout-site");
+        let saved = LayoutState {
+            sidebar_visible: true,
+            inspector_visible: false,
+            preview_visible: true,
+            sidebar_width: 200.,
+            inspector_width: 320.,
+            preview_height: 220.,
+        };
+        {
+            let saved = saved.clone();
+            seed_project(&store, project.path(), |preferences| {
+                preferences.layout = Some(saved);
+            });
+        }
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == canonical)
+        })
+        .await;
+
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(shell.settings.layout, saved);
+            let dock = shell.dock.read(cx);
+            assert!(dock.is_dock_open(DockPlacement::Left));
+            assert!(!dock.is_dock_open(DockPlacement::Right));
+            assert!(dock.is_dock_open(DockPlacement::Bottom));
+            assert_eq!(dock.dock_size(DockPlacement::Left), Some(px(200.)));
+            assert_eq!(dock.dock_size(DockPlacement::Right), Some(px(320.)));
+            assert_eq!(dock.dock_size(DockPlacement::Bottom), Some(px(220.)));
+            assert_eq!(
+                shell.global_layout,
+                LayoutState::default(),
+                "restoring a project layout must not rewrite the global layout"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("navigator-panel").bounds().size.width, px(200.));
+            assert!(
+                window
+                    .try_find("inspector-panel")
+                    .is_none_or(|panel| !panel.visible())
+            );
+            assert!(window.find("preview-panel").visible());
+        })
+        .unwrap();
+
+        // The open is recorded under the stable registry identity, using the
+        // package name from package.json — never the runtime workspace id.
+        let (fresh, _, warning) = PreferencesStore::load(global_path);
+        assert!(warning.is_none());
+        let (registry, _, warning) = fresh.registry();
+        assert!(warning.is_none());
+        let path = canonical.to_string_lossy().into_owned();
+        let record = registry.get_by_path(&path).expect("project registered");
+        assert_eq!(record.package_name.as_deref(), Some("layout-site"));
+        let scope_id = view.read_with(cx, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .unwrap()
+                .preferences
+                .project_id
+                .clone()
+        });
+        assert_eq!(record.id, scope_id);
+        assert!(!scope_id.starts_with("workspace-"));
+    }
+
+    #[gpui_kit::test]
+    async fn switching_projects_switches_the_saved_layouts(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_path = workspace.path().join("preferences/global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let first = project_fixture("first-site");
+        let second = project_fixture("second-site");
+        let first_layout = LayoutState {
+            sidebar_visible: false,
+            inspector_visible: true,
+            preview_visible: false,
+            sidebar_width: 190.,
+            inspector_width: 280.,
+            preview_height: 160.,
+        };
+        let second_layout = LayoutState {
+            sidebar_visible: true,
+            inspector_visible: false,
+            preview_visible: true,
+            sidebar_width: 230.,
+            inspector_width: 320.,
+            preview_height: 240.,
+        };
+        {
+            let layout = first_layout.clone();
+            seed_project(&store, first.path(), |preferences| {
+                preferences.layout = Some(layout);
+            });
+        }
+        {
+            let layout = second_layout.clone();
+            seed_project(&store, second.path(), |preferences| {
+                preferences.layout = Some(layout);
+            });
+        }
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        let first_root = std::fs::canonicalize(first.path()).unwrap();
+        let second_root = std::fs::canonicalize(second.path()).unwrap();
+
+        open_project(cx, handle, &view, first.path().to_path_buf());
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == first_root)
+        })
+        .await;
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(shell.settings.layout, first_layout);
+            assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
+        });
+
+        open_project(cx, handle, &view, second.path().to_path_buf());
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == second_root)
+        })
+        .await;
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(shell.settings.layout, second_layout);
+            assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Left));
+            assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Right));
+            assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
+            assert_eq!(
+                shell.dock.read(cx).dock_size(DockPlacement::Bottom),
+                Some(px(240.))
+            );
+        });
+
+        open_project(cx, handle, &view, first.path().to_path_buf());
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == first_root)
+        })
+        .await;
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(shell.settings.layout, first_layout);
+            assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn moved_project_rebinds_and_keeps_its_layout(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_path = workspace.path().join("preferences/global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let project = project_fixture("moving-site");
+        let saved = LayoutState {
+            sidebar_visible: false,
+            inspector_visible: true,
+            preview_visible: true,
+            sidebar_width: 210.,
+            inspector_width: 300.,
+            preview_height: 180.,
+        };
+        let id = {
+            let layout = saved.clone();
+            seed_project(&store, project.path(), |preferences| {
+                preferences.layout = Some(layout);
+            })
+        };
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        let original_root = std::fs::canonicalize(project.path()).unwrap();
+
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == original_root)
+        })
+        .await;
+
+        // Move the project directory, then reopen it at the new location.
+        let moved = workspace.path().join("moved");
+        std::fs::rename(project.path(), &moved).unwrap();
+        let moved_root = std::fs::canonicalize(&moved).unwrap();
+        open_project(cx, handle, &view, moved.clone());
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == moved_root)
+        })
+        .await;
+
+        view.read_with(cx, |shell, cx| {
+            let scope = shell.project_scope.as_ref().unwrap();
+            assert_eq!(
+                scope.preferences.project_id, id,
+                "a moved project keeps its registry identity and preferences"
+            );
+            assert_eq!(shell.settings.layout, saved);
+            assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
+            assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn project_width_change_persists_to_the_project_file_only(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let preferences_root = workspace.path().join("preferences");
+        let global_path = preferences_root.join("global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path.clone());
+        store.save_global(1, &settings).unwrap();
+        let project = project_fixture("width-site");
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == canonical)
+        })
+        .await;
+        view.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.settings.layout, shell.global_layout,
+                "a project without a saved layout inherits the global layout"
+            );
+            assert!(
+                shell
+                    .project_scope
+                    .as_ref()
+                    .unwrap()
+                    .preferences
+                    .layout
+                    .is_none()
+            );
+        });
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let start = window.find("resize-handle-left").bounds().center();
+            window.drag(start, point(start.x + px(36.), start.y), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.condition(&view, |shell, _| {
+            let Some(scope) = shell.project_scope.as_ref() else {
+                return false;
+            };
+            let path = preferences_root
+                .join("projects")
+                .join(format!("{}.json", scope.preferences.project_id));
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value["layout"]["sidebar_width"].as_f64())
+                .is_some_and(|width| width > 250.)
+        })
+        .await;
+
+        let id = view.read_with(cx, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .unwrap()
+                .preferences
+                .project_id
+                .clone()
+        });
+        let project_preferences = project_file(&preferences_root, &id);
+        assert_eq!(
+            project_preferences["layout"]["sidebar_visible"], true,
+            "the project file must record the captured layout"
+        );
+        let (_, global, warning) = PreferencesStore::load(global_path);
+        assert!(warning.is_none());
+        assert_eq!(
+            global.layout.sidebar_width, 240.,
+            "a project width must never be written to the global file"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn preview_height_change_persists_to_the_project_file(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let preferences_root = workspace.path().join("preferences");
+        let global_path = preferences_root.join("global.json");
+        let project = project_fixture("preview-site");
+        {
+            let (store, _, _) = PreferencesStore::load(global_path.clone());
+            seed_project(&store, project.path(), |preferences| {
+                preferences.layout = Some(LayoutState {
+                    preview_visible: true,
+                    ..LayoutState::default()
+                });
+            });
+        }
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == canonical)
+        })
+        .await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let start = window.find("resize-handle-bottom").bounds().center();
+            window.drag(start, point(start.x, start.y - px(48.)), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(300));
+
+        let id = view.read_with(cx, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .unwrap()
+                .preferences
+                .project_id
+                .clone()
+        });
+        cx.condition(&view, |shell, _| {
+            let Some(scope) = shell.project_scope.as_ref() else {
+                return false;
+            };
+            let path = preferences_root
+                .join("projects")
+                .join(format!("{}.json", scope.preferences.project_id));
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value["layout"]["preview_height"].as_f64())
+                .is_some_and(|height| height > 190.)
+        })
+        .await;
+        let preferences = project_file(&preferences_root, &id);
+        assert_eq!(preferences["layout"]["preview_visible"], true);
+    }
+
+    #[gpui_kit::test]
+    async fn pending_project_layout_is_flushed_before_switching(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let preferences_root = workspace.path().join("preferences");
+        let global_path = preferences_root.join("global.json");
+        let first = project_fixture("pending-first");
+        let second = project_fixture("pending-second");
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        let first_root = std::fs::canonicalize(first.path()).unwrap();
+        let second_root = std::fs::canonicalize(second.path()).unwrap();
+
+        open_project(cx, handle, &view, first.path().to_path_buf());
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == first_root)
+        })
+        .await;
+        // A layout change whose debounced write has not run yet.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let start = window.find("resize-handle-left").bounds().center();
+            window.drag(start, point(start.x + px(36.), start.y), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let first_id = view.read_with(cx, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .unwrap()
+                .preferences
+                .project_id
+                .clone()
+        });
+
+        // Switch before the debounce fires, then change the second project so a
+        // single shared pending task would replace the first project's write.
+        open_project(cx, handle, &view, second.path().to_path_buf());
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == second_root)
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let start = window.find("resize-handle-left").bounds().center();
+            window.drag(start, point(start.x + px(60.), start.y), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(400));
+
+        let path = preferences_root
+            .join("projects")
+            .join(format!("{first_id}.json"));
+        cx.condition(&view, move |_, _| {
+            std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value["layout"]["sidebar_width"].as_f64())
+                .is_some_and(|width| width > 250.)
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn last_entry_reopens_on_open_and_is_ignored_when_missing(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let preferences_root = workspace.path().join("preferences");
+        let global_path = preferences_root.join("global.json");
+        let project = project_fixture("entry-site");
+        let missing = project_fixture("missing-site");
+        {
+            let (store, _, _) = PreferencesStore::load(global_path.clone());
+            seed_project(&store, project.path(), |preferences| {
+                preferences.last_entry = Some("src/content/second.md".into());
+            });
+            seed_project(&store, missing.path(), |preferences| {
+                preferences.last_entry = Some("src/content/gone.md".into());
+            });
+        }
+        // Reopen the store from disk: this is the restart the acceptance covers.
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == canonical)
+        })
+        .await;
+        let project_handle = view.read_with(cx, |shell, _| shell.project.clone());
+        cx.condition(&project_handle, |project, _| project.open_tabs().len() == 1)
+            .await;
+        view.read_with(cx, |shell, cx| {
+            let project = shell.project.read(cx);
+            assert_eq!(
+                project.active_relative_source().as_deref(),
+                Some("src/content/second.md")
+            );
+            assert_eq!(
+                project.active_path(),
+                Some(canonical.join("src/content/second.md"))
+            );
+        });
+
+        // Opening a different entry records it as this project's last entry.
+        cx.update_window(handle.into(), |_, window, cx| {
+            project_handle.update(cx, |project, cx| {
+                project.open_first_entry_for_tests(window, cx)
+            });
+        })
+        .unwrap();
+        cx.condition(&project_handle, |project, _| project.open_tabs().len() == 2)
+            .await;
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.condition(&view, |shell, _| {
+            let Some(scope) = shell.project_scope.as_ref() else {
+                return false;
+            };
+            let path = preferences_root
+                .join("projects")
+                .join(format!("{}.json", scope.preferences.project_id));
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value["last_entry"].as_str().map(str::to_owned))
+                .as_deref()
+                == Some("src/content/first.md")
+        })
+        .await;
+
+        open_project(cx, handle, &view, missing.path().to_path_buf());
+        let missing_root = std::fs::canonicalize(missing.path()).unwrap();
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == missing_root)
+        })
+        .await;
+        cx.run_until_parked();
+        view.read_with(cx, |shell, cx| {
+            let project = shell.project.read(cx);
+            assert!(project.open_tabs().is_empty());
+            assert!(project.active_path().is_none());
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn layout_without_a_project_still_persists_globally(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_path = workspace.path().join("preferences/global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path.clone());
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let start = window.find("resize-handle-left").bounds().center();
+            window.drag(start, point(start.x + px(36.), start.y), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.condition(&view, |shell, _| {
+            let persisted = std::fs::read(&global_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value["layout"]["sidebar_width"].as_f64());
+            shell.global_layout.sidebar_width > 250. && persisted.is_some_and(|w| w > 250.)
+        })
+        .await;
+        let (_, global, warning) = PreferencesStore::load(global_path);
+        assert!(warning.is_none());
+        assert!(
+            global.layout.sidebar_width > 250.,
+            "without a project the live layout keeps persisting globally"
+        );
+        assert!(!workspace.path().join("preferences/projects").exists());
     }
 
     #[gpui_kit::test]
@@ -1405,7 +2379,7 @@ mod tests {
         let paragraph = "# 中文 🦀\nA multilingual paragraph with **emphasis**, `inline code`, 日本語, and enough ordinary words to represent a real article.\n";
         std::fs::write(root.join("src/content/intro.md"), paragraph.repeat(8000)).unwrap();
 
-        let (handle, view) = mount(cx, Settings::default());
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.execute(CommandId::OpenProject, window, cx)
@@ -1483,7 +2457,7 @@ mod tests {
     fn readonly_file_open_workload(cx: &mut TestAppContext) {
         use std::time::Instant;
         let directory = tempfile::tempdir().unwrap();
-        let (handle, view) = mount(cx, Settings::default());
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         for (bytes, long_line) in [
             (1024, false),
             (100 * 1024, false),

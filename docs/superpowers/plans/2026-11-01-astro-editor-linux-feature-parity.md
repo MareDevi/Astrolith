@@ -1,6 +1,6 @@
 # Astro Editor Linux feature-parity implementation plan
 
-**Status:** Approved on 2026-11-01; P0 evidence, fixture and editor capability gate complete; P1 next.
+**Status:** Approved on 2026-11-01; P0 evidence, fixture and editor capability gate complete; P1 scoped preferences and project registry implemented; P2 next.
 
 **Date:** 2026-11-01
 

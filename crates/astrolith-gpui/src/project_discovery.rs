@@ -328,6 +328,16 @@ impl Drop for ProjectWorkspace {
     }
 }
 impl EventEmitter<SessionChanged> for ProjectWorkspace {}
+
+/// Emitted once a project's manifest and entry index are published.
+///
+/// Carries the canonical root so preference consumers never derive a project
+/// identity from the per-open [`ProjectId`].
+pub(crate) struct ProjectOpened {
+    /// Canonical project root.
+    pub root: PathBuf,
+}
+impl EventEmitter<ProjectOpened> for ProjectWorkspace {}
 impl ProjectWorkspace {
     pub fn new(
         document: Entity<WorkspacePanel>,
@@ -564,17 +574,23 @@ impl ProjectWorkspace {
 
     /// The collection entry rendered by the active document, if any.
     pub fn active_entry_id(&self) -> Option<astrolith_core::EntryId> {
-        let active = self.active.as_ref()?;
-        let root = self.manifest.as_ref()?.root();
-        let relative = active
-            .strip_prefix(root)
-            .ok()?
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = self.active_relative_source()?;
         self.entries
             .iter()
             .find(|entry| entry.entry().source().as_str() == relative)
             .map(|entry| entry.entry().id().clone())
+    }
+
+    /// Project-relative source of the active document, using `/` separators.
+    ///
+    /// This is the value persisted as a project's last entry.
+    pub(crate) fn active_relative_source(&self) -> Option<String> {
+        let active = self.active.as_ref()?;
+        let root = self.manifest.as_ref()?.root();
+        active
+            .strip_prefix(root)
+            .ok()
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
     }
 
     /// Identity used to decide when the frontmatter form needs a refresh.
@@ -788,6 +804,11 @@ impl ProjectWorkspace {
                         );
                         this.load_pending_recovery(window, cx);
                         this.load_collection_schemas(cx);
+                        // The shell records this open and restores the project's
+                        // layout and last entry; publish only after the index.
+                        if let Some(root) = this.project_root() {
+                            cx.emit(ProjectOpened { root });
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -947,6 +968,29 @@ impl ProjectWorkspace {
             cx.notify();
         });
     }
+    /// Reopen the entry recorded as this project's last entry.
+    ///
+    /// A missing or unindexed entry is ignored: the workspace keeps its
+    /// ordinary empty state rather than reporting an error.
+    pub(crate) fn reopen_last_entry(
+        &mut self,
+        source: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = source else {
+            return;
+        };
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.entry().source().as_str() == source)
+        else {
+            return;
+        };
+        self.open_entry(index, window, cx);
+    }
+
     #[cfg(test)]
     pub(crate) fn open_first_entry_for_tests(
         &mut self,
@@ -1732,7 +1776,7 @@ fn supports_frontmatter(path: &std::path::Path) -> bool {
         .is_some_and(|extension| matches!(extension, "md" | "mdx"))
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
