@@ -414,3 +414,64 @@ fn collection_base_override_replaces_the_configured_base_or_reports_the_reason()
         );
     }
 }
+
+#[test]
+fn json_file_collections_are_discovered_as_data_only() {
+    let dir = fixture();
+    std::fs::remove_file(dir.path().join("src/content.config.ts")).unwrap();
+    std::fs::create_dir_all(dir.path().join("src/content/blog")).unwrap();
+    std::fs::create_dir_all(dir.path().join("oracles/data-collections")).unwrap();
+    let oracle = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/parity-project/oracles/data-collections");
+    std::fs::copy(
+        oracle.join("content.config.mjs"),
+        dir.path().join("src/content.config.mjs"),
+    )
+    .unwrap();
+    std::fs::copy(
+        oracle.join("authors.json"),
+        dir.path().join("oracles/data-collections/authors.json"),
+    )
+    .unwrap();
+    set_mdx_integration(dir.path());
+    write_mdx(dir.path(), "5.0.6", "^5.0.0");
+
+    let out = inspect_project(&request(dir.path())).unwrap();
+    let DiscoveryOutcome::Ready(manifest) = out else {
+        panic!("the data-collection oracle stays supported: {out:?}")
+    };
+    assert_eq!(
+        manifest
+            .collections()
+            .iter()
+            .map(|collection| collection.id().as_str())
+            .collect::<Vec<_>>(),
+        ["posts"]
+    );
+    assert_eq!(manifest.data_collections().len(), 1);
+    let authors = &manifest.data_collections()[0];
+    assert_eq!(authors.id().as_str(), "dataAuthors");
+    assert_eq!(
+        authors.file(),
+        dir.path()
+            .join("oracles/data-collections/authors.json")
+            .canonicalize()
+            .unwrap()
+    );
+    assert_eq!(
+        authors.config(),
+        dir.path()
+            .join("src/content.config.mjs")
+            .canonicalize()
+            .unwrap()
+    );
+    assert!(manifest.diagnostics().is_empty());
+
+    std::fs::remove_file(dir.path().join("oracles/data-collections/authors.json")).unwrap();
+    let DiscoveryOutcome::Ready(manifest) = inspect_project(&request(dir.path())).unwrap() else {
+        panic!("a missing data file must not fail the whole project")
+    };
+    assert!(manifest.data_collections().is_empty());
+    assert_eq!(manifest.diagnostics().len(), 1);
+    assert!(manifest.diagnostics()[0].contains("dataAuthors"));
+}

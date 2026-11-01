@@ -10,7 +10,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::schema::model::{CollectionSchema, Field, FieldKind};
+use crate::schema::model::{CollectionSchema, Field, FieldConstraints, FieldKind};
 
 /// How severe a validation finding is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,8 +114,129 @@ fn validate_fields(
                     ));
                 }
             }
-            Some(value) => validate_value(&field.kind, value, &path, diagnostics),
+            Some(value) => {
+                validate_value(&field.kind, value, &path, diagnostics);
+                validate_constraints(&field.constraints, &field.kind, value, &path, diagnostics);
+            }
         }
+    }
+}
+
+/// Check the schema constraints that apply to one present value.
+///
+/// Constraints never block saving; they only produce local diagnostics.
+fn validate_constraints(
+    constraints: &FieldConstraints,
+    kind: &FieldKind,
+    value: &Value,
+    path: &str,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    if value.is_null() {
+        return;
+    }
+    let base_kind = unwrap_nullable(kind);
+    match base_kind {
+        FieldKind::Number | FieldKind::Integer => {
+            if let Some(number) = value.as_f64() {
+                if let Some(minimum) = constraints.minimum
+                    && number < minimum
+                {
+                    diagnostics.push(ValidationDiagnostic::error(
+                        path,
+                        format!("must be at least {minimum}"),
+                    ));
+                }
+                if let Some(maximum) = constraints.maximum
+                    && number > maximum
+                {
+                    diagnostics.push(ValidationDiagnostic::error(
+                        path,
+                        format!("must be at most {maximum}"),
+                    ));
+                }
+            }
+        }
+        FieldKind::String { .. } => {
+            if let Some(text) = value.as_str() {
+                let length = text.chars().count();
+                if let Some(minimum) = constraints.min_length
+                    && length < minimum
+                {
+                    diagnostics.push(ValidationDiagnostic::error(
+                        path,
+                        format!("must be at least {minimum} characters"),
+                    ));
+                }
+                if let Some(maximum) = constraints.max_length
+                    && length > maximum
+                {
+                    diagnostics.push(ValidationDiagnostic::error(
+                        path,
+                        format!("must be at most {maximum} characters"),
+                    ));
+                }
+                if let Some(pattern) = constraints.pattern.as_deref() {
+                    validate_pattern(pattern, text, path, diagnostics);
+                }
+            }
+        }
+        FieldKind::Array { .. } => {
+            if let Some(items) = value.as_array() {
+                if let Some(minimum) = constraints.min_length
+                    && items.len() < minimum
+                {
+                    diagnostics.push(ValidationDiagnostic::error(
+                        path,
+                        format!("must have at least {minimum} items"),
+                    ));
+                }
+                if let Some(maximum) = constraints.max_length
+                    && items.len() > maximum
+                {
+                    diagnostics.push(ValidationDiagnostic::error(
+                        path,
+                        format!("must have at most {maximum} items"),
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Strip a nullable wrapper so constraints apply to the inner kind.
+fn unwrap_nullable(kind: &FieldKind) -> &FieldKind {
+    match kind {
+        FieldKind::Nullable { inner } => unwrap_nullable(inner),
+        other => other,
+    }
+}
+
+/// Evaluate a schema pattern when the Rust regex engine can express it.
+///
+/// Patterns using look-around or backreferences (for example Zod's email
+/// pattern) cannot be compiled by the linear-time engine; they remain a hint
+/// and produce a warning rather than a false failure.
+fn validate_pattern(
+    pattern: &str,
+    text: &str,
+    path: &str,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    match regex::Regex::new(pattern) {
+        Ok(regex) => {
+            if !regex.is_match(text) {
+                diagnostics.push(ValidationDiagnostic::error(
+                    path,
+                    "does not match the schema pattern",
+                ));
+            }
+        }
+        Err(_) => diagnostics.push(ValidationDiagnostic::warning(
+            path,
+            "schema pattern cannot be evaluated locally",
+        )),
     }
 }
 

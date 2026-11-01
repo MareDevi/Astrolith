@@ -1,10 +1,15 @@
 use serde_json::{Value, json};
 
-use super::{CollectionSchema, Field, FieldKind, SchemaDialect, normalize_schema};
+use super::{
+    CollectionSchema, Field, FieldConstraints, FieldKind, SchemaDialect, normalize_schema,
+};
 
 const ASTRO5_SCHEMA: &str = include_str!("fixtures/astro5-docs.schema.json");
 const ASTRO6_SCHEMA: &str = include_str!("fixtures/astro6-docs.schema.json");
 const ASTRO7_SCHEMA: &str = include_str!("fixtures/astro7-docs.schema.json");
+
+/// The zod-4 email refinement Astro 6/7 emit beside `format: email`.
+const ASTRO7_EMAIL_PATTERN: &str = "^(?:[A-Za-z0-9_'+\\-]+\\.)*[A-Za-z0-9_'+\\-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$";
 
 fn parse(source: &str) -> CollectionSchema {
     let value: Value = serde_json::from_str(source).expect("fixture is valid JSON");
@@ -31,6 +36,40 @@ fn string_kind() -> FieldKind {
     FieldKind::String { format: None }
 }
 
+fn nested_field<'a>(schema: &'a CollectionSchema, object: &str, name: &str) -> &'a Field {
+    let FieldKind::Object { fields } = &field(schema, object).kind else {
+        panic!("`{object}` should be an object");
+    };
+    fields
+        .iter()
+        .find(|field| field.name == name)
+        .unwrap_or_else(|| panic!("missing nested field `{object}.{name}`"))
+}
+
+/// Clear constraint values so two dialects generated from the same Zod schema
+/// can be compared structurally.
+fn without_constraints(schema: CollectionSchema) -> CollectionSchema {
+    fn clear(fields: &mut [Field]) {
+        for field in fields {
+            field.constraints = FieldConstraints::default();
+            clear_kind(&mut field.kind);
+        }
+    }
+    fn clear_kind(kind: &mut FieldKind) {
+        match kind {
+            FieldKind::Object { fields } => clear(fields),
+            FieldKind::Array { items }
+            | FieldKind::Nullable { inner: items }
+            | FieldKind::Record { value: items } => clear_kind(items),
+            _ => {}
+        }
+    }
+
+    let mut schema = schema;
+    clear(&mut schema.fields);
+    schema
+}
+
 #[test]
 fn astro5_and_astro7_normalize_to_the_same_dialect_independent_model() {
     let astro5 = parse(ASTRO5_SCHEMA);
@@ -39,8 +78,23 @@ fn astro5_and_astro7_normalize_to_the_same_dialect_independent_model() {
     assert_eq!(astro5.dialect, SchemaDialect::Draft7);
     assert_eq!(astro7.dialect, SchemaDialect::Draft202012);
     assert_eq!(
-        astro5.fields, astro7.fields,
+        without_constraints(astro5.clone()).fields,
+        without_constraints(astro7.clone()).fields,
         "both real dialects must normalize to one identical model"
+    );
+    // Astro 7 emits a zod-4 email refinement pattern that the Astro 5 fixture
+    // does not; the model must keep the divergence instead of dropping it.
+    assert_eq!(
+        nested_field(&astro7, "author", "email")
+            .constraints
+            .pattern
+            .as_deref(),
+        Some(ASTRO7_EMAIL_PATTERN)
+    );
+    assert!(
+        nested_field(&astro5, "author", "email")
+            .constraints
+            .is_empty()
     );
     assert_eq!(astro5.diagnostics, astro7.diagnostics);
 }
@@ -62,24 +116,26 @@ fn astro6_oracle_matches_the_astro7_dialect_independent_model() {
 fn normalizes_scalar_object_and_container_fields() {
     let schema = parse(ASTRO5_SCHEMA);
 
-    // Fields are sorted by name (see `collect_fields`); the synthetic Astro
+    // Fields keep declaration order (see `collect_fields`); the synthetic Astro
     // `$schema` property is not a field.
     assert_eq!(
         field_names(&schema),
         [
-            "author",
-            "category",
-            "date",
-            "description",
-            "draft",
-            "literal",
-            "nested",
-            "record",
-            "tags",
             "title",
+            "description",
+            "date",
+            "draft",
+            "tags",
+            "category",
+            "author",
+            "nested",
             "union",
+            "literal",
+            "record",
         ]
     );
+    let orders: Vec<usize> = schema.fields.iter().map(|field| field.order).collect();
+    assert_eq!(orders, (0..11).collect::<Vec<_>>());
 
     assert_eq!(field(&schema, "title").kind, string_kind());
     assert!(field(&schema, "title").required);
@@ -134,17 +190,17 @@ fn normalizes_nested_objects_and_nullable_scalars() {
         panic!("author should be an object, got {author:?}");
     };
     assert_eq!(fields.len(), 2);
-    assert_eq!(fields[0].name, "email");
+    assert_eq!(fields[0].name, "name");
+    assert_eq!(fields[0].kind, string_kind());
+    assert!(fields[0].required);
+    assert_eq!(fields[1].name, "email");
     assert_eq!(
-        fields[0].kind,
+        fields[1].kind,
         FieldKind::String {
             format: Some("email".into())
         }
     );
-    assert!(!fields[0].required);
-    assert_eq!(fields[1].name, "name");
-    assert_eq!(fields[1].kind, string_kind());
-    assert!(fields[1].required);
+    assert!(!fields[1].required);
 
     let nested = &field(&schema, "nested").kind;
     let FieldKind::Object { fields } = nested else {
@@ -262,6 +318,62 @@ fn arrays_and_scalar_defaults_are_preserved() {
     assert_eq!(field(&schema, "list").default, Some(json!([])));
     assert_eq!(field(&schema, "count").kind, FieldKind::Integer);
     assert_eq!(field(&schema, "count").default, Some(json!(0)));
+}
+
+#[test]
+fn descriptions_and_constraints_are_captured() {
+    let schema = normalize_schema(&json!({
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Shown in the browser tab",
+                "minLength": 1,
+                "maxLength": 80,
+                "pattern": "^[A-Z]"
+            },
+            "rating": { "type": "number", "minimum": 0.5, "maximum": 5 },
+            "rank": { "type": "integer", "minimum": 1 },
+            "tags": {
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1,
+                "maxItems": 4
+            }
+        }
+    }))
+    .expect("schema normalizes");
+
+    let title = field(&schema, "title");
+    assert_eq!(
+        title.description.as_deref(),
+        Some("Shown in the browser tab")
+    );
+    assert_eq!(
+        title.constraints,
+        FieldConstraints {
+            minimum: None,
+            maximum: None,
+            min_length: Some(1),
+            max_length: Some(80),
+            pattern: Some("^[A-Z]".into()),
+        }
+    );
+    assert_eq!(
+        field(&schema, "rating").constraints,
+        FieldConstraints {
+            minimum: Some(0.5),
+            maximum: Some(5.0),
+            ..FieldConstraints::default()
+        }
+    );
+    assert_eq!(field(&schema, "rank").constraints.minimum, Some(1.0));
+    let tags = &field(&schema, "tags").constraints;
+    assert_eq!(tags.min_length, Some(1));
+    assert_eq!(tags.max_length, Some(4));
+    assert!(tags.pattern.is_none());
+    assert!(!tags.is_empty());
+    assert!(schema.diagnostics.is_empty());
 }
 
 #[test]

@@ -1,6 +1,6 @@
 # Astro Editor Linux feature-parity implementation plan
 
-**Status:** Approved on 2026-11-01; P0 evidence, fixture and editor capability gate complete; P1 scoped preferences and project registry implemented; P2 next.
+**Status:** Approved on 2026-11-01; P0 evidence, fixture and editor capability gate complete; P1 scoped preferences and project registry implemented; P2 entry lifecycle, filters and sort implemented; P3 schema-driven frontmatter parity implemented (real-window field-family gate still manual); P4 next.
 
 **Date:** 2026-11-01
 

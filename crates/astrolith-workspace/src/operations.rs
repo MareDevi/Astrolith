@@ -63,6 +63,8 @@ pub enum ScalarValue {
     Real(f64),
     /// A YAML boolean.
     Boolean(bool),
+    /// A sequence of quoted YAML strings, written as a flow sequence.
+    List(Vec<String>),
 }
 
 /// One required frontmatter field with its generated value.
@@ -107,6 +109,23 @@ pub enum CreationInputKind {
     Date,
     /// One of a fixed set of string values.
     Enum(Vec<String>),
+    /// An Astro `image()` path. Creation accepts an in-project path; copying an
+    /// external file is the asset service's job.
+    Image,
+    /// A comma-separated list of in-project image paths.
+    ImageList,
+    /// An Astro `reference()` entry id from one or more collections.
+    Reference {
+        /// Target collections, in schema declaration order.
+        collections: Vec<String>,
+    },
+    /// A comma-separated list of reference entry ids.
+    ReferenceList {
+        /// Target collections, in schema declaration order.
+        collections: Vec<String>,
+    },
+    /// A comma-separated list of string tags.
+    Tags,
 }
 
 /// Everything creation can decide before the user is asked anything.
@@ -673,35 +692,68 @@ pub fn creation_plan(
                 }
             }
         }
-        match scalar_kind(&field.kind) {
-            Some(ScalarKind::Text) => plan.inputs.push(CreationInput {
+        match typed_input(&field.kind) {
+            Some(kind) => plan.inputs.push(CreationInput {
                 name: field.name.clone(),
-                kind: CreationInputKind::Text,
+                kind,
             }),
-            Some(ScalarKind::Number) => plan.inputs.push(CreationInput {
-                name: field.name.clone(),
-                kind: CreationInputKind::Number,
-            }),
-            Some(ScalarKind::Integer) => plan.inputs.push(CreationInput {
-                name: field.name.clone(),
-                kind: CreationInputKind::Integer,
-            }),
-            Some(ScalarKind::Boolean) => plan.inputs.push(CreationInput {
-                name: field.name.clone(),
-                kind: CreationInputKind::Boolean,
-            }),
-            Some(ScalarKind::Date) => plan.inputs.push(CreationInput {
-                name: field.name.clone(),
-                kind: CreationInputKind::Date,
-            }),
-            Some(ScalarKind::Enum(values)) => plan.inputs.push(CreationInput {
-                name: field.name.clone(),
-                kind: CreationInputKind::Enum(values),
-            }),
-            None => plan.unsupported.push(field.name.clone()),
+            None => match scalar_kind(&field.kind) {
+                Some(ScalarKind::Text) => plan.inputs.push(CreationInput {
+                    name: field.name.clone(),
+                    kind: CreationInputKind::Text,
+                }),
+                Some(ScalarKind::Number) => plan.inputs.push(CreationInput {
+                    name: field.name.clone(),
+                    kind: CreationInputKind::Number,
+                }),
+                Some(ScalarKind::Integer) => plan.inputs.push(CreationInput {
+                    name: field.name.clone(),
+                    kind: CreationInputKind::Integer,
+                }),
+                Some(ScalarKind::Boolean) => plan.inputs.push(CreationInput {
+                    name: field.name.clone(),
+                    kind: CreationInputKind::Boolean,
+                }),
+                Some(ScalarKind::Date) => plan.inputs.push(CreationInput {
+                    name: field.name.clone(),
+                    kind: CreationInputKind::Date,
+                }),
+                Some(ScalarKind::Enum(values)) => plan.inputs.push(CreationInput {
+                    name: field.name.clone(),
+                    kind: CreationInputKind::Enum(values),
+                }),
+                None => plan.unsupported.push(field.name.clone()),
+            },
         }
     }
     plan
+}
+
+/// Typed creation controls for schema kinds that need more than a plain scalar.
+fn typed_input(kind: &FieldKind) -> Option<CreationInputKind> {
+    match kind {
+        FieldKind::Image => Some(CreationInputKind::Image),
+        FieldKind::Reference { collections } => Some(CreationInputKind::Reference {
+            collections: collections.clone(),
+        }),
+        FieldKind::Array { items } => match items.as_ref() {
+            FieldKind::String { .. } | FieldKind::Enum { .. } => Some(CreationInputKind::Tags),
+            FieldKind::Image => Some(CreationInputKind::ImageList),
+            FieldKind::Reference { collections } => Some(CreationInputKind::ReferenceList {
+                collections: collections.clone(),
+            }),
+            FieldKind::Nullable { inner } => typed_input(inner).map(|kind| match kind {
+                CreationInputKind::Image => CreationInputKind::ImageList,
+                CreationInputKind::Reference { collections } => {
+                    CreationInputKind::ReferenceList { collections }
+                }
+                other => other,
+            }),
+            _ => None,
+        },
+        FieldKind::Nullable { inner } => typed_input(inner),
+        _ => None,
+    }
 }
 
 /// Render one creation value as a raw string for a pre-write form.
@@ -749,7 +801,35 @@ pub fn parse_input(input: &CreationInput, raw: &str) -> Result<ScalarValue, Stri
                 ))
             }
         }
+        CreationInputKind::Image => {
+            if raw.is_empty() {
+                Err(format!("{} needs an image path", input.name))
+            } else if raw.chars().any(char::is_control) {
+                Err(format!("{} contains an unsupported character", input.name))
+            } else {
+                Ok(ScalarValue::String(raw.to_owned()))
+            }
+        }
+        CreationInputKind::ImageList => Ok(ScalarValue::List(split_list(raw))),
+        CreationInputKind::Reference { .. } => {
+            if raw.is_empty() {
+                Err(format!("{} needs a reference id", input.name))
+            } else {
+                Ok(ScalarValue::String(raw.to_owned()))
+            }
+        }
+        CreationInputKind::ReferenceList { .. } => Ok(ScalarValue::List(split_list(raw))),
+        CreationInputKind::Tags => Ok(ScalarValue::List(split_list(raw))),
     }
+}
+
+/// Split a comma-separated creation list into non-empty trimmed values.
+fn split_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Validate one file stem or name segment without touching the filesystem.
@@ -1050,6 +1130,22 @@ fn render_scalar(value: &ScalarValue) -> Result<String, OperationError> {
             text
         }
         ScalarValue::Boolean(value) => value.to_string(),
+        ScalarValue::List(values) => {
+            let mut rendered = String::from("[");
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    rendered.push_str(", ");
+                }
+                if value.chars().any(char::is_control) {
+                    return Err(OperationError::InvalidName(value.clone()));
+                }
+                rendered.push('\'');
+                rendered.push_str(&value.replace('\'', "''"));
+                rendered.push('\'');
+            }
+            rendered.push(']');
+            rendered
+        }
     })
 }
 

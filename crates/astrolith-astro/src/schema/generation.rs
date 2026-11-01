@@ -279,6 +279,176 @@ fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
     Some(root.join(relative_path))
 }
 
+/// A stable fingerprint of every input that can change a project's frontmatter
+/// form: the generated schema files and the content/astro configuration.
+///
+/// The fingerprint hashes each file's name and **content bytes**, never its
+/// size or modification time: Astro rewrites `.astro/collections/*.schema.json`
+/// on every sync, so a timestamp-based fingerprint would trigger a new sync
+/// forever. A missing schema directory or config is represented by its own
+/// sentinel so creation and deletion both change the fingerprint.
+pub fn schema_fingerprint(root: &Path) -> io::Result<u64> {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut hasher);
+    let directory = root.join(".astro/collections");
+    match fs::read_dir(&directory) {
+        Ok(entries) => {
+            let mut paths = Vec::new();
+            for entry in entries {
+                let path = entry?.path();
+                if is_schema_file(&path) {
+                    paths.push(path);
+                }
+            }
+            paths.sort();
+            for path in paths {
+                hash_file_entry(&path, &mut hasher);
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            "missing schema directory".hash(&mut hasher);
+        }
+        Err(error) => return Err(error),
+    }
+    let src_directory = safe_join(root, &astro_src_dir(root)).unwrap_or_else(|| root.to_path_buf());
+    for directory in [src_directory, root.to_path_buf()] {
+        for name in ["content.config", "astro.config"] {
+            if let Some(path) = find_config_file(&directory, name) {
+                hash_file_entry(&path, &mut hasher);
+            }
+        }
+    }
+    Ok(hasher.finish())
+}
+
+fn hash_file_entry(path: &Path, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    path.hash(hasher);
+    match hash_file_contents(path) {
+        Ok(content) => content.hash(hasher),
+        Err(_) => "unreadable".hash(hasher),
+    }
+}
+
+fn hash_file_contents(path: &Path) -> io::Result<u64> {
+    use std::hash::Hasher;
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let file = fs::File::open(path)?;
+    let mut reader = file.take(MAX_SCHEMA_FILE as u64 + 1);
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.write(&buffer[..read]);
+    }
+    Ok(hasher.finish())
+}
+
+/// One schema-freshness reconciliation step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchemaRefresh {
+    /// The installed schemas already match the current fingerprint.
+    Current,
+    /// The caller must regenerate; the token must be passed to
+    /// [`SchemaFreshness::accept`] with the fingerprint observed at request
+    /// start.
+    Regenerate {
+        /// Request identity for stale-result rejection.
+        request: u64,
+    },
+}
+
+/// Decides when a schema directory or content config change must regenerate the
+/// frontmatter form and rejects superseded generation results.
+///
+/// The state machine is GUI-free so the freshness rules are testable without an
+/// Astro install: callers poll [`Self::reconcile`] with
+/// [`schema_fingerprint`] and only apply a completed report through
+/// [`Self::accept`]. A failed generation is remembered, so the same
+/// fingerprint is not retried on every poll.
+#[derive(Clone, Debug, Default)]
+pub struct SchemaFreshness {
+    installed: Option<u64>,
+    pending: Option<(u64, u64)>,
+    failed: Option<u64>,
+    next_request: u64,
+}
+
+impl SchemaFreshness {
+    /// Start or confirm a regeneration for `fingerprint`.
+    ///
+    /// A fingerprint whose generation already failed is reported as
+    /// [`SchemaRefresh::Current`] until the fingerprint changes, so a broken
+    /// sync is not retried every poll.
+    pub fn reconcile(&mut self, fingerprint: u64) -> SchemaRefresh {
+        if self.installed == Some(fingerprint) {
+            // Returning to the installed inputs clears an older failure so the
+            // same fingerprint can regenerate again if the inputs change back.
+            self.failed = None;
+            return SchemaRefresh::Current;
+        }
+        if self.failed == Some(fingerprint) {
+            return SchemaRefresh::Current;
+        }
+        if let Some((request, pending)) = self.pending
+            && pending == fingerprint
+        {
+            return SchemaRefresh::Regenerate { request };
+        }
+        self.failed = None;
+        self.next_request += 1;
+        self.pending = Some((self.next_request, fingerprint));
+        SchemaRefresh::Regenerate {
+            request: self.next_request,
+        }
+    }
+
+    /// Record a completed generation for `request` at `fingerprint`.
+    ///
+    /// Returns `false` when a newer request superseded it or when `fingerprint`
+    /// is not the fingerprint the request was created for (the inputs changed
+    /// while the tool ran); the caller must drop the result without touching the
+    /// form. On success `fingerprint` becomes the installed one, so a following
+    /// [`Self::reconcile`] with the same input reports [`SchemaRefresh::Current`].
+    pub fn accept(&mut self, request: u64, fingerprint: u64) -> bool {
+        let Some((pending, expected)) = self.pending else {
+            return false;
+        };
+        if pending != request {
+            return false;
+        }
+        self.pending = None;
+        if expected != fingerprint {
+            return false;
+        }
+        self.failed = None;
+        self.installed = Some(fingerprint);
+        true
+    }
+
+    /// Record a failed generation so the same fingerprint is not retried.
+    ///
+    /// A later input change clears the failure and starts a new request.
+    pub fn reject(&mut self, request: u64) {
+        if let Some((pending, fingerprint)) = self.pending
+            && pending == request
+        {
+            self.pending = None;
+            self.failed = Some(fingerprint);
+        }
+    }
+
+    /// The fingerprint whose schemas are currently installed.
+    pub fn installed(&self) -> Option<u64> {
+        self.installed
+    }
+}
+
 /// Whether the generated schemas are missing or older than the content config.
 ///
 /// A missing `.astro/collections` directory, no schema files, a missing content

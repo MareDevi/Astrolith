@@ -7,8 +7,11 @@ mod parser;
 mod validation;
 mod validation_tooling;
 
+pub use generation::{SchemaFreshness, SchemaRefresh, schema_fingerprint};
 pub use helpers::enhance_astro_fields;
-pub use model::{CollectionSchema, Field, FieldKind, SchemaDiagnostic, SchemaDialect};
+pub use model::{
+    CollectionSchema, Field, FieldConstraints, FieldKind, SchemaDiagnostic, SchemaDialect,
+};
 pub use parser::{SchemaError, normalize_schema};
 pub use validation::{
     ValidationDiagnostic, ValidationSeverity, ValidationSource, validate_frontmatter,

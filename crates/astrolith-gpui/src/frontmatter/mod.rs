@@ -1,80 +1,91 @@
 //! Schema-driven frontmatter forms for the Inspector panel.
 //!
 //! [`fields`] maps normalized [`FieldKind`](astrolith_astro::schema::FieldKind)
-//! values to native controls and applies edits through the lossless
+//! values and parsed document shapes to native controls, orders them exactly as
+//! the panel requires and applies edits through the lossless
 //! [`ParsedDocument`] patch contract. [`FrontmatterEditor`] is the GUI-free model
 //! that holds one parsed document, its controls and its validation feedback; the
 //! [`FrontmatterForm`] GPUI entity renders that model with GPUI Kit controls.
 //!
 //! The editor never touches the filesystem: parsing, editing and serialization
 //! all operate on in-memory text. Persisting the result is the shell's save
-//! coordinator's job, so only supported scalar edits ever reach disk.
+//! coordinator's job, so only supported edits ever reach disk.
 
 pub mod fields;
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use astrolith_astro::schema::{
     CollectionSchema, FieldKind, ValidationDiagnostic, validate_frontmatter,
 };
-use astrolith_document::{DocumentError, FrontmatterValue, ParsedDocument, parse_document};
+use astrolith_core::preferences::FieldMappings;
+use astrolith_document::{
+    DocumentError, FieldShape, FrontmatterField, FrontmatterValue, ParsedDocument, parse_document,
+};
+use chrono::NaiveDate;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Icon, Sizable, StyledExt,
     button::{Button, ButtonVariants},
+    calendar::Date,
     checkbox::Checkbox,
-    input::{Input, InputEvent, InputState},
+    date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    menu::{DropdownMenu, PopupMenuItem},
 };
 use gpui_kit::{
-    AppContext, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription,
-    Window, div, prelude::*, px,
+    AnyElement, App, AppContext, Context, Entity, EventEmitter, IntoElement, PathPromptOptions,
+    Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
 use serde_json::{Map, Value};
 
-pub use fields::{ControlKind, FieldControl, FieldEditError, control_label};
+pub use fields::{
+    ControlKind, FieldControl, FieldEditError, FieldRole, FrontmatterEdit, ReferenceCatalog,
+    control_label, slugify,
+};
 
 /// The GUI-free form model for one document's frontmatter.
 ///
 /// Holds the parsed document, the resolved control list and the latest local
 /// validation diagnostics. Editing a value records a lossless patch, re-parses
 /// the re-serialized text (so subsequent reads see the edited value) and
-/// recomputes diagnostics.
+/// recomputes diagnostics. A collection without a schema still gets a form
+/// built from the fields that exist in the document.
 #[derive(Clone, Debug)]
 pub struct FrontmatterEditor {
-    schema: Arc<CollectionSchema>,
+    schema: Option<Arc<CollectionSchema>>,
+    mappings: FieldMappings,
     controls: Vec<FieldControl>,
     document: ParsedDocument,
     text: String,
     diagnostics: Vec<ValidationDiagnostic>,
-    manageable: BTreeSet<String>,
 }
 
 impl FrontmatterEditor {
-    /// Build a form model for `text` against `schema`.
+    /// Build a form model for `text`.
     ///
     /// # Errors
     ///
     /// Returns a [`DocumentError`] when the document frontmatter is malformed or
-    /// uses a construct outside the lossless subset (for example block sequences).
-    pub fn new(schema: Arc<CollectionSchema>, text: String) -> Result<Self, DocumentError> {
+    /// uses a construct outside the lossless subset (for example anchors, aliases
+    /// or tags). The caller must surface that error instead of guessing.
+    pub fn new(
+        schema: Option<Arc<CollectionSchema>>,
+        mappings: FieldMappings,
+        text: String,
+    ) -> Result<Self, DocumentError> {
         let document = parse_document(&text)?;
-        let controls = fields::build_controls(&schema.fields);
-        let manageable = manageable_paths(&controls);
+        let controls = fields::build_controls(schema.as_deref(), &mappings, document.fields());
         let mut editor = Self {
             schema,
+            mappings,
             controls,
             document,
             text,
             diagnostics: Vec::new(),
-            manageable,
         };
         editor.revalidate();
         Ok(editor)
-    }
-
-    /// Return the schema backing this form.
-    pub fn schema(&self) -> &CollectionSchema {
-        &self.schema
     }
 
     /// Return the resolved controls in render order.
@@ -97,9 +108,24 @@ impl FrontmatterEditor {
         self.controls.iter().find(|control| control.path == path)
     }
 
-    /// Return the current typed value at `path`, if readable.
+    /// Return the current typed scalar value at `path`, if readable.
     pub fn value(&self, path: &str) -> Option<FrontmatterValue> {
         self.document.field(path).cloned()
+    }
+
+    /// Return the current sequence items at `path` (empty when absent).
+    pub fn items(&self, path: &str) -> Vec<FrontmatterValue> {
+        self.document
+            .field_info(path)
+            .and_then(|info| info.items.clone())
+            .unwrap_or_default()
+    }
+
+    /// Return the exact raw YAML text for a container field, if any.
+    pub fn raw(&self, path: &str) -> Option<&str> {
+        self.document
+            .field_info(path)
+            .and_then(|info| info.raw.as_deref())
     }
 
     /// Return the diagnostics whose path matches `path` (leaf or descendant).
@@ -124,61 +150,145 @@ impl FrontmatterEditor {
                 .refusal
                 .unwrap_or_else(|| "this field is read-only".to_owned()));
         }
+        if matches!(
+            control.kind,
+            ControlKind::Tags | ControlKind::Reference { multiple: true, .. }
+        ) {
+            // A list control must never be replaced by one scalar; items are
+            // added and removed individually through `add_item`/`remove_item`.
+            return Err("list fields are edited item by item".to_owned());
+        }
         let mut document = self.document.clone();
-        fields::apply_edit(&mut document, path, &control.kind, raw)
+        match &control.kind {
+            ControlKind::RawYaml { .. } => {
+                fields::apply_raw_edit(&mut document, path, raw)
+                    .map_err(|error| error.to_string())?;
+            }
+            _ => {
+                fields::apply_scalar_edit(&mut document, path, &control.kind, raw, control.present)
+                    .map_err(|error| error.to_string())?
+            }
+        }
+        self.commit(document)
+    }
+
+    /// Add one string/reference item to a sequence field, inserting the field
+    /// when it is absent.
+    pub fn add_item(&mut self, path: &str, raw: &str) -> Result<String, String> {
+        let control = self
+            .control(path)
+            .ok_or_else(|| format!("unknown frontmatter field `{path}`"))?
+            .clone();
+        if !control.editable
+            || !matches!(
+                control.kind,
+                ControlKind::Tags | ControlKind::Reference { multiple: true, .. }
+            )
+        {
+            return Err(control
+                .refusal
+                .unwrap_or_else(|| "this field does not accept list items".to_owned()));
+        }
+        let value = FrontmatterValue::String(raw.to_owned());
+        let mut document = self.document.clone();
+        if control.present {
+            let index = self.items(path).len();
+            document
+                .insert_sequence_item(path, index, value)
+                .map_err(|error| error.to_string())?;
+        } else {
+            document
+                .insert_sequence(path, &[value])
+                .map_err(|error| error.to_string())?;
+        }
+        self.commit(document)
+    }
+
+    /// Remove one sequence item.
+    pub fn remove_item(&mut self, path: &str, index: usize) -> Result<String, String> {
+        let mut document = self.document.clone();
+        document
+            .remove_sequence_item(path, index)
             .map_err(|error| error.to_string())?;
+        self.commit(document)
+    }
+
+    /// Remove an optional field.
+    pub fn remove_field(&mut self, path: &str) -> Result<String, String> {
+        let control = self
+            .control(path)
+            .ok_or_else(|| format!("unknown frontmatter field `{path}`"))?
+            .clone();
+        if control.required {
+            return Err("a required field cannot be removed".to_owned());
+        }
+        let mut document = self.document.clone();
+        document
+            .remove_field(path)
+            .map_err(|error| error.to_string())?;
+        self.commit(document)
+    }
+
+    fn commit(&mut self, document: ParsedDocument) -> Result<String, String> {
         let text = document.serialize().map_err(|error| error.to_string())?;
         let parsed = parse_document(&text).map_err(|error| error.to_string())?;
         self.document = parsed;
         self.text = text.clone();
+        self.controls = fields::build_controls(
+            self.schema.as_deref(),
+            &self.mappings,
+            self.document.fields(),
+        );
         self.revalidate();
         Ok(text)
     }
 
     fn revalidate(&mut self) {
         let values = self.read_values();
-        let diagnostics = validate_frontmatter(&self.schema, &values);
-        self.diagnostics = diagnostics
+        let Some(schema) = self.schema.as_deref() else {
+            self.diagnostics.clear();
+            return;
+        };
+        let present: std::collections::BTreeSet<&str> = self
+            .document
+            .fields()
+            .iter()
+            .map(|info| info.path.as_str())
+            .collect();
+        self.diagnostics = validate_frontmatter(schema, &values)
             .into_iter()
             .filter(|diagnostic| {
-                diagnostic.path == "<root>" || self.manageable.contains(&diagnostic.path)
+                // A field that exists with an unreadable shape is not missing.
+                !(diagnostic.message == "required field is missing"
+                    && present.contains(diagnostic.path.as_str()))
             })
             .collect();
     }
 
-    /// Build a JSON object of the readable scalar leaves.
+    /// Build a JSON object of the readable document values for validation.
     fn read_values(&self) -> Value {
         let mut root = Map::new();
-        for control in &self.controls {
-            if !control.editable {
-                continue;
-            }
-            let Some(value) = self.document.field(&control.path) else {
+        for info in self.document.fields() {
+            let Some(value) = readable_value(info) else {
                 continue;
             };
-            insert_path(&mut root, &control.path, fields::frontmatter_to_json(value));
+            insert_path(&mut root, &info.path, value);
         }
         Value::Object(root)
     }
 }
 
-/// Paths for which local validation is authoritative: editable scalar leaves and
-/// object containers we can introspect. Read-only containers (arrays, records,
-/// unsupported) are excluded so an unreadable value never yields a false
-/// "required field is missing".
-fn manageable_paths(controls: &[FieldControl]) -> BTreeSet<String> {
-    let mut paths = BTreeSet::new();
-    for control in controls {
-        let introspectable = match &control.kind {
-            ControlKind::Object => true,
-            ControlKind::Array | ControlKind::Record | ControlKind::Unsupported { .. } => false,
-            _ => control.editable,
-        };
-        if introspectable {
-            paths.insert(control.path.clone());
-        }
+fn readable_value(info: &FrontmatterField) -> Option<Value> {
+    match info.shape {
+        FieldShape::Scalar => info.value.as_ref().map(fields::frontmatter_to_json),
+        FieldShape::Null => Some(Value::Null),
+        FieldShape::Mapping => Some(Value::Object(Map::new())),
+        FieldShape::Sequence => info
+            .items
+            .as_ref()
+            .map(|items| Value::Array(items.iter().map(fields::frontmatter_to_json).collect())),
+        FieldShape::Flow | FieldShape::BlockScalar => None,
     }
-    paths
 }
 
 fn insert_path(root: &mut Map<String, Value>, path: &str, value: Value) {
@@ -186,7 +296,9 @@ fn insert_path(root: &mut Map<String, Value>, path: &str, value: Value) {
     let mut current = root;
     while let Some(segment) = segments.next() {
         if segments.peek().is_none() {
-            current.insert(segment.to_owned(), value);
+            if value != Value::Object(Map::new()) || !current.contains_key(segment) {
+                current.insert(segment.to_owned(), value);
+            }
             return;
         }
         let entry = current
@@ -199,7 +311,7 @@ fn insert_path(root: &mut Map<String, Value>, path: &str, value: Value) {
     }
 }
 
-/// Short label for a schema leaf kind (used for tests and the mapping report).
+/// Short label for a schema leaf kind (used for tests and diagnostics).
 pub fn kind_label(kind: &FieldKind) -> &'static str {
     match kind {
         FieldKind::String { .. } => "string",
@@ -219,26 +331,13 @@ pub fn kind_label(kind: &FieldKind) -> &'static str {
     }
 }
 
-/// Emitted when the user edits one frontmatter field.
-///
-/// Carries only the field `path` and its new typed `value` — never a
-/// whole-document snapshot — so the shell applies a targeted single-field patch
-/// to the *live* session text. This preserves any concurrent unsaved edits to
-/// the document body instead of overwriting them with a stale snapshot.
-#[derive(Clone, Debug)]
-pub struct FrontmatterChanged {
-    /// Dot-separated path of the edited field.
-    pub path: String,
-    /// The field's new typed value.
-    pub value: FrontmatterValue,
-}
-
-/// One editable row: the control plus, for text-like controls, a lightweight
-/// single-line input. The inspector never instantiates a syntax-highlighting
-/// editor per field.
+/// One editable row: the control plus whatever input entity it needs.
 struct RowEditor {
     control: FieldControl,
     input: Option<Entity<InputState>>,
+    textarea: Option<Entity<TextareaState>>,
+    date: Option<Entity<DatePickerState>>,
+    add_input: Option<Entity<InputState>>,
     /// Presentation strings are built when the form loads, not per frame.
     label: SharedString,
     path: SharedString,
@@ -246,25 +345,48 @@ struct RowEditor {
     hierarchy: usize,
     is_object: bool,
     read_only_label: Option<SharedString>,
+    description: Option<SharedString>,
+    hint: Option<SharedString>,
     aria_label: SharedString,
     /// (display, raw) pairs for enum controls.
     enum_values: Vec<(SharedString, SharedString)>,
-    _subscription: Option<Subscription>,
+    /// Options for reference controls, ordered by label.
+    reference_options: Vec<(SharedString, SharedString)>,
+    /// Current sequence items as (true index, display string) pairs (tags and
+    /// reference lists). Null items are hidden but keep their position, so chip
+    /// removal never targets the wrong item.
+    items: Vec<(usize, SharedString)>,
+    /// Current raw YAML text for container fields.
+    raw: Option<SharedString>,
+    is_title: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// Everything the form needs to render one document.
+pub struct FrontmatterDocument {
+    /// Generated collection schema, or `None` for a schema-less collection.
+    pub schema: Option<Arc<CollectionSchema>>,
+    /// Resolved field mappings for the collection.
+    pub mappings: FieldMappings,
+    /// Reference options for every schema reference target.
+    pub references: Arc<ReferenceCatalog>,
+    /// Canonical project root used to validate in-project image paths.
+    pub root: Option<PathBuf>,
+    /// Complete document text, including unsaved edits.
+    pub text: String,
 }
 
 /// A GPUI entity that renders a [`FrontmatterEditor`] with native controls.
-///
-/// Text-like fields use single-line [`Input`]s, booleans a [`Checkbox`], enums
-/// one [`Button`] per allowed value, object containers a heading plus their
-/// children, and read-only fields an explicit refusal. Edits update the model and emit
-/// [`FrontmatterChanged`] with the edited field path and its typed value; the
-/// shell applies that as a targeted patch to the live document text.
 pub struct FrontmatterForm {
     editor: Option<FrontmatterEditor>,
     rows: Vec<RowEditor>,
+    references: Arc<ReferenceCatalog>,
+    root: Option<PathBuf>,
+    load_error: Option<SharedString>,
+    notice: Option<SharedString>,
 }
 
-impl EventEmitter<FrontmatterChanged> for FrontmatterForm {}
+impl EventEmitter<FrontmatterEdit> for FrontmatterForm {}
 
 impl FrontmatterForm {
     /// Create an empty form showing a placeholder.
@@ -272,6 +394,10 @@ impl FrontmatterForm {
         Self {
             editor: None,
             rows: Vec::new(),
+            references: Arc::new(ReferenceCatalog::new()),
+            root: None,
+            load_error: None,
+            notice: None,
         }
     }
 
@@ -285,22 +411,26 @@ impl FrontmatterForm {
         self.editor.as_ref()
     }
 
-    /// Load a schema and document text into the form, rebuilding its rows.
+    /// Load one document into the form.
     pub fn set_document(
         &mut self,
-        schema: Arc<CollectionSchema>,
-        text: String,
+        document: FrontmatterDocument,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match FrontmatterEditor::new(schema, text) {
+        self.references = document.references;
+        self.root = document.root;
+        self.notice = None;
+        match FrontmatterEditor::new(document.schema, document.mappings, document.text) {
             Ok(editor) => {
-                self.rows = build_rows(&editor, window, cx);
+                self.load_error = None;
+                self.rows = build_rows(&editor, &self.references, window, cx);
                 self.editor = Some(editor);
             }
-            Err(_) => {
-                // Malformed frontmatter stays in the source editor; the form
-                // shows nothing rather than guessing at a lossy parse.
+            Err(error) => {
+                // Malformed or unsupported frontmatter stays in the source
+                // editor; the panel shows the explicit refusal reason.
+                self.load_error = Some(SharedString::from(error.to_string()));
                 self.editor = None;
                 self.rows.clear();
             }
@@ -312,15 +442,12 @@ impl FrontmatterForm {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.editor = None;
         self.rows.clear();
+        self.load_error = None;
+        self.notice = None;
         cx.notify();
     }
 
-    /// Apply a raw edit at `path` and emit a targeted field change.
-    ///
-    /// The emitted [`FrontmatterChanged`] carries only the field path and typed
-    /// value; the caller patches the live session text, so a stale whole-document
-    /// snapshot is never written back. The local model is refreshed best-effort
-    /// so validation feedback and boolean/enum selection stay in sync.
+    /// Apply a raw edit at `path` and emit the document edit.
     pub fn apply_value(&mut self, path: &str, raw: &str, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_mut() else {
             return;
@@ -331,17 +458,147 @@ impl FrontmatterForm {
         if !control.editable {
             return;
         }
+        if matches!(control.kind, ControlKind::RawYaml { .. }) {
+            match editor.set_value(path, raw) {
+                Ok(_) => {
+                    cx.emit(FrontmatterEdit::Raw {
+                        path: path.to_owned(),
+                        raw: raw.to_owned(),
+                    });
+                    self.sync_rows(cx);
+                }
+                Err(error) => self.notice = Some(SharedString::from(error)),
+            }
+            cx.notify();
+            return;
+        }
         let Ok(value) = fields::parse_value(&control.kind, raw) else {
             return;
         };
-        // Local-only refresh for validation/selection; body bytes here are
-        // irrelevant because the authoritative document is the live session.
-        let _ = editor.set_value(path, raw);
-        cx.emit(FrontmatterChanged {
+        if let Err(error) = editor.set_value(path, raw) {
+            self.notice = Some(SharedString::from(error));
+            cx.notify();
+            return;
+        }
+        cx.emit(FrontmatterEdit::Scalar {
             path: path.to_owned(),
             value,
+            present: control.present,
         });
+        self.sync_rows(cx);
         cx.notify();
+    }
+
+    /// Add one tag/reference item and emit the edit.
+    pub fn apply_add_item(&mut self, path: &str, raw: &str, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let Some(control) = editor.control(path).cloned() else {
+            return;
+        };
+        if !control.editable {
+            return;
+        }
+        let index = editor.items(path).len();
+        if let Err(error) = editor.add_item(path, raw) {
+            self.notice = Some(SharedString::from(error));
+            cx.notify();
+            return;
+        }
+        cx.emit(FrontmatterEdit::AddItem {
+            path: path.to_owned(),
+            index,
+            value: FrontmatterValue::String(raw.to_owned()),
+        });
+        self.sync_rows(cx);
+        cx.notify();
+    }
+
+    /// Remove one sequence item and emit the edit.
+    pub fn apply_remove_item(&mut self, path: &str, index: usize, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        if let Err(error) = editor.remove_item(path, index) {
+            self.notice = Some(SharedString::from(error));
+            cx.notify();
+            return;
+        }
+        cx.emit(FrontmatterEdit::RemoveItem {
+            path: path.to_owned(),
+            index,
+        });
+        self.sync_rows(cx);
+        cx.notify();
+    }
+
+    /// Remove an optional field and emit the edit.
+    pub fn apply_remove_field(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        if let Err(error) = editor.remove_field(path) {
+            self.notice = Some(SharedString::from(error));
+            cx.notify();
+            return;
+        }
+        cx.emit(FrontmatterEdit::Remove {
+            path: path.to_owned(),
+        });
+        self.sync_rows(cx);
+        cx.notify();
+    }
+
+    /// Copy the slugified title to the clipboard only.
+    ///
+    /// No document text and no file changes; the value comes from the current
+    /// form buffer even when the file has never been saved.
+    pub fn copy_slug(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_ref() else {
+            return;
+        };
+        let Some(control) = editor
+            .controls()
+            .iter()
+            .find(|control| control.role == Some(FieldRole::Title))
+        else {
+            return;
+        };
+        let title = match editor.value(&control.path) {
+            Some(FrontmatterValue::String(text)) => text,
+            Some(FrontmatterValue::Integer(value)) => value.to_string(),
+            Some(FrontmatterValue::Float(value)) => value.to_string(),
+            _ => String::new(),
+        };
+        let slug = slugify(&title);
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(slug));
+        self.notice = Some(SharedString::from("Slug copied to the clipboard"));
+        cx.notify();
+    }
+
+    /// Apply a project-relative image path through a normal scalar edit.
+    fn set_image_path(&mut self, path: &str, value: String, cx: &mut Context<Self>) {
+        self.apply_value(path, &value, cx);
+    }
+
+    fn sync_rows(&mut self, _cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_ref() else {
+            self.rows.clear();
+            return;
+        };
+        for row in &mut self.rows {
+            let Some(control) = editor.control(&row.path) else {
+                continue;
+            };
+            row.control.present = control.present;
+            row.control.removable = control.removable;
+            row.control.editable = control.editable;
+            row.control.refusal = control.refusal.clone();
+            row.items = sequence_display(editor, &row.path);
+            row.raw = editor.raw(&row.path).map(SharedString::from);
+            row.read_only_label = read_only_label(&row.control, row.is_object);
+        }
     }
 
     /// Return the row control paths currently rendered (test/diagnostic helper).
@@ -351,39 +608,151 @@ impl FrontmatterForm {
             .map(|row| row.control.path.clone())
             .collect()
     }
+
+    /// Return the visible row kinds in order (test/diagnostic helper).
+    pub fn control_kinds(&self) -> Vec<&'static str> {
+        self.rows
+            .iter()
+            .map(|row| row.control.control_label())
+            .collect()
+    }
+}
+
+fn sequence_display(editor: &FrontmatterEditor, path: &str) -> Vec<(usize, SharedString)> {
+    editor
+        .items(path)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, value)| match value {
+            FrontmatterValue::Null => None,
+            FrontmatterValue::Boolean(flag) => Some((index, SharedString::from(flag.to_string()))),
+            FrontmatterValue::Integer(value) => {
+                Some((index, SharedString::from(value.to_string())))
+            }
+            FrontmatterValue::Float(value) => Some((index, SharedString::from(value.to_string()))),
+            FrontmatterValue::String(text) => Some((index, SharedString::from(text))),
+        })
+        .collect()
+}
+
+fn read_only_label(control: &FieldControl, is_object: bool) -> Option<SharedString> {
+    if control.editable || is_object {
+        return None;
+    }
+    let refusal = control.refusal.as_deref().unwrap_or("read-only field");
+    Some(SharedString::from(format!("Read-only · {refusal}")))
 }
 
 fn build_rows(
     editor: &FrontmatterEditor,
+    references: &ReferenceCatalog,
     window: &mut Window,
     cx: &mut Context<FrontmatterForm>,
 ) -> Vec<RowEditor> {
     let mut rows = Vec::new();
     for control in editor.controls() {
-        let needs_text_input = control.editable
-            && !matches!(
+        let is_object = control.kind == ControlKind::Object;
+        let needs_text = control.editable
+            && matches!(
                 control.kind,
-                ControlKind::Boolean | ControlKind::Enum { .. }
+                ControlKind::Text { .. }
+                    | ControlKind::Number
+                    | ControlKind::Integer
+                    | ControlKind::Image
             );
-        let (input, subscription) = if needs_text_input {
+        let is_description = control.role == Some(FieldRole::Description);
+        let mut subscriptions = Vec::new();
+        let mut textarea = None;
+        let mut input = None;
+        let mut date = None;
+        let mut add_input = None;
+        if needs_text {
             let initial = editor
                 .value(&control.path)
                 .map(scalar_display)
                 .unwrap_or_default();
-            let state = cx.new(|cx| InputState::new(window, cx).default_value(initial));
+            if is_description {
+                let state = cx.new(|cx| TextareaState::new(window, cx).default_value(initial));
+                let path = control.path.clone();
+                subscriptions.push(cx.subscribe(
+                    &state,
+                    move |this, area, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let raw = area.read(cx).value().to_string();
+                            this.apply_value(&path, &raw, cx);
+                        }
+                    },
+                ));
+                textarea = Some(state);
+            } else {
+                let state = cx.new(|cx| InputState::new(window, cx).default_value(initial));
+                let path = control.path.clone();
+                subscriptions.push(cx.subscribe(
+                    &state,
+                    move |this, field, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            let raw = field.read(cx).value().to_string();
+                            this.apply_value(&path, &raw, cx);
+                        }
+                    },
+                ));
+                input = Some(state);
+            }
+        } else if matches!(control.kind, ControlKind::RawYaml { .. }) && control.editable {
+            let initial = editor.raw(&control.path).unwrap_or_default().to_owned();
+            let state = cx.new(|cx| TextareaState::new(window, cx).default_value(initial));
             let path = control.path.clone();
-            let subscription = cx.subscribe(&state, move |this, input, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    let raw = input.read(cx).value().to_string();
-                    this.apply_value(&path, &raw, cx);
-                }
+            subscriptions.push(
+                cx.subscribe(&state, move |this, area, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let raw = area.read(cx).value().to_string();
+                        this.apply_value(&path, &raw, cx);
+                    }
+                }),
+            );
+            textarea = Some(state);
+        } else if control.kind == ControlKind::Date {
+            let initial = editor.value(&control.path).and_then(|value| match value {
+                FrontmatterValue::String(text) => NaiveDate::parse_from_str(
+                    text.split(['T', ' ']).next().unwrap_or(&text),
+                    "%Y-%m-%d",
+                )
+                .ok(),
+                _ => None,
             });
-            (Some(state), Some(subscription))
-        } else {
-            (None, None)
-        };
-        let path = control.path.clone();
-        let is_object = control.kind == ControlKind::Object;
+            let state = cx.new(|cx| {
+                let mut state = DatePickerState::new(window, cx);
+                if let Some(initial) = initial {
+                    state.set_date(Date::Single(Some(initial)), window, cx);
+                }
+                state
+            });
+            let path = control.path.clone();
+            subscriptions.push(cx.subscribe(
+                &state,
+                move |this, _picker, event: &DatePickerEvent, cx| {
+                    if let DatePickerEvent::Change(DateTime::Single(Some(value))) = event {
+                        this.apply_value(&path, &value.format("%Y-%m-%d").to_string(), cx);
+                    }
+                },
+            ));
+            date = Some(state);
+        }
+        if matches!(control.kind, ControlKind::Tags) && control.editable {
+            let state = cx.new(|cx| InputState::new(window, cx));
+            let path = control.path.clone();
+            subscriptions.push(
+                cx.subscribe(&state, move |this, field, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        let raw = field.read(cx).value().trim().to_owned();
+                        if !raw.is_empty() {
+                            this.apply_add_item(&path, &raw, cx);
+                        }
+                    }
+                }),
+            );
+            add_input = Some(state);
+        }
         let enum_values = match &control.kind {
             ControlKind::Enum { values } => values
                 .iter()
@@ -397,26 +766,53 @@ fn build_rows(
                 .collect(),
             _ => Vec::new(),
         };
-        let read_only_label =
-            (!control.editable && !is_object && enum_values.is_empty()).then(|| {
-                let refusal = control.refusal.as_deref().unwrap_or("read-only field");
-                SharedString::from(format!("Read-only · {refusal}"))
-            });
+        let reference_options = match &control.kind {
+            ControlKind::Reference { collections, .. } => {
+                reference_options(references, collections)
+            }
+            _ => Vec::new(),
+        };
         rows.push(RowEditor {
-            control: control.clone(),
-            input,
             label: SharedString::from(control.name.clone()),
             aria_label: SharedString::from(format!("frontmatter field {}", control.path)),
-            path: SharedString::from(path),
+            path: SharedString::from(control.path.clone()),
             kind_label: control_label(&control.kind),
-            hierarchy: control.path.matches('.').count().saturating_sub(1),
+            hierarchy: control.path.matches('.').count(),
             is_object,
-            read_only_label,
+            read_only_label: read_only_label(control, is_object),
+            description: control.description.clone().map(SharedString::from),
+            hint: control.hint().map(SharedString::from),
             enum_values,
-            _subscription: subscription,
+            reference_options,
+            items: sequence_display(editor, &control.path),
+            raw: editor.raw(&control.path).map(SharedString::from),
+            is_title: control.role == Some(FieldRole::Title),
+            input,
+            textarea,
+            date,
+            add_input,
+            control: control.clone(),
+            _subscriptions: subscriptions,
         });
     }
     rows
+}
+
+fn reference_options(
+    catalog: &ReferenceCatalog,
+    collections: &[String],
+) -> Vec<(SharedString, SharedString)> {
+    let mut options: Vec<(SharedString, SharedString)> = Vec::new();
+    for collection in collections {
+        for option in catalog.get(collection).into_iter().flatten() {
+            let label = SharedString::from(option.label.clone());
+            let value = SharedString::from(option.value.clone());
+            if !options.iter().any(|(_, existing)| existing == &value) {
+                options.push((label, value));
+            }
+        }
+    }
+    options
 }
 
 fn scalar_display(value: FrontmatterValue) -> String {
@@ -430,7 +826,30 @@ fn scalar_display(value: FrontmatterValue) -> String {
 }
 
 impl Render for FrontmatterForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(error) = self.load_error.clone() {
+            return div()
+                .id("frontmatter-form")
+                .v_flex()
+                .gap_2()
+                .p_4()
+                .child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .child(Icon::new(IconName::TriangleAlert))
+                        .child("Frontmatter cannot be edited safely"),
+                )
+                .child(div().text_xs().text_color(cx.theme().danger).child(error))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Edit the raw source instead; the document is never rewritten."),
+                );
+        }
         let Some(editor) = self.editor.as_ref() else {
             return div()
                 .id("frontmatter-form")
@@ -450,14 +869,14 @@ impl Render for FrontmatterForm {
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Select a collection entry with a schema to edit its metadata."),
+                        .child("Select a collection entry to edit its metadata."),
                 );
         };
-        let rows = self
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| render_row(index, row, editor, cx));
+        let notice = self.notice.clone();
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(self.rows.len());
+        for (index, row) in self.rows.iter().enumerate() {
+            rows.push(render_row(index, row, editor, cx, window).into_any_element());
+        }
         div()
             .id("frontmatter-form")
             .v_flex()
@@ -493,6 +912,16 @@ impl Render for FrontmatterForm {
                             .text_color(cx.theme().muted_foreground),
                     ),
             )
+            .when_some(notice, |form, notice| {
+                form.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(notice),
+                )
+            })
             .child(div().v_flex().gap_3().p_3().children(rows))
     }
 }
@@ -501,13 +930,11 @@ fn render_row(
     index: usize,
     row: &RowEditor,
     editor: &FrontmatterEditor,
-    cx: &Context<FrontmatterForm>,
+    cx: &mut Context<FrontmatterForm>,
+    window: &Window,
 ) -> impl IntoElement {
+    let _ = window;
     let control = &row.control;
-    let boolean_value = matches!(
-        editor.value(&row.path),
-        Some(FrontmatterValue::Boolean(true))
-    );
     let mut diagnostics = String::new();
     for diagnostic in editor.diagnostics_for(&row.path) {
         use std::fmt::Write as _;
@@ -520,6 +947,57 @@ fn render_row(
             diagnostic.severity, diagnostic.message
         );
     }
+    let header = div()
+        .h_flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(
+            div()
+                .h_flex()
+                .items_center()
+                .gap_1()
+                .text_xs()
+                .when(control.required, |label| {
+                    label.child(div().text_color(cx.theme().warning).child("*"))
+                })
+                .child(row.label.clone())
+                .when_some(control.role, |label, role| {
+                    label.child(div().text_color(cx.theme().muted_foreground).child(
+                        SharedString::from(match role {
+                            FieldRole::Title => "title",
+                            FieldRole::Description => "description",
+                            FieldRole::Draft => "draft",
+                            FieldRole::Date => "date",
+                        }),
+                    ))
+                }),
+        )
+        .child(
+            div()
+                .h_flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(row.kind_label),
+                )
+                .when(row.control.removable, |group| {
+                    let path = row.path.clone();
+                    group.child(
+                        Button::new(("frontmatter-remove", index))
+                            .ghost()
+                            .xsmall()
+                            .label("Remove")
+                            .tooltip("Remove this optional field")
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.apply_remove_field(&path, cx);
+                            })),
+                    )
+                }),
+        );
 
     let mut row_view = div()
         .id(("frontmatter-field", index))
@@ -528,30 +1006,16 @@ fn render_row(
         .when(row.hierarchy > 0, |view| {
             view.pl(px((row.hierarchy * 12) as f32))
         })
-        .child(
+        .child(header);
+
+    if let Some(description) = row.description.clone() {
+        row_view = row_view.child(
             div()
-                .h_flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    div()
-                        .h_flex()
-                        .items_center()
-                        .gap_1()
-                        .text_xs()
-                        .when(control.required, |label| {
-                            label.child(div().text_color(cx.theme().warning).child("*"))
-                        })
-                        .child(row.label.clone()),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(row.kind_label),
-                ),
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(description),
         );
+    }
 
     if row.is_object {
         row_view = row_view.child(
@@ -560,9 +1024,36 @@ fn render_row(
                 .text_color(cx.theme().muted_foreground)
                 .child(row.label.clone()),
         );
+    } else if matches!(control.kind, ControlKind::Image) {
+        // The image control owns its path input, so it must render before the
+        // generic text input built for it.
+        row_view = row_view.child(image_control(index, row, cx));
+    } else if matches!(
+        control.kind,
+        ControlKind::Reference {
+            multiple: false,
+            ..
+        }
+    ) {
+        row_view = row_view.child(reference_dropdown(index, row, editor, cx));
+    } else if let Some(area) = row.textarea.as_ref() {
+        row_view = row_view.child(
+            Textarea::new(area)
+                .small()
+                .h(px(96.))
+                .aria_label(row.aria_label.clone()),
+        );
     } else if let Some(input) = row.input.as_ref() {
-        row_view = row_view.child(Input::new(input).small().aria_label(row.aria_label.clone()));
+        let field = Input::new(input).small().aria_label(row.aria_label.clone());
+        let field = if row.is_title { field.large() } else { field };
+        row_view = row_view.child(field);
+    } else if let Some(picker) = row.date.as_ref() {
+        row_view = row_view.child(DatePicker::new(picker).small());
     } else if matches!(control.kind, ControlKind::Boolean) {
+        let boolean_value = matches!(
+            editor.value(&row.path),
+            Some(FrontmatterValue::Boolean(true))
+        );
         let toggle_path = row.path.clone();
         row_view = row_view.child(
             Checkbox::new(("frontmatter-bool", index))
@@ -574,25 +1065,11 @@ fn render_row(
                 })),
         );
     } else if !row.enum_values.is_empty() {
-        let current = editor.value(&row.path).map(scalar_display);
-        let buttons = row
-            .enum_values
-            .iter()
-            .enumerate()
-            .map(|(value_index, (display, raw))| {
-                let selected = current.as_deref() == Some(raw.as_ref());
-                let enum_path = row.path.clone();
-                let raw = raw.clone();
-                Button::new(("frontmatter-enum", index * 64 + value_index))
-                    .xsmall()
-                    .ghost()
-                    .toggled(selected)
-                    .label(display.clone())
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.apply_value(&enum_path, &raw, cx);
-                    }))
-            });
-        row_view = row_view.child(div().h_flex().flex_wrap().gap_1().children(buttons));
+        row_view = row_view.child(enum_dropdown(index, row, editor, cx));
+    } else if matches!(control.kind, ControlKind::Reference { multiple: true, .. }) {
+        row_view = row_view.child(reference_list(index, row, cx));
+    } else if matches!(control.kind, ControlKind::Tags) {
+        row_view = row_view.child(tag_control(index, row, cx));
     } else if let Some(label) = row.read_only_label.clone() {
         row_view = row_view.child(
             div()
@@ -606,6 +1083,28 @@ fn render_row(
         );
     }
 
+    if row.is_title {
+        let actions = div().h_flex().items_center().gap_2().pt_1().child(
+            Button::new(("frontmatter-copy-slug", index))
+                .ghost()
+                .xsmall()
+                .label("Copy slug")
+                .tooltip("Slugify the title and copy it to the clipboard")
+                .on_click(cx.listener(|this, _, _window, cx| {
+                    this.copy_slug(cx);
+                })),
+        );
+        row_view = row_view.child(actions);
+    }
+
+    if let Some(hint) = row.hint.clone() {
+        row_view = row_view.child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(hint),
+        );
+    }
     if !diagnostics.is_empty() {
         row_view = row_view.child(
             div()
@@ -615,6 +1114,301 @@ fn render_row(
         );
     }
     row_view
+}
+
+/// The label shown on an enum or reference dropdown.
+///
+/// The current document value is shown even when the schema no longer lists it,
+/// so an out-of-schema value is visible instead of looking unset.
+fn selected_option_label(options: &[(SharedString, SharedString)], current: &str) -> SharedString {
+    options
+        .iter()
+        .find(|(_, value)| value.as_ref() == current)
+        .map(|(label, _)| label.clone())
+        .unwrap_or_else(|| {
+            if current.is_empty() {
+                SharedString::from("Select…")
+            } else {
+                SharedString::from(current.to_owned())
+            }
+        })
+}
+
+fn enum_dropdown(
+    index: usize,
+    row: &RowEditor,
+    editor: &FrontmatterEditor,
+    cx: &mut Context<FrontmatterForm>,
+) -> impl IntoElement {
+    let current = editor
+        .value(&row.path)
+        .map(scalar_display)
+        .unwrap_or_default();
+    let label = selected_option_label(&row.enum_values, &current);
+    let values = row.enum_values.clone();
+    let path = row.path.to_string();
+    let this = cx.weak_entity();
+    Button::new(("frontmatter-enum", index))
+        .xsmall()
+        .outline()
+        .label(label)
+        .dropdown_caret(true)
+        .dropdown_menu(move |menu, _window, _cx| {
+            let mut menu = menu;
+            for (display, raw) in &values {
+                let path = path.clone();
+                let raw = raw.to_string();
+                let this = this.clone();
+                menu = menu.item(PopupMenuItem::new(display.clone()).on_click(
+                    move |_, _window, cx: &mut App| {
+                        let raw = raw.clone();
+                        let path = path.clone();
+                        let _ = this.update(cx, |form, cx| form.apply_value(&path, &raw, cx));
+                    },
+                ));
+            }
+            menu
+        })
+}
+
+fn reference_dropdown(
+    index: usize,
+    row: &RowEditor,
+    editor: &FrontmatterEditor,
+    cx: &mut Context<FrontmatterForm>,
+) -> impl IntoElement {
+    let current = editor
+        .value(&row.path)
+        .map(scalar_display)
+        .unwrap_or_default();
+    let label = selected_option_label(&row.reference_options, &current);
+    let options = row.reference_options.clone();
+    let path = row.path.to_string();
+    let this = cx.weak_entity();
+    Button::new(("frontmatter-reference", index))
+        .xsmall()
+        .outline()
+        .label(label)
+        .dropdown_caret(true)
+        .dropdown_menu(move |menu, _window, _cx| {
+            let mut menu = menu;
+            if options.is_empty() {
+                return menu.item(PopupMenuItem::label("No entries"));
+            }
+            for (display, value) in &options {
+                let path = path.clone();
+                let value = value.to_string();
+                let this = this.clone();
+                menu = menu.item(PopupMenuItem::new(display.clone()).on_click(
+                    move |_, _window, cx: &mut App| {
+                        let value = value.clone();
+                        let path = path.clone();
+                        let _ = this.update(cx, |form, cx| form.apply_value(&path, &value, cx));
+                    },
+                ));
+            }
+            menu
+        })
+}
+
+fn reference_list(
+    index: usize,
+    row: &RowEditor,
+    cx: &mut Context<FrontmatterForm>,
+) -> impl IntoElement {
+    let path = row.path.to_string();
+    let this = cx.weak_entity();
+    let options = row.reference_options.clone();
+    let mut view = div().v_flex().gap_1();
+    if !row.items.is_empty() {
+        let chips = row
+            .items
+            .iter()
+            .map(|(item_index, item)| {
+                let path = path.clone();
+                let item_index = *item_index;
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(cx.theme().muted)
+                    .text_xs()
+                    .child(item.clone())
+                    .child(
+                        Button::new(("frontmatter-chip-remove", index * 64 + item_index))
+                            .ghost()
+                            .xsmall()
+                            .label("×")
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.apply_remove_item(&path, item_index, cx);
+                            })),
+                    )
+            })
+            .collect::<Vec<_>>();
+        view = view.child(div().h_flex().flex_wrap().gap_1().children(chips));
+    }
+    view.child(
+        Button::new(("frontmatter-reference-add", index))
+            .xsmall()
+            .outline()
+            .label("Add reference")
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _window, _cx| {
+                if options.is_empty() {
+                    return menu.item(PopupMenuItem::label("No entries"));
+                }
+                let mut menu = menu;
+                for (display, value) in &options {
+                    let path = path.clone();
+                    let value = value.to_string();
+                    let this = this.clone();
+                    menu = menu.item(PopupMenuItem::new(display.clone()).on_click(
+                        move |_, _window, cx: &mut App| {
+                            let value = value.clone();
+                            let path = path.clone();
+                            let _ =
+                                this.update(cx, |form, cx| form.apply_add_item(&path, &value, cx));
+                        },
+                    ));
+                }
+                menu
+            }),
+    )
+}
+
+fn tag_control(
+    index: usize,
+    row: &RowEditor,
+    cx: &mut Context<FrontmatterForm>,
+) -> impl IntoElement {
+    let path = row.path.to_string();
+    let mut view = div().v_flex().gap_1();
+    if !row.items.is_empty() {
+        let chips = row
+            .items
+            .iter()
+            .map(|(item_index, item)| {
+                let path = path.clone();
+                let item_index = *item_index;
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(cx.theme().muted)
+                    .text_xs()
+                    .child(item.clone())
+                    .child(
+                        Button::new(("frontmatter-chip-remove", index * 64 + item_index))
+                            .ghost()
+                            .xsmall()
+                            .label("×")
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.apply_remove_item(&path, item_index, cx);
+                            })),
+                    )
+            })
+            .collect::<Vec<_>>();
+        view = view.child(div().h_flex().flex_wrap().gap_1().children(chips));
+    }
+    if let Some(input) = row.add_input.as_ref() {
+        view = view.child(
+            Input::new(input)
+                .small()
+                .aria_label(SharedString::from(format!("add tag to {}", row.path))),
+        );
+    }
+    view
+}
+
+fn image_control(
+    index: usize,
+    row: &RowEditor,
+    cx: &mut Context<FrontmatterForm>,
+) -> impl IntoElement {
+    let path = row.path.to_string();
+    let mut preview = div()
+        .h_flex()
+        .items_center()
+        .justify_center()
+        .size(px(56.))
+        .rounded_md()
+        .border_1()
+        .border_color(cx.theme().window_border)
+        .bg(cx.theme().muted)
+        .child(
+            Icon::new(IconName::Image)
+                .small()
+                .text_color(cx.theme().muted_foreground),
+        );
+    if let Some(input) = row.input.as_ref() {
+        preview = div().h_flex().items_center().gap_2().child(preview).child(
+            div().flex_1().child(
+                Input::new(input)
+                    .small()
+                    .aria_label(SharedString::from(format!("image path for {}", row.path))),
+            ),
+        );
+    }
+    let mut actions = div().h_flex().gap_2();
+    let pick_path = path.clone();
+    actions = actions.child(
+        Button::new(("frontmatter-image-pick", index))
+            .xsmall()
+            .outline()
+            .label("Choose…")
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let _ = this;
+                let path = pick_path.clone();
+                let root = cx.entity().read(cx).root.clone();
+                let paths = cx.prompt_for_paths(PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: Some("Choose an image inside the project".into()),
+                });
+                cx.spawn_in(window, async move |this, cx| {
+                    let Ok(Ok(Some(paths))) = paths.await else {
+                        return;
+                    };
+                    let Some(selected) = paths.into_iter().next() else {
+                        return;
+                    };
+                    let relative = root
+                        .as_deref()
+                        .and_then(|root| selected.strip_prefix(root).ok())
+                        .map(|relative| relative.to_string_lossy().replace('\\', "/"));
+                    let _ = this.update(cx, |form, cx| match relative {
+                        Some(relative) => form.set_image_path(&path, relative, cx),
+                        None => {
+                            form.notice = Some(SharedString::from(
+                                "Choose an image inside the project; external copy arrives with the asset service.",
+                            ));
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            })),
+    );
+    if row.control.present {
+        let path = path.clone();
+        actions = actions.child(
+            Button::new(("frontmatter-image-clear", index))
+                .xsmall()
+                .ghost()
+                .label("Clear")
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    this.apply_remove_field(&path, cx);
+                })),
+        );
+    }
+    div().v_flex().gap_2().child(preview).child(actions)
 }
 
 fn enum_display(value: &Value) -> String {

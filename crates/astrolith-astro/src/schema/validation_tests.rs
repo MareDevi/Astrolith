@@ -1,8 +1,8 @@
 use serde_json::{Value, json};
 
 use super::{
-    CollectionSchema, Field, FieldKind, SchemaDialect, ValidationDiagnostic, ValidationSeverity,
-    ValidationSource, validate_frontmatter,
+    CollectionSchema, Field, FieldConstraints, FieldKind, SchemaDialect, ValidationDiagnostic,
+    ValidationSeverity, ValidationSource, validate_frontmatter,
 };
 
 fn schema(fields: Vec<Field>) -> CollectionSchema {
@@ -19,6 +19,9 @@ fn field(name: &str, required: bool, kind: FieldKind) -> Field {
         required,
         default: None,
         kind,
+        description: None,
+        constraints: FieldConstraints::default(),
+        order: 0,
     }
 }
 

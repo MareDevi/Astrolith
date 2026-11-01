@@ -17,8 +17,9 @@ pub struct ProjectConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectionConfig {
     collection: String,
-    base: String,
-    pattern: CollectionPattern,
+    base: Option<String>,
+    pattern: Option<CollectionPattern>,
+    file: Option<String>,
 }
 
 impl CollectionConfig {
@@ -26,12 +27,25 @@ impl CollectionConfig {
         &self.collection
     }
 
-    pub fn base(&self) -> &str {
-        &self.base
+    /// Glob loader base directory, when this collection uses `glob()`.
+    pub fn base(&self) -> Option<&str> {
+        self.base.as_deref()
     }
 
-    pub fn pattern(&self) -> &CollectionPattern {
-        &self.pattern
+    /// Glob loader pattern, when this collection uses `glob()`.
+    pub fn pattern(&self) -> Option<&CollectionPattern> {
+        self.pattern.as_ref()
+    }
+
+    /// Literal project-relative JSON file loaded by `file()`, when this is a
+    /// data collection.
+    pub fn file(&self) -> Option<&str> {
+        self.file.as_deref()
+    }
+
+    /// Whether this collection is loaded from a single JSON file.
+    pub fn is_data(&self) -> bool {
+        self.file.is_some()
     }
 }
 
@@ -40,6 +54,7 @@ struct ImportSet {
     bindings: HashSet<String>,
     define_collection_aliases: Vec<String>,
     glob_aliases: Vec<String>,
+    file_aliases: Vec<String>,
     define_config_aliases: Vec<String>,
     mdx_default_aliases: Vec<String>,
 }
@@ -54,7 +69,11 @@ pub fn parse_content_config(source: &str) -> Result<Vec<CollectionConfig>, Strin
         &imports.define_collection_aliases,
         "defineCollection from astro:content",
     )?;
-    let glob_alias = required_alias(&imports.glob_aliases, "glob from astro/loaders")?;
+    let glob_alias = optional_alias(&imports.glob_aliases, "glob from astro/loaders")?;
+    let file_alias = optional_alias(&imports.file_aliases, "file from astro/loaders")?;
+    if glob_alias.is_none() && file_alias.is_none() {
+        return Err("missing verified import of glob or file from astro/loaders".into());
+    }
 
     let mut declarations = HashMap::new();
     let mut declaration_positions = HashMap::new();
@@ -97,8 +116,9 @@ pub fn parse_content_config(source: &str) -> Result<Vec<CollectionConfig>, Strin
 
     let collections_object = collections_object
         .ok_or_else(|| "content config must export `const collections`".to_owned())?;
-    let mut known_bindings =
-        HashSet::from([define_collection_alias.to_owned(), glob_alias.to_owned()]);
+    let mut known_bindings = HashSet::from([define_collection_alias.to_owned()]);
+    known_bindings.extend(glob_alias.map(str::to_owned));
+    known_bindings.extend(file_alias.map(str::to_owned));
     known_bindings.extend(declarations.keys().cloned());
 
     let mut parsed_declarations = HashMap::new();
@@ -118,6 +138,7 @@ pub fn parse_content_config(source: &str) -> Result<Vec<CollectionConfig>, Strin
             source,
             define_collection_alias,
             glob_alias,
+            file_alias,
             &known_bindings,
         )
         .map_err(|error| format!("collection `{name}`: {error}"))?;
@@ -126,11 +147,14 @@ pub fn parse_content_config(source: &str) -> Result<Vec<CollectionConfig>, Strin
 
     parse_collections_export(
         collections_object,
-        source,
-        define_collection_alias,
-        glob_alias,
+        &ExportContext {
+            source,
+            define_collection_alias,
+            glob_alias,
+            file_alias,
+            known_bindings: &known_bindings,
+        },
         &parsed_declarations,
-        &known_bindings,
         &declaration_positions,
     )
 }
@@ -312,6 +336,9 @@ fn collect_imports(root: Node<'_>, source: &str) -> Result<ImportSet, String> {
                         if !type_only && defines_loader_names && imported == "glob" {
                             imports.glob_aliases.push(local.clone());
                         }
+                        if !type_only && defines_loader_names && imported == "file" {
+                            imports.file_aliases.push(local.clone());
+                        }
                         if !type_only && module == "astro/config" && imported == "defineConfig" {
                             imports.define_config_aliases.push(local.clone());
                         }
@@ -360,6 +387,16 @@ fn required_alias<'a>(aliases: &'a [String], description: &str) -> Result<&'a st
     match aliases {
         [alias] => Ok(alias),
         [] => Err(format!("missing verified import of {description}")),
+        _ => Err(format!(
+            "multiple verified imports of {description} are unsupported"
+        )),
+    }
+}
+
+fn optional_alias<'a>(aliases: &'a [String], description: &str) -> Result<Option<&'a str>, String> {
+    match aliases {
+        [] => Ok(None),
+        [alias] => Ok(Some(alias)),
         _ => Err(format!(
             "multiple verified imports of {description} are unsupported"
         )),
@@ -452,7 +489,8 @@ fn parse_collection_call(
     node: Node<'_>,
     source: &str,
     define_collection_alias: &str,
-    glob_alias: &str,
+    glob_alias: Option<&str>,
+    file_alias: Option<&str>,
     known_bindings: &HashSet<String>,
 ) -> Result<CollectionConfig, String> {
     let config_object = direct_call_object(
@@ -480,6 +518,23 @@ fn parse_collection_call(
         validate_schema(schema, source, known_bindings)?;
     }
 
+    let target = direct_identifier_call_target(loader, source)?.ok_or_else(|| {
+        "defineCollection loader must be a direct `glob(...)` or `file(...)` call".to_owned()
+    })?;
+    if Some(target) == glob_alias {
+        return parse_glob_loader(loader, source, target);
+    }
+    if Some(target) == file_alias {
+        return parse_file_loader(loader, source, target);
+    }
+    Err("defineCollection loader must use the verified `glob` or `file` import".into())
+}
+
+fn parse_glob_loader(
+    loader: Node<'_>,
+    source: &str,
+    glob_alias: &str,
+) -> Result<CollectionConfig, String> {
     let glob_object = direct_call_object(loader, source, glob_alias, "glob loader call")?;
     let glob_pairs = strict_object_pairs(glob_object, source, "glob loader options")?;
     let mut base = None;
@@ -507,20 +562,48 @@ fn parse_collection_call(
 
     Ok(CollectionConfig {
         collection: String::new(),
-        base,
-        pattern,
+        base: Some(base),
+        pattern: Some(pattern),
+        file: None,
     })
+}
+
+fn parse_file_loader(
+    loader: Node<'_>,
+    source: &str,
+    file_alias: &str,
+) -> Result<CollectionConfig, String> {
+    let path = direct_call_string_argument(loader, source, file_alias, "file loader call")?;
+    validate_project_relative_path(&path, "file loader path")?;
+    if !path.to_ascii_lowercase().ends_with(".json") {
+        return Err(format!(
+            "file loader path `{path}` must reference a JSON (`.json`) file"
+        ));
+    }
+    Ok(CollectionConfig {
+        collection: String::new(),
+        base: None,
+        pattern: None,
+        file: Some(path),
+    })
+}
+
+/// The verified loader aliases and bindings one exported collection may use.
+struct ExportContext<'a> {
+    source: &'a str,
+    define_collection_alias: &'a str,
+    glob_alias: Option<&'a str>,
+    file_alias: Option<&'a str>,
+    known_bindings: &'a HashSet<String>,
 }
 
 fn parse_collections_export(
     object: Node<'_>,
-    source: &str,
-    define_collection_alias: &str,
-    glob_alias: &str,
+    context: &ExportContext<'_>,
     declarations: &HashMap<String, CollectionConfig>,
-    known_bindings: &HashSet<String>,
     declaration_positions: &HashMap<String, usize>,
 ) -> Result<Vec<CollectionConfig>, String> {
+    let source = context.source;
     let mut collections = Vec::new();
     let mut names = HashSet::new();
 
@@ -580,9 +663,10 @@ fn parse_collections_export(
             "call_expression" => parse_collection_call(
                 value,
                 source,
-                define_collection_alias,
-                glob_alias,
-                known_bindings,
+                context.define_collection_alias,
+                context.glob_alias,
+                context.file_alias,
+                context.known_bindings,
             )?,
             kind => {
                 return Err(format!(
@@ -635,6 +719,45 @@ fn direct_call_object<'tree>(
         return Err(format!("{context} argument must be a literal object"));
     }
     Ok(*argument)
+}
+
+fn direct_call_string_argument(
+    call: Node<'_>,
+    source: &str,
+    expected_function: &str,
+    context: &str,
+) -> Result<String, String> {
+    if call.kind() != "call_expression" {
+        return Err(format!("{context} must be a direct call expression"));
+    }
+    let function = call
+        .child_by_field_name("function")
+        .ok_or_else(|| format!("{context} has no function"))?;
+    if function.kind() != "identifier" {
+        return Err(format!("{context} must use a verified identifier"));
+    }
+    let function_name = node_text(function, source, "call target")?;
+    if function_name != expected_function {
+        return Err(format!(
+            "{context} must call the verified `{expected_function}` import"
+        ));
+    }
+    let arguments = call
+        .child_by_field_name("arguments")
+        .ok_or_else(|| format!("{context} has no arguments"))?;
+    if arguments.kind() != "arguments" {
+        return Err(format!("{context} must use parenthesized arguments"));
+    }
+    let arguments: Vec<_> = named_children(arguments)
+        .into_iter()
+        .filter(|argument| !is_comment(*argument))
+        .collect();
+    let [argument] = arguments.as_slice() else {
+        return Err(format!(
+            "{context} must have exactly one literal string argument"
+        ));
+    };
+    literal_string(*argument, source, context)
 }
 
 fn strict_object_pairs<'tree>(

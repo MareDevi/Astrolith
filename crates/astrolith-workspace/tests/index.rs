@@ -20,6 +20,21 @@ fn discover(root: &Path) -> astrolith_astro::ProjectManifest {
 }
 
 fn manifest(root: &Path) -> astrolith_astro::ProjectManifest {
+    scaffold(root);
+    fs::write(
+        root.join("src/content.config.ts"),
+        r#"import {defineCollection} from 'astro:content';
+import {glob} from 'astro/loaders';
+const docs = defineCollection({loader:glob({base:'src/posts',pattern:'**/*.{md,mdx}'})});
+export const collections = {docs};
+"#,
+    )
+    .unwrap();
+
+    discover(root)
+}
+
+fn scaffold(root: &Path) {
     fs::create_dir_all(root.join("node_modules/astro")).unwrap();
     fs::write(
         root.join("package.json"),
@@ -39,17 +54,6 @@ fn manifest(root: &Path) -> astrolith_astro::ProjectManifest {
     .unwrap();
     fs::write(root.join("astro.config.mjs"),"import {defineConfig} from 'astro/config'; import mdx from '@astrojs/mdx'; export default defineConfig({integrations:[mdx()]});").unwrap();
     fs::create_dir_all(root.join("src/posts/guides")).unwrap();
-    fs::write(
-        root.join("src/content.config.ts"),
-        r#"import {defineCollection} from 'astro:content';
-import {glob} from 'astro/loaders';
-const docs = defineCollection({loader:glob({base:'src/posts',pattern:'**/*.{md,mdx}'})});
-export const collections = {docs};
-"#,
-    )
-    .unwrap();
-
-    discover(root)
 }
 
 fn project() -> (TempDir, astrolith_astro::ProjectManifest) {
@@ -92,6 +96,55 @@ fn project() -> (TempDir, astrolith_astro::ProjectManifest) {
     }
     let manifest = manifest(temp.path());
     (temp, manifest)
+}
+
+#[test]
+fn json_data_collections_are_never_editable_collection_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    scaffold(root);
+    fs::write(
+        root.join("src/content.config.mjs"),
+        r#"import {defineCollection} from 'astro:content';
+import {file, glob} from 'astro/loaders';
+const docs = defineCollection({loader:glob({base:'src/posts',pattern:'**/*.{md,mdx}'})});
+const dataAuthors = defineCollection({loader:file('./oracles/data-collections/authors.json')});
+export const collections = {docs, dataAuthors};
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("oracles/data-collections")).unwrap();
+    fs::write(
+        root.join("oracles/data-collections/authors.json"),
+        r#"[{"id":"ada","name":"Ada Lovelace"}]"#,
+    )
+    .unwrap();
+    fs::write(root.join("src/posts/entry.md"), "---\ntitle: Entry\n---\n").unwrap();
+
+    let manifest = discover(root);
+    assert_eq!(
+        manifest
+            .collections()
+            .iter()
+            .map(|collection| collection.id().as_str())
+            .collect::<Vec<_>>(),
+        ["docs"],
+        "a file() collection is not an editable collection"
+    );
+    assert_eq!(manifest.data_collections().len(), 1);
+
+    let entries = scan_collections(&manifest, &Cancellation::default()).unwrap();
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.entry().id().collection().as_str() == "docs"),
+        "data-collection rows never appear in the editable sidebar index"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.entry().source().as_str() == "src/posts/entry.md")
+    );
 }
 
 #[test]

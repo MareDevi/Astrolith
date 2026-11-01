@@ -8,6 +8,8 @@ pub mod index;
 pub mod list;
 /// Typed, validated entry lifecycle operations.
 pub mod operations;
+/// Reference-target options from file and JSON data collections.
+pub mod references;
 /// Bounded filesystem watcher batches.
 pub mod watcher;
 
@@ -17,4 +19,5 @@ pub use index::{
     CollectionEntry, EntryMetadata, MetaValue, SourceGroup, WorkspaceError, coalesce_by_source,
     scan_collections,
 };
+pub use references::ReferenceOption;
 pub use watcher::{CollectionWatcher, WatchBatch};

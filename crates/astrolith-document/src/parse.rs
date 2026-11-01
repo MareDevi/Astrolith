@@ -1,19 +1,29 @@
 //! Lossless frontmatter document model.
 //!
 //! [`parse_document`] splits a Markdown/MDX source into its exact frontmatter and
-//! body bytes and records the byte span of each supported scalar field so a
-//! caller can patch one value in place. [`serialize_document`](crate::serialize::serialize_document)
+//! body bytes and records the byte span of each supported field so a caller can
+//! patch one value in place. [`serialize_document`](crate::serialize::serialize_document)
 //! then reproduces every untouched byte exactly, including comments, unknown
 //! keys, quoting style, block scalars, Unicode, line endings and trailing
 //! newlines.
 //!
-//! The supported editable subset is a YAML block mapping of plain keys whose
-//! values are plain or quoted scalars, including nested block mappings. Flow
-//! collections (`[...]`, `{...}`), block scalars (`|`, `>`) and complex
-//! constructs are preserved as opaque fields that can be read but not patched;
-//! anchors, aliases, tags, merge keys, quoted or complex keys and sequence items
-//! are refused outright with [`DocumentError::UnsupportedFrontmatter`]. Refusing
-//! unsupported input is safer than guessing: it can never corrupt a document.
+//! The editable subset is a YAML block mapping whose leaves are plain, quoted
+//! or null scalars, whose containers are nested block mappings or block/flow
+//! sequences of scalars, and whose container values can be replaced as
+//! validated raw YAML. [`ParsedDocument::fields`] exposes a read-only shape
+//! snapshot for every field, while [`ParsedDocument::insert_field`],
+//! [`ParsedDocument::remove_field`], the sequence item methods and
+//! [`ParsedDocument::replace_raw`] record byte patches that only take effect on
+//! serialization. Inserting into a document that has no frontmatter creates a
+//! leading block after any byte-order mark and leaves the body byte-for-byte.
+//!
+//! Block scalars (`|`, `>`) are preserved as opaque fields that can be read but
+//! not patched; anchors, aliases, tags, merge keys, quoted or complex keys,
+//! multi-line flow collections and sequence items in positions where no
+//! sequence is allowed are refused. A sequence or mapping whose items are not
+//! scalar leaves is not item-editable but is still replaceable as raw YAML.
+//! Refusing unsupported input is safer than guessing: it can never corrupt a
+//! document.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -21,6 +31,7 @@ use std::ops::Range;
 use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::buffer::DocumentError;
+use crate::yaml::validate_value;
 
 /// The dominant line ending of a document, preserved on serialization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +40,15 @@ pub enum LineEnding {
     Lf,
     /// CRLF (`\r\n`) line endings.
     Crlf,
+}
+
+impl LineEnding {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Lf => "\n",
+            Self::Crlf => "\r\n",
+        }
+    }
 }
 
 /// A typed scalar value read from, or written to, frontmatter.
@@ -46,12 +66,67 @@ pub enum FrontmatterValue {
     String(String),
 }
 
+/// The YAML shape of one frontmatter field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldShape {
+    /// A plain or quoted scalar leaf.
+    Scalar,
+    /// A `key:` with no value.
+    Null,
+    /// A block mapping container that has children.
+    Mapping,
+    /// A block or flow sequence.
+    Sequence,
+    /// A `|` or `>` block scalar preserved verbatim.
+    BlockScalar,
+    /// A single-line flow mapping (`{...}`) or another opaque single-line value.
+    Flow,
+}
+
+/// The YAML style of a sequence field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequenceStyle {
+    /// One `- item` line per item.
+    Block,
+    /// A single-line `[a, b]` collection.
+    Flow,
+}
+
+/// A read-only snapshot of one parsed frontmatter field.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrontmatterField {
+    /// The dotted path of the field, in document order.
+    pub path: String,
+    /// The YAML shape of the field.
+    pub shape: FieldShape,
+    /// The typed scalar value, present only for [`FieldShape::Scalar`].
+    pub value: Option<FrontmatterValue>,
+    /// The scalar items of an editable sequence; `None` when any item is not a
+    /// scalar or when the field is not a sequence.
+    pub items: Option<Vec<FrontmatterValue>>,
+    /// The exact source text of a raw-editable container: a single-line flow
+    /// collection, or the dedented value block of a block mapping/sequence.
+    pub raw: Option<String>,
+    /// The sequence style, present only for [`FieldShape::Sequence`].
+    pub sequence_style: Option<SequenceStyle>,
+}
+
 #[derive(Clone, Debug)]
 struct Field {
     path: String,
+    shape: FieldShape,
     value: FrontmatterValue,
     span: Range<usize>,
     kind: FieldKind,
+    indent: usize,
+    key_line: Range<usize>,
+    block: Range<usize>,
+    value_pos: usize,
+    child_indent: Option<usize>,
+    items: Option<Vec<FrontmatterValue>>,
+    raw: Option<String>,
+    sequence_style: Option<SequenceStyle>,
+    sequence: Option<SequenceInfo>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,8 +135,32 @@ enum FieldKind {
     Scalar,
     /// A `key:` with a null value; readable but not patchable.
     NullLeaf,
-    /// A flow collection or block scalar; preserved verbatim, not patchable.
+    /// A container, flow collection or block scalar; not patchable as a scalar.
     Opaque,
+}
+
+#[derive(Clone, Debug)]
+enum SequenceInfo {
+    /// A block sequence with at least one `- item` line.
+    Block(BlockSequence),
+    /// A single-line flow sequence.
+    Flow(FlowSequence),
+    /// A sequence whose items cannot be edited individually.
+    Opaque,
+}
+
+#[derive(Clone, Debug)]
+struct BlockSequence {
+    item_indent: usize,
+    item_spans: Vec<Range<usize>>,
+    lines: Vec<Range<usize>>,
+}
+
+#[derive(Clone, Debug)]
+struct FlowSequence {
+    collection: Range<usize>,
+    item_spans: Vec<Range<usize>>,
+    separators: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +173,9 @@ struct Patch {
 #[derive(Clone, Debug)]
 struct Frontmatter {
     fields: Vec<Field>,
+    public: Vec<FrontmatterField>,
+    /// Absolute offset of the closing `---` line.
+    end: usize,
 }
 
 /// A parsed document that can be serialized back to its exact source bytes.
@@ -84,6 +186,18 @@ pub struct ParsedDocument {
     frontmatter: Option<Frontmatter>,
     body: String,
     patches: Vec<Patch>,
+    /// A leading frontmatter block created for a document that had none.
+    leading: Option<LeadingFrontmatter>,
+}
+
+/// Fields inserted into a document that did not start with a frontmatter block.
+///
+/// The block is emitted only on serialization, after any byte-order mark and
+/// before the untouched body.
+#[derive(Clone, Debug)]
+struct LeadingFrontmatter {
+    offset: usize,
+    lines: Vec<(String, String)>,
 }
 
 impl ParsedDocument {
@@ -103,6 +217,9 @@ impl ParsedDocument {
     }
 
     /// Return the typed value of a dotted field path, if present.
+    ///
+    /// Only scalar leaves are exposed; containers, sequences, flow collections
+    /// and block scalars return `None`.
     pub fn field(&self, path: &str) -> Option<&FrontmatterValue> {
         self.frontmatter
             .as_ref()?
@@ -112,48 +229,459 @@ impl ParsedDocument {
             .map(|field| &field.value)
     }
 
+    /// Return the shape snapshot of every field, in source order.
+    ///
+    /// The returned slice is a read-only snapshot taken at parse time: pending
+    /// mutations are not reflected until the document is re-parsed.
+    pub fn fields(&self) -> &[FrontmatterField] {
+        self.frontmatter
+            .as_ref()
+            .map_or(&[], |frontmatter| frontmatter.public.as_slice())
+    }
+
+    /// Return the shape snapshot of one field, if present.
+    pub fn field_info(&self, path: &str) -> Option<&FrontmatterField> {
+        self.frontmatter
+            .as_ref()?
+            .public
+            .iter()
+            .find(|field| field.path == path)
+    }
+
+    /// Report whether the frontmatter contains a field at `path`.
+    pub fn has_field(&self, path: &str) -> bool {
+        self.field_info(path).is_some()
+    }
+
     /// Record an in-place scalar patch for one field.
+    ///
+    /// A `key:` null leaf records the value directly after the colon, before any
+    /// trailing comment, so `title:` becomes `title: value` while the rest of
+    /// the line is preserved.
     ///
     /// # Errors
     ///
     /// Returns [`DocumentError::UnknownField`] when `path` is absent,
     /// [`DocumentError::UnsupportedPatch`] when the field is not a patchable
-    /// scalar (flow collection, block scalar, or otherwise opaque), or when the
-    /// value cannot be rendered as a safe YAML scalar.
+    /// scalar (container, sequence, flow collection or block scalar), or when
+    /// the value cannot be rendered as a safe YAML scalar.
     pub fn set_field(&mut self, path: &str, value: FrontmatterValue) -> Result<(), DocumentError> {
-        let Some(field) = self
-            .frontmatter
-            .as_ref()
-            .and_then(|frontmatter| frontmatter.fields.iter().find(|field| field.path == path))
-        else {
+        let field = self.field_record(path)?;
+        let replacement = render_value(path, &value)?;
+        let span = match field.kind {
+            FieldKind::Scalar => field.span.clone(),
+            FieldKind::NullLeaf => {
+                let position = field.value_pos;
+                let replacement = format!(" {replacement}");
+                self.record_patch(path, position..position, replacement);
+                return Ok(());
+            }
+            FieldKind::Opaque => {
+                return Err(DocumentError::UnsupportedPatch {
+                    path: path.to_owned(),
+                    reason: "field is not a scalar".to_owned(),
+                });
+            }
+        };
+        self.record_patch(path, span, replacement);
+        Ok(())
+    }
+
+    /// Insert an absent scalar field.
+    ///
+    /// `path` is a dotted path whose parent mapping must already exist (or be
+    /// top-level). Nested insertion uses the parent mapping's indentation and
+    /// the document's line ending. A document without a frontmatter block gets
+    /// a leading `---` block after any byte-order mark; the body bytes are kept
+    /// exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::UnknownField`] when the path already exists, and
+    /// [`DocumentError::UnsupportedPatch`] when the parent mapping is missing or
+    /// is not a mapping, or the value cannot be rendered as a YAML scalar.
+    pub fn insert_field(
+        &mut self,
+        path: &str,
+        value: FrontmatterValue,
+    ) -> Result<(), DocumentError> {
+        let rendered = render_value(path, &value)?;
+        let key = last_segment(path);
+        let line = format!("{key}: {rendered}");
+        if self.frontmatter.is_none() {
+            return self.insert_leading_line(path, line);
+        }
+        let (position, indent) = self.insertion_point(path)?;
+        let line = format!("{}{line}{}", " ".repeat(indent), self.line_ending.as_str());
+        self.record_patch(path, position..position, line);
+        Ok(())
+    }
+
+    /// Insert an absent sequence field with the given scalar items.
+    ///
+    /// Items are rendered as a single-line flow sequence (`key: [a, "b"]`)
+    /// using the document line ending; empty `items` inserts `key: []`. Items
+    /// are quoted whenever a plain rendering could merge into a neighbour or
+    /// change meaning in flow context, so `a,b` stays one item. An existing
+    /// null value (`key:` or `key: null`) is replaced by that flow sequence
+    /// instead. The parent mapping must already exist (or be top-level), and no
+    /// other byte of the document changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::UnknownField`] when the path already holds a
+    /// non-null value, and [`DocumentError::UnsupportedPatch`] when the parent
+    /// mapping is missing or is not a mapping, or an item cannot be rendered as
+    /// a YAML scalar.
+    pub fn insert_sequence(
+        &mut self,
+        path: &str,
+        items: &[FrontmatterValue],
+    ) -> Result<(), DocumentError> {
+        let mut rendered = Vec::with_capacity(items.len());
+        for item in items {
+            rendered.push(render_flow_value(path, item)?);
+        }
+        if let Ok(field) = self.field_record(path) {
+            let null_value = matches!(field.kind, FieldKind::NullLeaf)
+                || (matches!(field.kind, FieldKind::Scalar)
+                    && field.sequence.is_none()
+                    && matches!(field.value, FrontmatterValue::Null));
+            if null_value {
+                let span = field.value_pos..field.span.end;
+                let value = format!(" [{}]", rendered.join(", "));
+                self.record_patch(path, span, value);
+                return Ok(());
+            }
+            return Err(DocumentError::UnknownField {
+                path: path.to_owned(),
+            });
+        }
+        let key = last_segment(path);
+        let line = format!("{key}: [{}]", rendered.join(", "));
+        if self.frontmatter.is_none() {
+            return self.insert_leading_line(path, line);
+        }
+        let (position, indent) = self.insertion_point(path)?;
+        let line = format!("{}{line}{}", " ".repeat(indent), self.line_ending.as_str());
+        self.record_patch(path, position..position, line);
+        Ok(())
+    }
+
+    /// Record one line of the leading frontmatter block created on demand.
+    fn insert_leading_line(&mut self, path: &str, line: String) -> Result<(), DocumentError> {
+        if path.rsplit_once('.').is_some() {
+            return Err(DocumentError::UnsupportedPatch {
+                path: path.to_owned(),
+                reason: "parent mapping does not exist".to_owned(),
+            });
+        }
+        let offset = if self.source.starts_with('\u{feff}') {
+            '\u{feff}'.len_utf8()
+        } else {
+            0
+        };
+        let leading = self.leading.get_or_insert(LeadingFrontmatter {
+            offset,
+            lines: Vec::new(),
+        });
+        if leading.lines.iter().any(|(existing, _)| existing == path) {
+            return Err(DocumentError::UnknownField {
+                path: path.to_owned(),
+            });
+        }
+        leading.lines.push((path.to_owned(), line));
+        Ok(())
+    }
+
+    /// The byte position and indentation where an absent field is inserted.
+    fn insertion_point(&self, path: &str) -> Result<(usize, usize), DocumentError> {
+        let Some(frontmatter) = self.frontmatter.as_ref() else {
             return Err(DocumentError::UnknownField {
                 path: path.to_owned(),
             });
         };
-        if field.kind != FieldKind::Scalar {
-            let reason = match field.kind {
-                FieldKind::NullLeaf => "null fields are not editable",
-                _ => "field is an opaque collection or block scalar",
-            };
-            return Err(DocumentError::UnsupportedPatch {
+        if frontmatter.fields.iter().any(|field| field.path == path) {
+            return Err(DocumentError::UnknownField {
                 path: path.to_owned(),
-                reason: reason.to_owned(),
             });
         }
-        let span = field.span.clone();
-        let replacement = crate::serialize::serialize_scalar(&value).map_err(|reason| {
-            DocumentError::UnsupportedPatch {
+        match path.rsplit_once('.') {
+            Some((parent_path, _)) => {
+                let Some(parent) = frontmatter
+                    .fields
+                    .iter()
+                    .find(|field| field.path == parent_path)
+                else {
+                    return Err(DocumentError::UnsupportedPatch {
+                        path: path.to_owned(),
+                        reason: "parent mapping does not exist".to_owned(),
+                    });
+                };
+                if parent.shape != FieldShape::Mapping {
+                    return Err(DocumentError::UnsupportedPatch {
+                        path: path.to_owned(),
+                        reason: "parent field is not a mapping".to_owned(),
+                    });
+                }
+                Ok((
+                    parent.block.end,
+                    parent.child_indent.unwrap_or(parent.indent + 2),
+                ))
+            }
+            None => Ok((frontmatter.end, 0)),
+        }
+    }
+
+    /// Remove an existing field, including its nested block and comment suffix.
+    ///
+    /// Removing the only child of a mapping leaves the parent key with a null
+    /// value. Removing a sequence removes the whole sequence block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::UnknownField`] when `path` is absent.
+    pub fn remove_field(&mut self, path: &str) -> Result<(), DocumentError> {
+        let field = self.field_record(path)?;
+        let span = match field.shape {
+            FieldShape::Scalar | FieldShape::Null | FieldShape::Flow => field.key_line.clone(),
+            _ => field.block.clone(),
+        };
+        self.record_patch(path, span, String::new());
+        Ok(())
+    }
+
+    /// Replace one item of a scalar sequence (block or flow).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::UnknownField`] when `path` is absent,
+    /// [`DocumentError::UnsupportedPatch`] when the field is not an item-editable
+    /// sequence, the index is out of range, or the value cannot be rendered.
+    pub fn set_sequence_item(
+        &mut self,
+        path: &str,
+        index: usize,
+        value: FrontmatterValue,
+    ) -> Result<(), DocumentError> {
+        let (span, flow) = {
+            let sequence = self.sequence_info(path)?;
+            let span =
+                sequence_item_span(sequence, index).ok_or_else(|| index_out_of_range(path))?;
+            (span, matches!(sequence, SequenceInfo::Flow(_)))
+        };
+        let rendered = if flow {
+            render_flow_value(path, &value)?
+        } else {
+            render_value(path, &value)?
+        };
+        self.record_patch(path, span, rendered);
+        Ok(())
+    }
+
+    /// Insert a scalar item at `index` (`index <= len`).
+    ///
+    /// Block sequences get a new `- value` line at the sequence indentation;
+    /// flow sequences get `, value` before the closing bracket. Inserting into an
+    /// empty flow sequence yields `[value]` and preserves surrounding bytes. A
+    /// null field (`key:` or `key: null`) accepts its first item and becomes
+    /// `key: [value]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::UnknownField`] when `path` is absent,
+    /// [`DocumentError::UnsupportedPatch`] when the field is not an
+    /// item-editable sequence, the index is out of range, or the value cannot be
+    /// rendered.
+    pub fn insert_sequence_item(
+        &mut self,
+        path: &str,
+        index: usize,
+        value: FrontmatterValue,
+    ) -> Result<(), DocumentError> {
+        let eol = self.line_ending.as_str();
+        let null_span = match self.field_record(path) {
+            Ok(field)
+                if matches!(field.kind, FieldKind::NullLeaf)
+                    || (matches!(field.kind, FieldKind::Scalar)
+                        && field.sequence.is_none()
+                        && matches!(field.value, FrontmatterValue::Null)) =>
+            {
+                Some(field.value_pos..field.span.end)
+            }
+            _ => None,
+        };
+        if let Some(span) = null_span {
+            if index > 0 {
+                return Err(index_out_of_range(path));
+            }
+            let rendered = render_flow_value(path, &value)?;
+            self.record_patch(path, span, format!(" [{rendered}]"));
+            return Ok(());
+        }
+        let (span, replacement) = {
+            let sequence = self.sequence_info(path)?;
+            match sequence {
+                SequenceInfo::Block(block) => {
+                    let count = block.item_spans.len();
+                    if index > count {
+                        return Err(index_out_of_range(path));
+                    }
+                    if count == 0 {
+                        return Err(DocumentError::UnsupportedPatch {
+                            path: path.to_owned(),
+                            reason: "block sequence is empty".to_owned(),
+                        });
+                    }
+                    let rendered = render_value(path, &value)?;
+                    let position = if index == count {
+                        block.lines[count - 1].end
+                    } else {
+                        block.lines[index].start
+                    };
+                    let line = format!("{}- {rendered}{eol}", " ".repeat(block.item_indent));
+                    (position..position, line)
+                }
+                SequenceInfo::Flow(flow) => {
+                    let count = flow.item_spans.len();
+                    if index > count {
+                        return Err(index_out_of_range(path));
+                    }
+                    let rendered = render_flow_value(path, &value)?;
+                    if count == 0 {
+                        let start = flow.collection.start + 1;
+                        let end = flow.collection.end - 1;
+                        (start..end, rendered)
+                    } else if index == 0 {
+                        let separator = flow
+                            .separators
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| ", ".to_owned());
+                        let position = flow.item_spans[0].start;
+                        (position..position, format!("{rendered}{separator}"))
+                    } else if index == count {
+                        let separator = flow
+                            .separators
+                            .last()
+                            .cloned()
+                            .unwrap_or_else(|| ", ".to_owned());
+                        let position = flow.item_spans[count - 1].end;
+                        (position..position, format!("{separator}{rendered}"))
+                    } else {
+                        let separator = flow.separators[index - 1].clone();
+                        let position = flow.item_spans[index].start;
+                        (position..position, format!("{rendered}{separator}"))
+                    }
+                }
+                SequenceInfo::Opaque => unreachable!("sequence_info rejects opaque sequences"),
+            }
+        };
+        self.record_patch(path, span, replacement);
+        Ok(())
+    }
+
+    /// Remove one scalar sequence item. Removing the last item yields `[]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::UnknownField`] when `path` is absent and
+    /// [`DocumentError::UnsupportedPatch`] when the field is not an
+    /// item-editable sequence or the index is out of range.
+    pub fn remove_sequence_item(&mut self, path: &str, index: usize) -> Result<(), DocumentError> {
+        let patches: Vec<(Range<usize>, String)> = {
+            let sequence = self.sequence_info(path)?;
+            match sequence {
+                SequenceInfo::Block(block) => {
+                    let count = block.lines.len();
+                    if index >= count {
+                        return Err(index_out_of_range(path));
+                    }
+                    if count == 1 {
+                        let value_pos = self.field_record(path)?.value_pos;
+                        vec![
+                            (value_pos..value_pos, " []".to_owned()),
+                            (block.lines[0].clone(), String::new()),
+                        ]
+                    } else {
+                        vec![(block.lines[index].clone(), String::new())]
+                    }
+                }
+                SequenceInfo::Flow(flow) => {
+                    let count = flow.item_spans.len();
+                    if index >= count {
+                        return Err(index_out_of_range(path));
+                    }
+                    if count == 1 {
+                        vec![(flow.collection.clone(), "[]".to_owned())]
+                    } else if index == 0 {
+                        vec![(
+                            flow.item_spans[0].start..flow.item_spans[1].start,
+                            String::new(),
+                        )]
+                    } else {
+                        vec![(
+                            flow.item_spans[index - 1].end..flow.item_spans[index].end,
+                            String::new(),
+                        )]
+                    }
+                }
+                SequenceInfo::Opaque => unreachable!("sequence_info rejects opaque sequences"),
+            }
+        };
+        for (span, replacement) in patches {
+            self.record_patch(path, span, replacement);
+        }
+        Ok(())
+    }
+
+    /// Replace a field's exact raw text after validating it as one YAML value.
+    ///
+    /// Single-line flow collections replace their inline span. Block containers
+    /// (block sequences and block mappings) replace the whole value block: the
+    /// text is dedented, re-indented into the field's own indentation and
+    /// validated as a child of the field key before any byte changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::UnknownField`] when `path` is absent,
+    /// [`DocumentError::UnsupportedPatch`] for scalar leaves and block scalars,
+    /// or when `raw` is not a valid value for the field's context (empty,
+    /// anchors, aliases, tags, block scalars or a structure that does not nest
+    /// under one key).
+    pub fn replace_raw(&mut self, path: &str, raw: &str) -> Result<(), DocumentError> {
+        let field = self.field_record(path)?;
+        let inline = match field.shape {
+            FieldShape::Flow => true,
+            FieldShape::Sequence => field.sequence_style == Some(SequenceStyle::Flow),
+            _ => false,
+        };
+        if inline {
+            let span = field.span.clone();
+            let trimmed = raw.trim();
+            validate_value(trimmed).map_err(|reason| DocumentError::UnsupportedPatch {
                 path: path.to_owned(),
                 reason,
-            }
-        })?;
-        self.patches.retain(|patch| patch.path != path);
-        self.patches.push(Patch {
+            })?;
+            self.record_patch(path, span, trimmed.to_owned());
+            return Ok(());
+        }
+        if matches!(field.shape, FieldShape::Mapping | FieldShape::Sequence) {
+            let span = field.key_line.end..field.block.end;
+            let indent = field.child_indent.unwrap_or(field.indent + 2);
+            let rendered = render_block_raw(raw, indent, self.line_ending).map_err(|reason| {
+                DocumentError::UnsupportedPatch {
+                    path: path.to_owned(),
+                    reason,
+                }
+            })?;
+            self.record_patch(path, span, rendered);
+            return Ok(());
+        }
+        Err(DocumentError::UnsupportedPatch {
             path: path.to_owned(),
-            span,
-            replacement,
-        });
-        Ok(())
+            reason: "field is not a container collection".to_owned(),
+        })
     }
 
     /// Serialize the document, applying any recorded patches.
@@ -163,7 +691,7 @@ impl ParsedDocument {
     /// Returns [`DocumentError::UnsupportedPatch`] if recorded patches overlap,
     /// which would make the output ambiguous.
     pub fn serialize(&self) -> Result<String, DocumentError> {
-        if self.patches.is_empty() {
+        if self.patches.is_empty() && self.leading.is_none() {
             return Ok(self.source.clone());
         }
         let mut ordered: Vec<&Patch> = self.patches.iter().collect();
@@ -176,8 +704,22 @@ impl ParsedDocument {
                 });
             }
         }
-        let mut output = String::with_capacity(self.source.len());
+        let mut output = String::with_capacity(self.source.len() + 64);
         let mut cursor = 0;
+        if let Some(leading) = self.leading.as_ref() {
+            let eol = self.line_ending.as_str();
+            output.push_str(&self.source[..leading.offset]);
+            output.push_str("---");
+            output.push_str(eol);
+            for (_, line) in &leading.lines {
+                output.push_str(line);
+                output.push_str(eol);
+            }
+            output.push_str("---");
+            output.push_str(eol);
+            output.push_str(eol);
+            cursor = leading.offset;
+        }
         for patch in ordered {
             output.push_str(&self.source[cursor..patch.span.start]);
             output.push_str(&patch.replacement);
@@ -186,9 +728,147 @@ impl ParsedDocument {
         output.push_str(&self.source[cursor..]);
         Ok(output)
     }
+
+    fn field_record(&self, path: &str) -> Result<&Field, DocumentError> {
+        self.frontmatter
+            .as_ref()
+            .and_then(|frontmatter| frontmatter.fields.iter().find(|field| field.path == path))
+            .ok_or_else(|| DocumentError::UnknownField {
+                path: path.to_owned(),
+            })
+    }
+
+    fn sequence_info(&self, path: &str) -> Result<&SequenceInfo, DocumentError> {
+        match self.field_record(path)?.sequence.as_ref() {
+            Some(info @ (SequenceInfo::Block(_) | SequenceInfo::Flow(_))) => Ok(info),
+            Some(SequenceInfo::Opaque) => Err(DocumentError::UnsupportedPatch {
+                path: path.to_owned(),
+                reason: "sequence items are not editable".to_owned(),
+            }),
+            None => Err(DocumentError::UnsupportedPatch {
+                path: path.to_owned(),
+                reason: "field is not a sequence".to_owned(),
+            }),
+        }
+    }
+
+    fn record_patch(&mut self, path: &str, span: Range<usize>, replacement: String) {
+        if let Some(existing) = self
+            .patches
+            .iter_mut()
+            .find(|patch| patch.path == path && patch.span == span)
+        {
+            existing.replacement = replacement;
+            return;
+        }
+        self.patches.push(Patch {
+            path: path.to_owned(),
+            span,
+            replacement,
+        });
+    }
 }
 
-/// Split a source into frontmatter and body, recording editable scalar spans.
+fn last_segment(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path)
+}
+
+fn sequence_item_span(sequence: &SequenceInfo, index: usize) -> Option<Range<usize>> {
+    match sequence {
+        SequenceInfo::Block(block) => block.item_spans.get(index).cloned(),
+        SequenceInfo::Flow(flow) => flow.item_spans.get(index).cloned(),
+        SequenceInfo::Opaque => None,
+    }
+}
+
+fn index_out_of_range(path: &str) -> DocumentError {
+    DocumentError::UnsupportedPatch {
+        path: path.to_owned(),
+        reason: "sequence index is out of range".to_owned(),
+    }
+}
+
+fn render_value(path: &str, value: &FrontmatterValue) -> Result<String, DocumentError> {
+    crate::serialize::serialize_scalar(value).map_err(|reason| DocumentError::UnsupportedPatch {
+        path: path.to_owned(),
+        reason,
+    })
+}
+
+/// Render a value as one item of a single-line flow sequence.
+///
+/// Flow context treats `,` `[` `]` `{` `}` and `#` as structure, so a string
+/// carrying any of them is quoted rather than emitted plain.
+fn render_flow_value(path: &str, value: &FrontmatterValue) -> Result<String, DocumentError> {
+    crate::serialize::serialize_flow_scalar(value).map_err(|reason| {
+        DocumentError::UnsupportedPatch {
+            path: path.to_owned(),
+            reason,
+        }
+    })
+}
+
+/// Render raw block-container text into an indented value block.
+///
+/// The text is normalized to the document line ending, dedented by its smallest
+/// common indentation, validated as exactly one value nested under a probe key
+/// and re-indented under the field's own indentation.
+fn render_block_raw(raw: &str, indent: usize, line_ending: LineEnding) -> Result<String, String> {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim_end();
+    if trimmed.trim().is_empty() {
+        return Err("value is empty".to_owned());
+    }
+    let first = trimmed.as_bytes()[0];
+    if matches!(first, b'&' | b'*' | b'!' | b'|' | b'>') {
+        return Err("anchors, aliases, tags and block scalars are not allowed".to_owned());
+    }
+    let lines: Vec<&str> = trimmed.split('\n').collect();
+    let min_indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start_matches(' ').len())
+        .min()
+        .unwrap_or(0);
+    let stripped: Vec<&str> = lines
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                ""
+            } else {
+                line.get(min_indent..).unwrap_or("").trim_end()
+            }
+        })
+        .collect();
+    let mut probe = String::from("value:\n");
+    for line in &stripped {
+        probe.push_str("  ");
+        probe.push_str(line);
+        probe.push('\n');
+    }
+    let documents =
+        YamlLoader::load_from_str(&probe).map_err(|_| "value is not valid YAML".to_owned())?;
+    match documents.as_slice() {
+        [Yaml::Hash(map)]
+            if map.len() == 1
+                && map
+                    .get(&Yaml::String("value".to_owned()))
+                    .is_some_and(|value| !matches!(value, Yaml::BadValue)) => {}
+        _ => return Err("value is not a single nested YAML value".to_owned()),
+    }
+    let eol = line_ending.as_str();
+    let mut rendered = String::new();
+    for line in &stripped {
+        if !line.is_empty() {
+            rendered.push_str(&" ".repeat(indent));
+            rendered.push_str(line);
+        }
+        rendered.push_str(eol);
+    }
+    Ok(rendered)
+}
+
+/// Split a source into frontmatter and body, recording editable field spans.
 ///
 /// # Errors
 ///
@@ -220,6 +900,7 @@ pub fn parse_document(source: &str) -> Result<ParsedDocument, DocumentError> {
             frontmatter: None,
             body: source.to_owned(),
             patches: Vec::new(),
+            leading: None,
         });
     };
     if after_bom[..first_nl].trim_end_matches([' ', '\r']) != "---" {
@@ -229,6 +910,7 @@ pub fn parse_document(source: &str) -> Result<ParsedDocument, DocumentError> {
             frontmatter: None,
             body: source.to_owned(),
             patches: Vec::new(),
+            leading: None,
         });
     }
 
@@ -241,14 +923,31 @@ pub fn parse_document(source: &str) -> Result<ParsedDocument, DocumentError> {
 
     let mut fields = Vec::new();
     scan_fields(inner, inner_start, &mut fields)?;
+    let public = fields.iter().map(public_field).collect();
 
     Ok(ParsedDocument {
         body: source[closing_next..].to_owned(),
         source: source.to_owned(),
         line_ending,
-        frontmatter: Some(Frontmatter { fields }),
+        frontmatter: Some(Frontmatter {
+            fields,
+            public,
+            end: closing_start,
+        }),
         patches: Vec::new(),
+        leading: None,
     })
+}
+
+fn public_field(field: &Field) -> FrontmatterField {
+    FrontmatterField {
+        path: field.path.clone(),
+        shape: field.shape,
+        value: (field.shape == FieldShape::Scalar).then(|| field.value.clone()),
+        items: field.items.clone(),
+        raw: field.raw.clone(),
+        sequence_style: field.sequence_style,
+    }
 }
 
 fn find_closing_delimiter(source: &str, start: usize) -> Option<(usize, usize)> {
@@ -336,16 +1035,86 @@ fn leading_indent(text: &str) -> Result<usize, DocumentError> {
     Ok(count)
 }
 
-fn next_content_indent(inner: &str, lines: &[Line], index: usize) -> Option<usize> {
+fn is_sequence_item(content: &str) -> bool {
+    content.starts_with('-')
+        && content
+            .as_bytes()
+            .get(1)
+            .is_none_or(|byte| *byte == b' ' || *byte == b'\t')
+}
+
+/// Whether an unquoted sequence item is a `key: value` mapping entry.
+fn looks_like_mapping_item(rest: &str) -> bool {
+    if rest.starts_with(['"', '\'']) {
+        return false;
+    }
+    rest.contains(": ") || rest.ends_with(':')
+}
+
+/// The first non-blank, non-comment line after `index`.
+fn next_content<'a>(inner: &'a str, lines: &[Line], index: usize) -> Option<(usize, &'a str)> {
     for line in &lines[index + 1..] {
         let text = &inner[line.start..line.end];
         let trimmed = text.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        return Some(text.bytes().take_while(|byte| *byte == b' ').count());
+        let indent = text.bytes().take_while(|byte| *byte == b' ').count();
+        return Some((indent, &text[indent..]));
     }
     None
+}
+
+/// End offset (relative to `inner`) of the last line belonging to the block of a
+/// container key at `index` and indentation `indent`.
+fn container_end(inner: &str, lines: &[Line], index: usize, indent: usize) -> usize {
+    let mut cursor = index + 1;
+    let mut end = lines[index].next;
+    while cursor < lines.len() {
+        let text = &inner[lines[cursor].start..lines[cursor].end];
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            cursor += 1;
+            continue;
+        }
+        let line_indent = text.bytes().take_while(|byte| *byte == b' ').count();
+        if line_indent > indent {
+            end = lines[cursor].next;
+        } else if !trimmed.starts_with('#') {
+            break;
+        }
+        cursor += 1;
+    }
+    end
+}
+
+/// Dedented, `\n`-normalized text of the block lines belonging to a key.
+///
+/// Offsets are relative to `inner`; `indent` is the block's child indentation.
+/// The result is the text a raw editor shows, and re-indenting it by the same
+/// amount reproduces the source block.
+fn block_value_text(
+    inner: &str,
+    lines: &[Line],
+    key_index: usize,
+    end: usize,
+    indent: usize,
+) -> String {
+    let start = lines[key_index].next;
+    let mut text = String::new();
+    for line in lines {
+        if line.start < start || line.start >= end {
+            continue;
+        }
+        let content = &inner[line.start..line.end];
+        let leading = content.len() - content.trim_start_matches(' ').len();
+        text.push_str(&content[leading.min(indent)..]);
+        text.push('\n');
+    }
+    while text.ends_with('\n') {
+        text.pop();
+    }
+    text
 }
 
 fn scan_fields(inner: &str, base: usize, fields: &mut Vec<Field>) -> Result<(), DocumentError> {
@@ -362,14 +1131,9 @@ fn scan_fields(inner: &str, base: usize, fields: &mut Vec<Field>) -> Result<(), 
         }
         let indent = leading_indent(line)?;
         let content = &line[indent..];
-        if content.starts_with('-')
-            && content
-                .as_bytes()
-                .get(1)
-                .is_none_or(u8::is_ascii_whitespace)
-        {
+        if is_sequence_item(content) {
             return Err(DocumentError::UnsupportedFrontmatter {
-                reason: "sequence items are unsupported".to_owned(),
+                reason: "sequence items are only supported directly under a mapping key".to_owned(),
             });
         }
         while let Some((frame_indent, _)) = frames.last() {
@@ -393,22 +1157,73 @@ fn scan_fields(inner: &str, base: usize, fields: &mut Vec<Field>) -> Result<(), 
             return Err(DocumentError::InvalidFrontmatter);
         }
 
+        let key_line_start = base + lines[index].start;
+        let key_line = key_line_start..base + lines[index].next;
+        let value_pos = key_line_start + (content.len() - rest.len());
         let rest_trimmed = rest.trim_start_matches(' ');
         if rest_trimmed.is_empty() || rest_trimmed.starts_with('#') {
-            let is_parent =
-                next_content_indent(inner, &lines, index).is_some_and(|child| child > indent);
-            if is_parent {
-                frames.push((indent, path));
-            } else {
-                let point = base + lines[index].start + indent + content.len();
-                fields.push(Field {
-                    path,
-                    value: FrontmatterValue::Null,
-                    span: point..point,
-                    kind: FieldKind::NullLeaf,
-                });
+            match next_content(inner, &lines, index) {
+                Some((child_indent, child_content)) if child_indent > indent => {
+                    if is_sequence_item(child_content) {
+                        let (field, next) = parse_block_sequence(
+                            inner,
+                            base,
+                            &lines,
+                            index,
+                            &SequenceKey {
+                                path: &path,
+                                indent,
+                                line: key_line,
+                                value_pos,
+                            },
+                        )?;
+                        fields.push(field);
+                        index = next;
+                    } else {
+                        let block_end = base + container_end(inner, &lines, index, indent);
+                        let raw =
+                            block_value_text(inner, &lines, index, block_end - base, child_indent);
+                        fields.push(Field {
+                            path: path.clone(),
+                            shape: FieldShape::Mapping,
+                            value: FrontmatterValue::Null,
+                            span: key_line_start..block_end,
+                            kind: FieldKind::Opaque,
+                            indent,
+                            key_line,
+                            block: key_line_start..block_end,
+                            value_pos,
+                            child_indent: Some(child_indent),
+                            items: None,
+                            raw: Some(raw),
+                            sequence_style: None,
+                            sequence: None,
+                        });
+                        frames.push((indent, path));
+                        index += 1;
+                    }
+                }
+                _ => {
+                    let point = key_line_start + indent + content.len();
+                    fields.push(Field {
+                        path,
+                        shape: FieldShape::Null,
+                        value: FrontmatterValue::Null,
+                        span: point..point,
+                        kind: FieldKind::NullLeaf,
+                        indent,
+                        key_line: key_line.clone(),
+                        block: key_line,
+                        value_pos,
+                        child_indent: None,
+                        items: None,
+                        raw: None,
+                        sequence_style: None,
+                        sequence: None,
+                    });
+                    index += 1;
+                }
             }
-            index += 1;
             continue;
         }
 
@@ -423,13 +1238,23 @@ fn scan_fields(inner: &str, base: usize, fields: &mut Vec<Field>) -> Result<(), 
 
         if matches!(first, b'|' | b'>') {
             let (block_end, next_index) = block_scalar_range(inner, &lines, index, indent);
-            let start = base + lines[index].start + indent + value_offset;
+            let start = key_line_start + indent + value_offset;
             let end = base + block_end;
             fields.push(Field {
                 path,
+                shape: FieldShape::BlockScalar,
                 value: FrontmatterValue::Null,
                 span: start..end,
                 kind: FieldKind::Opaque,
+                indent,
+                key_line: key_line.clone(),
+                block: key_line_start..end,
+                value_pos,
+                child_indent: None,
+                items: None,
+                raw: None,
+                sequence_style: None,
+                sequence: None,
             });
             index = next_index;
             continue;
@@ -442,14 +1267,42 @@ fn scan_fields(inner: &str, base: usize, fields: &mut Vec<Field>) -> Result<(), 
                 }
             })?;
             ensure_trailing_is_comment(&content[end_offset..])?;
-            let start = base + lines[index].start + indent + value_offset;
-            let end = base + lines[index].start + indent + end_offset;
-            fields.push(Field {
+            let start = key_line_start + indent + value_offset;
+            let end = key_line_start + indent + end_offset;
+            let span = start..end;
+            let text = &content[value_offset..end_offset];
+            let mut field = Field {
                 path,
+                shape: FieldShape::Flow,
                 value: FrontmatterValue::Null,
-                span: start..end,
+                span: span.clone(),
                 kind: FieldKind::Opaque,
-            });
+                indent,
+                key_line: key_line.clone(),
+                block: key_line.clone(),
+                value_pos,
+                child_indent: None,
+                items: None,
+                raw: Some(text.to_owned()),
+                sequence_style: None,
+                sequence: None,
+            };
+            if first == b'[' {
+                field.shape = FieldShape::Sequence;
+                field.sequence_style = Some(SequenceStyle::Flow);
+                match parse_flow_sequence(text, span) {
+                    Some(flow) => {
+                        field.items = Some(flow.values);
+                        field.sequence = Some(SequenceInfo::Flow(flow.data));
+                    }
+                    None => {
+                        // The single-line raw text is still available, so the
+                        // form can offer a validated raw-YAML control.
+                        field.sequence = Some(SequenceInfo::Opaque);
+                    }
+                }
+            }
+            fields.push(field);
             index += 1;
             continue;
         }
@@ -457,17 +1310,172 @@ fn scan_fields(inner: &str, base: usize, fields: &mut Vec<Field>) -> Result<(), 
         let (token, token_end) = scalar_token(content, value_offset)?;
         ensure_trailing_is_comment(&content[token_end..])?;
         let value = parse_scalar(token)?;
-        let start = base + lines[index].start + indent + value_offset;
-        let end = base + lines[index].start + indent + token_end;
+        let start = key_line_start + indent + value_offset;
+        let end = key_line_start + indent + token_end;
         fields.push(Field {
             path,
+            shape: FieldShape::Scalar,
             value,
             span: start..end,
             kind: FieldKind::Scalar,
+            indent,
+            key_line: key_line.clone(),
+            block: key_line,
+            value_pos,
+            child_indent: None,
+            items: None,
+            raw: None,
+            sequence_style: None,
+            sequence: None,
         });
         index += 1;
     }
     Ok(())
+}
+
+struct ParsedFlow {
+    values: Vec<FrontmatterValue>,
+    data: FlowSequence,
+}
+
+fn parse_flow_sequence(text: &str, span: Range<usize>) -> Option<ParsedFlow> {
+    let body = text.get(1..text.len().checked_sub(1)?)?;
+    let relative = crate::yaml::split_flow_items(body)?;
+    let mut item_spans = Vec::with_capacity(relative.len());
+    let mut values = Vec::with_capacity(relative.len());
+    let mut separators = Vec::new();
+    for (position, range) in relative.iter().enumerate() {
+        let slice = &body[range.clone()];
+        let (token, token_end) = scalar_token(slice, 0).ok()?;
+        if token_end != slice.len() {
+            return None;
+        }
+        values.push(parse_scalar(token).ok()?);
+        let start = span.start + 1 + range.start;
+        item_spans.push(start..span.start + 1 + range.end);
+        if let Some(next) = relative.get(position + 1) {
+            separators.push(body[range.end..next.start].to_owned());
+        }
+    }
+    Some(ParsedFlow {
+        values,
+        data: FlowSequence {
+            collection: span,
+            item_spans,
+            separators,
+        },
+    })
+}
+
+/// The mapping key that owns a block sequence.
+struct SequenceKey<'a> {
+    path: &'a str,
+    indent: usize,
+    line: Range<usize>,
+    value_pos: usize,
+}
+
+fn parse_block_sequence(
+    inner: &str,
+    base: usize,
+    lines: &[Line],
+    key_index: usize,
+    key: &SequenceKey<'_>,
+) -> Result<(Field, usize), DocumentError> {
+    let mut cursor = key_index + 1;
+    let mut item_indent: Option<usize> = None;
+    let mut item_spans = Vec::new();
+    let mut item_lines = Vec::new();
+    let mut values = Vec::new();
+    let mut editable = true;
+    let mut last_end = base + lines[key_index].next;
+    while cursor < lines.len() {
+        let text = &inner[lines[cursor].start..lines[cursor].end];
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            cursor += 1;
+            continue;
+        }
+        let indent = leading_indent(text)?;
+        if indent <= key.indent {
+            break;
+        }
+        last_end = base + lines[cursor].next;
+        if trimmed.starts_with('#') {
+            cursor += 1;
+            continue;
+        }
+        let content = &text[indent..];
+        let expected_indent = *item_indent.get_or_insert(indent);
+        if indent != expected_indent || !is_sequence_item(content) {
+            editable = false;
+            cursor += 1;
+            continue;
+        }
+        let rest = content[1..].trim_start_matches(' ');
+        let item_offset = content.len() - rest.len();
+        if rest.is_empty()
+            || rest.starts_with('#')
+            || is_sequence_item(rest)
+            || looks_like_mapping_item(rest)
+            || matches!(
+                rest.as_bytes()[0],
+                b'&' | b'*' | b'!' | b'|' | b'>' | b'[' | b'{'
+            )
+        {
+            editable = false;
+            cursor += 1;
+            continue;
+        }
+        match scalar_token(content, item_offset) {
+            Ok((token, token_end)) => {
+                if ensure_trailing_is_comment(&content[token_end..]).is_err() {
+                    editable = false;
+                } else if let Ok(value) = parse_scalar(token) {
+                    item_spans.push(
+                        base + lines[cursor].start + indent + item_offset
+                            ..base + lines[cursor].start + indent + token_end,
+                    );
+                    item_lines.push(base + lines[cursor].start..base + lines[cursor].next);
+                    values.push(value);
+                } else {
+                    editable = false;
+                }
+            }
+            Err(_) => editable = false,
+        }
+        cursor += 1;
+    }
+
+    let block = key.line.start..last_end;
+    let item_indent = item_indent.unwrap_or(key.indent + 2);
+    let raw = block_value_text(inner, lines, key_index, last_end - base, item_indent);
+    let sequence = if editable {
+        SequenceInfo::Block(BlockSequence {
+            item_indent,
+            item_spans,
+            lines: item_lines,
+        })
+    } else {
+        SequenceInfo::Opaque
+    };
+    let field = Field {
+        path: key.path.to_owned(),
+        shape: FieldShape::Sequence,
+        value: FrontmatterValue::Null,
+        span: block.clone(),
+        kind: FieldKind::Opaque,
+        indent: key.indent,
+        key_line: key.line.clone(),
+        block,
+        value_pos: key.value_pos,
+        child_indent: item_indent.into(),
+        items: editable.then_some(values),
+        raw: Some(raw),
+        sequence_style: Some(SequenceStyle::Block),
+        sequence: Some(sequence),
+    };
+    Ok((field, cursor))
 }
 
 fn split_key(content: &str) -> Result<(String, &str), DocumentError> {

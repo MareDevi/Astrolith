@@ -24,6 +24,43 @@ pub struct Field {
     pub default: Option<Value>,
     /// Normalized field type.
     pub kind: FieldKind,
+    /// Schema-authored description shown as control help.
+    pub description: Option<String>,
+    /// Range, length and pattern constraints that drive validation hints.
+    pub constraints: FieldConstraints,
+    /// Zero-based declaration order. Title-first rendering uses this to keep
+    /// every other schema field in source declaration order.
+    pub order: usize,
+}
+
+/// The JSON Schema constraints a field carries.
+///
+/// Numeric bounds apply to [`FieldKind::Number`] and [`FieldKind::Integer`];
+/// length bounds apply to [`FieldKind::String`] text and sequence item counts;
+/// the pattern applies to string values.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FieldConstraints {
+    /// Inclusive minimum (`minimum`).
+    pub minimum: Option<f64>,
+    /// Inclusive maximum (`maximum`).
+    pub maximum: Option<f64>,
+    /// Minimum string length or sequence item count (`minLength`/`minItems`).
+    pub min_length: Option<usize>,
+    /// Maximum string length or sequence item count (`maxLength`/`maxItems`).
+    pub max_length: Option<usize>,
+    /// Regular-expression pattern (`pattern`).
+    pub pattern: Option<String>,
+}
+
+impl FieldConstraints {
+    /// Whether any constraint is present and worth rendering.
+    pub fn is_empty(&self) -> bool {
+        self.minimum.is_none()
+            && self.maximum.is_none()
+            && self.min_length.is_none()
+            && self.max_length.is_none()
+            && self.pattern.is_none()
+    }
 }
 
 /// A normalized field type.

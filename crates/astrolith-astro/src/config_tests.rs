@@ -42,14 +42,26 @@ fn accepts_direct_collections_with_verified_import_aliases() {
 
     let parsed = parse_content_config(source).unwrap();
     assert_eq!(parsed.len(), 2);
-    assert_eq!(collection(&parsed, "articles").base(), "content/articles");
     assert_eq!(
-        collection(&parsed, "articles").pattern().declared(),
+        collection(&parsed, "articles").base().unwrap(),
+        "content/articles"
+    );
+    assert_eq!(
+        collection(&parsed, "articles")
+            .pattern()
+            .unwrap()
+            .declared(),
         ["**/*.md"]
     );
-    assert_eq!(collection(&parsed, "field-notes").base(), "content/notes");
     assert_eq!(
-        collection(&parsed, "field-notes").pattern().declared(),
+        collection(&parsed, "field-notes").base().unwrap(),
+        "content/notes"
+    );
+    assert_eq!(
+        collection(&parsed, "field-notes")
+            .pattern()
+            .unwrap()
+            .declared(),
         ["**/*.{md,mdx}"]
     );
 }
@@ -71,13 +83,16 @@ fn accepts_local_const_references_and_preserves_exported_names() {
 
     let parsed = parse_content_config(&source).unwrap();
     assert_eq!(parsed.len(), 2);
-    assert_eq!(collection(&parsed, "posts").base(), "src/content/articles");
     assert_eq!(
-        collection(&parsed, "updates").base(),
+        collection(&parsed, "posts").base().unwrap(),
         "src/content/articles"
     );
     assert_eq!(
-        collection(&parsed, "posts").pattern().declared(),
+        collection(&parsed, "updates").base().unwrap(),
+        "src/content/articles"
+    );
+    assert_eq!(
+        collection(&parsed, "posts").pattern().unwrap().declared(),
         ["**/*.mdx"]
     );
 }
@@ -96,7 +111,7 @@ fn accepts_shorthand_collection_references() {
     let parsed = parse_content_config(&source).unwrap();
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0].collection(), "posts");
-    assert_eq!(parsed[0].base(), "content/posts");
+    assert_eq!(parsed[0].base().unwrap(), "content/posts");
 }
 
 #[test]
@@ -118,7 +133,7 @@ fn ignores_fake_configuration_in_comments_and_schema_strings() {
 
     let parsed = parse_content_config(&source).unwrap();
     assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].base(), "content/posts");
+    assert_eq!(parsed[0].base().unwrap(), "content/posts");
 }
 
 #[test]
@@ -322,12 +337,40 @@ fn rejects_unsupported_patterns_and_dynamic_paths() {
 }
 
 #[test]
-fn rejects_custom_remote_and_file_loaders() {
-    let custom_loader = content_source(
+fn accepts_json_file_loaders_alongside_glob_with_aliases() {
+    let source = r#"
+        import { defineCollection, z } from "astro:content";
+        import { file as dataFile, glob as find } from "astro/loaders";
+
+        const authors = defineCollection({
+            loader: dataFile("./src/data/authors.json"),
+            schema: z.object({ name: z.string() }),
+        });
+        const posts = defineCollection({
+            loader: find({ base: "src/posts", pattern: "**/*.md" }),
+        });
+        export const collections = { authors, posts };
+    "#;
+
+    let parsed = parse_content_config(source).unwrap();
+    let authors = collection(&parsed, "authors");
+    assert!(authors.is_data());
+    assert_eq!(authors.file(), Some("./src/data/authors.json"));
+    assert_eq!(authors.base(), None);
+    assert_eq!(authors.pattern(), None);
+    let posts = collection(&parsed, "posts");
+    assert!(!posts.is_data());
+    assert_eq!(posts.file(), None);
+    assert_eq!(posts.base(), Some("src/posts"));
+}
+
+#[test]
+fn rejects_non_json_remote_and_missing_loaders() {
+    let non_json = content_source(
         r#"
         import { file } from "astro/loaders";
         export const collections = { posts: defineCollection({
-            loader: file("content/posts.json"),
+            loader: file("content/posts.yaml"),
         }) };
     "#,
     );
@@ -338,9 +381,17 @@ fn rejects_custom_remote_and_file_loaders() {
         }) };
     "#,
     );
+    let missing_loader = content_source(
+        r#"
+        export const collections = { posts: defineCollection({
+            schema: z.object({ title: z.string() }),
+        }) };
+    "#,
+    );
 
-    assert!(parse_content_config(&custom_loader).is_err());
+    assert!(parse_content_config(&non_json).is_err());
     assert!(parse_content_config(&remote_loader).is_err());
+    assert!(parse_content_config(&missing_loader).is_err());
 }
 
 #[test]
@@ -626,9 +677,12 @@ fn parses_checked_in_astro_fixture_configs_and_rejects_custom_id_oracles() {
 
         let parsed = parse_content_config(content_config).unwrap();
         assert_eq!(parsed.len(), expected, "{name}");
-        assert_eq!(collection(&parsed, "docs").base(), "./content/docs");
         assert_eq!(
-            collection(&parsed, "archive").pattern().declared(),
+            collection(&parsed, "docs").base().unwrap(),
+            "./content/docs"
+        );
+        assert_eq!(
+            collection(&parsed, "archive").pattern().unwrap().declared(),
             ["**/*.{md,mdx}"]
         );
 
@@ -655,7 +709,7 @@ fn accepts_array_patterns_with_negative_globs() {
 
     let parsed = parse_content_config(&source).unwrap();
     assert_eq!(
-        collection(&parsed, "posts").pattern().declared(),
+        collection(&parsed, "posts").pattern().unwrap().declared(),
         ["**/*.{md,mdx}", "!**/drafts/**", "!**/hidden.md"]
     );
 }

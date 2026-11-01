@@ -2,6 +2,7 @@
 use crate::{
     commands::{CommandAvailability, CommandId},
     editor::session::{DocumentSession, SessionChanged},
+    frontmatter::{FrontmatterEdit, ReferenceCatalog},
     layout::panels::WorkspacePanel,
     runtime, settings,
 };
@@ -9,7 +10,7 @@ use astrolith_astro::{
     Cancellation, DiscoveryOutcome, DiscoveryRequest, ProjectManifest, contained_path,
     inspect_project, read_bounded,
     schema::generation::{SchemaGenerationRequest, generate_collection_schemas},
-    schema::{CollectionSchema, FieldKind},
+    schema::{CollectionSchema, FieldKind, SchemaFreshness, SchemaRefresh, schema_fingerprint},
 };
 use astrolith_core::{
     CollectionId, ProjectId, SourcePath,
@@ -18,19 +19,19 @@ use astrolith_core::{
     },
 };
 use astrolith_document::{
-    DocumentIdentity, DocumentLoadTicket, DocumentRevision, DocumentSnapshot, FrontmatterValue,
-    RecoveryRecord, RecoveryStore, SaveOutcome, parse_document, save_snapshot,
+    DocumentIdentity, DocumentLoadTicket, DocumentRevision, DocumentSnapshot, RecoveryRecord,
+    RecoveryStore, SaveOutcome, parse_document, save_snapshot,
 };
 use astrolith_preview::RouteMapping;
 use astrolith_workspace::{
-    CollectionEntry, CollectionWatcher,
+    CollectionEntry, CollectionWatcher, ReferenceOption,
     list::{self, EntryFilter, EntrySort, SortDirection, SortMode},
     operations::{
-        self, CopyPathRequest, CreateRequest, CreationField, CreationInput, DuplicateRequest,
-        MoveRequest, NewEntryName, PathForm, ProjectScope, RevealRequest, ScalarValue, SystemTrash,
-        TrashBackend, TrashRequest,
+        self, CopyPathRequest, CreateRequest, CreationField, CreationInput, CreationInputKind,
+        DuplicateRequest, MoveRequest, NewEntryName, PathForm, ProjectScope, RevealRequest,
+        ScalarValue, SystemTrash, TrashBackend, TrashRequest,
     },
-    scan_collections,
+    references, scan_collections,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -468,6 +469,19 @@ pub(crate) struct ProjectWorkspace {
     pending_create: Option<PendingCreate>,
     /// Last query observed from the list search box, used to refresh the header.
     last_list_query: String,
+    /// Schema freshness state machine; rejects superseded generation results.
+    schema_freshness: SchemaFreshness,
+    /// Advances whenever a different schema set is installed, rebuilding forms.
+    schema_revision: u64,
+    /// Reference options for schema reference controls, rebuilt with the index.
+    references: Arc<ReferenceCatalog>,
+    /// Advances whenever the reference catalog changes, rebuilding forms that
+    /// are already open so new options reach their dropdowns.
+    references_revision: u64,
+    /// Options loaded from JSON `file()` data collections, keyed by collection.
+    data_references: BTreeMap<String, Vec<ReferenceOption>>,
+    /// In-flight data-collection reference load.
+    data_references_task: Option<Task<()>>,
 }
 
 /// What to do after a dirty session has been saved through the guarded path.
@@ -490,6 +504,31 @@ struct PendingCreate {
     extension: FileExtension,
     fields: Vec<CreationField>,
     today: String,
+}
+
+/// Identity that decides when the frontmatter panel must be rebuilt.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrontmatterKey {
+    path: PathBuf,
+    has_schema: bool,
+    schema_revision: u64,
+    references_revision: u64,
+    mappings: FieldMappings,
+}
+
+/// One active document's complete frontmatter-form input.
+#[derive(Clone)]
+pub struct ActiveFrontmatter {
+    /// Generated collection schema, or `None` for a schema-less collection.
+    pub schema: Option<Arc<CollectionSchema>>,
+    /// Resolved field mappings for the active collection.
+    pub mappings: FieldMappings,
+    /// Reference options for every schema reference target.
+    pub references: Arc<ReferenceCatalog>,
+    /// Canonical project root, used to validate in-project image paths.
+    pub root: PathBuf,
+    /// Live editor text, including unsaved changes.
+    pub text: String,
 }
 impl Drop for ProjectWorkspace {
     fn drop(&mut self) {
@@ -590,6 +629,12 @@ impl ProjectWorkspace {
             trash_backend: Arc::new(SystemTrash),
             pending_create: None,
             last_list_query: String::new(),
+            schema_freshness: SchemaFreshness::default(),
+            schema_revision: 0,
+            references: Arc::new(ReferenceCatalog::new()),
+            references_revision: 0,
+            data_references: BTreeMap::new(),
+            data_references_task: None,
         }
     }
     pub fn has_dirty(&self, cx: &App) -> bool {
@@ -696,23 +741,166 @@ impl ProjectWorkspace {
         schemas: Vec<(String, CollectionSchema)>,
         cx: &mut Context<Self>,
     ) {
-        self.schemas = schemas
+        let installed: BTreeMap<String, Arc<CollectionSchema>> = schemas
             .into_iter()
             .map(|(collection, schema)| (collection, Arc::new(schema)))
             .collect();
+        let changed = installed.len() != self.schemas.len()
+            || installed.iter().any(|(collection, schema)| {
+                self.schemas
+                    .get(collection)
+                    .is_none_or(|existing| existing.as_ref() != schema.as_ref())
+            });
+        self.schemas = installed;
+        if changed {
+            self.schema_revision += 1;
+        }
         tracing::debug!(
             collections = self.schemas.len(),
+            revision = self.schema_revision,
+            changed,
             "collection schemas installed"
         );
         self.rebuild_sort_options();
+        self.rebuild_references();
         self.publish_list_state(cx);
         cx.notify();
     }
 
-    /// Generate and load collection schemas from the project's own Astro install.
+    /// Install one completed schema generation unless a newer request superseded it.
     ///
-    /// Runs entirely off the UI thread. A missing or failing Astro installation is
-    /// non-fatal: the frontmatter form simply stays unavailable for that project.
+    /// Returns `false` when the report is stale; the caller must then drop it
+    /// without touching the form so a superseded generation can never replace
+    /// fresh schemas or reload the panel.
+    fn apply_generated_schemas(
+        &mut self,
+        request: u64,
+        fingerprint: u64,
+        schemas: Vec<(String, CollectionSchema)>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.schema_freshness.accept(request, fingerprint) {
+            tracing::debug!(request, "dropped a superseded schema generation result");
+            return false;
+        }
+        tracing::info!(
+            collections = schemas.len(),
+            revision = self.schema_revision + 1,
+            "collection schemas generated"
+        );
+        self.set_collection_schemas(schemas, cx);
+        true
+    }
+
+    /// Rebuild the reference catalog from the current index and data collections.
+    fn rebuild_references(&mut self) {
+        let mut groups: BTreeMap<String, Vec<&CollectionEntry>> = BTreeMap::new();
+        for entry in self.entries.iter() {
+            groups
+                .entry(entry.entry().id().collection().as_str().to_owned())
+                .or_default()
+                .push(entry);
+        }
+        let mut catalog = ReferenceCatalog::new();
+        for (collection, entries) in groups {
+            let mappings = self.resolved_for(Some(&collection)).field_mappings;
+            let owned: Vec<CollectionEntry> = entries.into_iter().cloned().collect();
+            catalog.insert(
+                collection,
+                references::entry_options(&owned, Some(&mappings)),
+            );
+        }
+        for (collection, options) in &self.data_references {
+            catalog.insert(collection.clone(), options.clone());
+        }
+        let catalog = Arc::new(catalog);
+        if *self.references != *catalog {
+            self.references_revision = self
+                .references_revision
+                .checked_add(1)
+                .expect("references revision exhausted");
+            self.references = catalog;
+        }
+    }
+
+    /// Load JSON `file()` data collections for reference dropdowns.
+    fn load_data_references(&mut self, cx: &mut Context<Self>) {
+        let Some(manifest) = self.manifest.clone() else {
+            return;
+        };
+        let descriptors: Vec<_> = manifest
+            .data_collections()
+            .iter()
+            .map(|descriptor| {
+                (
+                    descriptor.id().as_str().to_owned(),
+                    descriptor.file().to_path_buf(),
+                )
+            })
+            .collect();
+        if descriptors.is_empty() {
+            // A project whose data collections were all removed must not keep
+            // stale options; the previous load is cancelled by dropping it.
+            self.data_references_task = None;
+            if !self.data_references.is_empty() {
+                self.data_references.clear();
+                self.rebuild_references();
+                cx.notify();
+            }
+            return;
+        }
+        let generation = self.generation;
+        let project = self.project_id.clone();
+        let mappings: BTreeMap<String, FieldMappings> = descriptors
+            .iter()
+            .map(|(collection, _)| {
+                (
+                    collection.clone(),
+                    self.resolved_for(Some(collection)).field_mappings,
+                )
+            })
+            .collect();
+        let work = runtime::blocking(cx, move || {
+            let mut options = BTreeMap::new();
+            let mut diagnostics = Vec::new();
+            for (collection, file) in descriptors {
+                match references::read_data_options(&file, mappings.get(&collection)) {
+                    Ok(entries) => {
+                        options.insert(collection, entries);
+                    }
+                    Err(error) => diagnostics.push(error.to_string()),
+                }
+            }
+            (options, diagnostics)
+        });
+        self.data_references_task = Some(cx.spawn(async move |this, cx| {
+            let Ok((options, diagnostics)) = work.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation || this.project_id != project {
+                    return;
+                }
+                this.data_references = options;
+                this.rebuild_references();
+                for diagnostic in diagnostics {
+                    tracing::warn!(%diagnostic, "data collection unavailable");
+                    this.status = format!("Data collection unavailable: {diagnostic}");
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Generate collection schemas from the project's own Astro install and
+    /// keep them fresh while the project is open.
+    ///
+    /// Generation and the freshness fingerprint both run on the blocking lane.
+    /// A missing or failing Astro install is non-fatal: the frontmatter form
+    /// keeps whatever schemas it already had. A change to the generated schema
+    /// directory or the content/astro config starts a new generation; results
+    /// from a superseded request are dropped before touching the form, and the
+    /// form reloads from the live editor text so dirty edits survive.
     fn load_collection_schemas(&mut self, cx: &mut Context<Self>) {
         let Some(manifest) = self.manifest.clone() else {
             return;
@@ -724,38 +912,88 @@ impl ProjectWorkspace {
         tracing::debug!(
             project = %project.as_ref().map_or("<unknown>", |project| project.as_str()),
             root = %root.display(),
-            "generating collection schemas"
+            "starting schema generation and freshness polling"
         );
-        let task = runtime::blocking(cx, move || {
-            let request = SchemaGenerationRequest::new(root, cancellation);
-            generate_collection_schemas(&request)
-        });
         self.schema_task = Some(cx.spawn(async move |this, cx| {
-            let result = task
-                .await
-                .and_then(|value| value.map_err(|error| error.to_string()));
-            let _ = this.update(cx, |this, cx| {
-                if this.generation != generation || this.project_id != project {
-                    return;
-                }
-                match result {
-                    Ok(report) => {
-                        tracing::info!(
-                            collections = report.schemas.len(),
-                            "collection schemas generated"
-                        );
-                        let schemas = report
-                            .schemas
-                            .into_iter()
-                            .map(|entry| (entry.collection, entry.schema))
-                            .collect();
-                        this.set_collection_schemas(schemas, cx);
+            loop {
+                let probe_root = root.clone();
+                let fingerprint =
+                    runtime::blocking(cx, move || schema_fingerprint(&probe_root)).await;
+                let Ok(Ok(fingerprint)) = fingerprint else {
+                    break;
+                };
+                let decision = this.update(cx, |this, _| {
+                    if this.generation != generation || this.project_id != project {
+                        return Err(());
                     }
-                    Err(error) => {
-                        tracing::warn!(%error, "collection schema generation failed");
+                    Ok(match this.schema_freshness.reconcile(fingerprint) {
+                        SchemaRefresh::Current => None,
+                        SchemaRefresh::Regenerate { request } => Some(request),
+                    })
+                });
+                let Ok(Ok(Some(request))) = decision else {
+                    if !matches!(decision, Ok(Ok(None))) {
+                        break;
                     }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(750))
+                        .await;
+                    continue;
+                };
+                let generation_root = root.clone();
+                let cancellation = cancellation.clone();
+                let report = runtime::blocking(cx, move || {
+                    let request =
+                        SchemaGenerationRequest::new(generation_root.clone(), cancellation);
+                    let report = generate_collection_schemas(&request);
+                    // Astro rewrites the schema files on every sync, so the
+                    // fingerprint is re-read after generation and that exact
+                    // value is installed. Otherwise the next poll would see a
+                    // "different" fingerprint and sync forever.
+                    let fingerprint = schema_fingerprint(&generation_root).ok();
+                    (report, fingerprint)
+                })
+                .await;
+                let serviced = this.update(cx, |this, cx| {
+                    if this.generation != generation || this.project_id != project {
+                        return Err(());
+                    }
+                    match report {
+                        Ok((Ok(report), Some(fingerprint))) => {
+                            let schemas = report
+                                .schemas
+                                .into_iter()
+                                .map(|entry| (entry.collection, entry.schema))
+                                .collect();
+                            this.apply_generated_schemas(request, fingerprint, schemas, cx);
+                            Ok(())
+                        }
+                        Ok((Ok(_), None)) => {
+                            this.schema_freshness.reject(request);
+                            tracing::warn!(
+                                "could not re-read the schema fingerprint after generation"
+                            );
+                            Ok(())
+                        }
+                        Ok((Err(error), _)) => {
+                            this.schema_freshness.reject(request);
+                            tracing::warn!(%error, "collection schema generation failed");
+                            Ok(())
+                        }
+                        Err(error) => {
+                            this.schema_freshness.reject(request);
+                            tracing::warn!(%error, "collection schema generation task failed");
+                            Ok(())
+                        }
+                    }
+                });
+                if !matches!(serviced, Ok(Ok(()))) {
+                    break;
                 }
-            });
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(750))
+                    .await;
+            }
         }));
     }
 
@@ -797,43 +1035,55 @@ impl ProjectWorkspace {
     }
 
     /// Identity used to decide when the frontmatter form needs a refresh.
-    pub fn active_frontmatter_key(&self) -> Option<(PathBuf, bool)> {
+    ///
+    /// Includes the schema revision and mapped field names so a regenerated
+    /// schema directory or a preferences change rebuilds the panel, while
+    /// ordinary typing never does.
+    pub fn active_frontmatter_key(&self) -> Option<FrontmatterKey> {
         let path = self.active.clone()?;
         if !supports_frontmatter(&path) {
             return None;
         }
-        let has_schema = self
-            .session_collections
-            .get(&path)
-            .is_some_and(|collection| self.schemas.contains_key(collection));
-        Some((path, has_schema))
+        let collection = self.session_collections.get(&path)?;
+        Some(FrontmatterKey {
+            has_schema: self.schemas.contains_key(collection),
+            schema_revision: self.schema_revision,
+            references_revision: self.references_revision,
+            mappings: self.resolved_for(Some(collection)).field_mappings,
+            path,
+        })
     }
 
-    /// Return the active document's resolved schema and current text, if any.
-    pub fn active_frontmatter(&self, cx: &App) -> Option<(Arc<CollectionSchema>, String)> {
+    /// Return the active document's schema, mappings, reference options and live
+    /// text, or `None` when the active file is not a collection entry.
+    pub fn active_frontmatter(&self, cx: &App) -> Option<ActiveFrontmatter> {
         let path = self.active.as_ref()?;
         if !supports_frontmatter(path) {
             return None;
         }
         let collection = self.session_collections.get(path)?;
-        let schema = self.schemas.get(collection)?.clone();
         let session = self.sessions.get(path)?;
         let text = session.read(cx).editor.read(cx).text().to_string();
-        Some((schema, text))
+        Some(ActiveFrontmatter {
+            schema: self.schemas.get(collection).cloned(),
+            mappings: self.resolved_for(Some(collection)).field_mappings,
+            references: self.references.clone(),
+            root: self.project_root()?,
+            text,
+        })
     }
 
-    /// Apply one frontmatter field edit to the active session's *current* text.
+    /// Apply one frontmatter form edit to the active session's *current* text.
     ///
-    /// Parses the live editor text, patches exactly `path` through the lossless
-    /// [`astrolith_document::ParsedDocument::set_field`] contract, and replaces
-    /// the session text with the result. Because the patch is computed from the
-    /// live text, concurrent unsaved edits to the document body are preserved
-    /// exactly; a stale form snapshot is never written back. No disk I/O happens
-    /// here — the conflict-aware save coordinator persists the edit later.
-    pub fn apply_frontmatter_field(
+    /// Parses the live editor text, applies exactly one lossless document
+    /// operation, and replaces the session text with the result. Because the
+    /// patch is computed from the live text, concurrent unsaved edits to the
+    /// document body are preserved exactly; a stale form snapshot is never
+    /// written back. No disk I/O happens here — the conflict-aware save
+    /// coordinator persists the edit later.
+    pub fn apply_frontmatter_edit(
         &mut self,
-        path: String,
-        value: FrontmatterValue,
+        edit: FrontmatterEdit,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -849,9 +1099,41 @@ impl ProjectWorkspace {
         let live = session.read(cx).editor.read(cx).text().to_string();
         let patched = (|| -> Result<String, String> {
             let mut document = parse_document(&live).map_err(|error| error.to_string())?;
-            document
-                .set_field(&path, value)
-                .map_err(|error| error.to_string())?;
+            match &edit {
+                FrontmatterEdit::Scalar {
+                    path,
+                    value,
+                    present,
+                } => {
+                    if *present {
+                        document.set_field(path, value.clone())
+                    } else {
+                        document.insert_field(path, value.clone())
+                    }
+                }
+                FrontmatterEdit::AddItem { path, value, .. } => {
+                    if document.has_field(path) {
+                        let index = document
+                            .field_info(path)
+                            .and_then(|info| info.items.as_ref())
+                            .map(Vec::len)
+                            .unwrap_or(0);
+                        document.insert_sequence_item(path, index, value.clone())
+                    } else {
+                        document.insert_sequence(path, std::slice::from_ref(value))
+                    }
+                }
+                FrontmatterEdit::RemoveItem { path, index } => {
+                    document.remove_sequence_item(path, *index)
+                }
+                FrontmatterEdit::Remove { path } => document.remove_field(path),
+                FrontmatterEdit::Raw { path, raw } => {
+                    astrolith_document::yaml::validate_value(raw)
+                        .map_err(|reason| format!("invalid raw YAML: {reason}"))?;
+                    document.replace_raw(path, raw)
+                }
+            }
+            .map_err(|error| error.to_string())?;
             document.serialize().map_err(|error| error.to_string())
         })();
         match patched {
@@ -867,8 +1149,8 @@ impl ProjectWorkspace {
                 cx.notify();
             }
             Err(error) => {
-                tracing::warn!(field = %path, %error, "could not edit a frontmatter field");
-                self.status = format!("Could not edit frontmatter field `{path}`: {error}");
+                tracing::warn!(%error, "could not apply a frontmatter edit");
+                self.status = format!("Could not edit frontmatter: {error}");
                 cx.notify();
             }
         }
@@ -964,6 +1246,13 @@ impl ProjectWorkspace {
         self.tab_order.clear();
         self.display_name = None;
         self.schemas.clear();
+        self.schema_freshness = SchemaFreshness::default();
+        self.schema_revision = 0;
+        self.references = Arc::new(ReferenceCatalog::new());
+        self.references_revision = 0;
+        self.data_references.clear();
+        self.data_references_task = None;
+        self.pending_create = None;
         self.pending_recovery.clear();
         self.manifest = None;
         self.active = None;
@@ -1013,12 +1302,14 @@ impl ProjectWorkspace {
                                 )
                             })
                             .collect();
-                        this.manifest = Some(Arc::new(manifest));
                         this.sessions.clear();
                         this.active = None;
                         this.document
                             .update(cx, |document, cx| document.clear_editor(cx));
-                        this.publish_entries(entries, cx);
+                        // One publication path: the initial open installs the
+                        // manifest, entries, data-collection references and the
+                        // rebuilt reference catalog exactly like a refresh does.
+                        this.apply_discovered_index(manifest, entries, cx);
                         this.start_watcher(watcher, window, cx);
                         this.status = format!(
                             "{} entries · Ctrl/Cmd+S saves the active document.",
@@ -2087,6 +2378,7 @@ impl ProjectWorkspace {
         self.global_preferences = global;
         self.project_preferences = project;
         self.rebuild_sort_options();
+        self.rebuild_references();
         self.publish_list_state(cx);
         // The initial open happens before the project scope is known; apply the
         // resolved content-directory overrides and re-index when they differ.
@@ -2263,10 +2555,16 @@ impl ProjectWorkspace {
                     .insert(name.to_owned(), descriptor.base().to_path_buf());
             }
         }
+        let diagnostics: Vec<String> = manifest.diagnostics().to_vec();
         self.manifest = Some(Arc::new(manifest));
         self.index_error = None;
         self.publish_entries(entries, cx);
         self.reconcile_sessions(cx);
+        self.load_data_references(cx);
+        self.rebuild_references();
+        if !diagnostics.is_empty() {
+            self.status = format!("Project diagnostics: {}", diagnostics.join("; "));
+        }
     }
 
     /// Publish an unavailable index while every open buffer is retained.
@@ -2594,7 +2892,7 @@ impl ProjectWorkspace {
         );
         if !plan.unsupported.is_empty() {
             self.status = format!(
-                "Cannot create a {} entry yet: required field(s) {} need the typed schema form (P3). Nothing was written.",
+                "Cannot create a {} entry: required field(s) {} are containers the create form cannot represent. Nothing was written.",
                 collection.as_str(),
                 plan.unsupported.join(", ")
             );
@@ -2613,6 +2911,53 @@ impl ProjectWorkspace {
             self.submit_create(None, Vec::new(), window, cx);
         } else {
             self.open_create_dialog(inputs, window, cx);
+        }
+    }
+
+    /// Human hint for one pre-write creation input.
+    fn creation_hint(&self, input: &CreationInput) -> Option<SharedString> {
+        match &input.kind {
+            CreationInputKind::Date => Some(SharedString::from("YYYY-MM-DD")),
+            CreationInputKind::Image => Some(SharedString::from(
+                "Project-relative image path; external copy arrives with the asset service",
+            )),
+            CreationInputKind::ImageList => Some(SharedString::from(
+                "Comma-separated project-relative image paths",
+            )),
+            CreationInputKind::Tags => Some(SharedString::from("Comma-separated values")),
+            CreationInputKind::Reference { collections } => Some(self.reference_hint(collections)),
+            CreationInputKind::ReferenceList { collections } => Some(SharedString::from(format!(
+                "Comma-separated ids · {}",
+                self.reference_hint(collections)
+            ))),
+            CreationInputKind::Enum(_) => None,
+            CreationInputKind::Text
+            | CreationInputKind::Number
+            | CreationInputKind::Integer
+            | CreationInputKind::Boolean => None,
+        }
+    }
+
+    /// List available reference ids and labels for a creation input.
+    fn reference_hint(&self, collections: &[String]) -> SharedString {
+        let mut parts = Vec::new();
+        for collection in collections {
+            let Some(options) = self.references.get(collection) else {
+                parts.push(format!("{collection}: no entries"));
+                continue;
+            };
+            let labels = options
+                .iter()
+                .take(12)
+                .map(|option| format!("{} ({})", option.label, option.value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("{collection}: {labels}"));
+        }
+        if parts.is_empty() {
+            SharedString::from("Reference id")
+        } else {
+            SharedString::from(parts.join(" · "))
         }
     }
 
@@ -2636,12 +2981,13 @@ impl ProjectWorkspace {
         let owner = cx.weak_entity();
         let name_input =
             cx.new(|cx| InputState::new(window, cx).default_value(default_name.clone()));
-        let rows: Vec<(CreationInput, Entity<InputState>)> = inputs
+        let rows: Vec<(CreationInput, Entity<InputState>, Option<SharedString>)> = inputs
             .into_iter()
             .map(|input| {
                 let initial = operations::input_text(&input, &default_name);
                 let state = cx.new(|cx| InputState::new(window, cx).default_value(initial));
-                (input, state)
+                let hint = self.creation_hint(&input);
+                (input, state, hint)
             })
             .collect();
         window.open_dialog(cx, move |dialog, _, cx| {
@@ -2667,14 +3013,21 @@ impl ProjectWorkspace {
                         .child(div().text_sm().child("File name"))
                         .child(Input::new(&name_input)),
                 );
-            for (input, state) in &rows {
-                body = body.child(
-                    div()
-                        .v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(input.name.clone()))
-                        .child(Input::new(state)),
-                );
+            for (input, state, hint) in &rows {
+                let mut row = div()
+                    .v_flex()
+                    .gap_1()
+                    .child(div().text_sm().child(input.name.clone()))
+                    .child(Input::new(state));
+                if let Some(hint) = hint {
+                    row = row.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(hint.clone()),
+                    );
+                }
+                body = body.child(row);
             }
             dialog.title("New entry").child(body).footer(
                 div()
@@ -2692,7 +3045,7 @@ impl ProjectWorkspace {
                             .on_click(move |_, window, cx| {
                                 let typed_name = name_input.read(cx).value().to_string();
                                 let mut values = Vec::with_capacity(rows.len());
-                                for (input, state) in &rows {
+                                for (input, state, _) in &rows {
                                     let raw = state.read(cx).value().to_string();
                                     match operations::parse_input(input, &raw) {
                                         Ok(value) => values.push((input.name.clone(), value)),
@@ -4911,6 +5264,9 @@ mod tests {
                             required: true,
                             default: None,
                             kind: FieldKind::String { format: None },
+                            description: None,
+                            constraints: astrolith_astro::schema::FieldConstraints::default(),
+                            order: 0,
                         }],
                         diagnostics: Vec::new(),
                     },
@@ -4958,6 +5314,198 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn data_collection_references_feed_dropdowns_without_sidebar_entries(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        std::fs::remove_file(dir.path().join("src/content.config.ts")).unwrap();
+        std::fs::write(
+            dir.path().join("src/content.config.mjs"),
+            r#"import {defineCollection} from 'astro:content';
+import {file, glob} from 'astro/loaders';
+const blog = defineCollection({loader: glob({base: './src/posts', pattern: '**/*.{md,mdx}'})});
+const dataAuthors = defineCollection({loader: file('./oracles/data-collections/authors.json')});
+export const collections = {blog, dataAuthors};
+"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("oracles/data-collections")).unwrap();
+        std::fs::write(
+            dir.path().join("oracles/data-collections/authors.json"),
+            r#"[{"id":"ada","name":"Ada Lovelace"},{"id":"grace","name":"Grace Hopper"},{"id":"anon"}]"#,
+        )
+        .unwrap();
+
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+
+        view.read_with(cx, |view, _| {
+            let manifest = view.manifest.as_ref().expect("project must be discovered");
+            assert_eq!(
+                manifest.data_collections().len(),
+                1,
+                "the file() loader must be discovered: {:?}",
+                manifest.diagnostics()
+            );
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| !view.data_references.is_empty()) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+
+        let expected = [
+            ReferenceOption {
+                value: "ada".to_owned(),
+                label: "Ada Lovelace".to_owned(),
+            },
+            ReferenceOption {
+                value: "grace".to_owned(),
+                label: "Grace Hopper".to_owned(),
+            },
+            ReferenceOption {
+                value: "anon".to_owned(),
+                label: "anon".to_owned(),
+            },
+        ];
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.data_references.get("dataAuthors").map(Vec::as_slice),
+                Some(expected.as_slice()),
+                "JSON file() entries label the reference dropdown by name, else id"
+            );
+            assert_eq!(
+                view.references.get("dataAuthors").map(Vec::as_slice),
+                Some(expected.as_slice()),
+                "the form's reference catalog includes data-collection entries"
+            );
+            assert!(
+                view.entries
+                    .iter()
+                    .all(|entry| entry.entry().id().collection().as_str() != "dataAuthors"),
+                "data collections are read-only and never editable sidebar entries"
+            );
+            assert_eq!(view.data_references.len(), 1);
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn reference_catalog_updates_reach_an_open_form(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+
+        let path = dir.path().join("src/posts/a.md");
+        let index = view.read_with(cx, |view, _| {
+            view.entries
+                .iter()
+                .position(|entry| entry.entry().source().as_str() == "src/posts/a.md")
+                .expect("the markdown fixture must be indexed")
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(index, window, cx))
+        })
+        .unwrap();
+        wait_for_session(cx, &view, &path).await;
+
+        let before = view
+            .read_with(cx, |view, _| view.active_frontmatter_key())
+            .expect("an open markdown entry exposes a form key");
+
+        let options = vec![ReferenceOption {
+            value: "ada".to_owned(),
+            label: "Ada Lovelace".to_owned(),
+        }];
+        view.update(cx, |view, cx| {
+            view.data_references
+                .insert("authors".to_owned(), options.clone());
+            view.rebuild_references();
+            cx.notify();
+        });
+        let loaded = view
+            .read_with(cx, |view, _| view.active_frontmatter_key())
+            .expect("the form key survives a reference update");
+        assert_ne!(
+            before, loaded,
+            "new reference options must rebuild an already-open form"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.references.get("authors").cloned()),
+            Some(options),
+            "the data collection feeds the reference dropdown"
+        );
+
+        // A project whose data collections were removed must drop their options
+        // instead of keeping the previous catalog forever.
+        view.update(cx, |view, cx| view.load_data_references(cx));
+        let cleared = view
+            .read_with(cx, |view, _| view.active_frontmatter_key())
+            .expect("the form key survives the cleared catalog");
+        assert_ne!(
+            loaded, cleared,
+            "a removed data collection must refresh the form"
+        );
+        assert!(!view.read_with(cx, |view, _| view.references.contains_key("authors")));
+        assert!(view.read_with(cx, |view, _| view.data_references.is_empty()));
+    }
+
+    #[gpui_kit::test]
+    async fn superseded_schema_generation_results_never_reach_the_form(cx: &mut TestAppContext) {
+        let (_handle, view) = mount(cx);
+        view.update(cx, |view, cx| {
+            let SchemaRefresh::Regenerate { request: first } = view.schema_freshness.reconcile(1)
+            else {
+                panic!("the first fingerprint must regenerate");
+            };
+            let SchemaRefresh::Regenerate { request: latest } = view.schema_freshness.reconcile(2)
+            else {
+                panic!("a changed fingerprint must regenerate");
+            };
+            assert_ne!(first, latest);
+
+            let schema_for = |name: &str| {
+                schema(vec![required_field(
+                    name,
+                    FieldKind::String { format: None },
+                )])
+            };
+            assert!(
+                !view.apply_generated_schemas(
+                    first,
+                    1,
+                    vec![("blog".to_owned(), schema_for("stale"))],
+                    cx
+                ),
+                "a superseded report must be dropped"
+            );
+            assert!(
+                view.schemas.is_empty(),
+                "a stale schema must never reach the panel"
+            );
+            assert_eq!(view.schema_revision, 0);
+
+            assert!(view.apply_generated_schemas(
+                latest,
+                2,
+                vec![("blog".to_owned(), schema_for("title"))],
+                cx
+            ));
+            assert!(view.schemas.contains_key("blog"));
+            assert_eq!(view.schema_revision, 1);
+        });
+    }
+
+    #[gpui_kit::test]
     async fn frontmatter_form_field_edit_preserves_concurrent_body_edit(cx: &mut TestAppContext) {
         use astrolith_astro::schema::{CollectionSchema, Field, FieldKind, SchemaDialect};
 
@@ -4984,12 +5532,18 @@ mod tests {
                                 required: true,
                                 default: None,
                                 kind: FieldKind::String { format: None },
+                                description: None,
+                                constraints: astrolith_astro::schema::FieldConstraints::default(),
+                                order: 0,
                             },
                             Field {
                                 name: "draft".to_owned(),
                                 required: false,
                                 default: None,
                                 kind: FieldKind::Boolean,
+                                description: None,
+                                constraints: astrolith_astro::schema::FieldConstraints::default(),
+                                order: 1,
                             },
                         ],
                         diagnostics: Vec::new(),
@@ -5023,14 +5577,22 @@ mod tests {
         }
 
         // The active document resolves its schema and current text for the form.
-        let (schema, text) = view
+        let ActiveFrontmatter {
+            schema, text, root, ..
+        } = view
             .read_with(cx, |view, cx| view.active_frontmatter(cx))
             .expect("active document must expose its schema and text");
+        let schema = schema.expect("the collection schema must resolve");
         assert!(schema.fields.iter().any(|field| field.name == "title"));
         assert_eq!(text, with_frontmatter);
-        assert_eq!(
-            view.read_with(cx, |view, _| view.active_frontmatter_key()),
-            Some((path.clone(), true))
+        assert_eq!(root, dir.path().canonicalize().unwrap());
+        let key = view
+            .read_with(cx, |view, _| view.active_frontmatter_key())
+            .expect("an active markdown entry exposes a form key");
+        assert_eq!(key.path, path);
+        assert!(
+            key.has_schema,
+            "the injected schema must be the form schema"
         );
 
         // The user edits the document BODY in the source editor (unsaved, in memory).
@@ -5053,9 +5615,12 @@ mod tests {
         // concurrent body edit must survive exactly.
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
-                view.apply_frontmatter_field(
-                    "title".to_owned(),
-                    FrontmatterValue::String("Edited".to_owned()),
+                view.apply_frontmatter_edit(
+                    FrontmatterEdit::Scalar {
+                        path: "title".to_owned(),
+                        value: astrolith_document::FrontmatterValue::String("Edited".to_owned()),
+                        present: true,
+                    },
                     window,
                     cx,
                 )
@@ -5107,6 +5672,9 @@ mod tests {
             required: true,
             default: None,
             kind,
+            description: None,
+            constraints: astrolith_astro::schema::FieldConstraints::default(),
+            order: 0,
         }
     }
 
@@ -5291,9 +5859,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    async fn create_defers_unrepresentable_required_fields_to_the_typed_form(
-        cx: &mut TestAppContext,
-    ) {
+    async fn create_collects_typed_required_fields_before_writing(cx: &mut TestAppContext) {
         let dir = fixture();
         let (handle, view) = mount(cx);
         open_project_and_wait(cx, handle, &view, dir.path()).await;
@@ -5301,12 +5867,30 @@ mod tests {
             view.set_collection_schemas(
                 vec![(
                     "blog".to_owned(),
-                    schema(vec![required_field(
-                        "cover",
-                        FieldKind::Reference {
-                            collections: vec!["assets".into()],
-                        },
-                    )]),
+                    schema(vec![
+                        required_field("title", FieldKind::String { format: None }),
+                        required_field("cover", FieldKind::Image),
+                        required_field(
+                            "author",
+                            FieldKind::Reference {
+                                collections: vec!["authors".into()],
+                            },
+                        ),
+                        required_field(
+                            "tags",
+                            FieldKind::Array {
+                                items: Box::new(FieldKind::String { format: None }),
+                            },
+                        ),
+                        required_field(
+                            "related",
+                            FieldKind::Array {
+                                items: Box::new(FieldKind::Reference {
+                                    collections: vec!["blog".into()],
+                                }),
+                            },
+                        ),
+                    ]),
                 )],
                 cx,
             )
@@ -5317,21 +5901,54 @@ mod tests {
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.entry_command(CommandId::NewEntry, None, window, cx)
-            })
+            });
+            assert!(
+                window.has_active_dialog(cx),
+                "typed required fields must be collected before anything is written"
+            );
+            window.press("escape", cx);
         })
         .unwrap();
-        cx.run_until_parked();
         assert_eq!(
             std::fs::read_dir(dir.path().join("src/posts"))
                 .unwrap()
                 .count(),
             before,
-            "nothing may be written without the required field"
+            "nothing may be written before the typed form is submitted"
         );
-        view.read_with(cx, |view, _| {
-            assert!(view.status.contains("P3"), "{}", view.status);
-            assert!(view.status.contains("cover"), "{}", view.status);
-        });
+
+        // The dialog hands its entered values back through the normal submit path.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.submit_create(
+                    None,
+                    vec![
+                        (
+                            "cover".to_owned(),
+                            ScalarValue::String("images/cover.png".to_owned()),
+                        ),
+                        ("author".to_owned(), ScalarValue::String("ada".to_owned())),
+                        (
+                            "tags".to_owned(),
+                            ScalarValue::List(vec!["news".to_owned(), "rust".to_owned()]),
+                        ),
+                        (
+                            "related".to_owned(),
+                            ScalarValue::List(vec!["other-post".to_owned()]),
+                        ),
+                    ],
+                    window,
+                    cx,
+                )
+            })
+        })
+        .unwrap();
+        let expected = dir.path().join(format!("src/posts/{}.md", today()));
+        wait_for_session(cx, &view, &expected).await;
+        assert_eq!(
+            std::fs::read_to_string(&expected).unwrap(),
+            "---\ntitle: 'New Blog'\ncover: 'images/cover.png'\nauthor: 'ada'\ntags: ['news', 'rust']\nrelated: ['other-post']\n---\n\n"
+        );
     }
 
     struct RecordingTrash {

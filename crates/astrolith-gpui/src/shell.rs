@@ -8,13 +8,13 @@ use crate::{
     commands::{self, COMMANDS, CommandId},
     editor::{header::DocumentHeader, session::SessionChanged},
     file::{DocumentSource, read_document},
-    frontmatter::{FrontmatterChanged, FrontmatterForm},
+    frontmatter::{FrontmatterDocument, FrontmatterEdit, FrontmatterForm},
     layout::{
         panels::WorkspacePanel,
         state::{LayoutState, PanelKind},
     },
     preview::PreviewPanel,
-    project_discovery::{ProjectOpened, ProjectWorkspace, now_secs},
+    project_discovery::{FrontmatterKey, ProjectOpened, ProjectWorkspace, now_secs},
     runtime,
     settings::{
         GlobalPreferencesV2, PreferencesStore, ProjectPreferencesV1, resolve, settings_path,
@@ -123,7 +123,7 @@ pub(crate) struct Shell {
     project: Entity<ProjectWorkspace>,
     navigator: Entity<WorkspacePanel>,
     frontmatter: Entity<FrontmatterForm>,
-    frontmatter_key: Option<(PathBuf, bool)>,
+    frontmatter_key: Option<FrontmatterKey>,
     preview: Entity<PreviewPanel>,
     palette: Entity<CommandState>,
     palette_focus: FocusHandle,
@@ -312,11 +312,10 @@ impl Shell {
         subscriptions.push(cx.subscribe_in(
             &frontmatter,
             window,
-            move |_this, _form, event: &FrontmatterChanged, window, cx| {
-                let path = event.path.clone();
-                let value = event.value.clone();
+            move |_this, _form, event: &FrontmatterEdit, window, cx| {
+                let edit = event.clone();
                 let _ = apply_owner.update(cx, |project, cx| {
-                    project.apply_frontmatter_field(path, value, window, cx)
+                    project.apply_frontmatter_edit(edit, window, cx)
                 });
             },
         ));
@@ -1035,16 +1034,27 @@ fn command_icon(command: CommandId) -> IconName {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Activate the frontmatter form whenever the active document (or its
-        // schema availability) changes. Editing the form does not change this
-        // key, so live edits never rebuild the controls mid-entry.
+        // Activate the frontmatter form whenever the active document, its schema
+        // revision or its mapped fields change. Editing the form does not change
+        // this key, so live edits never rebuild the controls mid-entry.
         let key = self.project.read(cx).active_frontmatter_key();
         if key != self.frontmatter_key {
             self.frontmatter_key = key;
             match self.project.read(cx).active_frontmatter(cx) {
-                Some((schema, text)) => {
-                    self.frontmatter
-                        .update(cx, |form, cx| form.set_document(schema, text, window, cx));
+                Some(active) => {
+                    self.frontmatter.update(cx, |form, cx| {
+                        form.set_document(
+                            FrontmatterDocument {
+                                schema: active.schema,
+                                mappings: active.mappings,
+                                references: active.references,
+                                root: Some(active.root),
+                                text: active.text,
+                            },
+                            window,
+                            cx,
+                        )
+                    });
                 }
                 None => {
                     self.frontmatter.update(cx, |form, cx| form.clear(cx));
@@ -2550,6 +2560,9 @@ mod tests {
                 required: index % 3 == 0,
                 default: None,
                 kind: astrolith_astro::schema::FieldKind::String { format: None },
+                description: None,
+                constraints: astrolith_astro::schema::FieldConstraints::default(),
+                order: index,
             })
             .collect();
         let schema = astrolith_astro::schema::CollectionSchema {

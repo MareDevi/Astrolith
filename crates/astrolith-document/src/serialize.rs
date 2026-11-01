@@ -54,6 +54,57 @@ pub(crate) fn serialize_scalar(value: &FrontmatterValue) -> Result<String, Strin
     })
 }
 
+/// Render a typed value as one item of a single-line flow sequence.
+///
+/// Non-string scalars are identical to [`serialize_scalar`]. Strings are only
+/// emitted plain when the text survives flow context unchanged: YAML treats
+/// `,`, `[`, `]`, `{`, `}` and `#` as structure there, so a value such as
+/// `a,b` would otherwise split into two items.
+pub(crate) fn serialize_flow_scalar(value: &FrontmatterValue) -> Result<String, String> {
+    match value {
+        FrontmatterValue::String(text) => {
+            if text.chars().any(char::is_control) {
+                return Err(
+                    "strings with control characters cannot be patched as a single scalar"
+                        .to_owned(),
+                );
+            }
+            Ok(render_flow_string(text))
+        }
+        other => serialize_scalar(other),
+    }
+}
+
+fn render_flow_string(text: &str) -> String {
+    if plain_string_is_flow_safe(text) {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "''"))
+    }
+}
+
+fn plain_string_is_flow_safe(text: &str) -> bool {
+    plain_string_is_safe(text)
+        && !text.contains([',', '[', ']', '{', '}', '&', '*', '!', '|', '>', '#', '\t'])
+        && flow_item_reads_back_as_string(text)
+}
+
+fn flow_item_reads_back_as_string(text: &str) -> bool {
+    let probe = format!("k: [{text}]\n");
+    match YamlLoader::load_from_str(&probe).ok().as_deref() {
+        Some([Yaml::Hash(map)]) if map.len() == 1 => map.iter().any(|(key, value)| {
+            matches!(
+                (key, value),
+                (Yaml::String(name), Yaml::Array(items))
+                    if name.as_str() == "k"
+                        && items.len() == 1
+                        && matches!(&items[0], Yaml::String(inner) if inner.as_str() == text)
+            )
+        }),
+        _ => false,
+    }
+}
+
 fn render_string(text: &str) -> String {
     if plain_string_is_safe(text) {
         text.to_owned()

@@ -8,7 +8,9 @@
 
 use serde_json::{Map, Value};
 
-use crate::schema::model::{CollectionSchema, Field, FieldKind, SchemaDiagnostic, SchemaDialect};
+use crate::schema::model::{
+    CollectionSchema, Field, FieldConstraints, FieldKind, SchemaDiagnostic, SchemaDialect,
+};
 
 /// Bound on schema nesting so a crafted document cannot exhaust the stack.
 const MAX_SCHEMA_DEPTH: usize = 64;
@@ -167,10 +169,11 @@ impl<'a> Normalizer<'a> {
             .unwrap_or_default();
 
         let mut fields = Vec::new();
-        for (name, value) in properties {
-            if name == "$schema" {
-                continue;
-            }
+        for (order, (name, value)) in properties
+            .iter()
+            .filter(|(name, _)| name.as_str() != "$schema")
+            .enumerate()
+        {
             let field_path = child_path(path, name);
             let default = value.get("default").cloned();
             let kind = self.kind(value, &field_path, depth + 1);
@@ -179,11 +182,14 @@ impl<'a> Normalizer<'a> {
                 required: required.contains(&name.as_str()),
                 default,
                 kind,
+                description: value
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                constraints: constraints(value),
+                order,
             });
         }
-        // `serde_json` map ordering depends on whether the `preserve_order`
-        // feature is unified in by another workspace crate, so sort.
-        fields.sort_by(|left, right| left.name.cmp(&right.name));
         fields
     }
 
@@ -392,6 +398,26 @@ impl<'a> Normalizer<'a> {
 
 fn depth_message() -> String {
     format!("schema nesting exceeds the supported depth of {MAX_SCHEMA_DEPTH}")
+}
+
+/// Read the JSON Schema constraints emitted beside a field's type.
+fn constraints(value: &Value) -> FieldConstraints {
+    let read_usize = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_u64)
+            .map(|number| number as usize)
+    };
+    FieldConstraints {
+        minimum: value.get("minimum").and_then(Value::as_f64),
+        maximum: value.get("maximum").and_then(Value::as_f64),
+        min_length: read_usize("minLength").or_else(|| read_usize("minItems")),
+        max_length: read_usize("maxLength").or_else(|| read_usize("maxItems")),
+        pattern: value
+            .get("pattern")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    }
 }
 
 fn is_date_branch(branch: &Value) -> bool {

@@ -178,6 +178,13 @@ pub enum WorkspaceError {
     },
     /// A truthy frontmatter slug has a type that cannot be mapped safely to an ID.
     UnsupportedSlug(String),
+    /// A JSON data-collection file could not be read as reference entries.
+    InvalidData {
+        /// The data-collection file.
+        path: PathBuf,
+        /// Why the document cannot be used.
+        message: String,
+    },
     /// Two sources in one collection produced the same logical ID.
     DuplicateEntryId {
         /// The collection identity.
@@ -248,6 +255,13 @@ impl std::fmt::Display for WorkspaceError {
                 )
             }
             Self::UnsupportedSlug(message) => formatter.write_str(message),
+            Self::InvalidData { path, message } => {
+                write!(
+                    formatter,
+                    "invalid data collection {}: {message}",
+                    path.display()
+                )
+            }
             Self::DuplicateEntryId { collection, id } => {
                 write!(
                     formatter,

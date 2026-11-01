@@ -19,11 +19,16 @@ pub mod save;
 pub mod serialize;
 /// Disk baseline for conflict-aware saving.
 pub mod version;
+/// Raw YAML value validation.
+pub mod yaml;
 
 pub use buffer::{
     DocumentBuffer, DocumentError, DocumentIdentity, DocumentLoadTicket, DocumentRevision,
 };
-pub use parse::{FrontmatterValue, LineEnding, ParsedDocument, parse_document};
+pub use parse::{
+    FieldShape, FrontmatterField, FrontmatterValue, LineEnding, ParsedDocument, SequenceStyle,
+    parse_document,
+};
 pub use recovery::{RecoveryLoad, RecoveryRecord, RecoveryStore};
 pub use save::{DocumentSnapshot, SaveOutcome, save_snapshot};
 pub use serialize::serialize_document;

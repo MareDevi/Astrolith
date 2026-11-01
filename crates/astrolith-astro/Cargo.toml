@@ -8,8 +8,9 @@ publish.workspace = true
 [dependencies]
 tracing.workspace = true
 astrolith-core = { path = "../astrolith-core" }
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 semver = "1.0.28"
+regex = "1.13.1"
 tempfile = "3.27.0"
 tokio = { workspace = true }
 tree-sitter = "=0.26.13"

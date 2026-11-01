@@ -136,12 +136,34 @@ impl CollectionDescriptor {
         &self.config
     }
 }
+/// A JSON-backed Astro data collection loaded from a single file.
+#[derive(Clone, Debug)]
+pub struct DataCollectionDescriptor {
+    id: CollectionId,
+    file: PathBuf,
+    config: PathBuf,
+}
+impl DataCollectionDescriptor {
+    pub fn id(&self) -> &CollectionId {
+        &self.id
+    }
+    /// Canonical path of the JSON file loaded by `file()`.
+    pub fn file(&self) -> &Path {
+        &self.file
+    }
+    /// Canonical path of the content configuration that declared it.
+    pub fn config(&self) -> &Path {
+        &self.config
+    }
+}
 #[derive(Clone, Debug)]
 pub struct ProjectManifest {
     metadata: ProjectMetadata,
     project: ProjectId,
     generation: u64,
     collections: Vec<CollectionDescriptor>,
+    data_collections: Vec<DataCollectionDescriptor>,
+    diagnostics: Vec<String>,
 }
 impl ProjectManifest {
     pub fn root(&self) -> &Path {
@@ -156,8 +178,17 @@ impl ProjectManifest {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    /// Glob-backed collections, in configuration order.
     pub fn collections(&self) -> &[CollectionDescriptor] {
         &self.collections
+    }
+    /// JSON data collections, in configuration order.
+    pub fn data_collections(&self) -> &[DataCollectionDescriptor] {
+        &self.data_collections
+    }
+    /// Non-fatal data-collection problems found during discovery.
+    pub fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
     }
 }
 #[derive(Clone, Debug)]
@@ -369,7 +400,8 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
     };
     if parsed
         .iter()
-        .any(|collection| collection.pattern().includes_mdx())
+        .filter_map(|collection| collection.pattern())
+        .any(CollectionPattern::includes_mdx)
     {
         if !mdx_integration {
             return Ok(unsupported(
@@ -397,11 +429,48 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
         }
     }
     let mut collections = Vec::new();
+    let mut data_collections = Vec::new();
+    let mut diagnostics = Vec::new();
     for item in parsed {
         cancellation.check()?;
+        let id =
+            CollectionId::new(item.collection()).map_err(|error| AstroError(error.to_string()))?;
+        if let Some(file) = item.file() {
+            match contained_path(&root, Path::new(file)) {
+                Ok(path) if path.is_file() => {
+                    data_collections.push(DataCollectionDescriptor {
+                        id,
+                        file: path,
+                        config: config.clone(),
+                    });
+                }
+                Ok(path) => diagnostics.push(format!(
+                    "Data collection {} file is not a regular file: {}",
+                    item.collection(),
+                    path.display()
+                )),
+                Err(error) => diagnostics.push(format!(
+                    "Invalid data collection file for {}: {file} ({error})",
+                    item.collection()
+                )),
+            }
+            continue;
+        }
+        let configured_base = item.base().ok_or_else(|| {
+            AstroError(format!(
+                "collection {} has no loader base",
+                item.collection()
+            ))
+        })?;
+        let pattern = item.pattern().cloned().ok_or_else(|| {
+            AstroError(format!(
+                "collection {} has no loader pattern",
+                item.collection()
+            ))
+        })?;
         let reference = match request.collection_base(item.collection()) {
             Some(override_base) => override_base.to_path_buf(),
-            None => PathBuf::from(item.base()),
+            None => PathBuf::from(configured_base),
         };
         let base = match contained_path(&root, &reference) {
             Ok(path) if path.is_dir() => path,
@@ -412,17 +481,15 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
                         item.collection(),
                         override_base.display()
                     ),
-                    None => format!("Invalid local collection base: {}", item.base()),
+                    None => format!("Invalid local collection base: {configured_base}"),
                 };
                 return Ok(unsupported(message));
             }
         };
-        let id =
-            CollectionId::new(item.collection()).map_err(|error| AstroError(error.to_string()))?;
         collections.push(CollectionDescriptor {
             id,
             base,
-            pattern: item.pattern().clone(),
+            pattern,
             config: config.clone(),
         });
     }
@@ -432,6 +499,7 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
         generation = request.generation,
         astro = metadata.installed_version().unwrap_or("<unknown>"),
         collections = collections.len(),
+        data_collections = data_collections.len(),
         "Astro project inspected"
     );
     Ok(DiscoveryOutcome::Ready(ProjectManifest {
@@ -439,6 +507,8 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
         project: request.project.clone(),
         generation: request.generation,
         collections,
+        data_collections,
+        diagnostics,
     }))
 }
 

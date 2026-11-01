@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use astrolith_astro::schema::{CollectionSchema, Field, FieldKind, SchemaDialect};
+use astrolith_astro::schema::{
+    CollectionSchema, Field, FieldConstraints, FieldKind, SchemaDialect,
+};
 
 use super::*;
 
@@ -18,17 +20,39 @@ fn field(name: &str, required: bool, kind: FieldKind) -> Field {
         required,
         default: None,
         kind,
+        description: None,
+        constraints: FieldConstraints::default(),
+        order: 0,
     }
 }
 
 fn editor(fields: Vec<Field>, text: &str) -> FrontmatterEditor {
-    FrontmatterEditor::new(schema(fields), text.to_owned()).expect("valid document")
+    FrontmatterEditor::new(
+        Some(schema(fields)),
+        FieldMappings::default(),
+        text.to_owned(),
+    )
+    .expect("valid document")
+}
+
+/// Build controls for a document whose frontmatter is absent, so every schema
+/// field is listed as a not-yet-present field.
+fn control_list(fields: Vec<Field>) -> Vec<FieldControl> {
+    let schema = schema(fields);
+    fields::build_controls(Some(&schema), &FieldMappings::default(), &[])
+}
+
+/// Build controls for `document` against the given schema fields.
+fn control_list_for(fields: Vec<Field>, document: &str) -> Vec<FieldControl> {
+    let schema = schema(fields);
+    let parsed = parse_document(document).expect("valid document");
+    fields::build_controls(Some(&schema), &FieldMappings::default(), parsed.fields())
 }
 
 #[test]
 fn maps_every_field_kind_to_its_native_control() {
     use ControlKind::*;
-    let controls = fields::build_controls(&[
+    let controls = control_list(vec![
         field("title", true, FieldKind::String { format: None }),
         field(
             "email",
@@ -99,12 +123,16 @@ fn maps_every_field_kind_to_its_native_control() {
     assert_eq!(by_path("published").kind, Date);
     assert_eq!(by_path("cover").kind, Image);
     assert!(
-        matches!(by_path("author").kind, Reference { ref collections } if collections == &["authors".to_owned()])
+        matches!(by_path("author").kind, Reference { ref collections, multiple: false } if collections == &["authors".to_owned()])
     );
-    assert_eq!(by_path("tags").kind, Array);
-    assert_eq!(by_path("meta").kind, Record);
+    assert!(matches!(
+        by_path("tags").kind,
+        Tags if by_path("tags").editable
+    ));
+    assert!(matches!(by_path("meta").kind, ReadOnly { .. }));
 
-    // Scalars are editable; containers/unsupported/literal are read-only with a reason.
+    // Scalars and tags are editable; literals, containers and unsupported
+    // constructs are read-only with an explicit reason.
     for path in [
         "title",
         "email",
@@ -114,20 +142,17 @@ fn maps_every_field_kind_to_its_native_control() {
         "published",
         "cover",
         "author",
+        "tags",
     ] {
         assert!(by_path(path).editable, "{path} must be editable");
     }
     assert!(!by_path("version").editable);
     assert!(by_path("version").refusal.is_some());
-    assert!(!by_path("tags").editable);
-    assert!(
-        by_path("tags")
-            .refusal
-            .as_deref()
-            .unwrap()
-            .contains("array")
-    );
     assert!(!by_path("meta").editable);
+    assert_eq!(
+        by_path("meta").refusal.as_deref(),
+        Some("record values are preserved verbatim")
+    );
     assert!(!by_path("union").editable);
     assert_eq!(
         by_path("union").refusal.as_deref(),
@@ -137,8 +162,8 @@ fn maps_every_field_kind_to_its_native_control() {
 }
 
 #[test]
-fn object_fields_emit_a_container_and_editable_children() {
-    let controls = fields::build_controls(&[field(
+fn object_fields_emit_a_container_and_editable_children_only_when_present() {
+    let fields = vec![field(
         "author",
         true,
         FieldKind::Object {
@@ -147,18 +172,31 @@ fn object_fields_emit_a_container_and_editable_children() {
                 field("age", false, FieldKind::Integer),
             ],
         },
-    )]);
+    )];
+
+    // An absent mapping has no editable children: inserting `author.name`
+    // without the parent mapping would not be lossless.
+    let absent = control_list(fields.clone());
+    let paths: Vec<&str> = absent.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, ["author"]);
+    assert_eq!(absent[0].kind, ControlKind::Object);
+    assert!(!absent[0].editable);
+    assert!(!absent[0].present);
+
+    let controls = control_list_for(fields, "---\nauthor:\n  name: Ada\n  age: 36\n---\n");
     let paths: Vec<&str> = controls.iter().map(|c| c.path.as_str()).collect();
     assert_eq!(paths, ["author", "author.name", "author.age"]);
     assert_eq!(controls[0].kind, ControlKind::Object);
     assert!(!controls[0].editable);
     assert!(controls[1].editable && controls[2].editable);
     assert_eq!(controls[1].control_label(), "text");
+    assert_eq!(controls[2].control_label(), "integer");
+    assert!(controls[1].present && controls[2].present);
 }
 
 #[test]
 fn nullable_scalars_stay_editable_and_flag_nullable() {
-    let controls = fields::build_controls(&[field(
+    let controls = control_list(vec![field(
         "rating",
         false,
         FieldKind::Nullable {
@@ -300,7 +338,7 @@ fn read_only_fields_refuse_edits_with_an_explicit_reason() {
         text,
     );
     for (path, expected) in [
-        ("tags", "array"),
+        ("tags", "item by item"),
         ("version", "literal"),
         ("union", "heterogeneous union"),
     ] {
@@ -315,7 +353,7 @@ fn read_only_fields_refuse_edits_with_an_explicit_reason() {
 
 #[test]
 fn unsupported_fields_are_never_coerced_to_string() {
-    let controls = fields::build_controls(&[field(
+    let controls = control_list(vec![field(
         "value",
         false,
         FieldKind::Unsupported {
@@ -324,11 +362,16 @@ fn unsupported_fields_are_never_coerced_to_string() {
     )]);
     assert_eq!(
         controls[0].kind,
-        ControlKind::Unsupported {
+        ControlKind::ReadOnly {
             reason: "heterogeneous union [string, number]".to_owned()
         }
     );
     assert!(!controls[0].editable);
+    assert_eq!(
+        controls[0].refusal.as_deref(),
+        Some("heterogeneous union [string, number]"),
+        "the schema's refusal reason is surfaced verbatim"
+    );
 }
 
 #[test]
@@ -391,13 +434,261 @@ fn editing_clears_a_previously_reported_diagnostic() {
 }
 
 #[test]
+fn absent_optional_fields_and_sequence_items_edit_losslessly() {
+    let text = "---\r\ntitle: Old  # keep\r\ntags:\r\n  - a  # first\r\n  - b\r\n---\r\nBody\r\n";
+    let mut editor = editor(
+        vec![
+            field("title", true, FieldKind::String { format: None }),
+            field(
+                "tags",
+                false,
+                FieldKind::Array {
+                    items: Box::new(FieldKind::String { format: None }),
+                },
+            ),
+            field("draft", false, FieldKind::Boolean),
+        ],
+        text,
+    );
+
+    // Inserting an absent optional field appends one line and preserves every
+    // other byte, including comments and CRLF line endings.
+    let inserted = editor.set_value("draft", "true").unwrap();
+    assert_eq!(
+        inserted,
+        "---\r\ntitle: Old  # keep\r\ntags:\r\n  - a  # first\r\n  - b\r\ndraft: true\r\n---\r\nBody\r\n"
+    );
+
+    // Removing it restores the original document byte for byte.
+    let removed = editor.remove_field("draft").unwrap();
+    assert_eq!(removed, text);
+    let error = editor.remove_field("title").unwrap_err();
+    assert!(error.contains("required"), "{error}");
+
+    editor.add_item("tags", "c").unwrap();
+    assert_eq!(
+        editor.text(),
+        "---\r\ntitle: Old  # keep\r\ntags:\r\n  - a  # first\r\n  - b\r\n  - c\r\n---\r\nBody\r\n"
+    );
+    editor.remove_item("tags", 1).unwrap();
+    assert_eq!(
+        editor.text(),
+        "---\r\ntitle: Old  # keep\r\ntags:\r\n  - a  # first\r\n  - c\r\n---\r\nBody\r\n"
+    );
+    assert_eq!(
+        editor.items("tags"),
+        vec![
+            FrontmatterValue::String("a".to_owned()),
+            FrontmatterValue::String("c".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn raw_yaml_containers_are_validated_and_never_coerced() {
+    let text = "---\nmeta: {x: 1}\nmatrix: [[1, 2]]\n---\n";
+    let mut editor = editor(
+        vec![
+            field(
+                "meta",
+                false,
+                FieldKind::Record {
+                    value: Box::new(FieldKind::Number),
+                },
+            ),
+            field(
+                "matrix",
+                false,
+                FieldKind::Array {
+                    items: Box::new(FieldKind::Array {
+                        items: Box::new(FieldKind::Integer),
+                    }),
+                },
+            ),
+        ],
+        text,
+    );
+
+    // Flow containers the typed controls cannot express are edited as validated
+    // raw YAML; they are never coerced into a typed value.
+    assert!(matches!(
+        editor.control("meta").unwrap().kind,
+        ControlKind::RawYaml { .. }
+    ));
+    assert!(editor.control("meta").unwrap().editable);
+    assert_eq!(editor.raw("meta"), Some("{x: 1}"));
+    assert!(matches!(
+        editor.control("matrix").unwrap().kind,
+        ControlKind::RawYaml { .. }
+    ));
+    assert!(editor.control("matrix").unwrap().editable);
+    assert_eq!(editor.raw("matrix"), Some("[[1, 2]]"));
+
+    editor.set_value("meta", "{y: 2}").unwrap();
+    assert_eq!(editor.raw("meta"), Some("{y: 2}"));
+    assert_eq!(
+        editor.value("meta"),
+        None,
+        "a replaced container is never coerced into a scalar"
+    );
+
+    let before = editor.text().to_owned();
+    for invalid in [
+        "{y: 1}\nz: 2",
+        "&anchor {y: 1}",
+        "*alias",
+        "!tag {y: 1}",
+        "|",
+        "[y",
+    ] {
+        let error = editor.set_value("meta", invalid).unwrap_err();
+        assert!(!error.is_empty(), "{invalid:?} must be refused");
+        assert_eq!(
+            editor.text(),
+            before,
+            "{invalid:?} must not change the document"
+        );
+    }
+    editor.set_value("matrix", "[[3]]").unwrap();
+    assert_eq!(editor.raw("matrix"), Some("[[3]]"));
+    assert_eq!(editor.value("matrix"), None);
+}
+
+#[test]
+fn empty_frontmatter_values_are_editable_even_when_required() {
+    let text = "---\ntitle:  # needs a value\nslug:\n---\n";
+    let mut editor = editor(
+        vec![
+            field("title", true, FieldKind::String { format: None }),
+            field("slug", false, FieldKind::String { format: None }),
+        ],
+        text,
+    );
+    assert!(editor.control("title").unwrap().editable);
+    assert!(editor.control("title").unwrap().present);
+
+    let updated = editor.set_value("title", "A value").unwrap();
+    assert_eq!(
+        updated,
+        "---\ntitle: A value  # needs a value\nslug:\n---\n"
+    );
+    assert_eq!(
+        editor.value("title"),
+        Some(FrontmatterValue::String("A value".to_owned()))
+    );
+
+    // A required field with an empty value can be fixed even though it cannot be
+    // removed.
+    assert!(editor.remove_field("title").is_err());
+    editor.set_value("slug", "a-slug").unwrap();
+    assert_eq!(
+        editor.value("slug"),
+        Some(FrontmatterValue::String("a-slug".to_owned()))
+    );
+}
+
+#[test]
+fn absent_fields_insert_a_frontmatter_block_when_none_exists() {
+    let mut editor = editor(
+        vec![
+            field("title", true, FieldKind::String { format: None }),
+            field(
+                "tags",
+                false,
+                FieldKind::Array {
+                    items: Box::new(FieldKind::String { format: None }),
+                },
+            ),
+        ],
+        "# Heading\n\nBody\n",
+    );
+    editor.set_value("title", "Hello").unwrap();
+    let text = editor.add_item("tags", "a,b").unwrap();
+    assert_eq!(
+        text,
+        "---\ntitle: Hello\ntags: ['a,b']\n---\n\n# Heading\n\nBody\n"
+    );
+    assert_eq!(
+        editor.items("tags"),
+        vec![FrontmatterValue::String("a,b".to_owned())],
+        "the inserted flow item must not split at the comma"
+    );
+}
+
+#[test]
+fn null_list_field_accepts_its_first_item() {
+    for source in ["---\ntags:\n---\nBody\n", "---\ntags: null\n---\nBody\n"] {
+        let mut editor = editor(
+            vec![field(
+                "tags",
+                false,
+                FieldKind::Array {
+                    items: Box::new(FieldKind::String { format: None }),
+                },
+            )],
+            source,
+        );
+        let text = editor.add_item("tags", "first").unwrap();
+        assert_eq!(text, "---\ntags: [first]\n---\nBody\n", "{source:?}");
+        assert_eq!(
+            editor.items("tags"),
+            vec![FrontmatterValue::String("first".to_owned())],
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn sequence_display_keeps_true_indices_for_null_items() {
+    let editor = editor(
+        vec![field(
+            "tags",
+            false,
+            FieldKind::Array {
+                items: Box::new(FieldKind::String { format: None }),
+            },
+        )],
+        "---\ntags: [a, null, b]\n---\n",
+    );
+    let display: Vec<(usize, String)> = sequence_display(&editor, "tags")
+        .into_iter()
+        .map(|(index, item)| (index, item.to_string()))
+        .collect();
+    assert_eq!(
+        display,
+        vec![(0, "a".to_owned()), (2, "b".to_owned())],
+        "a hidden null item must not shift the indices of later chips"
+    );
+    let mut editor = editor;
+    editor.remove_item("tags", 2).unwrap();
+    assert_eq!(
+        editor.text(),
+        "---\ntags: [a, null]\n---\n",
+        "removing the chip for `b` must remove `b`, not the null item"
+    );
+}
+
+#[test]
+fn dropdown_labels_show_values_outside_the_schema() {
+    let options = vec![(SharedString::from("Draft"), SharedString::from("draft"))];
+    assert_eq!(selected_option_label(&options, "draft"), "Draft");
+    assert_eq!(
+        selected_option_label(&options, "archived"),
+        "archived",
+        "an out-of-schema value must stay visible"
+    );
+    assert_eq!(selected_option_label(&options, ""), "Select…");
+}
+
+#[test]
 fn malformed_frontmatter_is_rejected_at_construction() {
     let result = FrontmatterEditor::new(
-        schema(vec![field(
+        Some(schema(vec![field(
             "title",
             false,
             FieldKind::String { format: None },
-        )]),
+        )])),
+        FieldMappings::default(),
         "---\ntitle: [unterminated\n---\n".to_owned(),
     );
     assert!(result.is_err());
@@ -417,7 +708,7 @@ async fn form_entity_renders_controls_and_applies_edits(cx: &mut gpui_kit::TestA
         }
     }
 
-    let events: Arc<Mutex<Vec<(String, FrontmatterValue)>>> = Arc::new(Mutex::new(Vec::new()));
+    let events: Arc<Mutex<Vec<FrontmatterEdit>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = events.clone();
 
     let (handle, form) = cx.update(|cx| {
@@ -438,8 +729,13 @@ async fn form_entity_renders_controls_and_applies_edits(cx: &mut gpui_kit::TestA
             ]);
             form.update(cx, |form, cx| {
                 form.set_document(
-                    schema,
-                    "---\ntitle: Hi\ndraft: false\n---\n".to_owned(),
+                    FrontmatterDocument {
+                        schema: Some(schema),
+                        mappings: FieldMappings::default(),
+                        references: Arc::new(ReferenceCatalog::new()),
+                        root: None,
+                        text: "---\ntitle: Hi\ndraft: false\n---\n".to_owned(),
+                    },
                     window,
                     cx,
                 );
@@ -450,11 +746,8 @@ async fn form_entity_renders_controls_and_applies_edits(cx: &mut gpui_kit::TestA
             cx.new(|cx| {
                 let sub = cx.subscribe(
                     &subscriber,
-                    move |_host, _form, event: &FrontmatterChanged, _cx| {
-                        recorder
-                            .lock()
-                            .unwrap()
-                            .push((event.path.clone(), event.value.clone()));
+                    move |_host, _form, event: &FrontmatterEdit, _cx| {
+                        recorder.lock().unwrap().push(event.clone());
                     },
                 );
                 Host {
@@ -481,16 +774,291 @@ async fn form_entity_renders_controls_and_applies_edits(cx: &mut gpui_kit::TestA
         form.read_with(cx, |form, _| form.editor().unwrap().text().to_owned())
             .contains("title: New")
     );
-    // The form emits a targeted (path, value) change, never a whole-document text.
+    // The form emits a targeted path edit, never a whole-document text.
     assert_eq!(
         events.lock().unwrap().as_slice(),
-        &[(
-            "title".to_owned(),
-            FrontmatterValue::String("New".to_owned())
-        )]
+        &[FrontmatterEdit::Scalar {
+            path: "title".to_owned(),
+            value: FrontmatterValue::String("New".to_owned()),
+            present: true,
+        }]
     );
 
-    // A read-only field emits nothing.
+    // A list control refuses a whole-value replacement and emits nothing.
     form.update(cx, |form, cx| form.apply_value("tags", "[a]", cx));
     assert_eq!(events.lock().unwrap().len(), 1);
+}
+
+#[gpui_kit::test]
+async fn copy_as_slug_copies_without_touching_the_document(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::{WindowOptions, base::Root, test::TestWindowExt};
+
+    struct Host {
+        form: Entity<FrontmatterForm>,
+    }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.form.clone()
+        }
+    }
+
+    let text = "---\ntitle: Hello, World!\ndescription: Keep me\n---\n\n# Body\n";
+    let (handle, form) = cx.update(|cx| {
+        gpui_kit::init(cx);
+        let mut created = None;
+        let (handle, _host) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            let form = cx.new(FrontmatterForm::new);
+            form.update(cx, |form, cx| {
+                form.set_document(
+                    FrontmatterDocument {
+                        schema: Some(schema(vec![
+                            field("title", true, FieldKind::String { format: None }),
+                            field("description", false, FieldKind::String { format: None }),
+                            field("slug", false, FieldKind::String { format: None }),
+                        ])),
+                        mappings: FieldMappings::default(),
+                        references: Arc::new(ReferenceCatalog::new()),
+                        root: None,
+                        text: text.to_owned(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+            created = Some(form.clone());
+            cx.new(|_| Host { form: form.clone() })
+        })
+        .unwrap();
+        (handle.downcast::<Root>().unwrap(), created.unwrap())
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+    })
+    .unwrap();
+
+    form.update(cx, |form, cx| form.copy_slug(cx));
+    let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(copied.as_deref(), Some("hello-world"));
+    assert_eq!(
+        form.read_with(cx, |form, _| form.editor().unwrap().text().to_owned()),
+        text,
+        "copy as slug must not edit the document"
+    );
+}
+
+#[gpui_kit::test]
+async fn form_renders_the_typed_control_for_every_family(cx: &mut gpui_kit::TestAppContext) {
+    use astrolith_workspace::ReferenceOption;
+    use gpui_kit::{WindowOptions, base::Root, test::TestWindowExt};
+
+    struct Host {
+        form: Entity<FrontmatterForm>,
+    }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.form.clone()
+        }
+    }
+
+    let mut catalog = ReferenceCatalog::new();
+    catalog.insert(
+        "authors".to_owned(),
+        vec![ReferenceOption {
+            value: "ada".to_owned(),
+            label: "Ada Lovelace".to_owned(),
+        }],
+    );
+    let text = concat!(
+        "---\n",
+        "title: T\n",
+        "score: 1.5\n",
+        "count: 2\n",
+        "draft: false\n",
+        "published: 2024-01-01\n",
+        "cover: images/cover.png\n",
+        "author: ada\n",
+        "related:\n  - ada\n",
+        "tags: [a, b]\n",
+        "status: archived\n",
+        "seo:\n  socialImage: images/social.png\n",
+        "meta: {a: b}\n",
+        "fixed: x\n",
+        "---\n",
+    );
+    let schema = schema(vec![
+        field("title", true, FieldKind::String { format: None }),
+        field("score", false, FieldKind::Number),
+        field("count", false, FieldKind::Integer),
+        field("draft", false, FieldKind::Boolean),
+        field("published", false, FieldKind::Date),
+        field("cover", false, FieldKind::Image),
+        field(
+            "author",
+            true,
+            FieldKind::Reference {
+                collections: vec!["authors".to_owned()],
+            },
+        ),
+        field(
+            "related",
+            false,
+            FieldKind::Array {
+                items: Box::new(FieldKind::Reference {
+                    collections: vec!["authors".to_owned()],
+                }),
+            },
+        ),
+        field(
+            "tags",
+            false,
+            FieldKind::Array {
+                items: Box::new(FieldKind::String { format: None }),
+            },
+        ),
+        field(
+            "status",
+            false,
+            FieldKind::Enum {
+                values: vec![Value::String("draft".into()), Value::String("live".into())],
+            },
+        ),
+        field(
+            "seo",
+            false,
+            FieldKind::Object {
+                fields: vec![field("socialImage", false, FieldKind::Image)],
+            },
+        ),
+        field(
+            "meta",
+            false,
+            FieldKind::Record {
+                value: Box::new(FieldKind::String { format: None }),
+            },
+        ),
+        field(
+            "fixed",
+            false,
+            FieldKind::Literal {
+                value: Value::String("x".into()),
+            },
+        ),
+    ]);
+
+    let (handle, form) = cx.update(|cx| {
+        gpui_kit::init(cx);
+        let mut created = None;
+        let (handle, _host) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            let form = cx.new(FrontmatterForm::new);
+            form.update(cx, |form, cx| {
+                form.set_document(
+                    FrontmatterDocument {
+                        schema: Some(schema),
+                        mappings: FieldMappings::default(),
+                        references: Arc::new(catalog),
+                        root: None,
+                        text: text.to_owned(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+            created = Some(form.clone());
+            cx.new(|_| Host { form: form.clone() })
+        })
+        .unwrap();
+        (handle.downcast::<Root>().unwrap(), created.unwrap())
+    });
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let paths = form.read_with(cx, |form, _| form.control_paths());
+        assert_eq!(
+            paths,
+            vec![
+                "title",
+                "score",
+                "count",
+                "draft",
+                "published",
+                "cover",
+                "author",
+                "related",
+                "tags",
+                "status",
+                "seo",
+                "seo.socialImage",
+                "meta",
+                "fixed",
+            ]
+        );
+        let kinds = form.read_with(cx, |form, _| form.control_kinds());
+        assert_eq!(
+            kinds,
+            vec![
+                "text",
+                "number",
+                "integer",
+                "boolean",
+                "date",
+                "image",
+                "reference",
+                "reference list",
+                "tags",
+                "enum",
+                "object",
+                "image",
+                "raw yaml",
+                "literal",
+            ],
+            "every schema family must keep its own control"
+        );
+        let index = |path: &str| {
+            paths
+                .iter()
+                .position(|candidate| candidate == path)
+                .unwrap()
+        };
+
+        for image in ["cover", "seo.socialImage"] {
+            assert!(
+                window
+                    .try_find(("frontmatter-image-pick", index(image)))
+                    .is_some(),
+                "the image control for {image} must render its picker"
+            );
+        }
+        assert!(
+            window
+                .try_find(("frontmatter-reference", index("author")))
+                .is_some(),
+            "a single reference must render its labelled dropdown"
+        );
+        assert!(
+            window
+                .try_find(("frontmatter-reference-add", index("related")))
+                .is_some(),
+            "an array reference must render its add menu"
+        );
+        assert!(
+            window
+                .try_find(("frontmatter-bool", index("draft")))
+                .is_some(),
+            "a boolean must render its toggle"
+        );
+        assert!(
+            window
+                .try_find(("frontmatter-enum", index("status")))
+                .is_some(),
+            "an enum must render its dropdown"
+        );
+        assert!(
+            window
+                .try_find(("frontmatter-chip-remove", index("tags") * 64))
+                .is_some(),
+            "a tags control must render one removable chip per item"
+        );
+    })
+    .unwrap();
 }

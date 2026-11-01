@@ -365,6 +365,9 @@ fn field(name: &str, required: bool, kind: FieldKind) -> Field {
         required,
         default: None,
         kind,
+        description: None,
+        constraints: astrolith_astro::schema::FieldConstraints::default(),
+        order: 0,
     }
 }
 
@@ -386,11 +389,35 @@ fn creation_plan_generates_required_defaults_and_reports_the_rest() {
                 collections: vec!["assets".into()],
             },
         ),
+        field("hero", true, FieldKind::Image),
         field(
             "tags",
             true,
             FieldKind::Array {
                 items: Box::new(FieldKind::String { format: None }),
+            },
+        ),
+        field(
+            "links",
+            true,
+            FieldKind::Array {
+                items: Box::new(FieldKind::Reference {
+                    collections: vec!["posts".into()],
+                }),
+            },
+        ),
+        field(
+            "screenshots",
+            true,
+            FieldKind::Array {
+                items: Box::new(FieldKind::Image),
+            },
+        ),
+        field(
+            "meta",
+            true,
+            FieldKind::Record {
+                value: Box::new(FieldKind::String { format: None }),
             },
         ),
     ]);
@@ -413,13 +440,34 @@ fn creation_plan_generates_required_defaults_and_reports_the_rest() {
             },
         ]
     );
-    assert_eq!(plan.inputs.len(), 1);
-    assert_eq!(plan.inputs[0].name, "subtitle");
-    assert_eq!(plan.inputs[0].kind, CreationInputKind::Text);
+    // Required fields the schema only describes loosely are collected before
+    // anything is written, with a control family per kind.
     assert_eq!(
-        plan.unsupported,
-        vec!["cover".to_owned(), "tags".to_owned()]
+        plan.inputs
+            .iter()
+            .map(|input| (input.name.as_str(), input.kind.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("subtitle", CreationInputKind::Text),
+            (
+                "cover",
+                CreationInputKind::Reference {
+                    collections: vec!["assets".into()],
+                },
+            ),
+            ("hero", CreationInputKind::Image),
+            ("tags", CreationInputKind::Tags),
+            (
+                "links",
+                CreationInputKind::ReferenceList {
+                    collections: vec!["posts".into()],
+                },
+            ),
+            ("screenshots", CreationInputKind::ImageList),
+        ]
     );
+    // Only a container with no creation control stays unsupported.
+    assert_eq!(plan.unsupported, vec!["meta".to_owned()]);
     assert!(!plan.writes_immediately());
 }
 
@@ -489,4 +537,43 @@ fn creation_inputs_parse_and_reject_invalid_values() {
         ScalarValue::String("live".into())
     );
     assert!(operations::parse_input(&choice, "other").is_err());
+
+    let image = operations::CreationInput {
+        name: "hero".into(),
+        kind: CreationInputKind::Image,
+    };
+    assert!(operations::parse_input(&image, "  ").is_err());
+    assert_eq!(
+        operations::parse_input(&image, " images/hero.png ").unwrap(),
+        ScalarValue::String("images/hero.png".into())
+    );
+    let reference = operations::CreationInput {
+        name: "cover".into(),
+        kind: CreationInputKind::Reference {
+            collections: vec!["assets".into()],
+        },
+    };
+    assert!(operations::parse_input(&reference, "").is_err());
+    assert_eq!(
+        operations::parse_input(&reference, "ada").unwrap(),
+        ScalarValue::String("ada".into())
+    );
+    let tags = operations::CreationInput {
+        name: "tags".into(),
+        kind: CreationInputKind::Tags,
+    };
+    assert_eq!(
+        operations::parse_input(&tags, " news, rust ,, ").unwrap(),
+        ScalarValue::List(vec!["news".into(), "rust".into()])
+    );
+    let related = operations::CreationInput {
+        name: "related".into(),
+        kind: CreationInputKind::ReferenceList {
+            collections: vec!["posts".into()],
+        },
+    };
+    assert_eq!(
+        operations::parse_input(&related, "a, b").unwrap(),
+        ScalarValue::List(vec!["a".into(), "b".into()])
+    );
 }

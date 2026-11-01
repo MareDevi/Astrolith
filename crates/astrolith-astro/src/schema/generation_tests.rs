@@ -219,6 +219,138 @@ fn freshness_compares_schema_and_config_timestamps() {
 }
 
 #[test]
+fn freshness_rejects_superseded_generation_results() {
+    let mut freshness = SchemaFreshness::default();
+    assert_eq!(freshness.installed(), None);
+
+    let SchemaRefresh::Regenerate { request: first } = freshness.reconcile(10) else {
+        panic!("the initial fingerprint must regenerate");
+    };
+    assert_eq!(
+        freshness.reconcile(10),
+        SchemaRefresh::Regenerate { request: first },
+        "polling the same fingerprint reuses the in-flight request"
+    );
+
+    let SchemaRefresh::Regenerate { request: second } = freshness.reconcile(20) else {
+        panic!("a changed fingerprint must regenerate");
+    };
+    assert_ne!(first, second);
+    assert!(
+        !freshness.accept(first, 10),
+        "a result superseded by a newer fingerprint must be dropped"
+    );
+    assert_eq!(freshness.installed(), None);
+    assert!(freshness.accept(second, 20));
+    assert_eq!(freshness.installed(), Some(20));
+    assert_eq!(freshness.reconcile(20), SchemaRefresh::Current);
+
+    let SchemaRefresh::Regenerate { request: third } = freshness.reconcile(30) else {
+        panic!("a changed fingerprint must regenerate");
+    };
+    freshness.reject(third);
+    assert_eq!(
+        freshness.reconcile(30),
+        SchemaRefresh::Current,
+        "a failed generation is not retried until the fingerprint changes"
+    );
+    assert!(
+        !freshness.accept(third, 30),
+        "a rejected request stays stale"
+    );
+
+    let SchemaRefresh::Regenerate { request: fourth } = freshness.reconcile(40) else {
+        panic!("a new fingerprint after a failure must regenerate");
+    };
+    assert!(freshness.accept(fourth, 40));
+    assert_eq!(freshness.reconcile(40), SchemaRefresh::Current);
+}
+
+#[test]
+fn freshness_checks_the_pending_fingerprint_before_installing() {
+    let mut freshness = SchemaFreshness::default();
+    let SchemaRefresh::Regenerate { request } = freshness.reconcile(10) else {
+        panic!("the initial fingerprint must regenerate");
+    };
+    assert!(
+        !freshness.accept(request, 11),
+        "a fingerprint that changed while generating must not be installed"
+    );
+    assert_eq!(freshness.installed(), None);
+    let SchemaRefresh::Regenerate { request: retry } = freshness.reconcile(11) else {
+        panic!("the changed fingerprint must regenerate again");
+    };
+    assert_ne!(request, retry);
+    assert!(freshness.accept(retry, 11));
+    assert_eq!(freshness.installed(), Some(11));
+    assert_eq!(freshness.reconcile(11), SchemaRefresh::Current);
+}
+
+#[test]
+fn freshness_retries_a_failed_fingerprint_after_reverting_inputs() {
+    let mut freshness = SchemaFreshness::default();
+    let SchemaRefresh::Regenerate { request: first } = freshness.reconcile(1) else {
+        panic!("the initial fingerprint must regenerate");
+    };
+    assert!(freshness.accept(first, 1));
+
+    let SchemaRefresh::Regenerate { request: failing } = freshness.reconcile(2) else {
+        panic!("a changed fingerprint must regenerate");
+    };
+    freshness.reject(failing);
+    assert_eq!(
+        freshness.reconcile(2),
+        SchemaRefresh::Current,
+        "the failing fingerprint must not be retried every poll"
+    );
+
+    // Reverting the inputs to the installed state clears the failure, so going
+    // back to the failing fingerprint regenerates instead of staying stuck.
+    assert_eq!(freshness.reconcile(1), SchemaRefresh::Current);
+    assert!(
+        matches!(freshness.reconcile(2), SchemaRefresh::Regenerate { .. }),
+        "a failure must not outlive a return to the installed inputs"
+    );
+}
+
+#[test]
+fn schema_fingerprint_tracks_content_not_timestamps() {
+    use std::time::{Duration, SystemTime};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join(".astro/collections")).unwrap();
+    let schema = root.join(".astro/collections/docs.schema.json");
+    fs::write(&schema, "{\"type\":\"object\"}").unwrap();
+    let config = root.join("content.config.mjs");
+    fs::write(&config, "// config\n").unwrap();
+
+    let initial = schema_fingerprint(root).unwrap();
+
+    let file = fs::File::options().write(true).open(&schema).unwrap();
+    file.set_times(
+        fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(5_000)),
+    )
+    .unwrap();
+    assert_eq!(
+        schema_fingerprint(root).unwrap(),
+        initial,
+        "a new modification time with identical bytes is not a change"
+    );
+
+    fs::write(&schema, "{\"type\":\"array\"}").unwrap();
+    let changed = schema_fingerprint(root).unwrap();
+    assert_ne!(changed, initial, "changed schema bytes must change it");
+
+    fs::write(&config, "// changed config\n").unwrap();
+    assert_ne!(
+        schema_fingerprint(root).unwrap(),
+        changed,
+        "changed content config bytes must change it"
+    );
+}
+
+#[test]
 #[ignore = "requires ASTROLITH_FIXTURE_PROJECT pointing at an installed Astro project with a schema"]
 fn installed_project_generates_schemas_end_to_end() {
     let Ok(root) = std::env::var("ASTROLITH_FIXTURE_PROJECT") else {

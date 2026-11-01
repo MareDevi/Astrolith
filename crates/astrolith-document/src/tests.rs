@@ -1,5 +1,7 @@
 use crate::buffer::DocumentError;
-use crate::{FrontmatterValue, LineEnding, parse_document, serialize_document};
+use crate::{
+    FieldShape, FrontmatterValue, LineEnding, SequenceStyle, parse_document, serialize_document,
+};
 
 const RICH: &str = concat!(
     "---\r\n",
@@ -278,15 +280,29 @@ fn opaque_flow_field_patch_is_refused() {
 }
 
 #[test]
-fn null_leaf_is_readable_but_not_editable() {
+fn null_leaf_patch_inserts_the_value_before_a_trailing_comment() {
     let document = parse_document("---\ntitle:\n---\n").unwrap();
     assert_eq!(document.field("title"), Some(&FrontmatterValue::Null));
 
-    let mut editable = parse_document("---\ntitle:\n---\n").unwrap();
-    assert!(matches!(
-        editable.set_field("title", FrontmatterValue::String("x".to_owned())),
-        Err(DocumentError::UnsupportedPatch { .. })
-    ));
+    let mut plain = parse_document("---\ntitle:\n---\n").unwrap();
+    plain
+        .set_field("title", FrontmatterValue::String("Chapter 1".to_owned()))
+        .unwrap();
+    let output = serialize_document(&plain).unwrap();
+    assert_eq!(output, "---\ntitle: Chapter 1\n---\n");
+    assert_eq!(
+        parse_document(&output).unwrap().field("title"),
+        Some(&FrontmatterValue::String("Chapter 1".to_owned()))
+    );
+
+    let mut commented = parse_document("---\ntitle:  # keep me\n---\n").unwrap();
+    commented
+        .set_field("title", FrontmatterValue::Integer(3))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&commented).unwrap(),
+        "---\ntitle: 3  # keep me\n---\n"
+    );
 }
 
 #[test]
@@ -304,4 +320,665 @@ fn control_character_patch_is_refused() {
         document.set_field("title", FrontmatterValue::String("a\u{1}b".to_owned())),
         Err(DocumentError::UnsupportedPatch { .. })
     ));
+}
+
+fn string(text: &str) -> FrontmatterValue {
+    FrontmatterValue::String(text.to_owned())
+}
+
+#[test]
+fn fields_expose_shapes_and_flow_raw_in_source_order() {
+    let source = "---\ntitle: x\ntags: [a, b]\nauthor:\n  name: Ada\nbody: |\n  raw\n---\n";
+    let document = parse_document(source).unwrap();
+    let shapes: Vec<(&str, FieldShape)> = document
+        .fields()
+        .iter()
+        .map(|field| (field.path.as_str(), field.shape))
+        .collect();
+    assert_eq!(
+        shapes,
+        vec![
+            ("title", FieldShape::Scalar),
+            ("tags", FieldShape::Sequence),
+            ("author", FieldShape::Mapping),
+            ("author.name", FieldShape::Scalar),
+            ("body", FieldShape::BlockScalar),
+        ]
+    );
+    let tags = document.field_info("tags").unwrap();
+    assert_eq!(tags.raw.as_deref(), Some("[a, b]"));
+    assert_eq!(tags.items, Some(vec![string("a"), string("b")]));
+    assert_eq!(tags.sequence_style, Some(SequenceStyle::Flow));
+    assert!(document.field("tags").is_none());
+    assert!(document.field("author").is_none());
+    assert!(document.has_field("author.name"));
+    assert!(!document.has_field("missing"));
+}
+
+#[test]
+fn block_sequence_items_are_readable() {
+    let source = "---\ntags:\n  - one\n  - \"two\"  # note\nnested:\n  - key: 1\n---\n";
+    let document = parse_document(source).unwrap();
+    let tags = document.field_info("tags").unwrap();
+    assert_eq!(tags.shape, FieldShape::Sequence);
+    assert_eq!(tags.sequence_style, Some(SequenceStyle::Block));
+    assert_eq!(tags.items, Some(vec![string("one"), string("two")]));
+    assert_eq!(tags.raw.as_deref(), Some("- one\n- \"two\"  # note"));
+    assert!(document.field("tags").is_none());
+    let nested = document.field_info("nested").unwrap();
+    assert_eq!(nested.shape, FieldShape::Sequence);
+    assert_eq!(nested.items, None);
+    assert_eq!(
+        nested.raw.as_deref(),
+        Some("- key: 1"),
+        "a block sequence of mappings keeps its raw text for a raw editor"
+    );
+}
+
+#[test]
+fn flow_sequence_with_nested_items_is_not_item_editable() {
+    let document = parse_document("---\na: [x, \"y\", 3]\nb: [{k: 1}]\n---\n").unwrap();
+    let a = document.field_info("a").unwrap();
+    assert_eq!(
+        a.items,
+        Some(vec![string("x"), string("y"), FrontmatterValue::Integer(3)])
+    );
+    assert_eq!(a.raw.as_deref(), Some("[x, \"y\", 3]"));
+    let b = document.field_info("b").unwrap();
+    assert_eq!(b.shape, FieldShape::Sequence);
+    assert_eq!(b.items, None);
+    assert_eq!(
+        b.raw.as_deref(),
+        Some("[{k: 1}]"),
+        "an opaque flow sequence keeps its single-line raw text"
+    );
+}
+
+#[test]
+fn sequence_documents_round_trip_exactly() {
+    let source = "---\r\ntags:\r\n  - one  # c\r\n  - \"two\"\r\nflow: [a, b]\r\n---\r\nBody\r\n";
+    let document = parse_document(source).unwrap();
+    assert_eq!(serialize_document(&document).unwrap(), source);
+}
+
+#[test]
+fn insert_absent_top_level_field_preserves_bytes() {
+    let source = "---\ntitle: x\ntags:\n  - a\n---\nbody\n";
+    let mut document = parse_document(source).unwrap();
+    document
+        .insert_field("draft", FrontmatterValue::Boolean(false))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&document).unwrap(),
+        "---\ntitle: x\ntags:\n  - a\ndraft: false\n---\nbody\n"
+    );
+
+    let mut crlf = parse_document("---\r\ntitle: x\r\n---\r\n").unwrap();
+    crlf.insert_field("slug", string("s")).unwrap();
+    assert_eq!(
+        serialize_document(&crlf).unwrap(),
+        "---\r\ntitle: x\r\nslug: s\r\n---\r\n"
+    );
+}
+
+#[test]
+fn insert_absent_sequence_field_is_lossless() {
+    let mut document = parse_document("---\ntitle: x\n---\n").unwrap();
+    document
+        .insert_sequence("tags", &[string("a"), string("b c")])
+        .unwrap();
+    let output = serialize_document(&document).unwrap();
+    assert_eq!(output, "---\ntitle: x\ntags: [a, b c]\n---\n");
+    assert_eq!(
+        parse_document(&output)
+            .unwrap()
+            .field_info("tags")
+            .unwrap()
+            .items,
+        Some(vec![string("a"), string("b c")])
+    );
+
+    let mut empty = parse_document("---\ntitle: x\n---\n").unwrap();
+    empty.insert_sequence("tags", &[]).unwrap();
+    assert_eq!(
+        serialize_document(&empty).unwrap(),
+        "---\ntitle: x\ntags: []\n---\n"
+    );
+
+    let mut missing_parent = parse_document("---\ntitle: x\n---\n").unwrap();
+    assert!(matches!(
+        missing_parent.insert_sequence("author.tags", &[string("a")]),
+        Err(DocumentError::UnsupportedPatch { .. })
+    ));
+}
+
+#[test]
+fn insert_absent_nested_field_uses_parent_indent() {
+    let mut document = parse_document("---\nauthor:\n  name: Ada\n---\n").unwrap();
+    document
+        .insert_field("author.email", string("a@b"))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&document).unwrap(),
+        "---\nauthor:\n  name: Ada\n  email: a@b\n---\n"
+    );
+
+    let mut duplicate = parse_document("---\nauthor:\n  name: Ada\n---\n").unwrap();
+    assert!(matches!(
+        duplicate.insert_field("author.name", string("x")),
+        Err(DocumentError::UnknownField { .. })
+    ));
+}
+
+#[test]
+fn remove_scalar_nested_block_and_empty_parent() {
+    let mut top = parse_document("---\ntitle: x\nauthor:\n  name: Ada\n---\n").unwrap();
+    top.remove_field("title").unwrap();
+    assert_eq!(
+        serialize_document(&top).unwrap(),
+        "---\nauthor:\n  name: Ada\n---\n"
+    );
+
+    let mut nested = parse_document("---\nauthor:\n  name: Ada\n  email: a@b\n---\n").unwrap();
+    nested.remove_field("author.name").unwrap();
+    assert_eq!(
+        serialize_document(&nested).unwrap(),
+        "---\nauthor:\n  email: a@b\n---\n"
+    );
+
+    let mut only = parse_document("---\nauthor:\n  name: Ada\n---\n").unwrap();
+    only.remove_field("author.name").unwrap();
+    assert_eq!(serialize_document(&only).unwrap(), "---\nauthor:\n---\n");
+
+    let mut whole = parse_document("---\nauthor:\n  name: Ada\n---\n").unwrap();
+    whole.remove_field("author").unwrap();
+    assert_eq!(serialize_document(&whole).unwrap(), "---\n---\n");
+}
+
+const SEQ: &str = "---\ntags:\n  - one\n  - two  # keep\n  - 'three'\n---\n";
+
+#[test]
+fn block_sequence_insert_start_middle_and_end() {
+    let mut start = parse_document(SEQ).unwrap();
+    start
+        .insert_sequence_item("tags", 0, string("zero"))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&start).unwrap(),
+        "---\ntags:\n  - zero\n  - one\n  - two  # keep\n  - 'three'\n---\n"
+    );
+
+    let mut middle = parse_document(SEQ).unwrap();
+    middle
+        .insert_sequence_item("tags", 2, string("zero"))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&middle).unwrap(),
+        "---\ntags:\n  - one\n  - two  # keep\n  - zero\n  - 'three'\n---\n"
+    );
+
+    let mut end = parse_document(SEQ).unwrap();
+    end.insert_sequence_item("tags", 3, FrontmatterValue::Integer(4))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&end).unwrap(),
+        "---\ntags:\n  - one\n  - two  # keep\n  - 'three'\n  - 4\n---\n"
+    );
+
+    let mut crlf = parse_document("---\r\ntags:\r\n  - a\r\n  - b\r\n---\r\n").unwrap();
+    crlf.insert_sequence_item("tags", 2, string("c")).unwrap();
+    assert_eq!(
+        serialize_document(&crlf).unwrap(),
+        "---\r\ntags:\r\n  - a\r\n  - b\r\n  - c\r\n---\r\n"
+    );
+
+    let mut out_of_range = parse_document(SEQ).unwrap();
+    assert!(matches!(
+        out_of_range.insert_sequence_item("tags", 4, string("x")),
+        Err(DocumentError::UnsupportedPatch { .. })
+    ));
+}
+
+#[test]
+fn block_sequence_remove_and_set_preserve_other_items() {
+    let mut middle = parse_document(SEQ).unwrap();
+    middle.remove_sequence_item("tags", 1).unwrap();
+    assert_eq!(
+        serialize_document(&middle).unwrap(),
+        "---\ntags:\n  - one\n  - 'three'\n---\n"
+    );
+
+    let mut last = parse_document(SEQ).unwrap();
+    last.remove_sequence_item("tags", 2).unwrap();
+    assert_eq!(
+        serialize_document(&last).unwrap(),
+        "---\ntags:\n  - one\n  - two  # keep\n---\n"
+    );
+
+    let mut set = parse_document(SEQ).unwrap();
+    set.set_sequence_item("tags", 2, FrontmatterValue::Integer(4))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&set).unwrap(),
+        "---\ntags:\n  - one\n  - two  # keep\n  - 4\n---\n"
+    );
+
+    let mut only = parse_document("---\ntags:\n  - one\nafter: x\n---\n").unwrap();
+    only.remove_sequence_item("tags", 0).unwrap();
+    assert_eq!(
+        serialize_document(&only).unwrap(),
+        "---\ntags: []\nafter: x\n---\n"
+    );
+
+    let mut following = parse_document("---\ntags:\n  - one\n  - two\nafter: x\n---\n").unwrap();
+    following.remove_sequence_item("tags", 1).unwrap();
+    assert_eq!(
+        serialize_document(&following).unwrap(),
+        "---\ntags:\n  - one\nafter: x\n---\n"
+    );
+
+    let mut out_of_range = parse_document(SEQ).unwrap();
+    assert!(matches!(
+        out_of_range.remove_sequence_item("tags", 3),
+        Err(DocumentError::UnsupportedPatch { .. })
+    ));
+}
+
+#[test]
+fn validate_value_accepts_and_refuses_inline_yaml() {
+    use crate::yaml::validate_value;
+    for good in ["[a, b]", "{x: 1}", "\"quoted\"", "plain", "3"] {
+        assert!(validate_value(good).is_ok(), "{good:?} must be valid");
+    }
+    for bad in ["", "[a", "a: [1]\nb: 2", "&a x", "*a", "!tag x", "|"] {
+        assert!(validate_value(bad).is_err(), "{bad:?} must be refused");
+    }
+}
+
+#[test]
+fn flow_sequence_edits_preserve_spacing() {
+    let mut insert = parse_document("---\ntags: [a, \"b\", 3]\n---\n").unwrap();
+    insert.insert_sequence_item("tags", 1, string("x")).unwrap();
+    assert_eq!(
+        serialize_document(&insert).unwrap(),
+        "---\ntags: [a, x, \"b\", 3]\n---\n"
+    );
+
+    let mut append = parse_document("---\ntags: [a, \"b\"]\n---\n").unwrap();
+    append.insert_sequence_item("tags", 2, string("c")).unwrap();
+    assert_eq!(
+        serialize_document(&append).unwrap(),
+        "---\ntags: [a, \"b\", c]\n---\n"
+    );
+
+    let mut compact = parse_document("---\ntags: [a,b]\n---\n").unwrap();
+    compact
+        .insert_sequence_item("tags", 2, string("c"))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&compact).unwrap(),
+        "---\ntags: [a,b,c]\n---\n"
+    );
+
+    let mut remove = parse_document("---\ntags: [a, \"b\", 3]\n---\n").unwrap();
+    remove.remove_sequence_item("tags", 1).unwrap();
+    assert_eq!(
+        serialize_document(&remove).unwrap(),
+        "---\ntags: [a, 3]\n---\n"
+    );
+
+    let mut remove_last = parse_document("---\ntags: [a, \"b\"]\n---\n").unwrap();
+    remove_last.remove_sequence_item("tags", 1).unwrap();
+    assert_eq!(
+        serialize_document(&remove_last).unwrap(),
+        "---\ntags: [a]\n---\n"
+    );
+
+    let mut remove_only = parse_document("---\ntags: [a]\n---\n").unwrap();
+    remove_only.remove_sequence_item("tags", 0).unwrap();
+    assert_eq!(
+        serialize_document(&remove_only).unwrap(),
+        "---\ntags: []\n---\n"
+    );
+
+    let mut empty = parse_document("---\ntags: []\n---\n").unwrap();
+    empty.insert_sequence_item("tags", 0, string("x")).unwrap();
+    assert_eq!(serialize_document(&empty).unwrap(), "---\ntags: [x]\n---\n");
+
+    let mut set = parse_document("---\ntags: [a, \"b\"]\n---\n").unwrap();
+    set.set_sequence_item("tags", 1, FrontmatterValue::Integer(7))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&set).unwrap(),
+        "---\ntags: [a, 7]\n---\n"
+    );
+}
+
+#[test]
+fn replace_raw_validates_yaml_and_limits_shapes() {
+    let mut document = parse_document("---\ntags: [a, b]\nmeta: {x: 1}\n---\n").unwrap();
+    document.replace_raw("tags", "[x, \"y\"]").unwrap();
+    document.replace_raw("meta", "{x: 2}").unwrap();
+    let output = serialize_document(&document).unwrap();
+    assert_eq!(output, "---\ntags: [x, \"y\"]\nmeta: {x: 2}\n---\n");
+    assert_eq!(
+        parse_document(&output)
+            .unwrap()
+            .field_info("tags")
+            .unwrap()
+            .items,
+        Some(vec![string("x"), string("y")])
+    );
+
+    for bad in ["[a", "a: [1]\nb: 2", "&a x", "*a", "!tag x"] {
+        let mut refused = parse_document("---\ntags: [a]\n---\n").unwrap();
+        assert!(
+            matches!(
+                refused.replace_raw("tags", bad),
+                Err(DocumentError::UnsupportedPatch { .. })
+            ),
+            "{bad:?} must be refused"
+        );
+    }
+
+    let mut scalar = parse_document("---\ntitle: x\n---\n").unwrap();
+    assert!(matches!(
+        scalar.replace_raw("title", "y"),
+        Err(DocumentError::UnsupportedPatch { .. })
+    ));
+
+    let mut block = parse_document("---\ntags:\n  - a\n---\n").unwrap();
+    block.replace_raw("tags", "- b").unwrap();
+    assert_eq!(
+        serialize_document(&block).unwrap(),
+        "---\ntags:\n  - b\n---\n"
+    );
+
+    let mut unknown = parse_document("---\ntags: [a]\n---\n").unwrap();
+    assert!(matches!(
+        unknown.replace_raw("missing", "[b]"),
+        Err(DocumentError::UnknownField { .. })
+    ));
+}
+
+#[test]
+fn sequence_edits_nested_in_a_simple_mapping_preserve_comments_and_crlf() {
+    let source =
+        "---\r\nauthor:\r\n  name: Ada  # who\r\n  links:  # keep\r\n    - a\r\n    - b\r\n---\r\n";
+    let mut insert = parse_document(source).unwrap();
+    insert
+        .insert_sequence_item("author.links", 2, string("c"))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&insert).unwrap(),
+        "---\r\nauthor:\r\n  name: Ada  # who\r\n  links:  # keep\r\n    - a\r\n    - b\r\n    - c\r\n---\r\n"
+    );
+
+    let mut remove = parse_document(source).unwrap();
+    remove.remove_sequence_item("author.links", 0).unwrap();
+    assert_eq!(
+        serialize_document(&remove).unwrap(),
+        "---\r\nauthor:\r\n  name: Ada  # who\r\n  links:  # keep\r\n    - b\r\n---\r\n"
+    );
+
+    let mut set = parse_document(source).unwrap();
+    set.set_sequence_item("author.links", 1, string("B"))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&set).unwrap(),
+        "---\r\nauthor:\r\n  name: Ada  # who\r\n  links:  # keep\r\n    - a\r\n    - B\r\n---\r\n"
+    );
+}
+
+#[test]
+fn replace_raw_preserves_a_trailing_comment() {
+    let mut flow = parse_document("---\nmeta: {x: 1}  # keep\n---\n").unwrap();
+    flow.replace_raw("meta", "{x: 2}").unwrap();
+    assert_eq!(
+        serialize_document(&flow).unwrap(),
+        "---\nmeta: {x: 2}  # keep\n---\n"
+    );
+}
+
+#[test]
+fn sequence_item_edits_refuse_non_scalar_items() {
+    let mut block = parse_document("---\nnested:\n  - key: 1\n---\n").unwrap();
+    assert_eq!(block.field_info("nested").unwrap().items, None);
+    assert!(matches!(
+        block.set_sequence_item("nested", 0, string("x")),
+        Err(DocumentError::UnsupportedPatch { .. })
+    ));
+    assert!(matches!(
+        block.insert_sequence_item("nested", 0, string("x")),
+        Err(DocumentError::UnsupportedPatch { .. })
+    ));
+    assert!(matches!(
+        block.remove_sequence_item("nested", 0),
+        Err(DocumentError::UnsupportedPatch { .. })
+    ));
+
+    let mut flow = parse_document("---\nb: [{k: 1}]\n---\n").unwrap();
+    assert!(matches!(
+        flow.insert_sequence_item("b", 0, string("x")),
+        Err(DocumentError::UnsupportedPatch { .. })
+    ));
+
+    let mut scalar = parse_document("---\ntitle: x\n---\n").unwrap();
+    assert!(matches!(
+        scalar.set_sequence_item("title", 0, string("x")),
+        Err(DocumentError::UnsupportedPatch { .. })
+    ));
+}
+
+#[test]
+fn null_list_fields_can_gain_their_first_item() {
+    for source in ["---\ntags:\n---\n", "---\ntags: null\n---\n"] {
+        let mut document = parse_document(source).unwrap();
+        document
+            .insert_sequence_item("tags", 0, string("a,b"))
+            .unwrap_or_else(|error| panic!("{source:?}: {error}"));
+        let output = serialize_document(&document).unwrap();
+        assert_eq!(output, "---\ntags: ['a,b']\n---\n", "{source:?}");
+
+        // A whole-sequence insert on the same null value is equally valid.
+        let mut whole = parse_document(source).unwrap();
+        whole
+            .insert_sequence("tags", &[string("x"), string("y")])
+            .unwrap_or_else(|error| panic!("{source:?}: {error}"));
+        assert_eq!(
+            serialize_document(&whole).unwrap(),
+            "---\ntags: [x, y]\n---\n",
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn flow_items_with_structure_characters_round_trip_as_one_item() {
+    // Absent field: every value must survive as exactly one item.
+    let mut absent = parse_document("---\ntitle: x\n---\n").unwrap();
+    absent
+        .insert_sequence(
+            "tags",
+            &[
+                string("a,b"),
+                string(" leading"),
+                string("[x]"),
+                string("#y"),
+            ],
+        )
+        .unwrap();
+    let output = serialize_document(&absent).unwrap();
+    assert_eq!(
+        parse_document(&output)
+            .unwrap()
+            .field_info("tags")
+            .unwrap()
+            .items,
+        Some(vec![
+            string("a,b"),
+            string(" leading"),
+            string("[x]"),
+            string("#y")
+        ]),
+        "a flow item carrying structure characters must not split or vanish"
+    );
+
+    // Empty flow sequence.
+    let mut empty = parse_document("---\ntags: []\n---\n").unwrap();
+    empty
+        .insert_sequence_item("tags", 0, string("a,b"))
+        .unwrap();
+    let output = serialize_document(&empty).unwrap();
+    assert_eq!(output, "---\ntags: ['a,b']\n---\n");
+
+    // Middle and end of an existing flow sequence.
+    let mut middle = parse_document("---\ntags: [x, y]\n---\n").unwrap();
+    middle
+        .insert_sequence_item("tags", 1, string("a,b"))
+        .unwrap();
+    let output = serialize_document(&middle).unwrap();
+    assert_eq!(
+        parse_document(&output)
+            .unwrap()
+            .field_info("tags")
+            .unwrap()
+            .items,
+        Some(vec![string("x"), string("a,b"), string("y")])
+    );
+
+    let mut end = parse_document("---\ntags: [x]\n---\n").unwrap();
+    end.insert_sequence_item("tags", 1, string("a,b")).unwrap();
+    assert_eq!(
+        serialize_document(&end).unwrap(),
+        "---\ntags: [x, 'a,b']\n---\n"
+    );
+
+    // Replacing one flow item keeps it a single item.
+    let mut set = parse_document("---\ntags: [x, y]\n---\n").unwrap();
+    set.set_sequence_item("tags", 1, string("a,b")).unwrap();
+    assert_eq!(
+        serialize_document(&set).unwrap(),
+        "---\ntags: [x, 'a,b']\n---\n"
+    );
+}
+
+#[test]
+fn insert_creates_a_frontmatter_block_when_the_document_has_none() {
+    let mut empty = parse_document("").unwrap();
+    empty
+        .insert_field("draft", FrontmatterValue::Boolean(true))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&empty).unwrap(),
+        "---\ndraft: true\n---\n\n"
+    );
+
+    let source = "# Title\n\nBody without frontmatter\n";
+    let mut body = parse_document(source).unwrap();
+    body.insert_sequence("tags", &[string("a")]).unwrap();
+    body.insert_field("draft", FrontmatterValue::Boolean(false))
+        .unwrap();
+    let output = serialize_document(&body).unwrap();
+    assert_eq!(
+        output,
+        format!("---\ntags: [a]\ndraft: false\n---\n\n{source}")
+    );
+    assert_eq!(
+        parse_document(&output).unwrap().body(),
+        format!("\n{source}"),
+        "the body bytes after the inserted block are untouched"
+    );
+
+    let mut bom = parse_document("\u{feff}Body\n").unwrap();
+    bom.insert_field("draft", FrontmatterValue::Boolean(true))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&bom).unwrap(),
+        "\u{feff}---\ndraft: true\n---\n\nBody\n",
+        "the byte-order mark stays first"
+    );
+
+    let mut crlf = parse_document("Body\r\n").unwrap();
+    crlf.insert_field("draft", FrontmatterValue::Boolean(true))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&crlf).unwrap(),
+        "---\r\ndraft: true\r\n---\r\n\r\nBody\r\n"
+    );
+
+    let mut duplicate = parse_document("Body\n").unwrap();
+    duplicate
+        .insert_field("draft", FrontmatterValue::Boolean(true))
+        .unwrap();
+    assert!(matches!(
+        duplicate.insert_field("draft", FrontmatterValue::Boolean(false)),
+        Err(DocumentError::UnknownField { .. })
+    ));
+    assert!(matches!(
+        duplicate.insert_field("author.name", string("Ada")),
+        Err(DocumentError::UnsupportedPatch { .. })
+    ));
+}
+
+#[test]
+fn replace_raw_handles_block_containers() {
+    let source = "---\nrows:\n  - 1\n  - 2\nmeta:\n  a: 1\n  b: 2\nnote: x\n---\n";
+    let mut document = parse_document(source).unwrap();
+    document.replace_raw("rows", "- 3\n- 4\n- 5").unwrap();
+    document.replace_raw("meta", "c: 3").unwrap();
+    assert_eq!(
+        serialize_document(&document).unwrap(),
+        "---\nrows:\n  - 3\n  - 4\n  - 5\nmeta:\n  c: 3\nnote: x\n---\n"
+    );
+
+    // Invalid block raw is refused and never changes the bytes.
+    let mut refused = parse_document(source).unwrap();
+    for bad in ["", "  ", "&anchor x", "|", "- 1\nkey: 2"] {
+        assert!(
+            matches!(
+                refused.replace_raw("rows", bad),
+                Err(DocumentError::UnsupportedPatch { .. })
+            ),
+            "{bad:?} must be refused"
+        );
+    }
+    assert_eq!(serialize_document(&refused).unwrap(), source);
+
+    // A block mapping in a scalar-typed field is raw-editable too.
+    let mut mapping = parse_document("---\nnote:\n  a: 1\n---\n").unwrap();
+    mapping.replace_raw("note", "a: 2\nb: 3").unwrap();
+    assert_eq!(
+        serialize_document(&mapping).unwrap(),
+        "---\nnote:\n  a: 2\n  b: 3\n---\n"
+    );
+
+    // Reindented input and nested structures keep their relative shape.
+    let mut nested = parse_document("---\nrows:\n  - name: a\n  - name: b\n---\n").unwrap();
+    nested
+        .replace_raw("rows", "  - name: c\n    extra: 1\n")
+        .unwrap();
+    assert_eq!(
+        serialize_document(&nested).unwrap(),
+        "---\nrows:\n  - name: c\n    extra: 1\n---\n"
+    );
+}
+
+#[test]
+fn sequence_refusals_are_preserved() {
+    assert!(matches!(
+        parse_document("---\n\"title\": x\n---\n"),
+        Err(DocumentError::UnsupportedFrontmatter { .. })
+    ));
+    for source in [
+        "---\ntags: [a,\n  b]\n---\n",
+        "---\nauthor:\n\tname: x\n---\n",
+        "---\n- a\n---\n",
+        "---\na: 1\n  - b\n---\n",
+    ] {
+        assert!(
+            parse_document(source).is_err(),
+            "{source:?} must be refused"
+        );
+    }
 }
