@@ -78,11 +78,32 @@ Use **Open file…** to view a local UTF-8 source file (up to 8 MiB and 50,000 l
 | Command | Linux / Windows | macOS |
 | --- | --- | --- |
 | Open file | Ctrl+O | Command+O |
+| Open project | Ctrl+Shift+O | Command+Shift+O |
+| Save | Ctrl+S | Command+S |
+| Close document | Ctrl+W | Command+W |
 | Commands | Ctrl+Shift+P | Command+Shift+P |
-| Toggle files | Ctrl+B | Command+B |
-| Toggle inspector | Ctrl+Alt+I | Command+Option+I |
+| Toggle files | Ctrl+1 | Command+1 |
+| Toggle inspector | Ctrl+2 | Command+2 |
 | Toggle preview region | Ctrl+Alt+P | Command+Option+P |
-| Focus document | Ctrl+1 | Command+1 |
+| Focus document | Ctrl+0 | Command+0 |
+| Find / Replace | Ctrl+F / Ctrl+H | Command+F / Command+H |
+| Find next / previous | Ctrl+G / Ctrl+Shift+G | Command+G / Command+Shift+G |
+| Go to line | Ctrl+Alt+G | Command+Option+G |
+| Select next occurrence | Ctrl+D | Command+D |
+| Cursors at line ends | Ctrl+Shift+L | Command+Shift+L |
+
+Writer commands act on the focused document; every one is a single undo step.
+
+| Command | Linux / Windows | macOS |
+| --- | --- | --- |
+| Bold | Ctrl+B | Command+B |
+| Italic | Ctrl+I | Command+I |
+| Link | Ctrl+K | Command+K |
+| Heading 1–4 | Ctrl+Alt+1 … Ctrl+Alt+4 | Command+Option+1 … Command+Option+4 |
+| Paragraph | Ctrl+Alt+0 | Command+Option+0 |
+| Markdown comment | Ctrl+/ | Command+/ |
+| Focus mode | Ctrl+Shift+F | Command+Shift+F |
+| Typewriter mode | Ctrl+Shift+T | Command+Shift+T |
 
 The preview region currently reports that no preview is running. It does not start a development server. Theme mode, side widths, and panel visibility restore at startup. Preferences are split into global, project-registry and per-project files under `astrolith/preferences/` in `$XDG_CONFIG_HOME` (or `~/.config`) on Linux, `~/Library/Application Support` on macOS, and `%APPDATA%` on Windows: `global.json`, `projects.json` and `projects/<project-id>.json`. The first launch migrates the former `astrolith/preferences.json` into the global file and retains the old file as `preferences.v1.migrated.json`; it is never read again. An absolute `ASTROLITH_SETTINGS_PATH` overrides the global file path, with the registry and project files placed beside it. Malformed files are moved to a `*.corrupt` sibling and reported, while unsupported versions and externally changed files are preserved and reported; fix those files and restart to enable persistence again.
 

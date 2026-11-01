@@ -1,3 +1,6 @@
+use crate::editor::formatting::EditorWiring;
+use crate::editor::selection_toolbar;
+use crate::editor::writing_modes::{ProseTypography, prose_typography};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Icon, Sizable, StyledExt,
@@ -5,8 +8,8 @@ use gpui_kit::component::{
     input::{Editor, EditorState},
 };
 use gpui_kit::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render,
-    SharedString, TestSupportExt, Window, div, prelude::*,
+    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    MouseButton, Render, SharedString, TestSupportExt, Window, div, prelude::*, px,
 };
 
 pub(crate) struct WorkspacePanel {
@@ -18,9 +21,23 @@ pub(crate) struct WorkspacePanel {
     readonly: bool,
     header: Option<gpui_kit::AnyView>,
     view: Option<gpui_kit::AnyView>,
+    /// Live-session wiring: paste/link hooks and the selection toolbar target.
+    wiring: Option<EditorWiring>,
+    /// Focus handle of the selection toolbar, so focusing one of its buttons
+    /// keeps the overlay mounted and reachable.
+    pub(crate) toolbar_focus: FocusHandle,
+    /// Base prose size from preferences and the document pane width.
+    prose: Option<(f32, f32)>,
 }
 
 impl WorkspacePanel {
+    /// Focus the selection toolbar from the registry, so it is reachable by
+    /// keyboard even though the editor traps Tab for indentation.
+    pub fn focus_selection_toolbar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toolbar_focus.focus(window, cx);
+        cx.notify();
+    }
+
     pub fn is_editable(&self) -> bool {
         self.editor.is_some() && !self.readonly
     }
@@ -32,6 +49,7 @@ impl WorkspacePanel {
         cx: &mut Context<Self>,
     ) {
         self.readonly = true;
+        self.wiring = None;
         self.title = source
             .path
             .file_name()
@@ -67,17 +85,35 @@ impl WorkspacePanel {
         &mut self,
         title: String,
         editor: Entity<EditorState>,
+        wiring: Option<EditorWiring>,
         cx: &mut Context<Self>,
     ) {
         self.title = title.into();
         self.editor = Some(editor);
         self.readonly = false;
+        self.wiring = wiring;
         cx.emit(PanelEvent::LayoutChanged);
+        cx.notify();
+    }
+
+    /// Resolve responsive prose typography from the base size and pane width.
+    pub fn set_prose_width(
+        &mut self,
+        base_font_size: f32,
+        pane_width: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let next = (base_font_size, pane_width);
+        if self.prose == Some(next) {
+            return;
+        }
+        self.prose = Some(next);
         cx.notify();
     }
 
     pub fn clear_editor(&mut self, cx: &mut Context<Self>) {
         self.editor = None;
+        self.wiring = None;
         self.title = "Document".into();
         self.content = "Select a collection entry to edit its source.".into();
         cx.emit(PanelEvent::LayoutChanged);
@@ -96,6 +132,7 @@ impl WorkspacePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let toolbar_focus = cx.focus_handle().tab_stop(true);
         let editor = (id == "document-panel").then(|| {
             cx.new(|cx| {
                 EditorState::new(window, cx)
@@ -112,6 +149,9 @@ impl WorkspacePanel {
             readonly: true,
             header: None,
             view: None,
+            wiring: None,
+            toolbar_focus,
+            prose: None,
         }
     }
 }
@@ -164,7 +204,7 @@ impl Panel for WorkspacePanel {
     }
 }
 impl Render for WorkspacePanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id(self.id)
             .test_support()
@@ -180,19 +220,54 @@ impl Render for WorkspacePanel {
                 view.child(header.clone())
             })
             .when_some(self.editor.as_ref(), |view, editor| {
-                view.child(
-                    div().flex_1().min_h_0().child(
-                        Editor::new(editor)
-                            .readonly(self.readonly)
-                            .bordered(false)
-                            .aria_label(if self.readonly {
-                                "Document source, readonly"
-                            } else {
-                                "Document source, editable"
-                            })
-                            .size_full(),
-                    ),
-                )
+                let editor = editor.clone();
+                let typography = self
+                    .prose
+                    .map(|(base, width)| prose_typography(width, base));
+                let wiring = self.wiring.clone();
+                let overlay = wiring.as_ref().and_then(|wiring| {
+                    // Focus on the document, the toolbar or one of its buttons
+                    // keeps the popover mounted, so Tab can walk its controls.
+                    let focused = editor.read(cx).focus_handle(cx).is_focused(window)
+                        || self.toolbar_focus.contains_focused(window, cx);
+                    selection_toolbar::overlay(
+                        &editor,
+                        wiring.session.clone(),
+                        &self.toolbar_focus,
+                        focused,
+                        cx,
+                    )
+                });
+                let mut element = Editor::new(&editor)
+                    .readonly(self.readonly)
+                    .bordered(false)
+                    .aria_label(if self.readonly {
+                        "Document source, readonly"
+                    } else {
+                        "Document source, editable"
+                    })
+                    .size_full();
+                if let Some(ProseTypography {
+                    font_size,
+                    line_height,
+                }) = typography
+                {
+                    element = element
+                        .text_size(px(font_size))
+                        .line_height(gpui_kit::relative(line_height));
+                }
+                if let Some(wiring) = wiring.as_ref() {
+                    let paste = wiring.hooks.paste.clone();
+                    element = element.on_paste(move |item, window, cx| (paste)(item, window, cx));
+                }
+                let mut body = div().flex_1().min_h_0().child(element);
+                if let Some(hooks) = wiring.as_ref().map(|wiring| wiring.hooks.clone()) {
+                    let mouse_down = hooks.mouse_down.clone();
+                    body = body.on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                        (mouse_down)(event, window, cx)
+                    });
+                }
+                view.child(body.when_some(overlay, |body, overlay| body.child(overlay)))
             })
             .when_some(self.view.as_ref(), |view, content| {
                 view.child(div().flex_1().min_h_0().child(content.clone()))

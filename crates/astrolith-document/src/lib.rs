@@ -9,6 +9,8 @@
 
 /// Retained text, revision, dirty state, and load-result identity.
 pub mod buffer;
+/// Pure writer formatting transforms.
+pub mod formatting;
 /// Lossless frontmatter parse and scalar field spans.
 pub mod parse;
 /// Lossless writer projection and visible-to-source mapping.
@@ -17,8 +19,12 @@ pub mod projection;
 pub mod recovery;
 /// Conflict-aware, one-writer-per-document save coordinator.
 pub mod save;
+/// Deterministic sentence detection for focus mode.
+pub mod sentences;
 /// Lossless document and scalar serialization.
 pub mod serialize;
+/// One token snapshot for counts and classification.
+pub mod tokens;
 /// Disk baseline for conflict-aware saving.
 pub mod version;
 /// Raw YAML value validation.
@@ -26,6 +32,10 @@ pub mod yaml;
 
 pub use buffer::{
     DocumentBuffer, DocumentError, DocumentIdentity, DocumentLoadTicket, DocumentRevision,
+};
+pub use formatting::{
+    FormatCommand, FormatError, FormatOutcome, FormattedDocument, HeadingLevel, InlineLink, format,
+    format_document, inline_links,
 };
 pub use parse::{
     FieldShape, FrontmatterField, FrontmatterValue, LineEnding, ParsedDocument, SequenceStyle,
@@ -37,7 +47,9 @@ pub use projection::{
 };
 pub use recovery::{RecoveryLoad, RecoveryRecord, RecoveryStore};
 pub use save::{DocumentSnapshot, SaveOutcome, save_snapshot};
+pub use sentences::{cursor_sentence, other_sentences, sentences};
 pub use serialize::serialize_document;
+pub use tokens::{TokenSnapshot, TokenSummary, token_snapshot};
 pub use version::DiskBaseline;
 
 #[cfg(test)]

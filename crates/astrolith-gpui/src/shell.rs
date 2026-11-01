@@ -6,7 +6,11 @@ use std::{
 
 use crate::{
     commands::{self, COMMANDS, CommandId},
-    editor::{header::DocumentHeader, session::SessionChanged},
+    editor::{
+        header::DocumentHeader,
+        session::SessionChanged,
+        writer_chrome::{ChromeVisibility, TypedCharacters},
+    },
     file::{DocumentSource, read_document},
     frontmatter::{FrontmatterDocument, FrontmatterEdit, FrontmatterForm},
     layout::{
@@ -31,9 +35,9 @@ use gpui_kit::component::{
     status_bar::StatusBar,
 };
 use gpui_kit::{
-    App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, PathPromptOptions,
-    Render, SharedString, Subscription, Task, TestSupportExt, Window, WindowOptions, div,
-    prelude::*, px, size,
+    Animation, AnimationExt as _, App, AppContext, Context, Entity, FocusHandle, Focusable,
+    IntoElement, PathPromptOptions, Render, SharedString, Subscription, Task, TestSupportExt,
+    Window, WindowOptions, div, prelude::*, px, size,
 };
 
 /// Latest global and project snapshots, flushed by the quit observer.
@@ -152,6 +156,10 @@ pub(crate) struct Shell {
     scope_task: Option<Task<()>>,
     warning: Option<String>,
     focus: FocusHandle,
+    /// Writer chrome auto-hide state.
+    chrome: ChromeVisibility,
+    /// Typed characters per active document, for the chrome auto-hide policy.
+    typed: TypedCharacters,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -290,7 +298,10 @@ impl Shell {
         subscriptions.push(cx.subscribe_in(
             &project,
             window,
-            |this, _, _: &SessionChanged, _window, cx| this.sync_preview(cx),
+            |this, _, _: &SessionChanged, _window, cx| {
+                this.sync_preview(cx);
+                this.note_typing(cx);
+            },
         ));
         // Recording the open, restoring the project layout and reopening its
         // last entry all need the window the project open completed in.
@@ -408,7 +419,48 @@ impl Shell {
             scope_task: None,
             warning,
             focus,
+            chrome: ChromeVisibility::default(),
+            typed: TypedCharacters::default(),
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// Feed typed characters into the chrome auto-hide policy.
+    ///
+    /// Only characters typed into the active document count: deleting, cursor
+    /// moves and the session's own formatting or paste edits never hide the
+    /// chrome, switching documents restarts the count, and the policy itself
+    /// refuses to hide while a sidebar is open.
+    fn note_typing(&mut self, cx: &mut Context<Self>) {
+        let layout = self.read_dock_layout(cx);
+        let both_closed = !layout.sidebar_visible && !layout.inspector_visible;
+        let typed = {
+            let project = self.project.read(cx);
+            match (project.active_path(), project.active_session(cx)) {
+                (Some(path), Some(session)) => {
+                    let session = session.read(cx);
+                    self.typed.observe(
+                        path,
+                        &session.projection.visible,
+                        session.programmatic_change(),
+                    )
+                }
+                _ => {
+                    self.typed.forget();
+                    0
+                }
+            }
+        };
+        self.chrome.set_sidebars(both_closed);
+        if self.chrome.type_characters(typed, both_closed) {
+            cx.notify();
+        }
+    }
+
+    /// A hover at the window's top edge restores auto-hidden chrome.
+    fn hover_top_edge(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered && self.chrome.restore() {
+            cx.notify();
         }
     }
 
@@ -811,6 +863,62 @@ impl Shell {
                 }
             }
             CommandId::FocusDocument => self.document.read(cx).focus_handle(cx).focus(window, cx),
+            CommandId::FocusSelectionToolbar => self
+                .document
+                .update(cx, |panel, cx| panel.focus_selection_toolbar(window, cx)),
+            CommandId::FindInDocument => {
+                self.project
+                    .update(cx, |project, cx| project.open_find(false, cx));
+            }
+            CommandId::ReplaceInDocument => {
+                self.project
+                    .update(cx, |project, cx| project.open_find(true, cx));
+            }
+            CommandId::FindNextMatch => {
+                self.project
+                    .update(cx, |project, cx| project.find_step(true, cx));
+            }
+            CommandId::FindPreviousMatch => {
+                self.project
+                    .update(cx, |project, cx| project.find_step(false, cx));
+            }
+            CommandId::CloseFind => {
+                self.project
+                    .update(cx, |project, cx| project.close_find(cx));
+            }
+            CommandId::GoToLine => {
+                self.project
+                    .update(cx, |project, cx| project.open_go_to_line_dialog(window, cx));
+            }
+            CommandId::SelectNextOccurrence => {
+                self.project
+                    .update(cx, |project, cx| project.select_next_occurrence(cx));
+            }
+            CommandId::CursorsAtLineEnds => {
+                self.project
+                    .update(cx, |project, cx| project.cursors_at_line_ends(cx));
+            }
+            CommandId::Bold
+            | CommandId::Italic
+            | CommandId::InsertLink
+            | CommandId::Heading1
+            | CommandId::Heading2
+            | CommandId::Heading3
+            | CommandId::Heading4
+            | CommandId::Paragraph
+            | CommandId::ToggleComment => {
+                let command = format_command(command);
+                self.project
+                    .update(cx, |project, cx| project.apply_format(command, window, cx));
+            }
+            CommandId::ToggleFocusMode => {
+                self.project
+                    .update(cx, |project, cx| project.toggle_focus_mode(window, cx));
+            }
+            CommandId::ToggleTypewriterMode => {
+                self.project
+                    .update(cx, |project, cx| project.toggle_typewriter_mode(window, cx));
+            }
             CommandId::LightTheme | CommandId::DarkTheme | CommandId::SystemTheme => {
                 self.settings.theme = match command {
                     CommandId::LightTheme => ThemeMode::Light,
@@ -854,7 +962,7 @@ impl Shell {
             .update(cx, |state, cx| state.set_query("", window, cx));
         let palette = self.palette.clone();
         let owner = cx.weak_entity();
-        let availability = self.project.read(cx).command_availability(cx);
+        let availability = self.project.read(cx).command_availability(cx, window);
         let commands: Vec<_> = COMMANDS
             .iter()
             .copied()
@@ -1003,6 +1111,22 @@ impl Shell {
     }
 }
 
+/// Map a registry command to the writer transform it runs.
+fn format_command(command: CommandId) -> astrolith_document::FormatCommand {
+    use astrolith_document::{FormatCommand, HeadingLevel};
+    match command {
+        CommandId::Bold => FormatCommand::Bold,
+        CommandId::Italic => FormatCommand::Italic,
+        CommandId::InsertLink => FormatCommand::Link,
+        CommandId::Heading1 => FormatCommand::Heading(HeadingLevel::H1),
+        CommandId::Heading2 => FormatCommand::Heading(HeadingLevel::H2),
+        CommandId::Heading3 => FormatCommand::Heading(HeadingLevel::H3),
+        CommandId::Heading4 => FormatCommand::Heading(HeadingLevel::H4),
+        CommandId::Paragraph => FormatCommand::Paragraph,
+        _ => FormatCommand::Comment,
+    }
+}
+
 fn command_icon(command: CommandId) -> IconName {
     match command {
         CommandId::OpenFile => IconName::FileText,
@@ -1024,6 +1148,25 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::StopPreview => IconName::Square,
         CommandId::OpenPreview => IconName::Globe,
         CommandId::FocusDocument => IconName::FileText,
+        CommandId::FocusSelectionToolbar => IconName::TextCursor,
+        CommandId::FindInDocument | CommandId::ReplaceInDocument => IconName::Search,
+        CommandId::FindNextMatch => IconName::ChevronDown,
+        CommandId::FindPreviousMatch => IconName::ChevronUp,
+        CommandId::CloseFind => IconName::X,
+        CommandId::GoToLine => IconName::ListOrdered,
+        CommandId::SelectNextOccurrence => IconName::TextCursor,
+        CommandId::CursorsAtLineEnds => IconName::List,
+        CommandId::Bold => IconName::Bold,
+        CommandId::Italic => IconName::Italic,
+        CommandId::InsertLink => IconName::Link,
+        CommandId::Heading1 => IconName::Heading1,
+        CommandId::Heading2 => IconName::Heading2,
+        CommandId::Heading3 => IconName::Heading3,
+        CommandId::Heading4 => IconName::Heading4,
+        CommandId::Paragraph => IconName::Pilcrow,
+        CommandId::ToggleComment => IconName::MessageCircle,
+        CommandId::ToggleFocusMode => IconName::Eye,
+        CommandId::ToggleTypewriterMode => IconName::Type,
         CommandId::LightTheme => IconName::Sun,
         CommandId::DarkTheme => IconName::Moon,
         CommandId::SystemTheme => IconName::Monitor,
@@ -1062,6 +1205,27 @@ impl Render for Shell {
             }
         }
         let layout = &self.settings.layout;
+        // Responsive prose typography follows the document pane's width, which
+        // the shell owns: no layout feedback loop, no geometry guesswork.
+        let pane_width = (f32::from(window.viewport_size().width)
+            - if layout.sidebar_visible {
+                layout.sidebar_width
+            } else {
+                0.
+            }
+            - if layout.inspector_visible {
+                layout.inspector_width
+            } else {
+                0.
+            })
+        .max(320.);
+        let base_font_size = self.settings.editor_font_size;
+        self.document.update(cx, |panel, cx| {
+            panel.set_prose_width(base_font_size, pane_width, cx)
+        });
+        self.chrome
+            .set_sidebars(!layout.sidebar_visible && !layout.inspector_visible);
+        let chrome_hidden = self.chrome.is_hidden();
         let (project_name, tabs, active_index) = {
             let project = self.project.read(cx);
             (
@@ -1088,6 +1252,12 @@ impl Render for Shell {
                 }
             })
             .unwrap_or("—");
+        // One token snapshot per revision: words and characters always agree.
+        let counts = self
+            .project
+            .read(cx)
+            .active_counts(cx)
+            .map(|counts| format!("{} words · {} characters", counts.words, counts.characters));
 
         let close_owner = self.project.downgrade();
         div()
@@ -1100,105 +1270,163 @@ impl Render for Shell {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(
-                TitleBar::new()
-                    .on_close_window(move |_, window, cx| {
-                        let clean = close_owner
-                            .update(cx, |project, cx| project.guard_window_close(window, cx))
-                            .unwrap_or(true);
-                        if clean {
-                            window.remove_window();
-                        }
-                    })
+            .child(if chrome_hidden {
+                // Only the top edge remains: hovering it restores the chrome.
+                div()
+                    .id("chrome-top-edge")
+                    .test_support()
+                    .h(px(4.))
+                    .w_full()
+                    .flex_shrink_0()
+                    .bg(cx.theme().tab_bar)
+                    .on_hover(cx.listener(|this, hovered, _, cx| this.hover_top_edge(*hovered, cx)))
+                    .into_any_element()
+            } else {
+                div()
+                    .flex_shrink_0()
                     .child(
-                        div()
-                            .h_flex()
-                            .flex_1()
-                            .h_full()
-                            .items_center()
-                            .gap_2()
-                            .pr_2()
-                            .child(
-                                Icon::new(IconName::Asterisk)
-                                    .small()
-                                    .text_color(cx.theme().accent),
-                            )
-                            .child(div().text_sm().child("Astrolith"))
-                            .when_some(project_name.clone(), |row, name| {
-                                row.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(name),
-                                )
+                        TitleBar::new()
+                            .on_close_window(move |_, window, cx| {
+                                let clean = close_owner
+                                    .update(cx, |project, cx| {
+                                        project.guard_window_close(window, cx)
+                                    })
+                                    .unwrap_or(true);
+                                if clean {
+                                    window.remove_window();
+                                }
                             })
-                            .child(div().flex_1())
                             .child(
-                                Button::new("command-palette")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Search)
-                                    .label("Search or run a command…")
-                                    .tooltip(CommandId::OpenPalette.label())
-                                    .track_focus(&self.palette_focus)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.palette_focus.focus(window, cx);
-                                        this.execute(CommandId::OpenPalette, window, cx);
-                                    })),
-                            )
-                            .child({
-                                let availability = self.project.read(cx).command_availability(cx);
-                                Button::new("toolbar-new-entry")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::FilePlus)
-                                    .tooltip(CommandId::NewEntry.label())
-                                    .disabled(!CommandId::NewEntry.is_available(availability))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.execute(CommandId::NewEntry, window, cx)
-                                    }))
-                            })
-                            .child(div().flex_1())
-                            .children(
-                                [
-                                    (
-                                        "toggle-sidebar",
-                                        CommandId::ToggleSidebar,
-                                        IconName::PanelLeft,
-                                        layout.sidebar_visible,
-                                        "Toggle project panel",
-                                    ),
-                                    (
-                                        "toggle-preview",
-                                        CommandId::TogglePreview,
-                                        IconName::PanelBottom,
-                                        layout.preview_visible,
-                                        "Toggle preview panel",
-                                    ),
-                                    (
-                                        "toggle-inspector",
-                                        CommandId::ToggleInspector,
-                                        IconName::PanelRight,
-                                        layout.inspector_visible,
-                                        "Toggle inspector",
-                                    ),
-                                ]
-                                .map(
-                                    |(id, kind, icon, visible, tooltip)| {
-                                        Button::new(id)
+                                div()
+                                    .h_flex()
+                                    .flex_1()
+                                    .h_full()
+                                    .items_center()
+                                    .gap_2()
+                                    .pr_2()
+                                    .child(
+                                        Icon::new(IconName::Asterisk)
+                                            .small()
+                                            .text_color(cx.theme().accent),
+                                    )
+                                    .child(div().text_sm().child("Astrolith"))
+                                    .when_some(project_name.clone(), |row, name| {
+                                        row.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(name),
+                                        )
+                                    })
+                                    .child(div().flex_1())
+                                    .child(
+                                        Button::new("command-palette")
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::Search)
+                                            .label("Search or run a command…")
+                                            .tooltip(CommandId::OpenPalette.label())
+                                            .track_focus(&self.palette_focus)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.palette_focus.focus(window, cx);
+                                                this.execute(CommandId::OpenPalette, window, cx);
+                                            })),
+                                    )
+                                    .child({
+                                        let availability =
+                                            self.project.read(cx).command_availability(cx, window);
+                                        Button::new("toolbar-new-entry")
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::FilePlus)
+                                            .tooltip(CommandId::NewEntry.label())
+                                            .disabled(
+                                                !CommandId::NewEntry.is_available(availability),
+                                            )
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.execute(CommandId::NewEntry, window, cx)
+                                            }))
+                                    })
+                                    .child(div().flex_1())
+                                    .child({
+                                        let modes = self.project.read(cx).writing_modes();
+                                        Button::new("toggle-focus-mode")
                                             .xsmall()
                                             .ghost()
-                                            .icon(icon)
-                                            .tooltip(tooltip)
-                                            .toggled(visible)
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.execute(kind, window, cx)
+                                            .icon(IconName::Eye)
+                                            .tooltip(CommandId::ToggleFocusMode.label())
+                                            .toggled(modes.focus)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.execute(CommandId::ToggleFocusMode, window, cx)
                                             }))
-                                    },
-                                ),
+                                    })
+                                    .child({
+                                        let modes = self.project.read(cx).writing_modes();
+                                        Button::new("toggle-typewriter-mode")
+                                            .xsmall()
+                                            .ghost()
+                                            .icon(IconName::Type)
+                                            .tooltip(CommandId::ToggleTypewriterMode.label())
+                                            .toggled(modes.typewriter)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.execute(
+                                                    CommandId::ToggleTypewriterMode,
+                                                    window,
+                                                    cx,
+                                                )
+                                            }))
+                                    })
+                                    .children(
+                                        [
+                                            (
+                                                "toggle-sidebar",
+                                                CommandId::ToggleSidebar,
+                                                IconName::PanelLeft,
+                                                layout.sidebar_visible,
+                                                "Toggle project panel",
+                                            ),
+                                            (
+                                                "toggle-preview",
+                                                CommandId::TogglePreview,
+                                                IconName::PanelBottom,
+                                                layout.preview_visible,
+                                                "Toggle preview panel",
+                                            ),
+                                            (
+                                                "toggle-inspector",
+                                                CommandId::ToggleInspector,
+                                                IconName::PanelRight,
+                                                layout.inspector_visible,
+                                                "Toggle inspector",
+                                            ),
+                                        ]
+                                        .map(
+                                            |(id, kind, icon, visible, tooltip)| {
+                                                Button::new(id)
+                                                    .xsmall()
+                                                    .ghost()
+                                                    .icon(icon)
+                                                    .tooltip(tooltip)
+                                                    .toggled(visible)
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.execute(kind, window, cx)
+                                                        },
+                                                    ))
+                                            },
+                                        ),
+                                    ),
                             ),
-                    ),
-            )
+                    )
+                    // The reveal animation is a no-op (static end state, no
+                    // frames) when the platform asks for reduced motion.
+                    .with_animation(
+                        "writer-chrome-reveal",
+                        Animation::new(std::time::Duration::from_millis(140)),
+                        |element, delta| element.opacity(delta),
+                    )
+                    .into_any_element()
+            })
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
             .child({
                 let bar = StatusBar::new()
@@ -1213,6 +1441,7 @@ impl Render for Shell {
                     .left(project_name.unwrap_or_else(|| "No project".into()))
                     .left(div().w_2())
                     .left(document_state)
+                    .when_some(counts, |bar, counts| bar.right(counts))
                     .right(language)
                     .right("UTF-8")
                     .right(if cx.theme().is_dark() {

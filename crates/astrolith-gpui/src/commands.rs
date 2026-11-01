@@ -16,6 +16,25 @@ pub(crate) enum CommandId {
     Save,
     CloseDocument,
     RecoverUnsaved,
+    FindInDocument,
+    ReplaceInDocument,
+    FindNextMatch,
+    FindPreviousMatch,
+    CloseFind,
+    GoToLine,
+    SelectNextOccurrence,
+    CursorsAtLineEnds,
+    Bold,
+    Italic,
+    InsertLink,
+    Heading1,
+    Heading2,
+    Heading3,
+    Heading4,
+    Paragraph,
+    ToggleComment,
+    ToggleFocusMode,
+    ToggleTypewriterMode,
     OpenPalette,
     ToggleSidebar,
     ToggleInspector,
@@ -24,6 +43,7 @@ pub(crate) enum CommandId {
     StopPreview,
     OpenPreview,
     FocusDocument,
+    FocusSelectionToolbar,
     LightTheme,
     DarkTheme,
     SystemTheme,
@@ -44,6 +64,25 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::Save,
     CommandId::CloseDocument,
     CommandId::RecoverUnsaved,
+    CommandId::FindInDocument,
+    CommandId::ReplaceInDocument,
+    CommandId::FindNextMatch,
+    CommandId::FindPreviousMatch,
+    CommandId::CloseFind,
+    CommandId::GoToLine,
+    CommandId::SelectNextOccurrence,
+    CommandId::CursorsAtLineEnds,
+    CommandId::Bold,
+    CommandId::Italic,
+    CommandId::InsertLink,
+    CommandId::Heading1,
+    CommandId::Heading2,
+    CommandId::Heading3,
+    CommandId::Heading4,
+    CommandId::Paragraph,
+    CommandId::ToggleComment,
+    CommandId::ToggleFocusMode,
+    CommandId::ToggleTypewriterMode,
     CommandId::OpenPalette,
     CommandId::ToggleSidebar,
     CommandId::ToggleInspector,
@@ -52,6 +91,7 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::StopPreview,
     CommandId::OpenPreview,
     CommandId::FocusDocument,
+    CommandId::FocusSelectionToolbar,
     CommandId::LightTheme,
     CommandId::DarkTheme,
     CommandId::SystemTheme,
@@ -71,6 +111,13 @@ pub(crate) struct CommandAvailability {
     pub active_entry: bool,
     /// The initial project scan is running; entry files must not change yet.
     pub busy: bool,
+    /// The active document's editor owns keyboard focus.
+    pub editor_focused: bool,
+    /// The active document is Markdown, so `Mod+/` toggles a comment rather
+    /// than opening the MDX builder.
+    pub markdown_document: bool,
+    /// The active editor has a non-empty selection.
+    pub selection_nonempty: bool,
 }
 
 impl CommandId {
@@ -84,6 +131,27 @@ impl CommandId {
             | Self::RevealEntry
             | Self::CopyPathAbsolute
             | Self::CopyPathRelative => state.active_entry && !state.busy,
+            // Formatting follows editor focus, never a stale document flag, and
+            // the Markdown comment toggle is reserved for `.md`: `.mdx` spends
+            // `Mod+/` on the component builder.
+            Self::Bold
+            | Self::Italic
+            | Self::InsertLink
+            | Self::Heading1
+            | Self::Heading2
+            | Self::Heading3
+            | Self::Heading4
+            | Self::Paragraph
+            | Self::FindInDocument
+            | Self::ReplaceInDocument
+            | Self::FindNextMatch
+            | Self::FindPreviousMatch
+            | Self::CloseFind
+            | Self::GoToLine
+            | Self::SelectNextOccurrence
+            | Self::CursorsAtLineEnds => state.editor_focused,
+            Self::FocusSelectionToolbar => state.editor_focused && state.selection_nonempty,
+            Self::ToggleComment => state.editor_focused && state.markdown_document,
             _ => true,
         }
     }
@@ -102,6 +170,25 @@ impl CommandId {
             Self::Save => "Save",
             Self::CloseDocument => "Close file",
             Self::RecoverUnsaved => "Recover unsaved changes…",
+            Self::FindInDocument => "Find…",
+            Self::ReplaceInDocument => "Find and replace…",
+            Self::FindNextMatch => "Find next",
+            Self::FindPreviousMatch => "Find previous",
+            Self::CloseFind => "Close find",
+            Self::GoToLine => "Go to line…",
+            Self::SelectNextOccurrence => "Select next occurrence",
+            Self::CursorsAtLineEnds => "Add cursors at line ends",
+            Self::Bold => "Bold",
+            Self::Italic => "Italic",
+            Self::InsertLink => "Link…",
+            Self::Heading1 => "Heading 1",
+            Self::Heading2 => "Heading 2",
+            Self::Heading3 => "Heading 3",
+            Self::Heading4 => "Heading 4",
+            Self::Paragraph => "Paragraph",
+            Self::ToggleComment => "Toggle Markdown comment",
+            Self::ToggleFocusMode => "Focus mode",
+            Self::ToggleTypewriterMode => "Typewriter mode",
             Self::OpenPalette => "Commands…",
             Self::ToggleSidebar => "Toggle files",
             Self::ToggleInspector => "Toggle inspector",
@@ -110,6 +197,7 @@ impl CommandId {
             Self::StopPreview => "Stop preview server",
             Self::OpenPreview => "Open preview in browser",
             Self::FocusDocument => "Focus document",
+            Self::FocusSelectionToolbar => "Focus selection toolbar",
             Self::LightTheme => "Light theme",
             Self::DarkTheme => "Dark theme",
             Self::SystemTheme => "System theme",
@@ -165,16 +253,16 @@ impl CommandId {
             }
             Self::ToggleSidebar => {
                 if mac {
-                    "cmd-b"
+                    "cmd-1"
                 } else {
-                    "ctrl-b"
+                    "ctrl-1"
                 }
             }
             Self::ToggleInspector => {
                 if mac {
-                    "cmd-alt-i"
+                    "cmd-2"
                 } else {
-                    "ctrl-alt-i"
+                    "ctrl-2"
                 }
             }
             Self::TogglePreview => {
@@ -186,9 +274,136 @@ impl CommandId {
             }
             Self::FocusDocument => {
                 if mac {
-                    "cmd-1"
+                    "cmd-0"
                 } else {
-                    "ctrl-1"
+                    "ctrl-0"
+                }
+            }
+            Self::FocusSelectionToolbar => return None,
+            Self::FindInDocument => {
+                if mac {
+                    "cmd-f"
+                } else {
+                    "ctrl-f"
+                }
+            }
+            Self::ReplaceInDocument => {
+                if mac {
+                    "cmd-h"
+                } else {
+                    "ctrl-h"
+                }
+            }
+            Self::FindNextMatch => {
+                if mac {
+                    "cmd-g"
+                } else {
+                    "ctrl-g"
+                }
+            }
+            Self::FindPreviousMatch => {
+                if mac {
+                    "cmd-shift-g"
+                } else {
+                    "ctrl-shift-g"
+                }
+            }
+            Self::GoToLine => {
+                if mac {
+                    "cmd-alt-g"
+                } else {
+                    "ctrl-alt-g"
+                }
+            }
+            Self::SelectNextOccurrence => {
+                if mac {
+                    "cmd-d"
+                } else {
+                    "ctrl-d"
+                }
+            }
+            Self::CursorsAtLineEnds => {
+                if mac {
+                    "cmd-shift-l"
+                } else {
+                    "ctrl-shift-l"
+                }
+            }
+            Self::Bold => {
+                if mac {
+                    "cmd-b"
+                } else {
+                    "ctrl-b"
+                }
+            }
+            Self::Italic => {
+                if mac {
+                    "cmd-i"
+                } else {
+                    "ctrl-i"
+                }
+            }
+            Self::InsertLink => {
+                if mac {
+                    "cmd-k"
+                } else {
+                    "ctrl-k"
+                }
+            }
+            Self::Heading1 => {
+                if mac {
+                    "cmd-alt-1"
+                } else {
+                    "ctrl-alt-1"
+                }
+            }
+            Self::Heading2 => {
+                if mac {
+                    "cmd-alt-2"
+                } else {
+                    "ctrl-alt-2"
+                }
+            }
+            Self::Heading3 => {
+                if mac {
+                    "cmd-alt-3"
+                } else {
+                    "ctrl-alt-3"
+                }
+            }
+            Self::Heading4 => {
+                if mac {
+                    "cmd-alt-4"
+                } else {
+                    "ctrl-alt-4"
+                }
+            }
+            Self::Paragraph => {
+                if mac {
+                    "cmd-alt-0"
+                } else {
+                    "ctrl-alt-0"
+                }
+            }
+            Self::ToggleComment => {
+                if mac {
+                    "cmd-/"
+                } else {
+                    "ctrl-/"
+                }
+            }
+            Self::ToggleFocusMode => {
+                if mac {
+                    "cmd-shift-f"
+                } else {
+                    "ctrl-shift-f"
+                }
+            }
+            Self::ToggleTypewriterMode => {
+                if mac {
+                    "cmd-shift-t"
+                } else {
+                    "ctrl-shift-t"
                 }
             }
             Self::Quit => {
@@ -260,12 +475,42 @@ pub(crate) fn install_menus(cx: &mut App) {
         ]));
         items
     });
+    let format = gpui_kit::Menu::new("Format").items({
+        let mut items = items_for(&[
+            CommandId::Bold,
+            CommandId::Italic,
+            CommandId::InsertLink,
+            CommandId::ToggleComment,
+        ]);
+        items.push(gpui_kit::MenuItem::separator());
+        items.extend(items_for(&[
+            CommandId::Heading1,
+            CommandId::Heading2,
+            CommandId::Heading3,
+            CommandId::Heading4,
+            CommandId::Paragraph,
+        ]));
+        items
+    });
+    let writer = gpui_kit::Menu::new("Writer").items(items_for(&[
+        CommandId::FindInDocument,
+        CommandId::ReplaceInDocument,
+        CommandId::FindNextMatch,
+        CommandId::FindPreviousMatch,
+        CommandId::CloseFind,
+        CommandId::GoToLine,
+        CommandId::SelectNextOccurrence,
+        CommandId::CursorsAtLineEnds,
+        CommandId::FocusSelectionToolbar,
+        CommandId::ToggleFocusMode,
+        CommandId::ToggleTypewriterMode,
+    ]));
     let preview = gpui_kit::Menu::new("Preview").items(items_for(&[
         CommandId::StartPreview,
         CommandId::StopPreview,
         CommandId::OpenPreview,
     ]));
-    cx.set_menus([file, view, preview]);
+    cx.set_menus([file, view, format, writer, preview]);
 }
 
 fn items_for(commands: &[CommandId]) -> Vec<gpui_kit::MenuItem> {
@@ -278,6 +523,43 @@ fn items_for(commands: &[CommandId]) -> Vec<gpui_kit::MenuItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn formatting_follows_editor_focus_and_the_comment_belongs_to_markdown() {
+        let blurred = CommandAvailability::default();
+        let focused = CommandAvailability {
+            editor_focused: true,
+            markdown_document: true,
+            ..CommandAvailability::default()
+        };
+        for command in [
+            CommandId::Bold,
+            CommandId::Italic,
+            CommandId::InsertLink,
+            CommandId::Heading1,
+            CommandId::Heading2,
+            CommandId::Heading3,
+            CommandId::Heading4,
+            CommandId::Paragraph,
+            CommandId::FindInDocument,
+            CommandId::GoToLine,
+            CommandId::SelectNextOccurrence,
+            CommandId::CursorsAtLineEnds,
+        ] {
+            assert!(!command.is_available(blurred), "{}", command.label());
+            assert!(command.is_available(focused), "{}", command.label());
+        }
+        assert!(!CommandId::ToggleComment.is_available(blurred));
+        assert!(CommandId::ToggleComment.is_available(focused));
+        // `.mdx` reserves Mod+/ for the component builder.
+        assert!(!CommandId::ToggleComment.is_available(CommandAvailability {
+            markdown_document: false,
+            ..focused
+        }));
+        // Writer modes are global view toggles, not document commands.
+        assert!(CommandId::ToggleFocusMode.is_available(blurred));
+        assert!(CommandId::ToggleTypewriterMode.is_available(blurred));
+    }
+
     #[test]
     fn registered_commands_have_unique_identity_and_shortcuts() {
         let mut ids = std::collections::HashSet::new();
@@ -296,7 +578,7 @@ mod tests {
         let ready = CommandAvailability {
             project_open: true,
             active_entry: true,
-            busy: false,
+            ..CommandAvailability::default()
         };
         assert!(!CommandId::NewEntry.is_available(empty));
         assert!(CommandId::NewEntry.is_available(ready));
@@ -313,7 +595,7 @@ mod tests {
                 !command.is_available(CommandAvailability {
                     project_open: true,
                     active_entry: false,
-                    busy: false
+                    ..CommandAvailability::default()
                 }),
                 "{} must require an entry",
                 command.label()
@@ -347,7 +629,7 @@ mod tests {
                 .iter()
                 .map(|menu| menu.name.to_string())
                 .collect::<Vec<_>>(),
-            ["File", "View", "Preview"]
+            ["File", "View", "Format", "Writer", "Preview"]
         );
         let mut labels = Vec::new();
         for menu in &menus {

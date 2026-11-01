@@ -152,14 +152,37 @@ impl Drop for Serial {
     }
 }
 
+/// Poll for a panel state instead of waiting on a single notification.
+///
+/// The GPUI test scheduler can deliver a notification after the wall-clock
+/// deadline when the process is busy; polling with real sleeps is the same
+/// deadline without the missed-notification failure mode.
+async fn wait_for(
+    cx: &mut gpui_kit::TestAppContext,
+    panel: &Entity<PreviewPanel>,
+    mut predicate: impl FnMut(&PreviewPanel) -> bool,
+) {
+    for _ in 0..300 {
+        cx.run_until_parked();
+        if panel.read_with(cx, |panel, _| predicate(panel)) {
+            return;
+        }
+        runtime::blocking(cx, || {
+            std::thread::sleep(std::time::Duration::from_millis(10))
+        })
+        .await
+        .unwrap();
+    }
+    panic!("preview did not reach the expected state");
+}
+
 #[gpui_kit::test]
 async fn start_becomes_ready_and_reports_the_url(cx: &mut gpui_kit::TestAppContext) {
     let _serial = Serial::acquire();
     let backend = TestBackend::ready("http://127.0.0.1:4321/");
     let (_handle, panel, _surface) = mount(cx, backend.clone());
     panel.update(cx, |panel, cx| panel.start(cx));
-    cx.condition(&panel, |panel, _| panel.status().is_ready())
-        .await;
+    wait_for(cx, &panel, |panel| panel.status().is_ready()).await;
     panel.read_with(cx, |panel, _| {
         assert!(backend.started.load(Ordering::SeqCst));
         assert_eq!(
@@ -183,8 +206,7 @@ async fn start_while_ready_keeps_the_running_server(cx: &mut gpui_kit::TestAppCo
     let backend = TestBackend::ready("http://127.0.0.1:4321/");
     let (_handle, panel, _surface) = mount(cx, backend.clone());
     panel.update(cx, |panel, cx| panel.start(cx));
-    cx.condition(&panel, |panel, _| panel.status().is_ready())
-        .await;
+    wait_for(cx, &panel, |panel| panel.status().is_ready()).await;
     *backend.start.lock().unwrap() = Err("must not start again".to_owned());
     panel.update(cx, |panel, cx| panel.start(cx));
     panel.read_with(cx, |panel, _| {
@@ -207,12 +229,11 @@ async fn unexpected_server_exit_is_reported(cx: &mut gpui_kit::TestAppContext) {
     let backend = TestBackend::ready("http://127.0.0.1:4321/");
     let (_handle, panel, _surface) = mount(cx, backend.clone());
     panel.update(cx, |panel, cx| panel.start(cx));
-    cx.condition(&panel, |panel, _| panel.status().is_ready())
-        .await;
+    wait_for(cx, &panel, |panel| panel.status().is_ready()).await;
     backend.exit_with(ServerStatus::Failed(
         "Astro dev server exited unexpectedly (exit status: 1)".to_owned(),
     ));
-    cx.condition(&panel, |panel, _| {
+    wait_for(cx, &panel, |panel| {
         matches!(panel.status(), ServerStatus::Failed(_))
     })
     .await;
@@ -234,7 +255,7 @@ async fn start_failure_is_reported_and_not_ready(cx: &mut gpui_kit::TestAppConte
     let backend = TestBackend::failing("astro is not installed");
     let (_handle, panel, _surface) = mount(cx, backend);
     panel.update(cx, |panel, cx| panel.start(cx));
-    cx.condition(&panel, |panel, _| {
+    wait_for(cx, &panel, |panel| {
         matches!(panel.status(), ServerStatus::Failed(_))
     })
     .await;
@@ -256,10 +277,9 @@ async fn stop_returns_to_stopped(cx: &mut gpui_kit::TestAppContext) {
     let backend = TestBackend::ready("http://127.0.0.1:4321/");
     let (_handle, panel, _surface) = mount(cx, backend.clone());
     panel.update(cx, |panel, cx| panel.start(cx));
-    cx.condition(&panel, |panel, _| panel.status().is_ready())
-        .await;
+    wait_for(cx, &panel, |panel| panel.status().is_ready()).await;
     panel.update(cx, |panel, cx| panel.stop(cx));
-    cx.condition(&panel, |panel, _| {
+    wait_for(cx, &panel, |panel| {
         matches!(panel.status(), ServerStatus::Stopped)
     })
     .await;

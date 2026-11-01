@@ -1,2 +1,6 @@
+pub(crate) mod formatting;
 pub(crate) mod header;
+pub(crate) mod selection_toolbar;
 pub(crate) mod session;
+pub(crate) mod writer_chrome;
+pub(crate) mod writing_modes;

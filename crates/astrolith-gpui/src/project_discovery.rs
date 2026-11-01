@@ -1,7 +1,11 @@
 //! Owns project generations, index publication, retained sessions and load admission.
 use crate::{
     commands::{CommandAvailability, CommandId},
-    editor::session::{DocumentSession, SessionChanged},
+    editor::{
+        formatting::EditorWiring,
+        session::{DocumentSession, SessionChanged},
+        writing_modes::WritingModes,
+    },
     frontmatter::{FrontmatterEdit, ReferenceCatalog},
     layout::panels::WorkspacePanel,
     runtime, settings,
@@ -19,8 +23,9 @@ use astrolith_core::{
     },
 };
 use astrolith_document::{
-    DocumentIdentity, DocumentLoadTicket, DocumentRevision, DocumentSnapshot, RecoveryRecord,
-    RecoveryStore, SaveOutcome, parse_document, save_snapshot,
+    DocumentIdentity, DocumentKind, DocumentLoadTicket, DocumentRevision, DocumentSnapshot,
+    FormatCommand, RecoveryRecord, RecoveryStore, SaveOutcome, TokenSummary, parse_document,
+    save_snapshot,
 };
 use astrolith_preview::RouteMapping;
 use astrolith_workspace::{
@@ -482,6 +487,8 @@ pub(crate) struct ProjectWorkspace {
     data_references: BTreeMap<String, Vec<ReferenceOption>>,
     /// In-flight data-collection reference load.
     data_references_task: Option<Task<()>>,
+    /// Writing modes applied to every retained session.
+    writing: WritingModes,
 }
 
 /// What to do after a dirty session has been saved through the guarded path.
@@ -635,6 +642,7 @@ impl ProjectWorkspace {
             references_revision: 0,
             data_references: BTreeMap::new(),
             data_references_task: None,
+            writing: WritingModes::default(),
         }
     }
     pub fn has_dirty(&self, cx: &App) -> bool {
@@ -1761,6 +1769,11 @@ impl ProjectWorkspace {
                 // Only a coalesced first load can create an editor. Refresh never replaces it.
                 let session =
                     cx.new(|cx| DocumentSession::new(identity.clone(), source, window, cx));
+                // Every session starts with the writer's current modes.
+                let modes = self.writing;
+                session.update(cx, |session, cx| {
+                    session.set_writing_modes(modes, window, cx)
+                });
                 let tab_key = key.clone();
                 let subscription =
                     cx.subscribe(&session, move |this, _, _: &SessionChanged, cx| {
@@ -1829,8 +1842,10 @@ impl ProjectWorkspace {
             .to_string_lossy()
             .into_owned();
         let editor = session.read(cx).editor.clone();
-        self.document
-            .update(cx, |document, cx| document.show_editor(title, editor, cx));
+        let wiring = EditorWiring::new(session.downgrade());
+        self.document.update(cx, |document, cx| {
+            document.show_editor(title, editor, Some(wiring), cx)
+        });
         self.status = if session.read(cx).externally_changed {"Source changed on disk. This buffer is retained; close and reopen an unchanged document to reload."} else {"Editing in memory · Ctrl/Cmd+S saves."}.into();
         cx.notify();
     }
@@ -2724,13 +2739,257 @@ impl ProjectWorkspace {
         self.loading
     }
 
+    /// The session for the active tab, if one is loaded.
+    pub(crate) fn active_session(&self, _cx: &App) -> Option<Entity<DocumentSession>> {
+        self.active
+            .as_ref()
+            .and_then(|path| self.sessions.get(path))
+            .cloned()
+    }
+
+    /// The word, character and line counts of the active session.
+    ///
+    /// Only the scalars are copied: the token ranges stay in the session's one
+    /// snapshot instead of being cloned on every render.
+    pub(crate) fn active_counts(&self, cx: &App) -> Option<TokenSummary> {
+        self.active_session(cx)
+            .map(|session| session.read(cx).counts.summary())
+    }
+
+    /// The writing modes every retained session applies.
+    pub(crate) fn writing_modes(&self) -> WritingModes {
+        self.writing
+    }
+
     /// The one availability snapshot shared by the palette, toolbar and menus.
-    pub(crate) fn command_availability(&self, _cx: &App) -> CommandAvailability {
+    ///
+    /// Editor focus is read from the window, which is the only source that is
+    /// never stale: the session cannot cache it because the facade exposes no
+    /// independent focus signal of its own.
+    pub(crate) fn command_availability(&self, cx: &App, window: &Window) -> CommandAvailability {
+        let session = self.active_session(cx);
+        let focused = session.as_ref().is_some_and(|session| {
+            session
+                .read(cx)
+                .editor
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        });
+        let markdown = session
+            .as_ref()
+            .is_some_and(|session| session.read(cx).kind() == DocumentKind::Markdown);
+        let selection_nonempty = session
+            .as_ref()
+            .is_some_and(|session| !session.read(cx).editor.read(cx).selected_range().is_empty());
         CommandAvailability {
             project_open: self.manifest.is_some(),
             active_entry: self.active.is_some(),
             busy: self.is_busy(),
+            editor_focused: focused,
+            markdown_document: markdown,
+            selection_nonempty,
         }
+    }
+
+    /// Apply one formatting command to the active session.
+    pub(crate) fn apply_format(
+        &mut self,
+        command: FormatCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let availability = self.command_availability(cx, window);
+        let allowed = availability.editor_focused
+            && (command != FormatCommand::Comment || availability.markdown_document);
+        if !allowed {
+            self.status = "Formatting is unavailable while this document is not focused.".into();
+            cx.notify();
+            return false;
+        }
+        let Some(session) = self.active_session(cx) else {
+            return false;
+        };
+        let result = session.update(cx, |session, cx| session.apply_format(command, window, cx));
+        if let Err(message) = result {
+            self.status = message.to_string();
+        }
+        cx.notify();
+        true
+    }
+
+    /// Open the active editor's native find or replace panel.
+    pub(crate) fn open_find(&mut self, replace: bool, cx: &mut Context<Self>) -> bool {
+        let Some(session) = self.active_session(cx) else {
+            return false;
+        };
+        session.update(cx, |session, cx| {
+            session
+                .editor
+                .update(cx, |editor, cx| editor.open_search(replace, cx));
+        });
+        true
+    }
+
+    /// Step to the next or previous match in the active editor's search panel.
+    pub(crate) fn find_step(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+        let Some(session) = self.active_session(cx) else {
+            return false;
+        };
+        session.update(cx, |session, cx| {
+            session.editor.update(cx, |editor, cx| {
+                let found = if forward {
+                    editor.next_search_match(cx)
+                } else {
+                    editor.previous_search_match(cx)
+                };
+                found.is_some()
+            })
+        })
+    }
+
+    /// Close the active editor's find panel.
+    pub(crate) fn close_find(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(session) = self.active_session(cx) else {
+            return false;
+        };
+        session.update(cx, |session, cx| {
+            session
+                .editor
+                .update(cx, |editor, cx| editor.close_search(cx));
+        });
+        true
+    }
+
+    /// Extend the selection to the next occurrence, active selection only.
+    pub(crate) fn select_next_occurrence(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(session) = self.active_session(cx) else {
+            return false;
+        };
+        session
+            .update(cx, |session, cx| session.select_next_occurrence(cx))
+            .is_some()
+    }
+
+    /// Replace the cursor set with cursors at the main selection's line ends.
+    pub(crate) fn cursors_at_line_ends(&mut self, cx: &mut Context<Self>) -> usize {
+        let Some(session) = self.active_session(cx) else {
+            return 0;
+        };
+        session.update(cx, |session, cx| session.cursors_at_line_ends(cx))
+    }
+
+    /// Toggle focus mode for every retained session.
+    pub(crate) fn toggle_focus_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut modes = self.writing;
+        modes.focus = !modes.focus;
+        self.set_writing_modes(modes, window, cx);
+    }
+
+    /// Toggle typewriter mode for every retained session.
+    pub(crate) fn toggle_typewriter_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut modes = self.writing;
+        modes.typewriter = !modes.typewriter;
+        self.set_writing_modes(modes, window, cx);
+    }
+
+    fn set_writing_modes(
+        &mut self,
+        modes: WritingModes,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.writing = modes;
+        let sessions: Vec<Entity<DocumentSession>> = self.sessions.values().cloned().collect();
+        for session in sessions {
+            session.update(cx, |session, cx| {
+                session.set_writing_modes(modes, window, cx)
+            });
+        }
+        cx.notify();
+    }
+
+    /// Move the caret to a 1-based line in the active document.
+    pub(crate) fn go_to_line(
+        &mut self,
+        line: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(session) = self.active_session(cx) else {
+            return false;
+        };
+        let moved = session.update(cx, |session, cx| session.go_to_line(line, window, cx));
+        if !moved {
+            self.status = format!("Line {line} is outside this document.");
+        }
+        cx.notify();
+        moved
+    }
+
+    /// Prompt for a line number and move the caret there.
+    pub(crate) fn open_go_to_line_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let Some(session) = self.active_session(cx) else {
+            self.status = "Open a document before going to a line.".into();
+            cx.notify();
+            return;
+        };
+        let lines = session.read(cx).line_count(cx);
+        let owner = cx.weak_entity();
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Line number"));
+        let focus_input = input.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let owner = owner.clone();
+            let input = input.clone();
+            dialog
+                .title("Go to line")
+                .child(
+                    div()
+                        .v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .child(SharedString::from(format!("Document has {lines} lines"))),
+                        )
+                        .child(Input::new(&input)),
+                )
+                .footer(
+                    div()
+                        .h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("goto-line-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("goto-line-confirm")
+                                .primary()
+                                .label("Go")
+                                .on_click(move |_, window, cx| {
+                                    let typed = input.read(cx).value().to_string();
+                                    window.close_dialog(cx);
+                                    let _ = owner.update(cx, |project, cx| {
+                                        match typed.trim().parse::<usize>() {
+                                            Ok(line) => {
+                                                project.go_to_line(line, window, cx);
+                                            }
+                                            Err(_) => {
+                                                project.status =
+                                                    "Enter a line number to go to.".into();
+                                                cx.notify();
+                                            }
+                                        }
+                                    });
+                                }),
+                        ),
+                )
+        });
+        focus_input.update(cx, |input, cx| input.focus(window, cx));
     }
 
     /// Run one entry command against the active entry or a specific row.
@@ -2741,7 +3000,7 @@ impl ProjectWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let availability = self.command_availability(cx);
+        let availability = self.command_availability(cx, window);
         let availability = CommandAvailability {
             active_entry: target.is_some() || availability.active_entry,
             ..availability
@@ -3829,10 +4088,10 @@ impl ProjectWorkspace {
 }
 
 impl Render for ProjectWorkspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_project = self.manifest.is_some();
         let loading = self.loading;
-        let availability = self.command_availability(cx);
+        let availability = self.command_availability(cx, window);
         let visible = self.visible_entry_count(cx);
         let total = self.entries.len();
         let query = self.last_list_query.trim().to_owned();
@@ -6354,6 +6613,627 @@ export const collections = {blog, dataAuthors};
         cx.condition(view, |view, _| !view.is_loading()).await;
     }
 
+    /// Open the one entry of a fixture project and return its session.
+    async fn open_entry_for(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+        view: &Entity<ProjectWorkspace>,
+        relative: &str,
+    ) -> (PathBuf, Entity<DocumentSession>) {
+        let path = view.read_with(cx, |view, _| {
+            view.manifest.as_ref().unwrap().root().join(relative)
+        });
+        let index = view.read_with(cx, |view, _| {
+            view.entries
+                .iter()
+                .position(|entry| entry.entry().source().as_str() == relative)
+                .unwrap_or_else(|| panic!("{relative} must be indexed"))
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(index, window, cx))
+        })
+        .unwrap();
+        wait_for_session(cx, view, &path).await;
+        let session = view.read_with(cx, |view, _| view.sessions.get(&path).unwrap().clone());
+        (path, session)
+    }
+
+    #[gpui_kit::test]
+    async fn writer_formatting_undoes_in_one_step_and_keeps_hidden_bytes(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let frontmatter = "---\ntitle: 'Writer'\nstatus: false\n---\n";
+        let body = "# Body\n\nFirst sentence. Second sentence.\n";
+        let source = format!("{frontmatter}\n{body}");
+        std::fs::write(dir.path().join("src/posts/c.md"), &source).unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        let (path, session) = open_entry_for(cx, handle, &view, "src/posts/c.md").await;
+        // Focus mode is off, so the writer paints only the prose layer and the
+        // footer counts come from the session's one snapshot.
+        view.read_with(cx, |view, cx| {
+            let counts = view
+                .active_counts(cx)
+                .expect("an active document has counts");
+            assert_eq!(counts.words, 5);
+            assert_eq!(counts.lines, 4);
+            assert_eq!(
+                counts.characters,
+                body.chars().filter(|c| !c.is_whitespace()).count()
+            );
+        });
+
+        // Bold the first word through the registry path.
+        let start = session.read_with(cx, |session, _| {
+            session.projection.visible.find("First").unwrap()
+        });
+        cx.update_window(handle.into(), |_, _, cx| {
+            let editor = session.read(cx).editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(start..start + 5, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            session
+                .update(cx, |session, cx| {
+                    session.apply_format(FormatCommand::Bold, window, cx)
+                })
+                .expect("bold applies through the projection");
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        let edited = "# Body\n\n**First** sentence. Second sentence.\n";
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.projection.visible, edited);
+            assert_eq!(
+                session.buffer.current_text(),
+                format!("{frontmatter}\n{edited}")
+            );
+            assert!(session.is_dirty());
+        });
+
+        // Exactly one undo step restores the source, hidden bytes included.
+        let editor = session.read_with(cx, |session, _| session.editor.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press("ctrl-z", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.projection.visible, body);
+            assert_eq!(session.buffer.current_text(), source);
+            assert!(
+                !session.is_dirty(),
+                "undo must return to the saved baseline"
+            );
+        });
+
+        // The Markdown comment toggle is one contiguous edit as well.
+        cx.update_window(handle.into(), |_, _, cx| {
+            let editor = session.read(cx).editor.clone();
+            editor.update(cx, |editor, cx| editor.set_selected_range(0..6, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            session
+                .update(cx, |session, cx| {
+                    session.apply_format(FormatCommand::Comment, window, cx)
+                })
+                .expect("the comment toggle applies as one edit");
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(
+                session.projection.visible,
+                "<!-- # Body -->\n\nFirst sentence. Second sentence.\n"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            session
+                .update(cx, |session, cx| {
+                    session.apply_format(FormatCommand::Comment, window, cx)
+                })
+                .expect("the second toggle restores the line");
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.projection.visible, body);
+        });
+        assert!(path.ends_with("src/posts/c.md"));
+    }
+
+    #[gpui_kit::test]
+    fn heading_and_link_transforms_preserve_crlf_and_hidden_metadata(cx: &mut TestAppContext) {
+        let (handle, _) = mount(cx);
+        let frontmatter = "---\r\ntitle: 'CRLF'\r\n---\r\n\r\n";
+        let source = format!("{frontmatter}intro\r\nsecond\r\n");
+        let session = bare_session(cx, handle, "note.md", &source);
+        let push = handle.into();
+        cx.update_window(push, |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(0..0, cx));
+                session
+                    .apply_format(
+                        FormatCommand::Heading(astrolith_document::HeadingLevel::H2),
+                        window,
+                        cx,
+                    )
+                    .unwrap();
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.projection.visible, "## intro\r\nsecond\r\n");
+            assert_eq!(
+                session.buffer.current_text(),
+                format!("{frontmatter}## intro\r\nsecond\r\n"),
+                "every hidden byte and line ending is copied verbatim"
+            );
+        });
+
+        // Paragraph removes the marker again, and a link wraps the selection.
+        cx.update_window(push, |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .apply_format(FormatCommand::Paragraph, window, cx)
+                    .unwrap();
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(0..5, cx));
+                session
+                    .apply_format(FormatCommand::Link, window, cx)
+                    .unwrap();
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, app| {
+            assert_eq!(session.projection.visible, "[intro]()\r\nsecond\r\n");
+            assert_eq!(
+                session.editor.read(app).selected_range(),
+                8..8,
+                "the caret lands inside the empty URL"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn cursor_commands_follow_the_facade_selection_limits(cx: &mut TestAppContext) {
+        let (handle, _) = mount(cx);
+        let text = "aaa aaa aaa\nbbb\nccc\n";
+        let session = bare_session(cx, handle, "cursor.md", text);
+        let push = handle.into();
+        cx.update_window(push, |_, _, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(0..3, cx));
+                // Select-next only ever reads the active selection (B1), and each
+                // press continues after the range the previous one added.
+                assert_eq!(session.select_next_occurrence(cx), Some(4..7));
+                assert_eq!(session.select_next_occurrence(cx), Some(8..11));
+                assert_eq!(
+                    session.select_next_occurrence(cx),
+                    None,
+                    "the third occurrence is the last"
+                );
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        let (handle, _) = mount(cx);
+        let session = bare_session(cx, handle, "cursor.md", "aaa aaa\nbbb\nccc\n");
+        let push = handle.into();
+        cx.update_window(push, |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(0..3, cx));
+                // The cursor set is the main selection's line ends, so a
+                // single-line selection yields exactly one cursor.
+                assert_eq!(session.cursors_at_line_ends(cx), 1);
+                // Upstream keeps the main selection active, so the caret stays on
+                // the line end the selection started from.
+                assert_eq!(session.editor.read(cx).cursor(), 7);
+                assert!(session.go_to_line(2, window, cx));
+                assert_eq!(session.editor.read(cx).cursor(), 8);
+                assert!(!session.go_to_line(9, window, cx));
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    async fn counts_and_go_to_line_follow_every_keystroke(cx: &mut TestAppContext) {
+        let dir = fixture();
+        std::fs::write(dir.path().join("src/posts/a.md"), "one\ntwo\n").unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        let (_path, session) = open_entry_for(cx, handle, &view, "src/posts/a.md").await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                assert_eq!(session.counts.lines, 3);
+                assert!(!session.go_to_line(4, window, cx));
+            });
+        })
+        .unwrap();
+
+        // Typing through the real input path refreshes the one snapshot the
+        // footer and go-to-line read.
+        edit_active(cx, handle, &view, "one\ntwo\nthree\n").await;
+        view.read_with(cx, |view, cx| {
+            let counts = view
+                .active_counts(cx)
+                .expect("an active document has counts");
+            assert_eq!(counts.lines, 4);
+            assert_eq!(counts.words, 3);
+        });
+        session.read_with(cx, |session, _| {
+            assert!(
+                !session.programmatic_change(),
+                "typing is not the session's own write"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                assert!(session.go_to_line(4, window, cx));
+                assert_eq!(session.editor.read(cx).cursor(), 14);
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn retarget_refreshes_the_counts_the_footer_reads(cx: &mut TestAppContext) {
+        let (handle, _) = mount(cx);
+        let source = "import A from \"a\";\n# Body\n";
+        // `.mdx` hides the provable ESM prelude, so retargeting as `.md` shows
+        // more text and must refresh the shared snapshot.
+        let session = bare_session(cx, handle, "entry.mdx", source);
+        let push = handle.into();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.projection.visible, "# Body\n");
+            assert_eq!(session.counts.lines, 2);
+        });
+        cx.update_window(push, |_, window, cx| {
+            session.update(cx, |session, cx| {
+                let identity = DocumentIdentity::new(
+                    ProjectId::new("projection").unwrap(),
+                    1,
+                    SourcePath::new("entry.md").unwrap(),
+                );
+                session.retarget(identity, window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.projection.visible, source);
+            assert_eq!(session.counts.lines, 3);
+            assert_eq!(session.counts.words(), 5);
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn selection_toolbar_is_reachable_from_the_registry(cx: &mut TestAppContext) {
+        let dir = fixture();
+        std::fs::write(dir.path().join("src/posts/a.md"), "# Body\n").unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        let (_path, session) = open_entry_for(cx, handle, &view, "src/posts/a.md").await;
+        let panel = view.read_with(cx, |view, _| view.document.clone());
+        let start = session.read_with(cx, |session, _| {
+            session
+                .projection
+                .visible
+                .find("Body")
+                .expect("the body is visible")
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            session.update(cx, |session, cx| {
+                session.editor.update(cx, |editor, cx| {
+                    editor.set_selected_range(start..start + 4, cx)
+                });
+            });
+            let availability = view.read_with(cx, |view, cx| view.command_availability(cx, window));
+            assert!(
+                CommandId::FocusSelectionToolbar.is_available(availability),
+                "a focused editor with a selection offers the toolbar"
+            );
+            panel.update(cx, |panel, cx| panel.focus_selection_toolbar(window, cx));
+            assert!(
+                panel.read(cx).toolbar_focus.is_focused(window),
+                "the registry focus path reaches the toolbar despite the editor trapping Tab"
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn formatting_dispatches_only_with_live_editor_focus(cx: &mut TestAppContext) {
+        let dir = fixture();
+        std::fs::write(dir.path().join("src/posts/a.md"), "# Body\n").unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        let (_path, session) = open_entry_for(cx, handle, &view, "src/posts/a.md").await;
+        let start = session.read_with(cx, |session, _| {
+            session
+                .projection
+                .visible
+                .find("Body")
+                .expect("the body is visible")
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            session.update(cx, |session, cx| {
+                session.editor.update(cx, |editor, cx| {
+                    editor.set_selected_range(start..start + 4, cx)
+                });
+            });
+            assert!(
+                view.update(cx, |view, cx| view.apply_format(
+                    FormatCommand::Bold,
+                    window,
+                    cx
+                )),
+                "the focused editor accepts formatting"
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.projection.visible, "# **Body**\n");
+            assert!(
+                session.programmatic_change(),
+                "a formatting command is not typing"
+            );
+        });
+
+        // Focus anywhere else refuses the same command through the registry and
+        // leaves the text alone.
+        let elsewhere = cx.update(|cx| cx.focus_handle());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.focus(&elsewhere, cx);
+            window.render_frame(cx);
+            assert!(
+                !view.update(cx, |view, cx| view.apply_format(
+                    FormatCommand::Italic,
+                    window,
+                    cx
+                )),
+                "formatting needs the document's own focus"
+            );
+            assert_eq!(
+                view.read(cx).status,
+                "Formatting is unavailable while this document is not focused."
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.projection.visible, "# **Body**\n");
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn selection_toolbar_keeps_focus_and_stays_mounted_for_the_keyboard(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        std::fs::write(dir.path().join("src/posts/a.md"), "# Body text\n").unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        let (_path, session) = open_entry_for(cx, handle, &view, "src/posts/a.md").await;
+        let document = cx.update(|cx| view.read(cx).document.clone());
+        let toolbar_focus = document.read_with(cx, |panel, _| panel.toolbar_focus.clone());
+        let editor_focus =
+            session.read_with(cx, |session, cx| session.editor.read(cx).focus_handle(cx));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(2..6, cx));
+            });
+            editor_focus.focus(window, cx);
+            document.update(cx, |_, cx| cx.notify());
+            window.render_frame(cx);
+            assert!(
+                window.try_find("selection-toolbar").is_some(),
+                "a selection in the focused editor shows the toolbar"
+            );
+
+            // Focus moving onto the toolbar must not unmount the control that
+            // just received it.
+            toolbar_focus.focus(window, cx);
+            document.update(cx, |_, cx| cx.notify());
+            window.render_frame(cx);
+            assert!(
+                window.try_find("selection-toolbar").is_some(),
+                "the toolbar keeps itself mounted while it is focused"
+            );
+
+            // Tab walks off the container and into the button row.
+            window.press("tab", cx);
+            window.render_frame(cx);
+            assert!(
+                !toolbar_focus.is_focused(window) && toolbar_focus.contains_focused(window, cx),
+                "Tab reaches a toolbar button"
+            );
+            assert!(
+                window.try_find("selection-toolbar").is_some(),
+                "and the overlay stays mounted for it"
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn url_paste_wraps_the_selection_and_alt_click_hits_only_external_urls(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, view) = mount(cx);
+        let session = bare_session(
+            cx,
+            handle,
+            "links.md",
+            "Read [docs](https://example.dev/guide) or https://other.dev now.\n",
+        );
+        let push = handle.into();
+        // Mount the session in the document pane so the editor is laid out and
+        // `range_to_bounds` returns real geometry for the hit test.
+        let document = cx.update(|cx| view.read(cx).document.clone());
+        cx.update(|cx| {
+            document.update(cx, |panel, cx| {
+                panel.show_editor("links.md".into(), session.read(cx).editor.clone(), None, cx)
+            });
+        });
+        cx.update_window(push, |_, window, cx| {
+            window.render_frame(cx);
+            session.update(cx, |session, cx| {
+                // Paste-over-selection wraps the selection in one link.
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(0..4, cx));
+                assert!(session.wrap_selection_as_link("https://wrap.dev/x", window, cx));
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(
+                session.projection.visible,
+                "[Read](https://wrap.dev/x) [docs](https://example.dev/guide) or https://other.dev now.\n"
+            );
+        });
+
+        // A non-URL clipboard payload never takes over the paste.
+        cx.update_window(push, |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(0..4, cx));
+                assert!(!session.wrap_selection_as_link("plain text", window, cx));
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        // The URL hit test uses the editor's own range geometry.
+        let bounds = cx
+            .update_window(push, |_, window, cx| {
+                window.render_frame(cx);
+                let editor = session.read(cx).editor.clone();
+                editor.update(cx, |editor, cx| {
+                    let start = session
+                        .read(cx)
+                        .projection
+                        .visible
+                        .find("https://other.dev")
+                        .unwrap();
+                    editor.set_selected_range(0..0, cx);
+                    editor
+                        .range_to_bounds(&(start..start + "https://other.dev".len()))
+                        .expect("the URL is laid out")
+                })
+            })
+            .unwrap();
+        let opened = cx
+            .update_window(push, |_, _, cx| {
+                session.update(cx, |session, cx| session.open_url_at(bounds.center(), cx))
+            })
+            .unwrap();
+        assert_eq!(opened.as_deref(), Some("https://other.dev/"));
+    }
+
+    #[gpui_kit::test]
+    fn focus_mode_dims_other_sentences_and_the_prose_layer_skips_code(cx: &mut TestAppContext) {
+        let (handle, _) = mount(cx);
+        let text = "First sentence. Second sentence.\n\n> quoted `code` line\n\n```\n# not a heading\n```\n";
+        let session = bare_session(cx, handle, "focus.md", text);
+        let push = handle.into();
+        cx.update_window(push, |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session.editor.update(cx, |editor, cx| {
+                    editor.set_selected_range(0..0, cx);
+                });
+                session.set_writing_modes(
+                    crate::editor::writing_modes::WritingModes {
+                        focus: true,
+                        typewriter: false,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        session.read_with(cx, |session, app| {
+            let dimmed = session.presentation.focus_ranges(app);
+            let first = text.find("First sentence. ").unwrap() + "First sentence. ".len();
+            assert!(
+                dimmed.iter().all(|range| range.start >= first),
+                "the cursor sentence stays undimmed: {dimmed:?}"
+            );
+            assert_eq!(dimmed.first().map(|range| range.start), Some(first));
+            assert_eq!(dimmed.last().map(|range| range.end), Some(text.len()));
+
+            // Prose presentation: markers dimmed, code spans and blocks carry
+            // their own layer and never receive a prose token inside them.
+            let ranges = session.presentation.prose_ranges(app);
+            let slices: Vec<&str> = ranges.iter().map(|range| &text[range.clone()]).collect();
+            let code_span = text.find("`code`").unwrap();
+            assert!(slices.contains(&"> "));
+            assert!(slices.contains(&"`code`"));
+            let fence = text.find("```").unwrap();
+            assert!(
+                ranges
+                    .iter()
+                    .any(|range| range.start == fence && range.end == fence + 3),
+                "the fence line is a code block span"
+            );
+            for range in &ranges {
+                let inside_code = (code_span..code_span + "`code`".len()).contains(&range.start)
+                    && range.end <= code_span + "`code`".len()
+                    && *range != (code_span..code_span + "`code`".len());
+                assert!(!inside_code, "no prose token inside a code span: {range:?}");
+            }
+        });
+
+        // Moving the caret to the second sentence flips the dimmed set.
+        let second = text.find("Second").unwrap();
+        cx.update_window(push, |_, _, cx| {
+            let editor = session.read(cx).editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(second..second, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, app| {
+            let dimmed = session.presentation.focus_ranges(app);
+            assert!(
+                dimmed.iter().any(|range| range.start == 0),
+                "the first sentence is dimmed once the caret leaves it: {dimmed:?}"
+            );
+        });
+    }
+
     async fn wait_for_session(
         cx: &mut TestAppContext,
         view: &Entity<ProjectWorkspace>,
@@ -6663,7 +7543,9 @@ export const collections = {blog, dataAuthors};
         .unwrap();
         for _ in 0..300 {
             cx.run_until_parked();
-            if view.read_with(cx, |view, _| view.sessions.contains_key(&renamed)) {
+            if view.read_with(cx, |view, _| {
+                view.sessions.contains_key(&renamed) && view.active_entry_id().is_some()
+            }) {
                 break;
             }
             runtime::blocking(cx, || {
