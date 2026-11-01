@@ -1,0 +1,43 @@
+---
+import { getCollection, render } from "astro:content";
+
+// The preview service resolves a default route as `/<collection>/<entry id>`
+// and folds an `index` entry into its parent. This page emits exactly those
+// paths for every fixture collection, including nested and Unicode ids.
+export async function getStaticPaths() {
+  const collections = ["blog", "docs", "authors", "archive", "published"];
+  const paths = [];
+
+  for (const collection of collections) {
+    const entries = await getCollection(collection);
+
+    for (const entry of entries) {
+      let route = `${collection}/${entry.id}`;
+      if (entry.id === "index") {
+        route = collection;
+      } else if (entry.id.endsWith("/index")) {
+        route = `${collection}/${entry.id.slice(0, -"/index".length)}`;
+      }
+      paths.push({ params: { route }, props: { entry } });
+    }
+  }
+
+  return paths;
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{entry.id} — parity fixture</title>
+  </head>
+  <body data-astrolith-parity-preview>
+    <main data-entry-id={entry.id}>
+      <Content />
+    </main>
+  </body>
+</html>
