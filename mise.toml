@@ -51,6 +51,14 @@ run = "cargo test -p astrolith-gpui --release --locked window_resize_workload --
 description = "Open the disposable M00.2 Markdown editor spike"
 run = "cargo run --locked --package astrolith-desktop -- --spike=editor"
 
+[tasks."test:projection-perf"]
+description = "Measure the projected writer diff and typing cost in the development profile"
+run = "cargo test -p astrolith-document --locked projection_diff_workload -- --ignored --nocapture && cargo test -p astrolith-gpui --locked --lib projected_writer_workload -- --ignored --nocapture"
+
+[tasks."test:projection-perf:release"]
+description = "Measure the projected writer diff and typing cost in release"
+run = "cargo test -p astrolith-document --release --locked projection_diff_workload -- --ignored --nocapture && cargo test -p astrolith-gpui --release --locked --lib projected_writer_workload -- --ignored --nocapture"
+
 [tasks."test:editor-perf"]
 description = "Measure bounded editor workloads on the headless test platform"
 run = "cargo test --release --locked --package astrolith-desktop large_document_workload -- --ignored --nocapture"

@@ -315,6 +315,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tree-sitter",
+ "tree-sitter-typescript",
  "yaml-rust2",
 ]
 

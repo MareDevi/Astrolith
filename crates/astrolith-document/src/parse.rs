@@ -882,6 +882,62 @@ pub fn parse_document(source: &str) -> Result<ParsedDocument, DocumentError> {
         LineEnding::Lf
     };
 
+    let Some(span) = scan_leading_frontmatter(source)? else {
+        return Ok(ParsedDocument {
+            source: source.to_owned(),
+            line_ending,
+            frontmatter: None,
+            body: source.to_owned(),
+            patches: Vec::new(),
+            leading: None,
+        });
+    };
+
+    let inner = &source[span.inner_start..span.closing_start];
+    validate_yaml_mapping(inner)?;
+
+    let mut fields = Vec::new();
+    scan_fields(inner, span.inner_start, &mut fields)?;
+    let public = fields.iter().map(public_field).collect();
+
+    Ok(ParsedDocument {
+        body: source[span.end..].to_owned(),
+        source: source.to_owned(),
+        line_ending,
+        frontmatter: Some(Frontmatter {
+            fields,
+            public,
+            end: span.closing_start,
+        }),
+        patches: Vec::new(),
+        leading: None,
+    })
+}
+
+/// Byte layout of one exact leading frontmatter block.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FrontmatterSpan {
+    /// Offset just after the opening delimiter line.
+    pub(crate) inner_start: usize,
+    /// Offset of the closing delimiter line.
+    pub(crate) closing_start: usize,
+    /// Offset just after the closing delimiter line, including its line ending.
+    pub(crate) end: usize,
+}
+
+/// Locate a frontmatter block that starts at the very beginning of `source`.
+///
+/// Only delimiter structure is inspected: the YAML in between is not validated,
+/// so a writer projection can hide an otherwise malformed block exactly as it
+/// appears. A byte-order mark before the opening delimiter belongs to the block.
+///
+/// # Errors
+///
+/// Returns [`DocumentError::InvalidFrontmatter`] when the source starts with an
+/// opening delimiter that has no closing delimiter line.
+pub(crate) fn scan_leading_frontmatter(
+    source: &str,
+) -> Result<Option<FrontmatterSpan>, DocumentError> {
     let bom = if source.starts_with('\u{feff}') {
         '\u{feff}'.len_utf8()
     } else {
@@ -891,52 +947,25 @@ pub fn parse_document(source: &str) -> Result<ParsedDocument, DocumentError> {
 
     // No frontmatter unless the first line is exactly `---`.
     let Some(first_nl) = after_bom.find('\n') else {
-        if after_bom.trim_end_matches([' ', '\r']) == "---" {
-            return Err(DocumentError::InvalidFrontmatter);
-        }
-        return Ok(ParsedDocument {
-            source: source.to_owned(),
-            line_ending,
-            frontmatter: None,
-            body: source.to_owned(),
-            patches: Vec::new(),
-            leading: None,
-        });
+        return if after_bom.trim_end_matches([' ', '\r']) == "---" {
+            Err(DocumentError::InvalidFrontmatter)
+        } else {
+            Ok(None)
+        };
     };
     if after_bom[..first_nl].trim_end_matches([' ', '\r']) != "---" {
-        return Ok(ParsedDocument {
-            source: source.to_owned(),
-            line_ending,
-            frontmatter: None,
-            body: source.to_owned(),
-            patches: Vec::new(),
-            leading: None,
-        });
+        return Ok(None);
     }
 
     let inner_start = bom + first_nl + 1;
-    let Some((closing_start, closing_next)) = find_closing_delimiter(source, inner_start) else {
+    let Some((closing_start, end)) = find_closing_delimiter(source, inner_start) else {
         return Err(DocumentError::InvalidFrontmatter);
     };
-    let inner = &source[inner_start..closing_start];
-    validate_yaml_mapping(inner)?;
-
-    let mut fields = Vec::new();
-    scan_fields(inner, inner_start, &mut fields)?;
-    let public = fields.iter().map(public_field).collect();
-
-    Ok(ParsedDocument {
-        body: source[closing_next..].to_owned(),
-        source: source.to_owned(),
-        line_ending,
-        frontmatter: Some(Frontmatter {
-            fields,
-            public,
-            end: closing_start,
-        }),
-        patches: Vec::new(),
-        leading: None,
-    })
+    Ok(Some(FrontmatterSpan {
+        inner_start,
+        closing_start,
+        end,
+    }))
 }
 
 fn public_field(field: &Field) -> FrontmatterField {

@@ -11,6 +11,8 @@
 pub mod buffer;
 /// Lossless frontmatter parse and scalar field spans.
 pub mod parse;
+/// Lossless writer projection and visible-to-source mapping.
+pub mod projection;
 /// Recovery records for unsaved document content.
 pub mod recovery;
 /// Conflict-aware, one-writer-per-document save coordinator.
@@ -28,6 +30,10 @@ pub use buffer::{
 pub use parse::{
     FieldShape, FrontmatterField, FrontmatterValue, LineEnding, ParsedDocument, SequenceStyle,
     parse_document,
+};
+pub use projection::{
+    DocumentKind, ProjectionError, ProjectionSegment, TextEdit, TextReplacement, WriterProjection,
+    apply_visible_edit, diff_visible, map_visible_offset, project_writer,
 };
 pub use recovery::{RecoveryLoad, RecoveryRecord, RecoveryStore};
 pub use save::{DocumentSnapshot, SaveOutcome, save_snapshot};

@@ -982,3 +982,480 @@ fn sequence_refusals_are_preserved() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Writer projection
+// ---------------------------------------------------------------------------
+
+use crate::projection::{
+    DocumentKind, ProjectionError, ProjectionSegment, TextEdit, TextReplacement, WriterProjection,
+    apply_visible_edit, diff_visible, map_visible_offset, project_writer,
+};
+
+const FRONTMATTER: &str = "---\ntitle: \"Exact\" # keep\n---\n";
+
+fn hidden_bytes(source: &str, projection: &WriterProjection) -> Vec<String> {
+    projection
+        .segments
+        .iter()
+        .filter_map(|segment| match segment {
+            ProjectionSegment::Hidden { source: range } => Some(source[range.clone()].to_owned()),
+            ProjectionSegment::Visible { .. } => None,
+        })
+        .collect()
+}
+
+#[test]
+fn markdown_hides_only_the_exact_leading_frontmatter() {
+    let source = format!("{FRONTMATTER}\n# Title\n\nBody\n");
+    let projection = project_writer(&source, DocumentKind::Markdown).unwrap();
+    assert_eq!(projection.visible, "# Title\n\nBody\n");
+    assert_eq!(projection.segments.len(), 2);
+    assert_eq!(
+        projection.segments[0],
+        ProjectionSegment::Hidden {
+            source: 0..FRONTMATTER.len() + 1
+        }
+    );
+    assert_eq!(
+        projection.segments[1],
+        ProjectionSegment::Visible {
+            source: FRONTMATTER.len() + 1..source.len(),
+            visible: 0..projection.visible.len(),
+        }
+    );
+    // An unchanged projection round-trips the whole source exactly.
+    let rebuilt = apply_visible_edit(&source, &projection, TextEdit::default()).unwrap();
+    assert_eq!(rebuilt, source);
+    assert_eq!(
+        hidden_bytes(&source, &projection),
+        [format!("{FRONTMATTER}\n")]
+    );
+}
+
+#[test]
+fn projection_edges_stay_visible_or_append_after_the_block() {
+    let plain = "# Body\n";
+    let projection = project_writer(plain, DocumentKind::Markdown).unwrap();
+    assert_eq!(projection.visible, plain);
+    assert_eq!(
+        projection.segments,
+        [ProjectionSegment::Visible {
+            source: 0..plain.len(),
+            visible: 0..plain.len(),
+        }]
+    );
+
+    let empty = project_writer("", DocumentKind::Markdown).unwrap();
+    assert_eq!(empty.visible, "");
+    assert!(empty.segments.is_empty());
+    assert_eq!(
+        apply_visible_edit("", &empty, TextEdit::replace(0..0, "# New\n")).unwrap(),
+        "# New\n"
+    );
+
+    // A frontmatter-only file shows nothing; typing appends after the block.
+    let only = project_writer(FRONTMATTER, DocumentKind::Markdown).unwrap();
+    assert_eq!(only.visible, "");
+    assert_eq!(only.source_len(), FRONTMATTER.len());
+    assert_eq!(
+        apply_visible_edit(FRONTMATTER, &only, TextEdit::replace(0..0, "\n# Body\n")).unwrap(),
+        format!("{FRONTMATTER}\n# Body\n")
+    );
+    // A leading delimiter line is not frontmatter.
+    let dashed = project_writer("---x\nbody\n", DocumentKind::Markdown).unwrap();
+    assert_eq!(dashed.visible, "---x\nbody\n");
+    // Non-Markdown sources never hide anything.
+    let plain_text = project_writer(FRONTMATTER, DocumentKind::Plain).unwrap();
+    assert_eq!(plain_text.visible, FRONTMATTER);
+}
+
+#[test]
+fn malformed_frontmatter_is_reported_and_never_hidden() {
+    for source in ["---\ntitle: x\n", "---", "---\r\n"] {
+        assert_eq!(
+            project_writer(source, DocumentKind::Markdown),
+            Err(ProjectionError::MalformedFrontmatter),
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn blank_separators_after_metadata_are_hidden_and_only_ascii_blanks_count() {
+    let frontmatter = "---\ntitle: x\n---\n";
+
+    // The separator run is hidden even when it ends the file, so the writer never
+    // shows a trailing empty line that belongs to the metadata lead.
+    let source = format!("{frontmatter}\n \n");
+    let projection = project_writer(&source, DocumentKind::Markdown).unwrap();
+    assert_eq!(projection.visible, "");
+    assert_eq!(hidden_bytes(&source, &projection), [source]);
+
+    // Only ASCII space, tab and CR are blank: whitespace a user authored stays.
+    for authored in ["\u{a0}", "\u{3000}"] {
+        let source = format!("{frontmatter}\n{authored}\n# Body\n");
+        let projection = project_writer(&source, DocumentKind::Markdown).unwrap();
+        assert_eq!(projection.visible, format!("{authored}\n# Body\n"));
+    }
+
+    // Indentation of the first content line is preserved.
+    let source = format!("{frontmatter}\n\n  # Body\n");
+    let projection = project_writer(&source, DocumentKind::Markdown).unwrap();
+    assert_eq!(projection.visible, "  # Body\n");
+}
+
+#[test]
+fn unicode_and_crlf_map_byte_exactly() {
+    let frontmatter = "---\r\ntitle: \"Exact\" # 日本語\r\n---\r\n";
+    let source = format!("{frontmatter}\r\n# 見出し 🦀\r\n\r\n本文 e\u{301}\r\n");
+    let projection = project_writer(&source, DocumentKind::Markdown).unwrap();
+    assert_eq!(projection.visible, "# 見出し 🦀\r\n\r\n本文 e\u{301}\r\n");
+    assert_eq!(
+        hidden_bytes(&source, &projection),
+        [format!("{frontmatter}\r\n")]
+    );
+
+    let body = projection.visible.find("本文").unwrap();
+    let edit = TextEdit::replace(body..body + "本文".len(), "変更 🦀");
+    let updated = apply_visible_edit(&source, &projection, edit).unwrap();
+    assert!(updated.starts_with(frontmatter));
+    assert_eq!(
+        updated,
+        format!("{frontmatter}\r\n# 見出し 🦀\r\n\r\n変更 🦀 e\u{301}\r\n")
+    );
+
+    // Multi-byte characters are never split: the same edit at a char interior fails.
+    let mid = body + 1;
+    assert_eq!(
+        apply_visible_edit(&source, &projection, TextEdit::replace(mid..mid + 1, "x")),
+        Err(ProjectionError::InvalidRange {
+            start: mid,
+            end: mid + 1
+        })
+    );
+}
+
+#[test]
+fn visible_offsets_map_monotonically_into_the_source() {
+    let source = format!("{FRONTMATTER}\n# Title 🦀\n\nbody\n");
+    let projection = project_writer(&source, DocumentKind::Markdown).unwrap();
+    let marker = "\u{00a7}";
+    let mut previous = 0;
+    for offset in 0..=projection.visible.len() {
+        if !projection.visible.is_char_boundary(offset) {
+            continue;
+        }
+        let marked = apply_visible_edit(
+            &source,
+            &projection,
+            TextEdit::replace(offset..offset, marker),
+        )
+        .unwrap();
+        let mapped = marked.find(marker).unwrap();
+        assert_eq!(mapped, FRONTMATTER.len() + 1 + offset, "{offset}");
+        assert!(mapped >= previous, "{offset} went backwards");
+        assert!(marked.is_char_boundary(mapped + marker.len()));
+        previous = mapped;
+    }
+}
+
+#[test]
+fn caret_offsets_map_through_a_projection_rebuild() {
+    // A frontmatter block created at the top is hidden together with the blank
+    // line that separates it from the body, so the caret keeps its text.
+    let before = "\n# Title\n\nBody text\n";
+    let after = "# Title\n\nBody text\n";
+    let caret = before.find("Body").unwrap();
+    assert_eq!(map_visible_offset(before, after, caret), caret - 1);
+    assert_eq!(map_visible_offset(after, after, caret - 1), caret - 1);
+    // A caret inside replaced text collapses to the end of the replacement.
+    assert_eq!(
+        map_visible_offset(after, &after.replace("Body", ""), caret),
+        caret - 1
+    );
+    assert_eq!(map_visible_offset(after, "", caret - 1), 0);
+}
+
+#[test]
+fn mdx_hides_the_tree_sitter_proven_esm_prelude() {
+    let prelude = "import Callout from \"@components/Callout.astro\";\n\
+                   import { formatLabel as label } from \"@lib/format.ts\";\n\
+                   \n\
+                   export const importedLabel = label(\"Top-level   export\");\n";
+    let source = format!(
+        "{FRONTMATTER}\n{prelude}\n# Imported components\n\n<Callout>{{importedLabel}}</Callout>\n"
+    );
+    let projection = project_writer(&source, DocumentKind::Mdx).unwrap();
+    assert_eq!(
+        projection.visible,
+        "# Imported components\n\n<Callout>{importedLabel}</Callout>\n"
+    );
+    let hidden = projection.segments[0].clone();
+    let ProjectionSegment::Hidden { source: range } = hidden else {
+        panic!("the MDX prelude must be hidden");
+    };
+    assert_eq!(range.start, 0);
+    assert!(range.end > FRONTMATTER.len());
+    let hidden_text = &source[range];
+    assert!(hidden_text.contains("import Callout"));
+    assert!(hidden_text.contains("export const importedLabel"));
+    assert_eq!(hidden_bytes(&source, &projection).len(), 1);
+
+    // Markdown hides only the frontmatter, so the same imports stay visible.
+    let markdown = project_writer(&source, DocumentKind::Markdown).unwrap();
+    assert!(markdown.visible.contains("import Callout"));
+}
+
+#[test]
+fn ambiguous_mdx_prelude_syntax_stays_visible() {
+    for body in [
+        "import {\n  Callout,\n\n# Body\n",
+        "imported prose that only looks like an import\n\n# Body\n",
+        "  import Callout from \"@components/Callout.astro\";\n\n# Body\n",
+        "// a comment\nimport Callout from \"@components/Callout.astro\";\n\n# Body\n",
+        "```mdx\nimport Callout from \"./Callout.astro\";\n```\n",
+        "# Body\n\nimport Callout from \"./Callout.astro\";\n",
+        "export\n\n# Body\n",
+    ] {
+        let source = format!("{FRONTMATTER}\n{body}");
+        let projection = project_writer(&source, DocumentKind::Mdx).unwrap();
+        assert_eq!(projection.visible, body, "{body:?} must stay visible");
+    }
+
+    // A statement that becomes provably complete later does not retroactively hide
+    // the ambiguous prefix: only the leading proven statements are hidden.
+    let source = format!("{FRONTMATTER}\nimport A from \"./A.astro\";\n\nexport\n\n# Body\n");
+    let projection = project_writer(&source, DocumentKind::Mdx).unwrap();
+    assert_eq!(projection.visible, "export\n\n# Body\n");
+    assert!(!projection.visible.contains("import A"));
+}
+
+#[test]
+fn replace_all_batches_apply_right_to_left_against_original_offsets() {
+    let source = format!("{FRONTMATTER}alpha alpha alpha\n");
+    let projection = project_writer(&source, DocumentKind::Markdown).unwrap();
+    let matches = projection
+        .visible
+        .match_indices("alpha")
+        .map(|(start, _)| TextReplacement::new(start..start + 5, "beta"))
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 3);
+    let updated = apply_visible_edit(
+        &source,
+        &projection,
+        TextEdit {
+            replacements: matches,
+        },
+    )
+    .unwrap();
+    assert_eq!(updated, format!("{FRONTMATTER}beta beta beta\n"));
+
+    // Offsets are read against the pre-edit text: a stale second pass is refused.
+    assert_eq!(
+        apply_visible_edit(
+            &source,
+            &projection,
+            TextEdit {
+                replacements: vec![
+                    TextReplacement::new(5..10, "x"),
+                    TextReplacement::new(0..9, "y"),
+                ],
+            }
+        ),
+        Err(ProjectionError::OverlappingEdits)
+    );
+
+    // Right-to-left order is produced even when the caller supplies the reverse.
+    let mut replacements = projection
+        .visible
+        .match_indices("alpha")
+        .map(|(start, _)| TextReplacement::new(start..start + 5, "Z"))
+        .collect::<Vec<_>>();
+    replacements.reverse();
+    assert_eq!(
+        apply_visible_edit(&source, &projection, TextEdit { replacements }).unwrap(),
+        format!("{FRONTMATTER}Z Z Z\n")
+    );
+}
+
+#[test]
+fn edits_touching_hidden_bytes_are_refused() {
+    // A synthetic interleaved layout cannot come from `project_writer`, but the
+    // mapping contract must hold for any projection it is handed.
+    let source = "HHabcHHdef";
+    let projection = WriterProjection {
+        visible: "abcdef".to_owned(),
+        segments: vec![
+            ProjectionSegment::Hidden { source: 0..2 },
+            ProjectionSegment::Visible {
+                source: 2..5,
+                visible: 0..3,
+            },
+            ProjectionSegment::Hidden { source: 5..7 },
+            ProjectionSegment::Visible {
+                source: 7..10,
+                visible: 3..6,
+            },
+        ],
+    };
+    // Straddling a hidden run, and the ambiguous insertion on the shared edge.
+    for range in [2..4, 3..3] {
+        assert_eq!(
+            apply_visible_edit(source, &projection, TextEdit::replace(range.clone(), "x")),
+            Err(ProjectionError::HiddenBoundary {
+                start: range.start,
+                end: range.end
+            }),
+            "{range:?}"
+        );
+    }
+    // Out-of-range and inverted requests are refused before any mapping.
+    let (inverted_start, inverted_end) = (6, 5);
+    for range in [0..7, inverted_start..inverted_end] {
+        assert!(matches!(
+            apply_visible_edit(source, &projection, TextEdit::replace(range, "x")),
+            Err(ProjectionError::InvalidRange { .. })
+        ));
+    }
+    // Edits that stay inside one visible run map through the hidden bytes.
+    assert_eq!(
+        apply_visible_edit(source, &projection, TextEdit::replace(0..1, "<")).unwrap(),
+        "HH<bcHHdef"
+    );
+    assert_eq!(
+        apply_visible_edit(source, &projection, TextEdit::replace(3..4, "D")).unwrap(),
+        "HHabcHHDef"
+    );
+    assert_eq!(
+        apply_visible_edit(source, &projection, TextEdit::replace(6..6, ">")).unwrap(),
+        "HHabcHHdef>"
+    );
+}
+
+#[test]
+fn renew_visible_keeps_hidden_bytes_fixed() {
+    let source = format!("{FRONTMATTER}\n# Title\n");
+    let projection = project_writer(&source, DocumentKind::Markdown).unwrap();
+    let renewed = projection
+        .renew_visible("# Changed 🦀\n\nBody\n".to_owned())
+        .unwrap();
+    assert_eq!(
+        renewed.segments[0],
+        ProjectionSegment::Hidden {
+            source: 0..FRONTMATTER.len() + 1
+        }
+    );
+    assert_eq!(renewed.segments.len(), 2);
+    assert_eq!(
+        renewed.source_len(),
+        FRONTMATTER.len() + 1 + renewed.visible.len()
+    );
+    assert_eq!(
+        apply_visible_edit(
+            &format!("{FRONTMATTER}\n{}", renewed.visible),
+            &renewed,
+            TextEdit::replace(0..0, ">")
+        )
+        .unwrap(),
+        format!("{FRONTMATTER}\n># Changed 🦀\n\nBody\n")
+    );
+
+    let interleaved = WriterProjection {
+        visible: "v".to_owned(),
+        segments: vec![
+            ProjectionSegment::Hidden { source: 0..1 },
+            ProjectionSegment::Visible {
+                source: 1..2,
+                visible: 0..1,
+            },
+            ProjectionSegment::Hidden { source: 2..3 },
+        ],
+    };
+    assert_eq!(
+        interleaved.renew_visible("w".to_owned()),
+        Err(ProjectionError::UnrenewableLayout)
+    );
+}
+
+#[test]
+fn visible_diff_trims_to_one_replacement() {
+    assert!(diff_visible("", "").is_empty());
+    assert!(diff_visible("# Body\n", "# Body\n").is_empty());
+
+    for (previous, next) in [
+        ("# Body\n", "# BodX\n"),
+        ("# Body\n", "🦀# Body\n"),
+        ("# 見出し\n", "# 見出X\n"),
+        ("abc", "ab"),
+        ("ab", "abc"),
+        ("", "中"),
+        ("中", ""),
+    ] {
+        let edit = diff_visible(previous, next);
+        assert_eq!(edit.replacements.len(), 1, "{previous:?} -> {next:?}");
+        let TextReplacement { range, replacement } = &edit.replacements[0];
+        assert!(previous.is_char_boundary(range.start));
+        assert!(previous.is_char_boundary(range.end));
+        assert_eq!(
+            &next[range.start..range.start + replacement.len()],
+            replacement
+        );
+        let mut rebuilt = previous.to_owned();
+        rebuilt.replace_range(range.clone(), replacement);
+        assert_eq!(rebuilt, next);
+    }
+}
+
+// Diagnostic only: bounded CPU measurements of the projection diff, not native
+// input-to-present latency. Run with:
+//   cargo test -p astrolith-document --locked projection_diff_workload -- --ignored --nocapture
+//   cargo test -p astrolith-document --release --locked projection_diff_workload -- --ignored --nocapture
+#[test]
+#[ignore = "bounded workload measurements"]
+fn projection_diff_workload() {
+    use std::time::Instant;
+
+    let frontmatter = "---\ntitle: Workload\ndraft: false\n---\n";
+    for (bytes, long_line) in [
+        (1024usize, false),
+        (100 * 1024, false),
+        (1024 * 1024, false),
+        (100 * 1024, true),
+    ] {
+        let unit = if long_line {
+            "中文日本語🦀 **bold** `code` "
+        } else {
+            "# 中文 🦀\n\nA multilingual paragraph with **emphasis**, `code`, 日本語 and 中文.\n"
+        };
+        let body = unit.repeat(bytes.div_ceil(unit.len()));
+        let source = format!("{frontmatter}{body}");
+        let projection = project_writer(&source, DocumentKind::Markdown).unwrap();
+        let mut samples: Vec<f64> = Vec::with_capacity(60);
+        for sample in 0..60 {
+            // Ordinary typing: append one character, then insert one at the start.
+            let offset = if sample % 2 == 0 {
+                projection.visible.len()
+            } else {
+                0
+            };
+            let mut next = projection.visible.clone();
+            next.insert(offset, '中');
+            let start = Instant::now();
+            let edit = diff_visible(&projection.visible, &next);
+            let updated = apply_visible_edit(&source, &projection, edit).unwrap();
+            samples.push(start.elapsed().as_secs_f64() * 1000.);
+            assert!(updated.starts_with(frontmatter));
+        }
+        samples.sort_by(f64::total_cmp);
+        println!(
+            "PROJECTION_DIFF bytes={} body_bytes={} lines={} long_line={long_line} samples=60 p50_ms={:.4} p95_ms={:.4} max_ms={:.4}",
+            source.len(),
+            projection.visible.len(),
+            projection.visible.lines().count(),
+            samples[29],
+            samples[56],
+            samples[59],
+        );
+    }
+}

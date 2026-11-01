@@ -640,7 +640,7 @@ impl ProjectWorkspace {
     pub fn has_dirty(&self, cx: &App) -> bool {
         self.sessions
             .values()
-            .any(|session| session.read(cx).is_dirty(cx))
+            .any(|session| session.read(cx).is_dirty())
     }
 
     /// Project name shown in window chrome; `None` until a project is open.
@@ -717,6 +717,16 @@ impl ProjectWorkspace {
             });
         }
         self.tabs = Arc::new(tabs);
+    }
+
+    /// Surface one session's refusal notice in the workspace status line.
+    fn surface_session_notice(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        let Some(session) = self.sessions.get(path).cloned() else {
+            return;
+        };
+        if let Some(notice) = session.update(cx, |session, _| session.notice.take()) {
+            self.status = notice.to_string();
+        }
     }
 
     fn update_tab_state(&mut self, path: &std::path::Path, cx: &App) {
@@ -1063,7 +1073,9 @@ impl ProjectWorkspace {
         }
         let collection = self.session_collections.get(path)?;
         let session = self.sessions.get(path)?;
-        let text = session.read(cx).editor.read(cx).text().to_string();
+        // The form parses complete-source text; the editor itself only shows the
+        // writer projection, which has no frontmatter to build controls from.
+        let text = session.read(cx).buffer.current_text().to_owned();
         Some(ActiveFrontmatter {
             schema: self.schemas.get(collection).cloned(),
             mappings: self.resolved_for(Some(collection)).field_mappings,
@@ -1073,14 +1085,14 @@ impl ProjectWorkspace {
         })
     }
 
-    /// Apply one frontmatter form edit to the active session's *current* text.
+    /// Apply one frontmatter form edit to the active session's complete source.
     ///
-    /// Parses the live editor text, applies exactly one lossless document
-    /// operation, and replaces the session text with the result. Because the
-    /// patch is computed from the live text, concurrent unsaved edits to the
-    /// document body are preserved exactly; a stale form snapshot is never
-    /// written back. No disk I/O happens here — the conflict-aware save
-    /// coordinator persists the edit later.
+    /// The session absorbs any queued body edit first, then applies exactly one
+    /// lossless document operation to the authoritative complete source and
+    /// rebuilds the writer projection. Because the patch is computed from the
+    /// live source, concurrent unsaved edits to the document body are preserved
+    /// exactly; a stale form snapshot is never written back. No disk I/O happens
+    /// here — the conflict-aware save coordinator persists the edit later.
     pub fn apply_frontmatter_edit(
         &mut self,
         edit: FrontmatterEdit,
@@ -1096,58 +1108,49 @@ impl ProjectWorkspace {
         let Some(session) = self.sessions.get(&active).cloned() else {
             return;
         };
-        let live = session.read(cx).editor.read(cx).text().to_string();
-        let patched = (|| -> Result<String, String> {
-            let mut document = parse_document(&live).map_err(|error| error.to_string())?;
-            match &edit {
-                FrontmatterEdit::Scalar {
-                    path,
-                    value,
-                    present,
-                } => {
-                    if *present {
-                        document.set_field(path, value.clone())
-                    } else {
-                        document.insert_field(path, value.clone())
+        let patched = session.update(cx, |session, cx| {
+            session.patch_complete(window, cx, |live| {
+                let mut document = parse_document(live).map_err(|error| error.to_string())?;
+                match &edit {
+                    FrontmatterEdit::Scalar {
+                        path,
+                        value,
+                        present,
+                    } => {
+                        if *present {
+                            document.set_field(path, value.clone())
+                        } else {
+                            document.insert_field(path, value.clone())
+                        }
+                    }
+                    FrontmatterEdit::AddItem { path, value, .. } => {
+                        if document.has_field(path) {
+                            let index = document
+                                .field_info(path)
+                                .and_then(|info| info.items.as_ref())
+                                .map(Vec::len)
+                                .unwrap_or(0);
+                            document.insert_sequence_item(path, index, value.clone())
+                        } else {
+                            document.insert_sequence(path, std::slice::from_ref(value))
+                        }
+                    }
+                    FrontmatterEdit::RemoveItem { path, index } => {
+                        document.remove_sequence_item(path, *index)
+                    }
+                    FrontmatterEdit::Remove { path } => document.remove_field(path),
+                    FrontmatterEdit::Raw { path, raw } => {
+                        astrolith_document::yaml::validate_value(raw)
+                            .map_err(|reason| format!("invalid raw YAML: {reason}"))?;
+                        document.replace_raw(path, raw)
                     }
                 }
-                FrontmatterEdit::AddItem { path, value, .. } => {
-                    if document.has_field(path) {
-                        let index = document
-                            .field_info(path)
-                            .and_then(|info| info.items.as_ref())
-                            .map(Vec::len)
-                            .unwrap_or(0);
-                        document.insert_sequence_item(path, index, value.clone())
-                    } else {
-                        document.insert_sequence(path, std::slice::from_ref(value))
-                    }
-                }
-                FrontmatterEdit::RemoveItem { path, index } => {
-                    document.remove_sequence_item(path, *index)
-                }
-                FrontmatterEdit::Remove { path } => document.remove_field(path),
-                FrontmatterEdit::Raw { path, raw } => {
-                    astrolith_document::yaml::validate_value(raw)
-                        .map_err(|reason| format!("invalid raw YAML: {reason}"))?;
-                    document.replace_raw(path, raw)
-                }
-            }
-            .map_err(|error| error.to_string())?;
-            document.serialize().map_err(|error| error.to_string())
-        })();
+                .map_err(|error| error.to_string())?;
+                document.serialize().map_err(|error| error.to_string())
+            })
+        });
         match patched {
-            Ok(text) => {
-                session.update(cx, |session, cx| {
-                    session
-                        .editor
-                        .update(cx, |editor, cx| editor.set_value(text.clone(), window, cx));
-                    session.sync_buffer(cx);
-                    cx.emit(SessionChanged);
-                    cx.notify();
-                });
-                cx.notify();
-            }
+            Ok(()) => cx.notify(),
             Err(error) => {
                 tracing::warn!(%error, "could not apply a frontmatter edit");
                 self.status = format!("Could not edit frontmatter: {error}");
@@ -1762,6 +1765,7 @@ impl ProjectWorkspace {
                 let subscription =
                     cx.subscribe(&session, move |this, _, _: &SessionChanged, cx| {
                         this.update_tab_state(&tab_key, cx);
+                        this.surface_session_notice(&tab_key, cx);
                         this.schedule_recovery(cx);
                         cx.emit(SessionChanged);
                         cx.notify();
@@ -1848,7 +1852,7 @@ impl ProjectWorkspace {
         if self
             .sessions
             .get(&path)
-            .is_some_and(|session| session.read(cx).is_dirty(cx))
+            .is_some_and(|session| session.read(cx).is_dirty())
         {
             let title = path
                 .file_name()
@@ -2010,9 +2014,7 @@ impl ProjectWorkspace {
                     // materialize it so `confirm_saved` sees the newer revision.
                     session.sync_buffer(cx);
                     let content = session.buffer.current_text().to_owned();
-                    let marked = session
-                        .buffer
-                        .confirm_saved(DocumentRevision::new(revision), &content);
+                    let marked = session.confirm_saved(DocumentRevision::new(revision), &content);
                     session.dirty = session.buffer.is_dirty();
                     if marked {
                         session.externally_changed = false;
@@ -2347,11 +2349,14 @@ impl ProjectWorkspace {
                         DocumentSession::from_recovered(identity, disk, content, window, cx)
                     });
                     let key = path.clone();
-                    let subscription = cx.subscribe(&session, |this, _, _: &SessionChanged, cx| {
-                        this.schedule_recovery(cx);
-                        cx.emit(SessionChanged);
-                        cx.notify();
-                    });
+                    let notice_key = key.clone();
+                    let subscription =
+                        cx.subscribe(&session, move |this, _, _: &SessionChanged, cx| {
+                            this.surface_session_notice(&notice_key, cx);
+                            this.schedule_recovery(cx);
+                            cx.emit(SessionChanged);
+                            cx.notify();
+                        });
                     this.session_subscriptions.insert(key.clone(), subscription);
                     this.sessions.insert(key.clone(), session.clone());
                     this.active = Some(key.clone());
@@ -2811,7 +2816,7 @@ impl ProjectWorkspace {
     fn needs_save(&self, path: &Path, cx: &App) -> bool {
         self.sessions
             .get(path)
-            .is_some_and(|session| session.read(cx).is_dirty(cx))
+            .is_some_and(|session| session.read(cx).is_dirty())
     }
 
     fn start_new_entry(
@@ -3290,7 +3295,7 @@ impl ProjectWorkspace {
                         let mut dirty = false;
                         if let Some(root) = root {
                             let to = root.join(moved.to().as_str());
-                            this.retarget_session(&from, &to, moved.to().clone(), cx);
+                            this.retarget_session(&from, &to, moved.to().clone(), window, cx);
                             dirty = this
                                 .sessions
                                 .get(&to)
@@ -3321,6 +3326,7 @@ impl ProjectWorkspace {
         from: &Path,
         to: &Path,
         source: SourcePath,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(session) = self.sessions.remove(from) else {
@@ -3339,7 +3345,7 @@ impl ProjectWorkspace {
             identity.project_generation(),
             source,
         );
-        session.update(cx, |session, _| session.buffer.retarget(retargeted));
+        session.update(cx, |session, cx| session.retarget(retargeted, window, cx));
         if let Some(subscription) = self.session_subscriptions.remove(from) {
             self.session_subscriptions
                 .insert(to.to_path_buf(), subscription);
@@ -3727,7 +3733,7 @@ impl ProjectWorkspace {
                 let Some(source) = relative_source(&root, path) else {
                     return false;
                 };
-                !indexed.contains(source.as_str()) && !session.read(cx).is_dirty(cx)
+                !indexed.contains(source.as_str()) && !session.read(cx).is_dirty()
             })
             .map(|(path, _)| path.clone())
             .collect();
@@ -4547,7 +4553,7 @@ mod tests {
             cx.run_until_parked();
         }
         assert!(view.read_with(cx, |view, cx| {
-            view.sessions.get(&first).unwrap().read(cx).is_dirty(cx)
+            view.sessions.get(&first).unwrap().read(cx).is_dirty()
         }));
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| assert!(!view.guard_window_close(window, cx)));
@@ -4567,7 +4573,7 @@ mod tests {
         view.read_with(cx, |view, cx| {
             let session = view.sessions.get(&first).unwrap().read(cx);
             assert_eq!(session.editor.read(cx).value(), "# Changed\n");
-            assert!(session.is_dirty(cx));
+            assert!(session.is_dirty());
         });
         let next = fixture();
         let generation = view.read_with(cx, |view, _| view.generation);
@@ -4880,17 +4886,31 @@ mod tests {
         .unwrap();
         cx.condition(&view, |view, _| view.loads.is_empty()).await;
         view.read_with(cx, |view, cx| {
-            let mdx = view
+            let session = view
                 .sessions
                 .get(view.active.as_ref().unwrap())
                 .unwrap()
-                .read(cx)
-                .editor
-                .read(cx)
-                .value();
-            assert!(mdx.contains("export const label"));
-            assert!(mdx.contains("<p>{label}</p>"));
+                .read(cx);
+            let visible = session.editor.read(cx).value();
+            let complete = session.buffer.current_text();
+            assert!(
+                visible.starts_with("# 日本語のMDX"),
+                "the writer starts at the body, not the hidden prelude: {visible}"
+            );
+            assert!(
+                !visible.contains("export const label"),
+                "the MDX prelude is hidden from the writer"
+            );
+            assert!(
+                complete.contains("export const label"),
+                "the complete source retains the prelude"
+            );
+            assert!(complete.contains("<p>{label}</p>"));
         });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| view.activate_session(&first, window, cx))
         })
@@ -4898,7 +4918,7 @@ mod tests {
         view.read_with(cx, |view, cx| {
             let session = view.sessions.get(&first).unwrap().read(cx);
             assert_eq!(session.editor.read(cx).value(), "# Fixture edit\n");
-            assert!(session.is_dirty(cx));
+            assert!(session.is_dirty());
         });
         assert_eq!(
             std::fs::read_to_string(&first).unwrap(),
@@ -4984,7 +5004,7 @@ mod tests {
 
         edit_active(cx, handle, &view, "# Saved\n").await;
         assert!(view.read_with(cx, |view, cx| {
-            view.sessions.get(&path).unwrap().read(cx).is_dirty(cx)
+            view.sessions.get(&path).unwrap().read(cx).is_dirty()
         }));
 
         cx.update_window(handle.into(), |_, window, cx| {
@@ -5595,19 +5615,23 @@ export const collections = {blog, dataAuthors};
             "the injected schema must be the form schema"
         );
 
+        // The writer shows only the body: the frontmatter is hidden, and the
+        // complete source still retains it.
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert_eq!(session.editor.read(cx).value(), "# Body 中文\n");
+            assert_eq!(session.buffer.current_text(), with_frontmatter);
+        });
+
         // The user edits the document BODY in the source editor (unsaved, in memory).
-        let body_edited = "---\ntitle: Old\ndraft: false\n---\n\n# Body EDITED 中文\n";
+        let body_edited = "# Body EDITED 中文\n";
         edit_active(cx, handle, &view, body_edited).await;
         view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert_eq!(session.editor.read(cx).value(), body_edited);
             assert_eq!(
-                view.sessions
-                    .get(&path)
-                    .unwrap()
-                    .read(cx)
-                    .editor
-                    .read(cx)
-                    .value(),
-                body_edited
+                session.buffer.current_text(),
+                "---\ntitle: Old\ndraft: false\n---\n\n# Body EDITED 中文\n"
             );
         });
 
@@ -5631,11 +5655,15 @@ export const collections = {blog, dataAuthors};
         view.read_with(cx, |view, cx| {
             let session = view.sessions.get(&path).unwrap().read(cx);
             assert_eq!(
-                session.editor.read(cx).value(),
+                session.buffer.current_text(),
                 expected,
                 "only the title field may change; the unsaved body edit must survive"
             );
-            assert_eq!(session.buffer.current_text(), expected);
+            assert_eq!(
+                session.editor.read(cx).value(),
+                body_edited,
+                "the visible text must not move when hidden frontmatter changes"
+            );
             assert!(session.buffer.is_dirty());
         });
 
@@ -5656,6 +5684,621 @@ export const collections = {blog, dataAuthors};
             .unwrap();
         }
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    }
+
+    /// Build a session outside the project flow, so the writer projection can be
+    /// driven directly without rendering the editor.
+    fn bare_session(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+        source_path: &str,
+        source: &str,
+    ) -> Entity<DocumentSession> {
+        cx.update_window(handle.into(), |_, window, cx| {
+            let identity = DocumentIdentity::new(
+                ProjectId::new("projection").unwrap(),
+                1,
+                SourcePath::new(source_path).unwrap(),
+            );
+            cx.new(|cx| DocumentSession::new(identity, source.to_owned(), window, cx))
+        })
+        .unwrap()
+    }
+
+    /// Replace the session's visible text the way a whole-document user edit does.
+    fn replace_visible(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+        session: &Entity<DocumentSession>,
+        text: &str,
+    ) {
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.replace_all(text, window, cx));
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    async fn projected_writer_keeps_hidden_bytes_across_typing_and_undo(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let frontmatter = "---\ntitle: \"Exact\" # keep\ndraft: false\n---\n";
+        let source = format!("{frontmatter}\n# Body 🦀\n\nSecond line\n");
+        std::fs::write(dir.path().join("src/posts/c.md"), &source).unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        let path = dir.path().join("src/posts/c.md");
+        let index = view.read_with(cx, |view, _| {
+            view.entries
+                .iter()
+                .position(|entry| entry.entry().source().as_str() == "src/posts/c.md")
+                .expect("the projected fixture must be indexed")
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(index, window, cx))
+        })
+        .unwrap();
+        wait_for_session(cx, &view, &path).await;
+
+        // The writer shows the body only; the complete source keeps the frontmatter.
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert_eq!(
+                session.editor.read(cx).value(),
+                "# Body 🦀\n\nSecond line\n"
+            );
+            assert_eq!(session.buffer.current_text(), source);
+            assert!(!session.is_dirty());
+        });
+
+        // Type a replacement body through the real input path.
+        let edited = "# Body changed 中文\n\nSecond line\n";
+        edit_active(cx, handle, &view, edited).await;
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert_eq!(session.editor.read(cx).value(), edited);
+            assert_eq!(
+                session.buffer.current_text(),
+                format!("{frontmatter}\n{edited}"),
+                "every body edit must land after the exact hidden bytes"
+            );
+            assert!(session.is_dirty());
+            // A recovery snapshot always carries the complete source.
+            let record = RecoveryRecord::capture(&session.buffer, 0);
+            assert_eq!(record.content(), format!("{frontmatter}\n{edited}"));
+        });
+
+        // Undo restores the complete source, hidden bytes included.
+        let mut undos = 0;
+        while view.read_with(cx, |view, cx| {
+            view.sessions.get(&path).unwrap().read(cx).is_dirty()
+        }) {
+            assert!(undos < 8, "undo must reach the loaded baseline");
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.press(
+                    if cfg!(target_os = "macos") {
+                        "cmd-z"
+                    } else {
+                        "ctrl-z"
+                    },
+                    cx,
+                )
+            })
+            .unwrap();
+            cx.run_until_parked();
+            undos += 1;
+        }
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert_eq!(session.buffer.current_text(), source);
+            assert_eq!(
+                session.editor.read(cx).value(),
+                "# Body 🦀\n\nSecond line\n"
+            );
+        });
+
+        // Saving the edited body writes the complete source byte-for-byte.
+        edit_active(cx, handle, &view, edited).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        let expected = format!("{frontmatter}\n{edited}");
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if std::fs::read_to_string(&path).unwrap() == expected {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert!(!session.is_dirty());
+            assert_eq!(session.buffer.original_text(), expected);
+        });
+
+        // Reopening from disk rebuilds the projection around the saved bytes.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.close_active(window, cx));
+            assert!(
+                !window.has_active_dialog(cx),
+                "a clean document closes plainly"
+            );
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(index, window, cx))
+        })
+        .unwrap();
+        wait_for_session(cx, &view, &path).await;
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert_eq!(session.editor.read(cx).value(), edited);
+            assert_eq!(session.buffer.current_text(), expected);
+            assert!(!session.is_dirty());
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn malformed_frontmatter_stays_visible_and_seeds_the_notice(cx: &mut TestAppContext) {
+        // A collection entry with an unclosed opener cannot be indexed, so the
+        // session is driven directly; the notice must be seeded by `build` so the
+        // workspace's `SessionChanged` subscription can publish it on the first
+        // change.
+        let source = "---\ntitle: Unterminated\n\n# Body\n";
+        let (handle, _view) = mount(cx);
+        let session = bare_session(cx, handle, "src/posts/entry.md", source);
+        session.read_with(cx, |session, cx| {
+            assert_eq!(
+                session.editor.read(cx).value(),
+                source,
+                "undelimitable metadata must stay visible"
+            );
+            assert_eq!(
+                session.projection,
+                astrolith_document::WriterProjection::complete(source),
+                "nothing may be hidden when the block cannot be delimited"
+            );
+            let notice = session
+                .notice
+                .as_ref()
+                .expect("the session must record why the source is shown whole");
+            assert!(
+                notice.contains("Writer metadata stays visible"),
+                "{notice:?}"
+            );
+        });
+
+        // The first delivered change keeps the notice available for publication.
+        replace_visible(cx, handle, &session, "# Body edited\n");
+        session.read_with(cx, |session, _| {
+            assert!(
+                session
+                    .notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.contains("Writer metadata stays visible")),
+                "absorbing a change must not swallow the notice"
+            );
+            assert_eq!(session.buffer.current_text(), "# Body edited\n");
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn frontmatter_patch_rebuilds_projection_and_keeps_the_caret(cx: &mut TestAppContext) {
+        let source = "# Title\n\nBody text\n";
+        let (handle, _view) = mount(cx);
+        let session = bare_session(cx, handle, "src/posts/entry.md", source);
+        let caret = source.find("Body").unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(caret..caret, cx));
+                session
+                    .patch_complete(window, cx, |live| {
+                        let mut document = parse_document(live).map_err(|e| e.to_string())?;
+                        document
+                            .insert_field(
+                                "title",
+                                astrolith_document::FrontmatterValue::String("New".to_owned()),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        document.serialize().map_err(|e| e.to_string())
+                    })
+                    .expect("the patch must apply to the complete source");
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let expected = "---\ntitle: New\n---\n\n# Title\n\nBody text\n";
+        let revision = session.read_with(cx, |session, cx| {
+            assert_eq!(session.buffer.current_text(), expected);
+            assert_eq!(session.projection.visible, "# Title\n\nBody text\n");
+            assert_eq!(session.editor.read(cx).value(), "# Title\n\nBody text\n");
+            assert_eq!(
+                session.editor.read(cx).cursor(),
+                session.projection.visible.find("Body").unwrap(),
+                "the caret must stay on the same body text"
+            );
+            session.buffer.revision()
+        });
+        // The session's own rewrite is not a user edit: no second revision.
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.buffer.revision(), revision);
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn frontmatter_patch_that_hides_a_separator_rebuilds_the_visible_text(
+        cx: &mut TestAppContext,
+    ) {
+        // No frontmatter yet, so the leading blank line is visible content; the
+        // patch creates the frontmatter and turns that line into a hidden
+        // separator, which forces a real editor rewrite.
+        let source = "\n# Title\n\nBody\n";
+        let (handle, _view) = mount(cx);
+        let session = bare_session(cx, handle, "src/posts/entry.md", source);
+        let before = session.update(cx, |session, cx| {
+            assert_eq!(session.editor.read(cx).value(), source);
+            let caret = source.find("Body").unwrap();
+            session
+                .editor
+                .update(cx, |editor, cx| editor.set_selected_range(caret..caret, cx));
+            session.buffer.revision()
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .patch_complete(window, cx, |live| {
+                        let mut document = parse_document(live).map_err(|e| e.to_string())?;
+                        document
+                            .insert_field(
+                                "title",
+                                astrolith_document::FrontmatterValue::String("New".to_owned()),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        document.serialize().map_err(|e| e.to_string())
+                    })
+                    .expect("the patch must apply to the complete source");
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let revision = session.read_with(cx, |session, cx| {
+            assert_eq!(session.projection.visible, "# Title\n\nBody\n");
+            assert_eq!(session.editor.read(cx).value(), "# Title\n\nBody\n");
+            assert_eq!(
+                session.editor.read(cx).cursor(),
+                session.projection.visible.find("Body").unwrap(),
+                "the caret must stay on the same body text"
+            );
+            assert!(
+                session
+                    .buffer
+                    .current_text()
+                    .starts_with("---\ntitle: New\n---\n"),
+                "the patch must add the frontmatter: {:?}",
+                session.buffer.current_text()
+            );
+            assert!(session.buffer.current_text().ends_with("# Title\n\nBody\n"));
+            assert_eq!(
+                session.buffer.revision(),
+                before.checked_next().unwrap(),
+                "the rewrite must not be absorbed as a second edit"
+            );
+            assert!(session.is_dirty(), "the patch itself is unsaved");
+            session.buffer.revision()
+        });
+        // Only the patch's revision can be marked saved: no second absorb exists.
+        let patched = session.read_with(cx, |session, _| session.buffer.current_text().to_owned());
+        let marked = session.update(cx, |session, _| session.confirm_saved(revision, &patched));
+        assert!(marked);
+        session.read_with(cx, |session, cx| {
+            assert!(!session.is_dirty());
+            assert_eq!(session.editor.read(cx).value(), "# Title\n\nBody\n");
+        });
+
+        // A following keystroke lands in the body, after the hidden frontmatter.
+        replace_visible(cx, handle, &session, "# Title\n\nBody!\n");
+        session.read_with(cx, |session, cx| {
+            let complete = session.buffer.current_text();
+            assert!(
+                complete.starts_with("---\ntitle: New\n---\n"),
+                "{complete:?}"
+            );
+            assert!(complete.ends_with("# Title\n\nBody!\n"), "{complete:?}");
+            assert_eq!(session.editor.read(cx).value(), "# Title\n\nBody!\n");
+            assert!(session.is_dirty(), "the keystroke must reach the source");
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn rejected_projection_edit_keeps_the_source_and_reports_a_notice(
+        cx: &mut TestAppContext,
+    ) {
+        let source = "abcHHdef";
+        let (handle, _view) = mount(cx);
+        let session = bare_session(cx, handle, "src/posts/entry.md", source);
+        // A synthetic interleaved layout cannot come from `project_writer`, but a
+        // session that is handed one must refuse instead of guessing.
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session.editor.update(cx, |editor, cx| {
+                    editor.replace_all("abcdef", window, cx);
+                });
+                session.buffer.apply_text(source.to_owned()).unwrap();
+                session.projection = astrolith_document::WriterProjection {
+                    visible: "abcdef".to_owned(),
+                    segments: vec![
+                        astrolith_document::ProjectionSegment::Visible {
+                            source: 0..3,
+                            visible: 0..3,
+                        },
+                        astrolith_document::ProjectionSegment::Hidden { source: 3..5 },
+                        astrolith_document::ProjectionSegment::Visible {
+                            source: 5..8,
+                            visible: 3..6,
+                        },
+                    ],
+                };
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        // The queued self-write matches the projection, so nothing is absorbed.
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.buffer.current_text(), source);
+        });
+
+        replace_visible(cx, handle, &session, "abZf");
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.buffer.current_text(), source, "the source is kept");
+            assert!(session.notice.is_some(), "the refusal must be surfaced");
+            assert_eq!(
+                session.editor.read(cx).value(),
+                source,
+                "the refused text must be replaced by the authoritative projection"
+            );
+            assert!(!session.is_dirty(), "a refused edit changes nothing");
+        });
+
+        // The latch blocks the divergent text: the next keystroke is typed into
+        // whatever the editor now shows, and it must land on the authoritative
+        // projection rather than on the bytes that were refused.
+        let shown = session.read_with(cx, |session, cx| {
+            session.editor.read(cx).value().to_string()
+        });
+        replace_visible(cx, handle, &session, &format!("{shown}X"));
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.buffer.current_text(), format!("{source}X"));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn retargeting_a_renamed_source_reprojects_its_kind(cx: &mut TestAppContext) {
+        // The retention rule hides the ESM prelude for MDX only, so a rename that
+        // crosses `.mdx` ↔ `.md` must re-project the retained session.
+        let source = "---\ntitle: Entry\n---\nimport Callout from \"./Callout.astro\";\n\n# Body\n";
+        let (handle, _view) = mount(cx);
+        let session = bare_session(cx, handle, "src/posts/entry.mdx", source);
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.projection.visible, "# Body\n");
+            assert_eq!(session.editor.read(cx).value(), "# Body\n");
+        });
+
+        let retarget = |cx: &mut TestAppContext, path: &str| {
+            cx.update_window(handle.into(), |_, window, cx| {
+                session.update(cx, |session, cx| {
+                    let identity = DocumentIdentity::new(
+                        ProjectId::new("projection").unwrap(),
+                        1,
+                        SourcePath::new(path).unwrap(),
+                    );
+                    session.retarget(identity, window, cx);
+                });
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+
+        retarget(cx, "src/posts/entry.md");
+        session.read_with(cx, |session, cx| {
+            assert_eq!(
+                session.projection.visible, "import Callout from \"./Callout.astro\";\n\n# Body\n",
+                "markdown keeps the import visible"
+            );
+            assert_eq!(
+                session.editor.read(cx).value(),
+                session.projection.visible,
+                "the editor must follow the new projection"
+            );
+            assert_eq!(session.buffer.current_text(), source, "bytes are untouched");
+        });
+
+        retarget(cx, "src/posts/entry.mdx");
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.projection.visible, "# Body\n");
+            assert_eq!(session.editor.read(cx).value(), "# Body\n");
+            assert_eq!(session.buffer.current_text(), source);
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn projected_body_and_form_edits_survive_a_stale_save_completion(
+        cx: &mut TestAppContext,
+    ) {
+        let frontmatter = "---\ntitle: Old\n---\n";
+        let source = format!("{frontmatter}\n# Body\n");
+        let (handle, _view) = mount(cx);
+        let session = bare_session(cx, handle, "src/posts/entry.md", &source);
+
+        replace_visible(cx, handle, &session, "# Body edited\n");
+        let stale_revision = session.read_with(cx, |session, _| session.buffer.revision());
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .patch_complete(window, cx, |live| {
+                        let mut document = parse_document(live).map_err(|e| e.to_string())?;
+                        document
+                            .set_field(
+                                "title",
+                                astrolith_document::FrontmatterValue::String("New".to_owned()),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        document.serialize().map_err(|e| e.to_string())
+                    })
+                    .unwrap();
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let expected = "---\ntitle: New\n---\n\n# Body edited\n";
+        let current = session.read_with(cx, |session, cx| {
+            assert_eq!(session.buffer.current_text(), expected);
+            assert_eq!(session.editor.read(cx).value(), "# Body edited\n");
+            session.buffer.revision()
+        });
+        assert_ne!(stale_revision, current);
+
+        // A completion for the pre-form revision is stale and drops.
+        let marked = session.update(cx, |session, _| {
+            session.confirm_saved(stale_revision, "---\ntitle: Old\n---\n\n# Body edited\n")
+        });
+        assert!(!marked, "a stale save must not mark newer edits saved");
+        session.read_with(cx, |session, _| {
+            assert!(session.is_dirty());
+            assert_eq!(session.buffer.current_text(), expected);
+        });
+
+        // The matching completion clears it.
+        let marked = session.update(cx, |session, _| session.confirm_saved(current, expected));
+        assert!(marked);
+        session.read_with(cx, |session, _| {
+            assert!(!session.is_dirty());
+            assert_eq!(session.buffer.original_text(), expected);
+        });
+    }
+
+    struct WorkloadHost {
+        editor: Entity<gpui_kit::component::input::EditorState>,
+    }
+    impl Render for WorkloadHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(gpui_kit::component::input::Editor::new(&self.editor).size_full())
+        }
+    }
+
+    /// Open one projected session in a real editor view for typing measurements.
+    fn mount_workload(
+        cx: &mut TestAppContext,
+        source: &str,
+    ) -> (WindowHandle<Root>, Entity<DocumentSession>) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let mut session = None;
+            let (handle, _) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let identity = DocumentIdentity::new(
+                    ProjectId::new("projection").unwrap(),
+                    1,
+                    SourcePath::new("src/posts/entry.md").unwrap(),
+                );
+                let created =
+                    cx.new(|cx| DocumentSession::new(identity, source.to_owned(), window, cx));
+                let editor = created.read(cx).editor.clone();
+                session = Some(created);
+                cx.new(|_| WorkloadHost { editor })
+            })
+            .unwrap();
+            (
+                handle.downcast::<Root>().unwrap(),
+                session.expect("the workload session must exist"),
+            )
+        })
+    }
+
+    // Diagnostic only: test-platform CPU event dispatch plus frames, not native
+    // input-to-present latency. Compare each workload only with its own baseline.
+    #[gpui_kit::test]
+    #[ignore = "bounded projection measurements; run mise run test:projection-perf"]
+    fn projected_writer_workload(cx: &mut TestAppContext) {
+        use std::time::Instant;
+        let frontmatter = "---\ntitle: Workload\ndraft: false\n---\n";
+        for (bytes, long_line) in [
+            (1024usize, false),
+            (100 * 1024, false),
+            (1024 * 1024, false),
+            (100 * 1024, true),
+        ] {
+            let unit = if long_line {
+                "中文日本語🦀 **bold** `code` "
+            } else {
+                "# 中文 🦀\n\nA multilingual paragraph with **emphasis**, `code`, 日本語 and 中文.\n"
+            };
+            let body = unit.repeat(bytes.div_ceil(unit.len()));
+            let source = format!("{frontmatter}{body}");
+            let (handle, session) = mount_workload(cx, &source);
+            let editor = session.read_with(cx, |session, _| session.editor.clone());
+            let visible_bytes = source.len() - frontmatter.len();
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                window.click(("input", editor.entity_id()), cx);
+                window.press("secondary-a", cx);
+                window.press("right", cx);
+            })
+            .unwrap();
+            let mut samples = Vec::with_capacity(100);
+            for _ in 0..100 {
+                // One keystroke per application update: the `Change` it dispatches
+                // is delivered and absorbed inside the timed region, so the
+                // projection work is included rather than queued past the sample.
+                let start = Instant::now();
+                cx.update_window(handle.into(), |_, window, cx| {
+                    window.input("中", cx);
+                    window.render_frame(cx);
+                })
+                .unwrap();
+                samples.push(start.elapsed().as_secs_f64() * 1000.);
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "PROJECTED_WRITER source_bytes={} body_bytes={visible_bytes} lines={} long_line={long_line} samples=100 p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
+                source.len(),
+                body.lines().count(),
+                samples[49],
+                samples[94],
+                samples[99],
+            );
+            cx.update_window(handle.into(), |_, _, cx| {
+                assert_eq!(
+                    editor.read(cx).value().len(),
+                    visible_bytes + 100 * "中".len()
+                );
+            })
+            .unwrap();
+            session.read_with(cx, |session, _| {
+                assert!(
+                    session.buffer.current_text().starts_with(frontmatter),
+                    "hidden bytes must survive typing"
+                );
+                assert_eq!(
+                    session.buffer.current_text().len(),
+                    source.len() + 100 * "中".len()
+                );
+            });
+        }
     }
 
     fn schema(fields: Vec<astrolith_astro::schema::Field>) -> CollectionSchema {
