@@ -404,6 +404,40 @@ mod tests {
         assert!(!document.is_dirty());
     }
 
+    #[test]
+    fn rebasing_after_a_save_lets_the_follow_up_persist_the_newer_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "old").unwrap();
+
+        let mut document = buffer("old");
+        let saved_revision = document.apply_text("v1".to_owned()).unwrap();
+        // The first save persists v1; the user keeps typing before it completes.
+        let first = DocumentSnapshot::capture(&document, &path);
+        let outcome = runtime().block_on(save_snapshot(&first)).unwrap();
+        assert!(matches!(outcome, SaveOutcome::Saved { .. }));
+        document.apply_text("v2".to_owned()).unwrap();
+        assert!(!document.confirm_saved(saved_revision, "v1"));
+        assert!(document.rebase_persisted(saved_revision, "v1"));
+
+        let revision = document.revision();
+        assert!(document.is_dirty(), "the newer revision is still unsaved");
+        assert_eq!(document.original_text(), "v1");
+        assert_eq!(document.current_text(), "v2");
+
+        let follow_up = DocumentSnapshot::capture(&document, &path);
+        assert_eq!(
+            runtime().block_on(save_snapshot(&follow_up)),
+            Ok(SaveOutcome::Saved {
+                revision: revision.get()
+            }),
+            "the follow-up save must not conflict with our own write"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "v2");
+        assert!(document.confirm_saved(revision, "v2"));
+        assert!(!document.is_dirty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn saving_through_a_symlink_replaces_the_link_not_the_target() {

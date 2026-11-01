@@ -8,6 +8,7 @@ use crate::{
     commands::{self, COMMANDS, CommandId},
     editor::{
         header::DocumentHeader,
+        save_coordinator::SaveStatus,
         session::SessionChanged,
         writer_chrome::{ChromeVisibility, TypedCharacters},
     },
@@ -1235,13 +1236,24 @@ impl Render for Shell {
             )
         };
         let active_tab = tabs.get(active_index);
+        // The coordinator owns the five save states: Unsaved, Saving…, Saved,
+        // Conflict and Save failed. A read-only source keeps its file status.
+        let save_status = self.project.read(cx).active_save_status();
         let document_state: SharedString = match active_tab {
+            Some(tab) => match save_status {
+                Some(SaveStatus::Conflict) => "Conflict".into(),
+                Some(SaveStatus::Saving) => "Saving…".into(),
+                Some(SaveStatus::Failed(_)) => "Save failed".into(),
+                Some(SaveStatus::Unsaved) => "Unsaved changes".into(),
+                Some(SaveStatus::Saved) if tab.externally_changed => "Changed on disk".into(),
+                Some(SaveStatus::Saved) => "Saved".into(),
+                None if tab.externally_changed => "Changed on disk".into(),
+                None if tab.dirty => "Unsaved changes".into(),
+                None => "Saved".into(),
+            },
             None if self.opening => "Opening file…".into(),
             None if self.document.read(cx).is_editable() => self.file_status.clone().into(),
             None => "No file open".into(),
-            Some(tab) if tab.externally_changed => "Changed on disk".into(),
-            Some(tab) if tab.dirty => "Unsaved changes".into(),
-            Some(_) => "Saved".into(),
         };
         let language = active_tab
             .map(|tab| {

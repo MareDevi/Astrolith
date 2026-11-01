@@ -249,6 +249,23 @@ impl DocumentBuffer {
         }
     }
 
+    /// Move the baseline to the bytes an earlier save actually persisted.
+    ///
+    /// The file now holds `persisted`, so the next snapshot must compare against
+    /// those bytes instead of the stale pre-save baseline; otherwise the
+    /// follow-up save of a newer revision would report a conflict on our own
+    /// write. Only the baseline advances: `current_text` and `revision` are
+    /// retained, so the newer content stays dirty. Returns whether the baseline
+    /// advanced, which requires a newer revision than the one saved.
+    pub fn rebase_persisted(&mut self, saved_revision: DocumentRevision, persisted: &str) -> bool {
+        if self.revision > saved_revision {
+            self.original_text = persisted.to_owned();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Capture the identity and revision needed to validate asynchronous work.
     pub fn load_ticket(&self) -> DocumentLoadTicket {
         DocumentLoadTicket::new(self.identity.clone(), self.revision)

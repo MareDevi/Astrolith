@@ -463,6 +463,21 @@ pub(crate) fn settings_path() -> io::Result<PathBuf> {
     Ok(application_config_dir()?.join("astrolith/preferences/global.json"))
 }
 
+/// Directory holding redacted save-failure artifacts, alongside preferences.
+pub(crate) fn save_failure_dir() -> io::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("ASTROLITH_SAVE_FAILURE_DIR") {
+        let path = PathBuf::from(path);
+        return if path.is_absolute() {
+            Ok(path)
+        } else {
+            Err(io::Error::other(
+                "ASTROLITH_SAVE_FAILURE_DIR must be absolute.",
+            ))
+        };
+    }
+    Ok(application_config_dir()?.join("astrolith/save-failures"))
+}
+
 /// Directory holding crash-recovery records, alongside preferences.
 pub(crate) fn recovery_dir() -> io::Result<PathBuf> {
     if let Some(path) = std::env::var_os("ASTROLITH_RECOVERY_DIR") {

@@ -8,8 +8,8 @@ use astrolith_document::{
 };
 use gpui_kit::component::input::{EditorState, InputEvent, Position};
 use gpui_kit::{
-    App, AppContext, Context, Entity, EventEmitter, Pixels, Point, SharedString, Subscription,
-    Window,
+    App, AppContext, Context, Entity, EventEmitter, Focusable, Pixels, Point, SharedString,
+    Subscription, Window,
 };
 
 use crate::editor::formatting::external_url;
@@ -55,9 +55,17 @@ pub(crate) struct DocumentSession {
     text_key: u64,
     _change: Subscription,
     _cursor: Subscription,
+    _blur: Subscription,
 }
 pub(crate) struct SessionChanged;
 impl EventEmitter<SessionChanged> for DocumentSession {}
+
+/// The editor lost focus while its document was dirty.
+///
+/// The writer saves on blur (ledger row 44) through the coordinator's immediate
+/// request, not through the idle deadline.
+pub(crate) struct SaveOnBlur;
+impl EventEmitter<SaveOnBlur> for DocumentSession {}
 impl DocumentSession {
     pub fn new(
         identity: DocumentIdentity,
@@ -138,6 +146,17 @@ impl DocumentSession {
             let _ = window;
             this.refresh_cursor(cx);
         });
+        // Losing focus is the writer's save trigger: the workspace turns it into
+        // an immediate guarded save when the buffer is dirty.
+        let blur = cx.on_blur(
+            &editor.read(cx).focus_handle(cx),
+            window,
+            |this, _window, cx| {
+                if this.buffer.is_dirty() {
+                    cx.emit(SaveOnBlur);
+                }
+            },
+        );
         Self {
             editor,
             buffer,
@@ -157,6 +176,7 @@ impl DocumentSession {
             text_key,
             _change: change,
             _cursor: cursor,
+            _blur: blur,
         }
     }
 
@@ -500,6 +520,12 @@ impl DocumentSession {
     /// Record that `revision` was persisted.
     pub fn confirm_saved(&mut self, revision: DocumentRevision, persisted: &str) -> bool {
         self.buffer.confirm_saved(revision, persisted)
+    }
+
+    /// Move the baseline to the bytes an earlier save persisted, keeping newer
+    /// edits dirty so their follow-up save does not conflict with that write.
+    pub fn rebase_persisted(&mut self, saved_revision: DocumentRevision, persisted: &str) -> bool {
+        self.buffer.rebase_persisted(saved_revision, persisted)
     }
 
     /// Re-target this session at a renamed source and re-project it.

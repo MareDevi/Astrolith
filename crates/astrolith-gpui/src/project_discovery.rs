@@ -3,7 +3,11 @@ use crate::{
     commands::{CommandAvailability, CommandId},
     editor::{
         formatting::EditorWiring,
-        session::{DocumentSession, SessionChanged},
+        save_coordinator::{
+            SaveCompletion, SaveCoordinator, SaveKind, SaveRequest, SaveResult, SaveStatus,
+        },
+        save_failure::SaveFailureArtifact,
+        session::{DocumentSession, SaveOnBlur, SessionChanged},
         writing_modes::WritingModes,
     },
     frontmatter::{FrontmatterEdit, ReferenceCatalog},
@@ -47,8 +51,9 @@ use gpui_kit::component::{
     menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
 };
 use gpui_kit::{
-    App, AppContext, Context, Entity, EventEmitter, Focusable, IntoElement, PathPromptOptions,
-    Render, SharedString, Subscription, Task, TestSupportExt, WeakEntity, Window, div, prelude::*,
+    AnyWindowHandle, App, AppContext, Context, Entity, EventEmitter, Focusable, IntoElement,
+    PathPromptOptions, Render, SharedString, Subscription, Task, TestSupportExt, WeakEntity,
+    Window, div, prelude::*,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -389,6 +394,28 @@ fn entry_menu_item(
         })
 }
 
+/// Redacted class for a document error; the message never reaches an artifact.
+fn save_failure_class(error: &astrolith_document::DocumentError) -> &'static str {
+    use astrolith_document::DocumentError;
+    match error {
+        DocumentError::Io { .. } => "io",
+        DocumentError::RevisionOverflow => "revision",
+        DocumentError::InvalidFrontmatter
+        | DocumentError::UnsupportedFrontmatter { .. }
+        | DocumentError::UnknownField { .. }
+        | DocumentError::UnsupportedPatch { .. } => "frontmatter",
+    }
+}
+
+/// One completed guarded save, as the workspace applies it.
+enum SaveAttempt {
+    /// The revision was persisted; `persisted` is the exact text written, so the
+    /// buffer baseline can follow the file when newer edits already exist.
+    Saved { revision: u64, persisted: String },
+    /// The file changed on disk; nothing was written.
+    Conflict,
+}
+
 /// A retained document as displayed by the editor tab strip.
 #[derive(Clone, Debug)]
 pub(crate) struct OpenTab {
@@ -431,12 +458,19 @@ pub(crate) struct ProjectWorkspace {
     schemas: BTreeMap<String, Arc<CollectionSchema>>,
     active: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
-    session_subscriptions: HashMap<PathBuf, Subscription>,
+    session_subscriptions: HashMap<PathBuf, Vec<Subscription>>,
     recovery: Option<RecoveryStore>,
     pending_recovery: Vec<RecoveryRecord>,
     recovery_task: Option<Task<()>>,
     recovery_load_task: Option<Task<()>>,
-    save_task: Option<Task<()>>,
+    /// In-flight guarded saves, at most one per canonical source.
+    save_tasks: HashMap<PathBuf, Task<()>>,
+    /// Autosave deadlines and per-document save state.
+    save_coordinator: SaveCoordinator,
+    /// Timer armed for the earliest autosave deadline.
+    autosave_task: Option<Task<()>>,
+    /// Window used to run deadline work outside a window event.
+    window_handle: Option<AnyWindowHandle>,
     restore_task: Option<Task<()>>,
     /// In-flight index request; only index work owns this slot, so an unrelated
     /// command can never cancel a refresh that still has to clear `refreshing`.
@@ -468,6 +502,12 @@ pub(crate) struct ProjectWorkspace {
     sort_options: Vec<(SortMode, SharedString)>,
     /// Operation to run once a guarded save of a dirty session succeeds.
     pending_after_save: Option<PendingAfterSave>,
+    /// Destination for redacted save-failure artifacts; `None` disables them.
+    save_failure_dir: Option<PathBuf>,
+    /// Project switch waiting for every dirty buffer to save.
+    pending_switch: Option<PathBuf>,
+    /// Quit waiting for every dirty buffer to save through the coordinator.
+    pending_quit: bool,
     /// Desktop trash backend; tests inject a recording backend.
     trash_backend: Arc<dyn TrashBackend>,
     /// Context captured when a create dialog is opened.
@@ -496,6 +536,17 @@ enum PendingAfterSave {
     Rename { from: PathBuf, to: SourcePath },
     Duplicate { path: PathBuf },
     Trash { path: PathBuf },
+    Close { path: PathBuf },
+}
+
+impl PendingAfterSave {
+    /// The source whose guarded save releases this action.
+    fn path(&self) -> &Path {
+        match self {
+            Self::Rename { from, .. } => from,
+            Self::Duplicate { path } | Self::Trash { path } | Self::Close { path } => path,
+        }
+    }
 }
 
 /// One completed watcher scan, published only when its request is the newest.
@@ -618,7 +669,10 @@ impl ProjectWorkspace {
             pending_recovery: Vec::new(),
             recovery_task: None,
             recovery_load_task: None,
-            save_task: None,
+            save_tasks: HashMap::new(),
+            save_coordinator: SaveCoordinator::new(GlobalPreferencesV2::default().autosave_delay),
+            autosave_task: None,
+            window_handle: Some(window.window_handle()),
             restore_task: None,
             index_task: None,
             command_tasks: Vec::new(),
@@ -633,6 +687,9 @@ impl ProjectWorkspace {
             list_sort: EntrySort::default(),
             sort_options: Vec::new(),
             pending_after_save: None,
+            save_failure_dir: settings::save_failure_dir().ok(),
+            pending_switch: None,
+            pending_quit: false,
             trash_backend: Arc::new(SystemTrash),
             pending_create: None,
             last_list_query: String::new(),
@@ -645,6 +702,13 @@ impl ProjectWorkspace {
             writing: WritingModes::default(),
         }
     }
+    /// Save status of the active document, for the tab strip status text.
+    pub(crate) fn active_save_status(&self) -> Option<SaveStatus> {
+        self.active
+            .as_ref()
+            .and_then(|path| self.save_coordinator.status(path))
+    }
+
     pub fn has_dirty(&self, cx: &App) -> bool {
         self.sessions
             .values()
@@ -751,6 +815,403 @@ impl ProjectWorkspace {
             tab.dirty = dirty;
             tab.externally_changed = externally_changed;
         }
+    }
+
+    /// Subscribe one retained session to text changes and editor blur.
+    fn watch_session(
+        &mut self,
+        path: PathBuf,
+        session: Entity<DocumentSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let changed_path = path.clone();
+        let changed = cx.subscribe_in(
+            &session,
+            window,
+            move |this, _, _: &SessionChanged, _window, cx| {
+                this.note_session_change(&changed_path, cx);
+            },
+        );
+        let blur_path = path.clone();
+        let blur = cx.subscribe_in(
+            &session,
+            window,
+            move |this, _, _: &SaveOnBlur, window, cx| {
+                this.save_on_blur(&blur_path, window, cx);
+            },
+        );
+        // Register the initial state so a clean document already has a status and
+        // a recovered one is tracked as dirty. Registration never arms the timer:
+        // recovered content waits for an edit, a blur or an explicit save before
+        // it overwrites the file.
+        let (revision, dirty) = session.update(cx, |session, cx| {
+            session.sync_buffer(cx);
+            (session.buffer.revision().get(), session.buffer.is_dirty())
+        });
+        self.save_coordinator
+            .observe(&path, revision, dirty, cx.background_executor().now());
+        self.session_subscriptions.insert(path, vec![changed, blur]);
+    }
+
+    /// Feed one session's revision into the save coordinator.
+    fn note_session_change(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        let Some(session) = self.sessions.get(path).cloned() else {
+            return;
+        };
+        // The session absorbed the delivered change before emitting, so the
+        // complete source is current here; re-absorbing would copy the whole
+        // editor text on every keystroke for no gain.
+        let (revision, dirty) = {
+            let session = session.read(cx);
+            (session.buffer.revision().get(), session.buffer.is_dirty())
+        };
+        let changed =
+            self.save_coordinator
+                .observe(path, revision, dirty, cx.background_executor().now());
+        self.update_tab_state(path, cx);
+        self.surface_session_notice(path, cx);
+        self.schedule_recovery(cx);
+        cx.emit(SessionChanged);
+        if changed {
+            self.arm_autosave(cx);
+        }
+        cx.notify();
+    }
+
+    /// Save a dirty buffer because its editor lost focus (ledger row 44).
+    fn save_on_blur(
+        &mut self,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A modal decision may still end in Discard, which must not race a
+        // background write; the dialog's own Save button starts the save.
+        // A save already in flight keeps this request as its follow-up.
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let Some(session) = self.sessions.get(path).cloned() else {
+            return;
+        };
+        let revision = session.update(cx, |session, cx| {
+            session.sync_buffer(cx);
+            session.buffer.revision().get()
+        });
+        if let Some(request) = self.save_coordinator.request_now(
+            path,
+            revision,
+            cx.background_executor().now(),
+            SaveKind::Automatic,
+        ) {
+            self.begin_save(request, window, cx);
+        }
+        self.arm_autosave(cx);
+        cx.notify();
+    }
+
+    /// Arm the timer for the earliest autosave deadline.
+    fn arm_autosave(&mut self, cx: &mut Context<Self>) {
+        self.autosave_task = None;
+        let now = cx.background_executor().now();
+        let Some(deadline) = self.save_coordinator.next_deadline(now) else {
+            return;
+        };
+        let Some(handle) = self.window_handle else {
+            return;
+        };
+        self.autosave_task = Some(cx.spawn(async move |this, cx| {
+            let delay = deadline.saturating_duration_since(cx.background_executor().now());
+            cx.background_executor().timer(delay).await;
+            let _ = handle.update(cx, |_root, window, app| {
+                let _ = this.update(app, |this, cx| this.pump_autosave(window, cx));
+            });
+        }));
+    }
+
+    /// Start every save whose deadline has passed.
+    pub(crate) fn pump_autosave(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let requests = self.save_coordinator.due(cx.background_executor().now());
+        for request in requests {
+            self.begin_save(request, window, cx);
+        }
+        self.arm_autosave(cx);
+        self.advance_switch(window, cx);
+        cx.notify();
+    }
+
+    /// Run one coordinator request through the guarded atomic save.
+    fn begin_save(&mut self, request: SaveRequest, window: &mut Window, cx: &mut Context<Self>) {
+        let path = request.path.clone();
+        let Some(session) = self.sessions.get(&path).cloned() else {
+            self.save_coordinator.forget(&path);
+            return;
+        };
+        // Capture the newest editor text so a queued `Change` cannot make the
+        // snapshot stale.
+        let (revision, dirty) = session.update(cx, |session, cx| {
+            session.sync_buffer(cx);
+            (session.buffer.revision().get(), session.buffer.is_dirty())
+        });
+        self.save_coordinator
+            .observe(&path, revision, dirty, cx.background_executor().now());
+        let snapshot = DocumentSnapshot::capture(&session.read(cx).buffer, path.clone());
+        tracing::debug!(
+            path = %path.display(),
+            revision = snapshot.revision().get(),
+            ticket = ?request.ticket,
+            kind = ?request.kind,
+            "starting guarded save"
+        );
+        if request.kind == SaveKind::Manual {
+            self.status = "Saving…".into();
+        }
+        cx.notify();
+        // Retain the bytes this attempt persists: a newer revision typed during
+        // the save must rebase its baseline onto them, or its follow-up would
+        // conflict with our own write.
+        let persisted = snapshot.content().to_owned();
+        let save = runtime::spawn(cx, async move {
+            match save_snapshot(&snapshot).await {
+                Ok(SaveOutcome::Saved { revision }) => Ok(SaveAttempt::Saved {
+                    revision,
+                    persisted,
+                }),
+                Ok(SaveOutcome::Conflict) => Ok(SaveAttempt::Conflict),
+                Err(error) => Err((save_failure_class(&error), error.to_string())),
+            }
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = match save.await {
+                Ok(result) => result,
+                Err(message) => Err(("service", message)),
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_save(request, result, window, cx);
+            });
+        });
+        self.save_tasks.insert(path, task);
+    }
+
+    /// Apply one guarded save result, dropping stale tickets.
+    fn finish_save(
+        &mut self,
+        request: SaveRequest,
+        result: Result<SaveAttempt, (&'static str, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = request.path.clone();
+        self.save_tasks.remove(&path);
+        let (outcome, persisted, class) = match result {
+            Ok(SaveAttempt::Saved {
+                revision,
+                persisted,
+            }) => (SaveResult::Saved { revision }, Some(persisted), None),
+            Ok(SaveAttempt::Conflict) => (SaveResult::Conflict, None, None),
+            Err((class, message)) => (SaveResult::Failed { message }, None, Some(class)),
+        };
+        let completion = self.save_coordinator.complete(
+            &path,
+            request.ticket,
+            outcome,
+            cx.background_executor().now(),
+        );
+        if completion == SaveCompletion::Stale {
+            tracing::debug!(path = %path.display(), "dropped a stale save completion");
+            return;
+        }
+        // One artifact per failure episode, never one per retry.
+        if let (Some(class), SaveCompletion::Failed { first: true, .. }) = (class, &completion) {
+            self.record_save_failure(&path, class, cx);
+        }
+        self.apply_save_completion(
+            &path,
+            &request,
+            persisted.as_deref(),
+            completion,
+            window,
+            cx,
+        );
+        self.arm_autosave(cx);
+        self.advance_switch(window, cx);
+        self.advance_quit(window, cx);
+        cx.notify();
+    }
+
+    fn apply_save_completion(
+        &mut self,
+        path: &std::path::Path,
+        request: &SaveRequest,
+        persisted: Option<&str>,
+        completion: SaveCompletion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get(path).cloned() else {
+            self.save_coordinator.forget(path);
+            self.pending_after_save = None;
+            self.status = "Document closed before the save finished.".into();
+            return;
+        };
+        match completion {
+            SaveCompletion::Saved {
+                revision,
+                current,
+                manual,
+            } => {
+                tracing::info!(path = %path.display(), revision, current, "document saved");
+                let identity = session.read(cx).buffer.identity().clone();
+                let persisted = persisted.unwrap_or_default();
+                let (confirmed, content) = session.update(cx, |session, cx| {
+                    // A newer edit after the snapshot may still be pending;
+                    // materialize it so `confirm_saved` sees the newer revision.
+                    session.sync_buffer(cx);
+                    let content = session.buffer.current_text().to_owned();
+                    let confirmed =
+                        session.confirm_saved(DocumentRevision::new(revision), persisted);
+                    if !confirmed {
+                        // Newer edits exist: move the baseline onto what the disk
+                        // now holds so their follow-up save does not conflict
+                        // with our own write. The buffer stays dirty.
+                        session.rebase_persisted(DocumentRevision::new(revision), persisted);
+                    }
+                    session.dirty = session.buffer.is_dirty();
+                    if confirmed {
+                        session.externally_changed = false;
+                    }
+                    cx.notify();
+                    (confirmed, content)
+                });
+                if !confirmed {
+                    // The buffer is the authority on dirtiness, so the
+                    // coordinator follows it instead of assuming newer content.
+                    let dirty = session.read(cx).buffer.is_dirty();
+                    let revision = session.read(cx).buffer.revision().get();
+                    self.save_coordinator.observe(
+                        path,
+                        revision,
+                        dirty,
+                        cx.background_executor().now(),
+                    );
+                }
+                if confirmed && let Some(store) = self.recovery.clone() {
+                    let task = runtime::blocking(cx, move || {
+                        let _ = store.clear_after_save(&identity, &content);
+                    });
+                    task.detach();
+                }
+                if request.kind == SaveKind::Manual || manual {
+                    self.status = if current && confirmed {
+                        "Saved.".into()
+                    } else {
+                        "Saved an earlier revision; newer edits remain unsaved.".into()
+                    };
+                }
+                self.update_tab_state(path, cx);
+                cx.emit(SessionChanged);
+                self.settle_pending_after_save(path, confirmed, window, cx);
+            }
+            SaveCompletion::Conflict => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "save conflict: the file changed on disk; edits retained"
+                );
+                session.update(cx, |session, cx| {
+                    session.externally_changed = true;
+                    cx.notify();
+                });
+                self.status = "Save conflict: the file changed on disk. Your edits are kept; reopen the document to reload, then try again.".into();
+                self.update_tab_state(path, cx);
+                cx.emit(SessionChanged);
+                self.abandon_pending_after_save(path);
+            }
+            SaveCompletion::Failed { message, .. } => {
+                tracing::error!(path = %path.display(), %message, "document save failed");
+                self.status = format!("Save failed: {message}");
+                self.update_tab_state(path, cx);
+                cx.emit(SessionChanged);
+                self.schedule_recovery(cx);
+                self.abandon_pending_after_save(path);
+            }
+            SaveCompletion::Stale => {}
+        }
+    }
+
+    /// Record a redacted artifact for a failed save.
+    ///
+    /// The artifact is written off the render path and contains no document
+    /// content; recording never changes the save outcome.
+    fn record_save_failure(
+        &mut self,
+        path: &std::path::Path,
+        error_class: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(directory) = self.save_failure_dir.clone() else {
+            return;
+        };
+        let source = self
+            .project_root()
+            .and_then(|root| path.strip_prefix(root).ok())
+            .map(|relative| relative.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let artifact = SaveFailureArtifact::new(error_class, source);
+        let task = runtime::blocking(cx, move || artifact.write(&directory));
+        task.detach();
+    }
+
+    /// Run a lifecycle action that was waiting for this document's save.
+    fn settle_pending_after_save(
+        &mut self,
+        path: &std::path::Path,
+        marked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.pending_after_save.as_ref() else {
+            return;
+        };
+        if pending.path() != path {
+            return;
+        }
+        let action = self
+            .pending_after_save
+            .take()
+            .expect("the pending action was just read");
+        if marked {
+            self.run_after_save(action, window, cx);
+        } else {
+            self.run_after_saved_revision(action, window, cx);
+        }
+    }
+
+    /// Drop a lifecycle action whose save conflicted or failed.
+    ///
+    /// A conflict or failure leaves the document dirty, so the action must wait
+    /// for a later save: a rename is never applied over an unsaved revision and a
+    /// close never destroys it. The status names the consequence so the user
+    /// knows the operation did not happen.
+    fn abandon_pending_after_save(&mut self, path: &std::path::Path) {
+        let Some(pending) = self.pending_after_save.take() else {
+            return;
+        };
+        if pending.path() != path {
+            self.pending_after_save = Some(pending);
+            return;
+        }
+        let consequence = match pending {
+            PendingAfterSave::Rename { .. } => "The rename was not applied.",
+            PendingAfterSave::Duplicate { .. } => "The entry was not duplicated.",
+            PendingAfterSave::Trash { .. } => "The entry was not moved to the Trash.",
+            PendingAfterSave::Close { .. } => "The document stays open.",
+        };
+        self.status = format!("{} {consequence}", self.status);
     }
 
     /// Install normalized collection schemas (from the R1 generation service).
@@ -1170,11 +1631,6 @@ impl ProjectWorkspace {
         if self.loading {
             return;
         }
-        if self.has_dirty(cx) {
-            self.status="Keep this project open while documents have unsaved changes. Close edited documents explicitly before switching projects.".into();
-            cx.notify();
-            return;
-        }
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1202,13 +1658,92 @@ impl ProjectWorkspace {
             });
         }));
     }
+    /// Switch projects, flushing every dirty buffer through the guarded path.
+    ///
+    /// The switch waits for the saves; a conflict or a failure cancels it and
+    /// reports why, so no unsaved content is silently lost (ledger rows 7, 68).
     fn start(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        tracing::info!(root = %root.display(), "opening Astro project");
-        if self.has_dirty(cx) {
-            self.status = "Close unsaved documents before switching projects.".into();
+        if !self.has_dirty(cx) && !self.save_coordinator.has_pending() {
+            self.open_project(root, window, cx);
+            return;
+        }
+        self.pending_switch = Some(root);
+        self.flush_dirty_buffers(window, cx);
+    }
+
+    /// Start an immediate save for every dirty buffer.
+    ///
+    /// Used before a project switch and before quitting: the caller waits until
+    /// nothing is dirty or pending, and cancels on a conflict or failure.
+    fn flush_dirty_buffers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let paths: Vec<PathBuf> = self.sessions.keys().cloned().collect();
+        for path in paths {
+            if self.save_coordinator.is_saving(&path) {
+                continue;
+            }
+            if matches!(
+                self.save_coordinator.status(&path),
+                Some(SaveStatus::Conflict)
+            ) {
+                continue;
+            }
+            let Some(session) = self.sessions.get(&path).cloned() else {
+                continue;
+            };
+            let (revision, dirty) = session.update(cx, |session, cx| {
+                session.sync_buffer(cx);
+                (session.buffer.revision().get(), session.buffer.is_dirty())
+            });
+            self.save_coordinator.observe(&path, revision, dirty, now);
+            if let Some(request) =
+                self.save_coordinator
+                    .request_now(&path, revision, now, SaveKind::Automatic)
+            {
+                self.begin_save(request, window, cx);
+            }
+        }
+        self.advance_switch(window, cx);
+        self.advance_quit(window, cx);
+    }
+
+    /// Complete or cancel a switch that was waiting for its flush.
+    fn advance_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.pending_switch.clone() else {
+            return;
+        };
+        let mut blocked = None;
+        for session in self.sessions.keys() {
+            match self.save_coordinator.status(session) {
+                Some(SaveStatus::Conflict) => {
+                    blocked = Some(
+                        "Project switch cancelled: a document changed on disk and was not overwritten. Reopen the document to reload, then switch.".to_string(),
+                    );
+                }
+                Some(SaveStatus::Failed(message)) => {
+                    blocked = Some(format!(
+                        "Project switch cancelled: the document could not be saved ({message})."
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if let Some(message) = blocked {
+            self.pending_switch = None;
+            tracing::warn!(%message, "cancelled a project switch");
+            self.status = message;
             cx.notify();
             return;
         }
+        if self.has_dirty(cx) || self.save_coordinator.has_pending() {
+            return;
+        }
+        self.pending_switch = None;
+        self.open_project(root, window, cx);
+    }
+
+    fn open_project(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        tracing::info!(root = %root.display(), "opening Astro project");
         self.cancellation.cancel();
         self.cancellation = Cancellation::default();
         let Some(next) = self.generation.checked_add(1) else {
@@ -1251,6 +1786,9 @@ impl ProjectWorkspace {
         self.watcher_owner = None;
         self.command_tasks.clear();
         self.loads.clear();
+        self.save_coordinator.clear();
+        self.save_tasks.clear();
+        self.autosave_task = None;
         self.sessions.clear();
         self.session_subscriptions.clear();
         self.session_collections.clear();
@@ -1774,16 +2312,7 @@ impl ProjectWorkspace {
                 session.update(cx, |session, cx| {
                     session.set_writing_modes(modes, window, cx)
                 });
-                let tab_key = key.clone();
-                let subscription =
-                    cx.subscribe(&session, move |this, _, _: &SessionChanged, cx| {
-                        this.update_tab_state(&tab_key, cx);
-                        this.surface_session_notice(&tab_key, cx);
-                        this.schedule_recovery(cx);
-                        cx.emit(SessionChanged);
-                        cx.notify();
-                    });
-                self.session_subscriptions.insert(key.clone(), subscription);
+                self.watch_session(key.clone(), session.clone(), window, cx);
                 self.sessions.insert(key.clone(), session.clone());
                 if !self.tab_order.contains(&key) {
                     self.tab_order.push(key.clone());
@@ -1813,6 +2342,15 @@ impl ProjectWorkspace {
         let Some(session) = self.sessions.get(path).cloned() else {
             return;
         };
+        // Switching files flushes the outgoing dirty buffer (ledger row 44);
+        // the save is silent and its completion cannot touch this document.
+        // A save already in flight keeps this request as its follow-up.
+        if let Some(outgoing) = self.active.clone()
+            && outgoing != path
+            && self.save_coordinator.is_dirty(&outgoing)
+        {
+            self.save_path(outgoing, SaveKind::Automatic, window, cx);
+        }
         self.active = Some(path.to_owned());
         self.install(path, session, cx);
         self.refresh_entry_selection(cx);
@@ -1875,18 +2413,19 @@ impl ProjectWorkspace {
                 .unwrap_or_else(|| path.display().to_string());
             let owner = cx.weak_entity();
             window.open_dialog(cx, move |dialog, _, _| {
-                let owner = owner.clone();
-                let path = path.clone();
+                let discard_owner = owner.clone();
+                let discard_path = path.clone();
+                let save_owner = owner.clone();
+                let save_path = path.clone();
                 dialog
-                    .title(format!("Discard changes to “{title}”?"))
-                    .child("The document has unsaved changes. Keeping it open preserves them.")
+                    .title(format!("Close “{title}”?"))
+                    .child("The document has unsaved changes.")
                     .footer(
                         div()
                             .h_flex()
                             .gap_2()
                             .child(
                                 Button::new("keep-editing")
-                                    .primary()
                                     .label("Keep editing")
                                     .on_click(|_, window, cx| window.close_dialog(cx)),
                             )
@@ -1895,9 +2434,30 @@ impl ProjectWorkspace {
                                     .danger()
                                     .label("Discard changes")
                                     .on_click(move |_, window, cx| {
-                                        let _ = owner
-                                            .update(cx, |this, cx| this.remove_session(&path, cx));
                                         window.close_dialog(cx);
+                                        let _ = discard_owner.update(cx, |this, cx| {
+                                            this.remove_session(&discard_path, cx)
+                                        });
+                                    }),
+                            )
+                            .child(
+                                Button::new("save-and-close")
+                                    .primary()
+                                    .label("Save and close")
+                                    .on_click(move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                        let _ = save_owner.update(cx, |this, cx| {
+                                            this.pending_after_save =
+                                                Some(PendingAfterSave::Close {
+                                                    path: save_path.clone(),
+                                                });
+                                            this.save_path(
+                                                save_path.clone(),
+                                                SaveKind::Manual,
+                                                window,
+                                                cx,
+                                            );
+                                        });
                                     }),
                             ),
                     )
@@ -1918,6 +2478,8 @@ impl ProjectWorkspace {
             task.detach();
         }
         tracing::debug!(path = %path.display(), "closing a retained document");
+        self.save_coordinator.forget(path);
+        self.save_tasks.remove(path);
         self.sessions.remove(path);
         self.session_subscriptions.remove(path);
         self.session_collections.remove(path);
@@ -1938,12 +2500,14 @@ impl ProjectWorkspace {
         }
         if !window.has_active_dialog(cx) {
             let owner = cx.weak_entity();
+            let save_owner = owner.clone();
             window.open_dialog(cx,move|dialog,_,_| {
-                let owner=owner.clone();
-                dialog.title("Discard unsaved documents?")
-                    .child("Changes exist only in memory. Keep the window open to preserve your documents.")
+                let owner = owner.clone();
+                let save_owner = save_owner.clone();
+                dialog.title("Unsaved documents")
+                    .child("Changes exist only in memory. Save them, keep the window open, or discard them.")
                     .footer(div().h_flex().gap_2()
-                        .child(Button::new("keep-window").primary().label("Keep editing").on_click(|_,window,cx|window.close_dialog(cx)))
+                        .child(Button::new("keep-window").label("Keep editing").on_click(|_,window,cx|window.close_dialog(cx)))
                         .child(Button::new("discard-window").danger().label("Discard and close").on_click(move|_,window,cx| {
                             let _=owner.update(cx,|this,cx| {
                                 if let Some(store)=this.recovery.clone() {
@@ -1951,13 +2515,63 @@ impl ProjectWorkspace {
                                     let task = runtime::blocking(cx, move || { for identity in identities { let _ = store.clear(&identity); } });
                                     task.detach();
                                 }
+                                this.pending_quit = false;
                                 this.sessions.clear();
                             });
                             window.close_dialog(cx);window.remove_window();
+                        }))
+                        .child(Button::new("save-all-and-quit").primary().label("Save all and quit").on_click(move|_,window,cx| {
+                            window.close_dialog(cx);
+                            let _=save_owner.update(cx,|this,cx| this.save_and_quit(window,cx));
                         })))
             });
         }
         false
+    }
+
+    /// Save every dirty buffer, then close the window once nothing is left.
+    ///
+    /// Quitting never discards content: the window stays open while a save is in
+    /// flight, a newer edit is still unsaved, or a conflict/failure needs the
+    /// user's attention.
+    fn save_and_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_quit = true;
+        self.flush_dirty_buffers(window, cx);
+    }
+
+    /// Close the window once a pending quit has no dirty or in-flight buffer.
+    fn advance_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.pending_quit {
+            return;
+        }
+        let mut blocked = None;
+        for session in self.sessions.keys() {
+            match self.save_coordinator.status(session) {
+                Some(SaveStatus::Conflict) => {
+                    blocked = Some(
+                        "Quit cancelled: a document changed on disk and was not overwritten. Reopen the document to reload, then quit.".to_string(),
+                    );
+                }
+                Some(SaveStatus::Failed(message)) => {
+                    blocked = Some(format!(
+                        "Quit cancelled: a document could not be saved ({message})."
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if let Some(message) = blocked {
+            self.pending_quit = false;
+            tracing::warn!(%message, "cancelled a quit");
+            self.status = message;
+            cx.notify();
+            return;
+        }
+        if self.has_dirty(cx) || self.save_coordinator.has_pending() {
+            return;
+        }
+        self.pending_quit = false;
+        window.remove_window();
     }
 
     /// Save the active document with conflict detection.
@@ -1967,114 +2581,48 @@ impl ProjectWorkspace {
             cx.notify();
             return;
         };
-        self.save_path(path, window, cx);
+        self.save_path(path, SaveKind::Manual, window, cx);
     }
 
-    /// Save one retained document with conflict detection.
-    fn save_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.sessions.get(&path).cloned() else {
-            return;
-        };
-        // Capture the latest editor text into the buffer before snapshotting so a
-        // queued Change event cannot cause a stale snapshot.
-        session.update(cx, |session, cx| {
-            session.sync_buffer(cx);
-            cx.notify();
-        });
-        let snapshot = DocumentSnapshot::capture(&session.read(cx).buffer, path.clone());
-        tracing::debug!(
-            path = %path.display(),
-            revision = snapshot.revision().get(),
-            "starting document save"
-        );
-        self.status = "Saving…".into();
-        cx.notify();
-        let save = runtime::spawn(cx, async move { save_snapshot(&snapshot).await });
-        self.save_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = save
-                .await
-                .and_then(|outcome| outcome.map_err(|error| error.to_string()));
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.finish_save(path, result, window, cx);
-            });
-        }));
-    }
-
-    fn finish_save(
+    /// Save one retained document through the guarded atomic path.
+    ///
+    /// A clean buffer is a no-op (`Ctrl/Cmd+S` on a saved document). The request
+    /// goes through the coordinator, so an autosave already in flight finishes
+    /// first and this save becomes its follow-up.
+    fn save_path(
         &mut self,
         path: PathBuf,
-        result: Result<SaveOutcome, String>,
+        kind: SaveKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(session) = self.sessions.get(&path).cloned() else {
-            self.pending_after_save = None;
-            self.status = "Document closed before the save finished.".into();
-            cx.notify();
             return;
         };
-        let mut saved = false;
-        let mut newer_edits = false;
-        match result {
-            Ok(SaveOutcome::Saved { revision }) => {
-                saved = true;
-                tracing::info!(
-                    path = %path.display(),
-                    revision,
-                    "document saved"
-                );
-                let identity = session.read(cx).buffer.identity().clone();
-                let (marked, content) = session.update(cx, |session, cx| {
-                    // A newer edit after the snapshot may still be pending;
-                    // materialize it so `confirm_saved` sees the newer revision.
-                    session.sync_buffer(cx);
-                    let content = session.buffer.current_text().to_owned();
-                    let marked = session.confirm_saved(DocumentRevision::new(revision), &content);
-                    session.dirty = session.buffer.is_dirty();
-                    if marked {
-                        session.externally_changed = false;
-                    }
-                    cx.notify();
-                    (marked, content)
-                });
-                if marked && let Some(store) = self.recovery.clone() {
-                    let task = runtime::blocking(cx, move || {
-                        let _ = store.clear_after_save(&identity, &content);
-                    });
-                    task.detach();
+        let (revision, dirty) = session.update(cx, |session, cx| {
+            session.sync_buffer(cx);
+            cx.notify();
+            (session.buffer.revision().get(), session.buffer.is_dirty())
+        });
+        if !dirty {
+            self.settle_pending_after_save(&path, true, window, cx);
+            cx.notify();
+            return;
+        }
+        let now = cx.background_executor().now();
+        self.save_coordinator.observe(&path, revision, dirty, now);
+        match self
+            .save_coordinator
+            .request_now(&path, revision, now, kind)
+        {
+            Some(request) => self.begin_save(request, window, cx),
+            None => {
+                if kind == SaveKind::Manual {
+                    self.status = "Saving…".into();
                 }
-                // A pending trash/rename/duplicate must never act on an earlier
-                // revision: the buffer is re-checked after the save completed.
-                newer_edits = session.read(cx).buffer.is_dirty();
-                self.status = if marked {
-                    "Saved.".into()
-                } else {
-                    "Saved an earlier revision; newer edits remain unsaved.".into()
-                };
-            }
-            Ok(SaveOutcome::Conflict) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    "save conflict: the file changed on disk; edits retained"
-                );
-                session.update(cx, |session, cx| {
-                    session.externally_changed = true;
-                    cx.notify();
-                });
-                self.status = "Save conflict: the file changed on disk. Your edits are kept; reopen the document to reload, then try again.".into();
-            }
-            Err(error) => {
-                tracing::error!(path = %path.display(), %error, "document save failed");
-                self.status = format!("Could not save: {error}");
             }
         }
-        match self.pending_after_save.take() {
-            Some(action) if saved && newer_edits => {
-                self.run_after_saved_revision(action, window, cx);
-            }
-            Some(action) if saved => self.run_after_save(action, window, cx),
-            _ => {}
-        }
+        self.arm_autosave(cx);
         cx.notify();
     }
 
@@ -2106,6 +2654,17 @@ impl ProjectWorkspace {
                 );
                 self.status = format!(
                     "{} was not moved to the Trash because newer edits were typed while saving. Save again, then trash it.",
+                    name(&path)
+                );
+                self.schedule_recovery(cx);
+            }
+            PendingAfterSave::Close { path } => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "keeping a document open: newer edits are still unsaved"
+                );
+                self.status = format!(
+                    "{} was not closed because newer edits were typed while saving. Save again, then close it.",
                     name(&path)
                 );
                 self.schedule_recovery(cx);
@@ -2364,15 +2923,7 @@ impl ProjectWorkspace {
                         DocumentSession::from_recovered(identity, disk, content, window, cx)
                     });
                     let key = path.clone();
-                    let notice_key = key.clone();
-                    let subscription =
-                        cx.subscribe(&session, move |this, _, _: &SessionChanged, cx| {
-                            this.surface_session_notice(&notice_key, cx);
-                            this.schedule_recovery(cx);
-                            cx.emit(SessionChanged);
-                            cx.notify();
-                        });
-                    this.session_subscriptions.insert(key.clone(), subscription);
+                    this.watch_session(key.clone(), session.clone(), window, cx);
                     this.sessions.insert(key.clone(), session.clone());
                     this.active = Some(key.clone());
                     this.install(&key, session.clone(), cx);
@@ -2397,6 +2948,10 @@ impl ProjectWorkspace {
     ) {
         self.global_preferences = global;
         self.project_preferences = project;
+        // Autosave delay is a global setting; existing dirty runs adopt it.
+        self.save_coordinator
+            .set_delay(self.global_preferences.autosave_delay);
+        self.arm_autosave(cx);
         self.rebuild_sort_options();
         self.rebuild_references();
         self.publish_list_state(cx);
@@ -3509,7 +4064,7 @@ impl ProjectWorkspace {
                 from: path.clone(),
                 to: destination,
             });
-            self.save_path(path, window, cx);
+            self.save_path(path, SaveKind::Manual, window, cx);
         } else {
             self.perform_rename(path, destination, window, cx);
         }
@@ -3605,15 +4160,18 @@ impl ProjectWorkspace {
             source,
         );
         session.update(cx, |session, cx| session.retarget(retargeted, window, cx));
-        if let Some(subscription) = self.session_subscriptions.remove(from) {
-            self.session_subscriptions
-                .insert(to.to_path_buf(), subscription);
-        }
+        self.save_coordinator.retarget(from, to);
+        // The old subscriptions capture the previous path, so they would feed
+        // changes, blur, status and recovery to a session that no longer exists
+        // under that key. Drop them and subscribe the same session to its new
+        // source; `observe` is idempotent for the retargeted revision.
+        self.session_subscriptions.remove(from);
         if let Some(collection) = self.session_collections.remove(from) {
             self.session_collections
                 .insert(to.to_path_buf(), collection);
         }
         self.sessions.insert(to.to_path_buf(), session.clone());
+        self.watch_session(to.to_path_buf(), session.clone(), window, cx);
         for path in &mut self.tab_order {
             if path == from {
                 *path = to.to_path_buf();
@@ -3643,7 +4201,7 @@ impl ProjectWorkspace {
     fn duplicate_entry(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.needs_save(&path, cx) {
             self.pending_after_save = Some(PendingAfterSave::Duplicate { path: path.clone() });
-            self.save_path(path, window, cx);
+            self.save_path(path, SaveKind::Manual, window, cx);
         } else {
             self.perform_duplicate(path, window, cx);
         }
@@ -3773,7 +4331,7 @@ impl ProjectWorkspace {
     fn save_and_trash(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.needs_save(&path, cx) {
             self.pending_after_save = Some(PendingAfterSave::Trash { path: path.clone() });
-            self.save_path(path, window, cx);
+            self.save_path(path, SaveKind::Manual, window, cx);
         } else {
             self.perform_trash(path, window, cx);
         }
@@ -3926,6 +4484,7 @@ impl ProjectWorkspace {
             PendingAfterSave::Rename { from, to } => self.perform_rename(from, to, window, cx),
             PendingAfterSave::Duplicate { path } => self.perform_duplicate(path, window, cx),
             PendingAfterSave::Trash { path } => self.perform_trash(path, window, cx),
+            PendingAfterSave::Close { path } => self.remove_session(&path, cx),
         }
     }
 
@@ -4829,10 +5388,30 @@ mod tests {
             view.update(cx, |view, cx| view.activate_session(&first, window, cx))
         })
         .unwrap();
+        // Switching away flushed the dirty buffer through the guarded save.
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if std::fs::read_to_string(&first).ok().as_deref() == Some("# Changed\n") {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "# Changed\n");
         view.read_with(cx, |view, cx| {
             let session = view.sessions.get(&first).unwrap().read(cx);
             assert_eq!(session.editor.read(cx).value(), "# Changed\n");
-            assert!(session.is_dirty());
+            assert!(
+                !session.is_dirty(),
+                "a file switch saves the outgoing buffer"
+            );
+            assert_eq!(
+                view.save_coordinator.status(&first),
+                Some(SaveStatus::Saved)
+            );
         });
         let next = fixture();
         let generation = view.read_with(cx, |view, _| view.generation);
@@ -4840,18 +5419,29 @@ mod tests {
             view.update(cx, |view, cx| view.start(next.path().into(), window, cx))
         })
         .unwrap();
-        assert_eq!(view.read_with(cx, |view, _| view.generation), generation);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("src/posts/a.md")).unwrap(),
-            "# A\n"
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.generation) != generation {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_ne!(
+            view.read_with(cx, |view, _| view.generation),
+            generation,
+            "a project switch flushes and then switches"
         );
-        cx.update_window(handle.into(), |_, window, cx| {
-            view.update(cx, |view, cx| view.close_active(window, cx));
-            assert!(window.has_active_dialog(cx));
-            window.press("escape", cx);
-        })
-        .unwrap();
-        assert_eq!(view.read_with(cx, |view, _| view.sessions.len()), 2);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "# Changed\n");
+        cx.condition(&view, |view, _| !view.loading).await;
+        assert_eq!(
+            view.read_with(cx, |view, _| view.sessions.len()),
+            0,
+            "the previous project's sessions close with it"
+        );
     }
     #[gpui_kit::test]
     async fn project_picker_cancel_and_watcher_keep_open_buffers(cx: &mut TestAppContext) {
@@ -5245,6 +5835,33 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Issue a coordinator request without running the guarded save, so a test
+    /// can inject the completion seam deterministically.
+    fn save_request(
+        view: &Entity<ProjectWorkspace>,
+        path: &Path,
+        kind: SaveKind,
+        cx: &mut App,
+    ) -> SaveRequest {
+        let session = view
+            .read(cx)
+            .sessions
+            .get(path)
+            .cloned()
+            .expect("the document is open");
+        let (revision, dirty) = session.update(cx, |session, cx| {
+            session.sync_buffer(cx);
+            (session.buffer.revision().get(), session.buffer.is_dirty())
+        });
+        view.update(cx, |view, cx| {
+            let now = cx.background_executor().now();
+            view.save_coordinator.observe(path, revision, dirty, now);
+            view.save_coordinator
+                .request_now(path, revision, now, kind)
+                .expect("a dirty document requests a save")
+        })
+    }
+
     #[gpui_kit::test]
     async fn saving_the_active_document_writes_disk_and_clears_dirty(cx: &mut TestAppContext) {
         let dir = fixture();
@@ -5512,6 +6129,776 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("src/posts/a.md")).unwrap(),
             "# A\n"
+        );
+    }
+
+    /// Mount, open the fixture's first entry and return its path.
+    async fn open_fixture_entry(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+        view: &Entity<ProjectWorkspace>,
+        dir: &tempfile::TempDir,
+    ) -> PathBuf {
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(view, |view, _| !view.loading).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(0, window, cx))
+        })
+        .unwrap();
+        cx.condition(view, |view, _| view.loads.is_empty()).await;
+        view.read_with(cx, |view, _| view.active.clone().unwrap())
+    }
+
+    async fn wait_for(cx: &mut TestAppContext, mut ready: impl FnMut(&mut TestAppContext) -> bool) {
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if ready(cx) {
+                return;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        panic!("condition did not become true");
+    }
+
+    #[gpui_kit::test]
+    async fn autosave_writes_through_the_guarded_path_and_is_silent_on_success(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let global = GlobalPreferencesV2 {
+            autosave_delay: astrolith_core::preferences::AutosaveDelay::One,
+            ..GlobalPreferencesV2::default()
+        };
+        view.update(cx, |view, cx| view.set_preferences(global, None, cx));
+        assert_eq!(
+            view.read_with(cx, |view, _| view.save_coordinator.delay().seconds()),
+            1,
+            "the resolved preference drives the effective delay"
+        );
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        edit_active(cx, handle, &view, "# Autosaved\n").await;
+        assert_eq!(
+            view.read_with(cx, |view, _| view.save_coordinator.status(&path)),
+            Some(SaveStatus::Unsaved)
+        );
+        wait_for(cx, |_| {
+            std::fs::read_to_string(&path).ok().as_deref() == Some("# Autosaved\n")
+        })
+        .await;
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert!(!session.is_dirty());
+            assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Saved));
+            assert!(
+                !view.status.starts_with("Saved"),
+                "an automatic save reports nothing in the status line"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn autosave_conflict_is_visible_and_never_overwrites(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let global = GlobalPreferencesV2 {
+            autosave_delay: astrolith_core::preferences::AutosaveDelay::One,
+            ..GlobalPreferencesV2::default()
+        };
+        view.update(cx, |view, cx| view.set_preferences(global, None, cx));
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+
+        std::fs::write(&path, "# External\n").unwrap();
+        edit_active(cx, handle, &view, "# Mine\n").await;
+        wait_for(cx, |cx| {
+            view.read_with(cx, |view, _| {
+                view.save_coordinator.status(&path) == Some(SaveStatus::Conflict)
+            })
+        })
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# External\n",
+            "the guarded save never clobbers an external change"
+        );
+        view.read_with(cx, |view, cx| {
+            assert!(view.status.contains("conflict"));
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert!(session.is_dirty());
+            assert!(session.externally_changed);
+            assert!(!view.save_tasks.contains_key(&path));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn manual_save_on_a_clean_buffer_does_nothing(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        let status = view.read_with(cx, |view, _| view.status.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.status, status);
+            assert!(view.save_tasks.is_empty());
+            assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Saved));
+        });
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# A\n");
+    }
+
+    #[gpui_kit::test]
+    async fn saving_and_closing_flushes_the_buffer_then_closes_it(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        edit_active(cx, handle, &view, "# Closed with save\n").await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.close_active(window, cx));
+            assert!(window.has_active_dialog(cx));
+            window.click("save-and-close", cx);
+        })
+        .unwrap();
+        wait_for(cx, |_| {
+            std::fs::read_to_string(&path).ok().as_deref() == Some("# Closed with save\n")
+        })
+        .await;
+        wait_for(cx, |cx| {
+            view.read_with(cx, |view, _| view.sessions.is_empty())
+        })
+        .await;
+        assert_eq!(
+            view.read_with(cx, |view, _| view.active.clone()),
+            None,
+            "the saved document is closed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# Closed with save\n"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn quitting_flushes_a_revision_typed_during_an_in_flight_save(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let recovery_dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(recovery_dir.path());
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| view.recovery = Some(store.clone()));
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+
+        edit_active(cx, handle, &view, "# First revision\n").await;
+        // A save is in flight for the first revision when the next one is typed.
+        cx.update_window(handle.into(), |_, _, cx| {
+            save_request(&view, &path, SaveKind::Manual, cx);
+        })
+        .unwrap();
+        edit_active(cx, handle, &view, "# Pending revision\n").await;
+        assert!(view.read_with(cx, |view, _| view.save_coordinator.is_saving(&path)));
+
+        let flush = view
+            .update(cx, |view, cx| view.flush_recovery_on_quit(cx))
+            .expect("a pending revision must produce an exit flush");
+        flush.await.unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.records().len(), 1);
+        assert_eq!(
+            loaded.records()[0].content(),
+            "# Pending revision\n",
+            "the revision typed while saving is not lost at quit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# A\n",
+            "quit never writes the recovered text over the original"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn switching_files_saves_the_outgoing_buffer_before_the_new_one(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(1, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let other = view.read_with(cx, |view, _| view.active.clone().unwrap());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.activate_session(&path, window, cx))
+        })
+        .unwrap();
+        edit_active(cx, handle, &view, "# Outgoing\n").await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.activate_session(&other, window, cx));
+            view.read_with(cx, |view, _| {
+                assert_eq!(
+                    view.active.clone(),
+                    Some(other.clone()),
+                    "the new document is active"
+                );
+                assert!(
+                    view.save_coordinator.is_saving(&path),
+                    "the outgoing save starts before the switch completes"
+                );
+            });
+        })
+        .unwrap();
+        wait_for(cx, |_| {
+            std::fs::read_to_string(&path).ok().as_deref() == Some("# Outgoing\n")
+        })
+        .await;
+        view.read_with(cx, |view, cx| {
+            assert!(!view.sessions.get(&path).unwrap().read(cx).is_dirty());
+            assert_eq!(
+                view.sessions
+                    .get(&other)
+                    .unwrap()
+                    .read(cx)
+                    .editor
+                    .read(cx)
+                    .value(),
+                "<X>{42}</X>\n",
+                "the incoming document keeps its own projection"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    async fn a_failed_save_keeps_the_buffer_dirty_and_writes_a_redacted_artifact(
+        cx: &mut TestAppContext,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = fixture();
+        let artifacts = tempfile::tempdir().unwrap();
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| {
+            view.save_failure_dir = Some(artifacts.path().to_path_buf());
+        });
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        edit_active(cx, handle, &view, "# Never written\n").await;
+
+        let posts = dir.path().join("src/posts");
+        let original = std::fs::metadata(&posts).unwrap().permissions();
+        let mut read_only = original.clone();
+        read_only.set_mode(0o500);
+        std::fs::set_permissions(&posts, read_only).unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        wait_for(cx, |cx| {
+            view.read_with(cx, |view, _| {
+                matches!(
+                    view.save_coordinator.status(&path),
+                    Some(SaveStatus::Failed(_))
+                )
+            })
+        })
+        .await;
+        std::fs::set_permissions(&posts, original).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# A\n",
+            "a failed save leaves the original intact"
+        );
+        view.read_with(cx, |view, cx| {
+            assert!(view.status.starts_with("Save failed"));
+            assert!(view.sessions.get(&path).unwrap().read(cx).is_dirty());
+        });
+        let names: Vec<PathBuf> = std::fs::read_dir(artifacts.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(names.len(), 1, "one redacted artifact per failed save");
+        let artifact = std::fs::read_to_string(&names[0]).unwrap();
+        assert!(artifact.contains("\"error_class\": \"io\""));
+        assert!(artifact.contains("\"source\": \"src/posts/a.md\""));
+        assert!(
+            !artifact.contains("Never written"),
+            "artifacts never contain document content"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn an_edit_during_an_autosave_saves_the_newer_revision_without_a_conflict(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let global = GlobalPreferencesV2 {
+            autosave_delay: astrolith_core::preferences::AutosaveDelay::One,
+            ..GlobalPreferencesV2::default()
+        };
+        view.update(cx, |view, cx| view.set_preferences(global, None, cx));
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+
+        edit_active(cx, handle, &view, "# First\n").await;
+        let revision = view.read_with(cx, |view, cx| {
+            view.sessions
+                .get(&path)
+                .unwrap()
+                .read(cx)
+                .buffer
+                .revision()
+                .get()
+        });
+        // The autosave is in flight for the first revision when the next is typed.
+        let request = cx
+            .update_window(handle.into(), |_, _, cx| {
+                save_request(&view, &path, SaveKind::Automatic, cx)
+            })
+            .unwrap();
+        edit_active(cx, handle, &view, "# Second\n").await;
+        assert!(view.read_with(cx, |view, _| view.save_coordinator.is_saving(&path)));
+
+        // The save's own write lands before its completion is delivered.
+        std::fs::write(&path, "# First\n").unwrap();
+        let finish_view = view.clone();
+        cx.update_window(handle.into(), move |_, window, cx| {
+            finish_view.update(cx, |view, cx| {
+                view.finish_save(
+                    request,
+                    Ok(SaveAttempt::Saved {
+                        revision,
+                        persisted: "# First\n".to_owned(),
+                    }),
+                    window,
+                    cx,
+                )
+            })
+        })
+        .unwrap();
+
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert!(session.is_dirty(), "the newer revision stays unsaved");
+            assert_eq!(
+                session.buffer.original_text(),
+                "# First\n",
+                "the baseline follows the bytes the save persisted"
+            );
+            assert_ne!(
+                view.save_coordinator.status(&path),
+                Some(SaveStatus::Conflict),
+                "our own write never conflicts with the follow-up"
+            );
+        });
+
+        wait_for(cx, |_| {
+            std::fs::read_to_string(&path).ok().as_deref() == Some("# Second\n")
+        })
+        .await;
+        view.read_with(cx, |view, cx| {
+            assert!(!view.sessions.get(&path).unwrap().read(cx).is_dirty());
+            assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Saved));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn a_blur_during_an_in_flight_save_queues_the_follow_up(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        edit_active(cx, handle, &view, "# First\n").await;
+        let revision = view.read_with(cx, |view, cx| {
+            view.sessions
+                .get(&path)
+                .unwrap()
+                .read(cx)
+                .buffer
+                .revision()
+                .get()
+        });
+        let request = cx
+            .update_window(handle.into(), |_, _, cx| {
+                save_request(&view, &path, SaveKind::Automatic, cx)
+            })
+            .unwrap();
+        edit_active(cx, handle, &view, "# Second\n").await;
+
+        let session = view.read_with(cx, |view, _| view.sessions.get(&path).unwrap().clone());
+        cx.update_window(handle.into(), |_, _, cx| {
+            session.update(cx, |_, cx| cx.emit(SaveOnBlur));
+        })
+        .unwrap();
+        std::fs::write(&path, "# First\n").unwrap();
+        let finish_view = view.clone();
+        cx.update_window(handle.into(), move |_, window, cx| {
+            finish_view.update(cx, |view, cx| {
+                view.finish_save(
+                    request,
+                    Ok(SaveAttempt::Saved {
+                        revision,
+                        persisted: "# First\n".to_owned(),
+                    }),
+                    window,
+                    cx,
+                )
+            })
+        })
+        .unwrap();
+        view.read_with(cx, |view, cx| {
+            let now = cx.background_executor().now();
+            assert_eq!(
+                view.save_coordinator.next_deadline(now),
+                Some(now),
+                "a blur during a save becomes its follow-up instead of being dropped"
+            );
+        });
+        wait_for(cx, |_| {
+            std::fs::read_to_string(&path).ok().as_deref() == Some("# Second\n")
+        })
+        .await;
+        view.read_with(cx, |view, cx| {
+            assert!(!view.sessions.get(&path).unwrap().read(cx).is_dirty());
+            assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Saved));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn a_file_switch_during_an_in_flight_save_queues_the_outgoing_follow_up(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(1, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let other = view.read_with(cx, |view, _| view.active.clone().unwrap());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.activate_session(&path, window, cx))
+        })
+        .unwrap();
+
+        edit_active(cx, handle, &view, "# First\n").await;
+        let revision = view.read_with(cx, |view, cx| {
+            view.sessions
+                .get(&path)
+                .unwrap()
+                .read(cx)
+                .buffer
+                .revision()
+                .get()
+        });
+        let request = cx
+            .update_window(handle.into(), |_, _, cx| {
+                save_request(&view, &path, SaveKind::Automatic, cx)
+            })
+            .unwrap();
+        edit_active(cx, handle, &view, "# Second\n").await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.activate_session(&other, window, cx))
+        })
+        .unwrap();
+        std::fs::write(&path, "# First\n").unwrap();
+        let finish_view = view.clone();
+        cx.update_window(handle.into(), move |_, window, cx| {
+            finish_view.update(cx, |view, cx| {
+                view.finish_save(
+                    request,
+                    Ok(SaveAttempt::Saved {
+                        revision,
+                        persisted: "# First\n".to_owned(),
+                    }),
+                    window,
+                    cx,
+                )
+            })
+        })
+        .unwrap();
+        view.read_with(cx, |view, cx| {
+            let now = cx.background_executor().now();
+            assert_eq!(
+                view.save_coordinator.next_deadline(now),
+                Some(now),
+                "the outgoing switch save waits as the in-flight save's follow-up"
+            );
+        });
+        wait_for(cx, |_| {
+            std::fs::read_to_string(&path).ok().as_deref() == Some("# Second\n")
+        })
+        .await;
+        view.read_with(cx, |view, cx| {
+            assert!(!view.sessions.get(&path).unwrap().read(cx).is_dirty());
+            assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Saved));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn a_manual_save_queued_behind_an_autosave_reports_saved(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        edit_active(cx, handle, &view, "# Queued\n").await;
+        let revision = view.read_with(cx, |view, cx| {
+            view.sessions
+                .get(&path)
+                .unwrap()
+                .read(cx)
+                .buffer
+                .revision()
+                .get()
+        });
+        let request = cx
+            .update_window(handle.into(), |_, _, cx| {
+                save_request(&view, &path, SaveKind::Automatic, cx)
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        assert_eq!(view.read_with(cx, |view, _| view.status.clone()), "Saving…");
+
+        let finish_view = view.clone();
+        cx.update_window(handle.into(), move |_, window, cx| {
+            finish_view.update(cx, |view, cx| {
+                view.finish_save(
+                    request,
+                    Ok(SaveAttempt::Saved {
+                        revision,
+                        persisted: "# Queued\n".to_owned(),
+                    }),
+                    window,
+                    cx,
+                )
+            })
+        })
+        .unwrap();
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.status, "Saved.",
+                "the queued manual request reports its own success"
+            );
+            assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Saved));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn a_conflict_abandons_a_pending_rename_and_reports_it(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        edit_active(cx, handle, &view, "# Mine\n").await;
+
+        let destination = SourcePath::new("src/posts/renamed.md").unwrap();
+        let target = dir.path().join("src/posts/renamed.md");
+        let request = cx
+            .update_window(handle.into(), |_, _, cx| {
+                save_request(&view, &path, SaveKind::Manual, cx)
+            })
+            .unwrap();
+        let finish_view = view.clone();
+        let from = path.clone();
+        cx.update_window(handle.into(), move |_, window, cx| {
+            finish_view.update(cx, |view, cx| {
+                view.pending_after_save = Some(PendingAfterSave::Rename {
+                    from,
+                    to: destination,
+                });
+                view.finish_save(request, Ok(SaveAttempt::Conflict), window, cx)
+            })
+        })
+        .unwrap();
+
+        assert!(
+            view.read_with(cx, |view, _| view.pending_after_save.is_none()),
+            "a conflict never leaves the rename queued"
+        );
+        assert!(!target.exists(), "a rename never runs after a conflict");
+        assert!(path.exists(), "the original file is untouched");
+        view.read_with(cx, |view, cx| {
+            assert!(view.status.contains("Save conflict"));
+            assert!(view.status.contains("rename was not applied"));
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert!(session.is_dirty());
+            assert_eq!(
+                view.save_coordinator.status(&path),
+                Some(SaveStatus::Conflict)
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    async fn a_failure_episode_writes_one_artifact_and_rearms_the_idle_delay(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let artifacts = tempfile::tempdir().unwrap();
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| {
+            view.save_failure_dir = Some(artifacts.path().to_path_buf());
+        });
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        edit_active(cx, handle, &view, "# Never written\n").await;
+
+        let first = cx
+            .update_window(handle.into(), |_, _, cx| {
+                save_request(&view, &path, SaveKind::Automatic, cx)
+            })
+            .unwrap();
+        let finish_view = view.clone();
+        cx.update_window(handle.into(), move |_, window, cx| {
+            finish_view.update(cx, |view, cx| {
+                view.finish_save(first, Err(("io", "cannot write".to_owned())), window, cx)
+            })
+        })
+        .unwrap();
+        view.read_with(cx, |view, cx| {
+            let now = cx.background_executor().now();
+            assert!(
+                view.save_coordinator
+                    .next_deadline(now)
+                    .is_some_and(|deadline| deadline > now),
+                "a failed save never re-issues immediately"
+            );
+            assert_eq!(
+                view.save_coordinator.status(&path),
+                Some(SaveStatus::Failed("cannot write".into()))
+            );
+        });
+        wait_for(cx, |_| {
+            std::fs::read_dir(artifacts.path())
+                .map(|entries| entries.count() == 1)
+                .unwrap_or(false)
+        })
+        .await;
+
+        // A retry of the same episode fails again: no second artifact.
+        let retry = cx
+            .update_window(handle.into(), |_, _, cx| {
+                save_request(&view, &path, SaveKind::Automatic, cx)
+            })
+            .unwrap();
+        let finish_view = view.clone();
+        cx.update_window(handle.into(), move |_, window, cx| {
+            finish_view.update(cx, |view, cx| {
+                view.finish_save(retry, Err(("io", "cannot write".to_owned())), window, cx)
+            })
+        })
+        .unwrap();
+        runtime::blocking(cx, || {
+            std::thread::sleep(std::time::Duration::from_millis(50))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_dir(artifacts.path()).unwrap().count(),
+            1,
+            "one artifact per failure episode, not one per retry"
+        );
+        view.read_with(cx, |view, cx| {
+            assert!(view.sessions.get(&path).unwrap().read(cx).is_dirty());
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn a_renamed_document_keeps_autosaving_at_its_new_path(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let global = GlobalPreferencesV2 {
+            autosave_delay: astrolith_core::preferences::AutosaveDelay::One,
+            ..GlobalPreferencesV2::default()
+        };
+        view.update(cx, |view, cx| view.set_preferences(global, None, cx));
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(0, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let path = view.read_with(cx, |view, _| view.active.clone().unwrap());
+        let renamed = dir.path().join("src/posts/renamed.md");
+
+        // A dirty rename saves through the coordinator, moves the file and
+        // retargets the retained session.
+        edit_active(cx, handle, &view, "# Rename save\n").await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.submit_rename(path.clone(), "src/posts/renamed.md".to_owned(), window, cx)
+            })
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if !path.exists() && view.read_with(cx, |view, _| view.sessions.contains_key(&renamed))
+            {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert!(
+            view.read_with(cx, |view, _| view.sessions.contains_key(&renamed)),
+            "the session is retargeted at the new source"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&renamed).unwrap(),
+            "# Rename save\n"
+        );
+
+        // Autosave must still see edits after the retarget.
+        edit_active(cx, handle, &view, "# Renamed edit\n").await;
+        wait_for(cx, |_| {
+            std::fs::read_to_string(&renamed).ok().as_deref() == Some("# Renamed edit\n")
+        })
+        .await;
+        view.read_with(cx, |view, cx| {
+            assert!(!view.sessions.get(&renamed).unwrap().read(cx).is_dirty());
+            assert_eq!(
+                view.save_coordinator.status(&renamed),
+                Some(SaveStatus::Saved)
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn saving_and_quitting_flushes_every_dirty_buffer_before_the_window_closes(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        edit_active(cx, handle, &view, "# Quit with save\n").await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| assert!(!view.guard_window_close(window, cx)));
+            assert!(window.has_active_dialog(cx));
+            window.click("save-all-and-quit", cx);
+        })
+        .unwrap();
+
+        wait_for(cx, |_| {
+            std::fs::read_to_string(&path).ok().as_deref() == Some("# Quit with save\n")
+        })
+        .await;
+        wait_for(cx, |cx| cx.windows().is_empty()).await;
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# Quit with save\n",
+            "quitting through the Save arm writes the buffer"
         );
     }
 
@@ -8039,13 +9426,15 @@ export const collections = {blog, dataAuthors};
         });
         view.update(cx, |view, _| view.trash_backend = backend.clone());
         cx.update_window(handle.into(), |_, window, cx| {
+            let request = save_request(&view, &path, SaveKind::Manual, cx);
             view.update(cx, |view, cx| {
                 view.pending_after_save = Some(PendingAfterSave::Trash { path: path.clone() });
                 // The completion seam: the snapshot's revision is already outdated.
                 view.finish_save(
-                    path.clone(),
-                    Ok(SaveOutcome::Saved {
+                    request,
+                    Ok(SaveAttempt::Saved {
                         revision: saved_revision,
+                        persisted: "# Saved revision\n".to_owned(),
                     }),
                     window,
                     cx,
@@ -8127,15 +9516,17 @@ export const collections = {blog, dataAuthors};
         let destination = SourcePath::new("src/posts/renamed.md").unwrap();
         let target = dir.path().join("src/posts/renamed.md");
         cx.update_window(handle.into(), |_, window, cx| {
+            let request = save_request(&view, &path, SaveKind::Manual, cx);
             view.update(cx, |view, cx| {
                 view.pending_after_save = Some(PendingAfterSave::Rename {
                     from: path.clone(),
                     to: destination.clone(),
                 });
                 view.finish_save(
-                    path.clone(),
-                    Ok(SaveOutcome::Saved {
+                    request,
+                    Ok(SaveAttempt::Saved {
                         revision: saved_revision,
+                        persisted: "# Saved revision\n".to_owned(),
                     }),
                     window,
                     cx,
