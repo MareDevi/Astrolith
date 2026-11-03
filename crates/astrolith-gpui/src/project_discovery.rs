@@ -99,6 +99,25 @@ impl Drop for ServiceWatcher {
     }
 }
 
+/// One clickable ancestor in the library breadcrumb.
+#[derive(Clone)]
+enum CrumbAction {
+    Collections,
+    Directory(Vec<String>),
+}
+
+fn parent_directory(directory: &[String]) -> Option<Vec<String>> {
+    (!directory.is_empty()).then(|| directory[..directory.len() - 1].to_vec())
+}
+
+/// One subdirectory row in a collection's browsable tree.
+struct DirectoryRow {
+    /// Path below the collection base, empty for the collection root.
+    segments: Vec<String>,
+    /// Recursive entry count below this directory.
+    count: usize,
+}
+
 /// One rendered project-panel row; labels are built only when the index,
 /// filter or ordering changes, never during a frame.
 struct EntryRow {
@@ -112,6 +131,43 @@ struct EntryRow {
     draft: bool,
     search: SharedString,
     path: PathBuf,
+    /// Present when this row is a folder rather than a document.
+    directory: Option<DirectoryRow>,
+}
+
+/// The directory segments of an entry's source below its collection base.
+fn entry_directory(entry: &CollectionEntry) -> Vec<String> {
+    entry
+        .relative_path()
+        .parent()
+        .map(path_segments)
+        .unwrap_or_default()
+}
+
+fn path_segments(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(segment) => Some(segment.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn directory_row(collection: &str, segments: Vec<String>, count: usize) -> EntryRow {
+    let joined = segments.join("/");
+    EntryRow {
+        index: 0,
+        id: format!("dir:{collection}:{joined}").into(),
+        title: segments.last().cloned().unwrap_or_default().into(),
+        filename: SharedString::default(),
+        show_filename: false,
+        date: SharedString::default(),
+        mdx: false,
+        draft: false,
+        search: joined.to_lowercase().into(),
+        path: PathBuf::new(),
+        directory: Some(DirectoryRow { segments, count }),
+    }
 }
 
 struct EntrySection {
@@ -130,6 +186,10 @@ struct EntryList {
     sort: EntrySort,
     /// When set, only entries from this collection are listed.
     collection_filter: Option<SharedString>,
+    /// Directory below the collection base being browsed; empty is its root.
+    directory: Vec<String>,
+    /// Entries under the browsed directory (recursive) or in the collection.
+    scope_total: usize,
     /// Resolved field mappings per collection identity.
     mappings: BTreeMap<String, FieldMappings>,
     selected: Option<IndexPath>,
@@ -146,6 +206,8 @@ impl EntryList {
             filter: EntryFilter::default(),
             sort: EntrySort::default(),
             collection_filter: None,
+            directory: Vec::new(),
+            scope_total: 0,
             mappings: BTreeMap::new(),
             selected: None,
             active: None,
@@ -160,76 +222,167 @@ impl EntryList {
             query: self.query.clone(),
             drafts_only: self.filter.drafts_only,
         };
-        let mut groups: BTreeMap<&str, Vec<(usize, &CollectionEntry)>> = BTreeMap::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            let collection = entry.entry().id().collection().as_str();
-            if self
-                .collection_filter
-                .as_ref()
-                .is_some_and(|selected| selected.as_ref() != collection)
-            {
-                continue;
-            }
+        let filter_active = !filter.query.trim().is_empty() || filter.drafts_only;
+        let mut sections = Vec::new();
+
+        if let Some(collection) = self.collection_filter.clone() {
+            let collection = collection.as_ref();
             let mappings = self.mappings.get(collection);
-            if !list::matches_filter(entry, mappings, &filter) {
-                continue;
+            let mut rows = Vec::new();
+            if filter_active {
+                // Filtering is a flat result set, exactly like the collection
+                // index before nested browsing existed.
+                let mut matching: Vec<(usize, &CollectionEntry)> = self
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| entry.entry().id().collection().as_str() == collection)
+                    .filter(|(_, entry)| list::matches_filter(entry, mappings, &filter))
+                    .collect();
+                matching.sort_by(|(_, left), (_, right)| {
+                    list::compare_entries(left, right, mappings, &self.sort)
+                });
+                self.scope_total = self
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.entry().id().collection().as_str() == collection)
+                    .count();
+                for (index, entry) in matching {
+                    rows.push(self.entry_row(index, entry, collection, mappings));
+                }
+            } else {
+                // Browse one directory: child folders first, then its own
+                // entries. Counts are recursive over the entries below.
+                let mut child_counts: BTreeMap<String, usize> = BTreeMap::new();
+                let mut direct = Vec::new();
+                let mut scope_total = 0;
+                for (index, entry) in self.entries.iter().enumerate() {
+                    if entry.entry().id().collection().as_str() != collection {
+                        continue;
+                    }
+                    let segments = entry_directory(entry);
+                    if !segments.starts_with(&self.directory) {
+                        continue;
+                    }
+                    scope_total += 1;
+                    if segments.len() == self.directory.len() {
+                        direct.push((index, entry));
+                    } else {
+                        *child_counts
+                            .entry(segments[self.directory.len()].clone())
+                            .or_default() += 1;
+                    }
+                }
+                self.scope_total = scope_total;
+                direct.sort_by(|(_, left), (_, right)| {
+                    list::compare_entries(left, right, mappings, &self.sort)
+                });
+                for (name, count) in child_counts {
+                    let mut segments = self.directory.clone();
+                    segments.push(name);
+                    rows.push(directory_row(collection, segments, count));
+                }
+                for (index, entry) in direct {
+                    rows.push(self.entry_row(index, entry, collection, mappings));
+                }
             }
-            groups.entry(collection).or_default().push((index, entry));
-        }
-        let mut sections = Vec::with_capacity(groups.len());
-        for (collection, mut rows) in groups {
-            let mappings = self.mappings.get(collection);
-            rows.sort_by(|(_, left), (_, right)| {
-                list::compare_entries(left, right, mappings, &self.sort)
-            });
-            let mut section = EntrySection {
+            sections.push(EntrySection {
                 title: collection.to_owned().into(),
                 heading: collection.to_uppercase().into(),
-                rows: Vec::with_capacity(rows.len()),
-            };
-            for (index, entry) in rows {
-                let title = list::display_title(entry, mappings);
-                let filename = list::file_name(entry).to_owned();
-                let show_filename = title != filename;
-                let date = list::publication_date(entry, mappings)
-                    .map(|date| format!("{date}"))
-                    .unwrap_or_default();
-                let search = format!("{filename}\n{title}").to_lowercase();
-                let id =
-                    SharedString::from(format!("entry:{collection}:{}", entry.entry().id().id()));
-                let path = self
-                    .root
-                    .as_ref()
-                    .map(|root| root.join(entry.entry().source().as_str()))
-                    .unwrap_or_else(|| PathBuf::from(entry.entry().source().as_str()));
-                section.rows.push(EntryRow {
-                    index,
-                    id,
-                    title: title.into(),
-                    filename: filename.into(),
-                    show_filename,
-                    date: date.into(),
-                    mdx: entry.entry().source().as_str().ends_with(".mdx"),
-                    draft: list::is_draft(entry, mappings),
-                    search: search.into(),
-                    path,
-                });
+                rows,
+            });
+        } else {
+            let mut groups: BTreeMap<&str, Vec<(usize, &CollectionEntry)>> = BTreeMap::new();
+            for (index, entry) in self.entries.iter().enumerate() {
+                let collection = entry.entry().id().collection().as_str();
+                let mappings = self.mappings.get(collection);
+                if !list::matches_filter(entry, mappings, &filter) {
+                    continue;
+                }
+                groups.entry(collection).or_default().push((index, entry));
             }
-            sections.push(section);
+            self.scope_total = self.entries.len();
+            for (collection, mut rows) in groups {
+                let mappings = self.mappings.get(collection);
+                rows.sort_by(|(_, left), (_, right)| {
+                    list::compare_entries(left, right, mappings, &self.sort)
+                });
+                let mut section = EntrySection {
+                    title: collection.to_owned().into(),
+                    heading: collection.to_uppercase().into(),
+                    rows: Vec::with_capacity(rows.len()),
+                };
+                for (index, entry) in rows {
+                    section
+                        .rows
+                        .push(self.entry_row(index, entry, collection, mappings));
+                }
+                sections.push(section);
+            }
         }
         self.sections = sections;
     }
 
+    fn entry_row(
+        &self,
+        index: usize,
+        entry: &CollectionEntry,
+        collection: &str,
+        mappings: Option<&FieldMappings>,
+    ) -> EntryRow {
+        let title = list::display_title(entry, mappings);
+        let filename = list::file_name(entry).to_owned();
+        let show_filename = title != filename;
+        let date = list::publication_date(entry, mappings)
+            .map(|date| format!("{date}"))
+            .unwrap_or_default();
+        let search = format!("{filename}\n{title}").to_lowercase();
+        let id = SharedString::from(format!("entry:{collection}:{}", entry.entry().id().id()));
+        let path = self
+            .root
+            .as_ref()
+            .map(|root| root.join(entry.entry().source().as_str()))
+            .unwrap_or_else(|| PathBuf::from(entry.entry().source().as_str()));
+        EntryRow {
+            index,
+            id,
+            title: title.into(),
+            filename: filename.into(),
+            show_filename,
+            date: date.into(),
+            mdx: entry.entry().source().as_str().ends_with(".mdx"),
+            draft: list::is_draft(entry, mappings),
+            search: search.into(),
+            path,
+            directory: None,
+        }
+    }
+
     fn entry_index(&self, ix: IndexPath) -> Option<usize> {
+        let row = self.sections.get(ix.section)?.rows.get(ix.row)?;
+        row.directory.is_none().then_some(row.index)
+    }
+
+    fn directory_at(&self, ix: IndexPath) -> Option<Vec<String>> {
         self.sections
             .get(ix.section)?
             .rows
-            .get(ix.row)
-            .map(|row| row.index)
+            .get(ix.row)?
+            .directory
+            .as_ref()
+            .map(|directory| directory.segments.clone())
     }
 
     fn visible_count(&self) -> usize {
         self.sections.iter().map(|section| section.rows.len()).sum()
+    }
+
+    fn entry_count(&self) -> usize {
+        self.sections
+            .iter()
+            .flat_map(|section| section.rows.iter())
+            .filter(|row| row.directory.is_none())
+            .count()
     }
 
     fn selected_row(&self) -> Option<(usize, usize)> {
@@ -292,6 +445,37 @@ impl ListDelegate for EntryList {
         cx: &mut Context<ListState<Self>>,
     ) -> Option<ListItem> {
         let row = self.sections.get(ix.section)?.rows.get(ix.row)?;
+        if let Some(directory) = &row.directory {
+            let name = row.title.clone();
+            let count = directory.count;
+            let label = row.search.clone();
+            let id = row.id.clone();
+            let selected = self.selected == Some(ix);
+            let muted = cx.theme().muted_foreground;
+            return Some(
+                ListItem::new(id)
+                    .selected(selected)
+                    .accessibility_label(label)
+                    .child(
+                        div()
+                            .h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .items_center()
+                            .gap_2()
+                            .child(Icon::new(IconName::Folder).size_4().text_color(muted))
+                            .child(div().min_w_0().flex_1().truncate().text_sm().child(name))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(SharedString::from(count.to_string())),
+                            )
+                            .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted)),
+                    ),
+            );
+        }
         let active = Some(&row.path) == self.active.as_ref();
         let selected = active || self.selected == Some(ix);
         let title = row.title.clone();
@@ -515,6 +699,8 @@ pub(crate) struct ProjectWorkspace {
     list: Entity<ListState<EntryList>>,
     /// Collection whose entries the library shows; `None` is the collection root.
     selected_collection: Option<String>,
+    /// Directory below the selected collection's base; empty is its root.
+    selected_directory: Vec<String>,
     tabs: Arc<Vec<OpenTab>>,
     tab_order: Vec<PathBuf>,
     display_name: Option<SharedString>,
@@ -752,6 +938,11 @@ impl ProjectWorkspace {
         let subscription =
             cx.subscribe_in(&list, window, |this, _, event: &ListEvent, window, cx| {
                 if let ListEvent::Confirm(ix) = event {
+                    let directory = this.list.read(cx).delegate().directory_at(*ix);
+                    if let Some(directory) = directory {
+                        this.select_directory(directory, window, cx);
+                        return;
+                    }
                     let index = this.list.read(cx).delegate().entry_index(*ix);
                     if let Some(index) = index {
                         this.open_entry(index, window, cx);
@@ -774,6 +965,7 @@ impl ProjectWorkspace {
             collection_counts: BTreeMap::new(),
             list,
             selected_collection: None,
+            selected_directory: Vec::new(),
             tabs: Arc::new(Vec::new()),
             tab_order: Vec::new(),
             display_name: None,
@@ -2254,6 +2446,7 @@ impl ProjectWorkspace {
         self.loading = true;
         self.open_error = None;
         self.selected_collection = None;
+        self.selected_directory.clear();
         self.status = "Checking the project folder…".into();
         cx.notify();
         let home = paths::home_directory();
@@ -2917,6 +3110,7 @@ impl ProjectWorkspace {
         {
             self.selected_collection = None;
         }
+        self.normalize_browsed_directory();
         self.display_name = self.manifest.as_ref().map(|manifest| {
             let root = manifest.root();
             root.file_name()
@@ -2938,6 +3132,7 @@ impl ProjectWorkspace {
         let filter = self.list_filter.clone();
         let sort = self.list_sort.clone();
         let collection_filter = self.selected_collection.clone().map(Into::into);
+        let directory = self.selected_directory.clone();
         self.list.update(cx, |list, cx| {
             let delegate = list.delegate_mut();
             delegate.entries = entries;
@@ -2947,6 +3142,7 @@ impl ProjectWorkspace {
             delegate.filter = filter;
             delegate.sort = sort;
             delegate.collection_filter = collection_filter;
+            delegate.directory = directory;
             delegate.rebuild();
             delegate.selected = delegate
                 .selected_row()
@@ -3201,15 +3397,24 @@ impl ProjectWorkspace {
         self.document.read(cx).focus_handle(cx).focus(window, cx);
     }
 
-    /// Keep the library on the collection that owns `path`.
+    /// Keep the library on the collection and directory that own `path`.
     fn focus_collection_for(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        let Some(collection) = self.session_collections.get(path).cloned() else {
+        let Some(collection) = self.collection_of(path) else {
             return;
         };
-        if self.selected_collection.as_deref() == Some(collection.as_str()) {
+        let directory = self
+            .entries
+            .iter()
+            .find(|entry| entry.absolute_source() == path)
+            .map(entry_directory)
+            .unwrap_or_default();
+        if self.selected_collection.as_deref() == Some(collection.as_str())
+            && self.selected_directory == directory
+        {
             return;
         }
         self.selected_collection = Some(collection);
+        self.selected_directory = directory;
         self.publish_list_state(cx);
     }
 
@@ -4563,35 +4768,35 @@ impl ProjectWorkspace {
             return;
         };
         let root = manifest.root().to_path_buf();
-        let target_entry = target
-            .and_then(|path| {
-                self.entries
-                    .iter()
-                    .find(|entry| entry.absolute_source() == path)
-            })
-            .or_else(|| {
-                self.active.as_ref().and_then(|active| {
-                    self.entries
-                        .iter()
-                        .find(|entry| entry.absolute_source() == active)
-                })
-            });
-        let selected_descriptor = self.selected_collection.as_deref().and_then(|selected| {
+        let explicit_entry = target.and_then(|path| {
+            self.entries
+                .iter()
+                .find(|entry| entry.absolute_source() == path)
+        });
+        let active_entry = self.active.as_ref().and_then(|active| {
+            self.entries
+                .iter()
+                .find(|entry| entry.absolute_source() == active)
+        });
+        let descriptor_of = |name: &str| {
             manifest
                 .collections()
                 .iter()
-                .find(|descriptor| descriptor.id().as_str() == selected)
-        });
-        let Some((collection, descriptor)) = target_entry
+                .find(|descriptor| descriptor.id().as_str() == name)
+        };
+        let selected_descriptor = self.selected_collection.as_deref().and_then(descriptor_of);
+        let Some((collection, descriptor)) = explicit_entry
             .and_then(|entry| {
                 let name = entry.entry().id().collection().as_str();
-                manifest
-                    .collections()
-                    .iter()
-                    .find(|descriptor| descriptor.id().as_str() == name)
-                    .map(|descriptor| (descriptor.id().clone(), descriptor))
+                descriptor_of(name).map(|descriptor| (descriptor.id().clone(), descriptor))
             })
             .or_else(|| selected_descriptor.map(|descriptor| (descriptor.id().clone(), descriptor)))
+            .or_else(|| {
+                active_entry.and_then(|entry| {
+                    let name = entry.entry().id().collection().as_str();
+                    descriptor_of(name).map(|descriptor| (descriptor.id().clone(), descriptor))
+                })
+            })
             .or_else(|| {
                 manifest
                     .collections()
@@ -4607,9 +4812,25 @@ impl ProjectWorkspace {
         // The manifest's collection base is the resolved directory: discovery
         // applies the collection's resolved content-directory override (P1) before
         // scanning, so creation, the file list and the watcher all agree on it.
-        let directory_absolute = target_entry
+        // The browsed directory wins over the active document so "New entry"
+        // follows the folder the library is showing.
+        let browsed_directory = (self.selected_collection.as_deref() == Some(collection.as_str()))
+            .then(|| {
+                let mut relative = PathBuf::new();
+                for segment in &self.selected_directory {
+                    relative.push(segment);
+                }
+                descriptor.base().join(relative)
+            });
+        let directory_absolute = explicit_entry
             .and_then(|entry| entry.absolute_source().parent())
             .filter(|parent| parent.starts_with(descriptor.base()))
+            .or(browsed_directory.as_deref())
+            .or_else(|| {
+                active_entry
+                    .and_then(|entry| entry.absolute_source().parent())
+                    .filter(|parent| parent.starts_with(descriptor.base()))
+            })
             .unwrap_or(descriptor.base());
         let directory = relative_source(&root, directory_absolute);
         let resolved = self.resolved_for(Some(collection.as_str()));
@@ -5502,6 +5723,7 @@ impl ProjectWorkspace {
         let filter = self.list_filter.clone();
         let sort = self.list_sort.clone();
         let collection_filter = self.selected_collection.clone().map(Into::into);
+        let directory = self.selected_directory.clone();
         self.list.update(cx, |list, cx| {
             let delegate = list.delegate_mut();
             delegate.entries = entries;
@@ -5511,6 +5733,7 @@ impl ProjectWorkspace {
             delegate.filter = filter;
             delegate.sort = sort;
             delegate.collection_filter = collection_filter;
+            delegate.directory = directory;
             delegate.rebuild();
             delegate.selected = delegate
                 .selected_row()
@@ -5530,12 +5753,61 @@ impl ProjectWorkspace {
             return;
         }
         self.selected_collection = collection;
+        self.selected_directory.clear();
         self.list_filter = EntryFilter::default();
         self.last_list_query.clear();
         self.list
             .update(cx, |list, cx| list.set_query("", window, cx));
         self.publish_list_state(cx);
         cx.notify();
+    }
+
+    /// Browse one directory below the selected collection's base.
+    pub(crate) fn select_directory(
+        &mut self,
+        directory: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_directory == directory {
+            return;
+        }
+        self.selected_directory = directory;
+        self.list_filter = EntryFilter::default();
+        self.last_list_query.clear();
+        self.list
+            .update(cx, |list, cx| list.set_query("", window, cx));
+        self.publish_list_state(cx);
+        cx.notify();
+    }
+
+    /// Move one level up: the parent directory, then the collection index.
+    pub(crate) fn library_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match parent_directory(&self.selected_directory) {
+            Some(parent) => self.select_directory(parent, window, cx),
+            None => self.select_collection(None, window, cx),
+        }
+    }
+
+    /// Drop a browsed directory that the latest index no longer contains.
+    fn normalize_browsed_directory(&mut self) {
+        let Some(collection) = self.selected_collection.clone() else {
+            self.selected_directory.clear();
+            return;
+        };
+        let mut existing: BTreeSet<Vec<String>> = BTreeSet::new();
+        for entry in self.entries.iter() {
+            if entry.entry().id().collection().as_str() != collection.as_str() {
+                continue;
+            }
+            let segments = entry_directory(entry);
+            for depth in 0..=segments.len() {
+                existing.insert(segments[..depth].to_vec());
+            }
+        }
+        while !self.selected_directory.is_empty() && !existing.contains(&self.selected_directory) {
+            self.selected_directory.pop();
+        }
     }
 
     pub(crate) fn toggle_drafts_only(&mut self, cx: &mut Context<Self>) {
@@ -5580,12 +5852,25 @@ impl ProjectWorkspace {
             .sections
             .iter()
             .flat_map(|section| section.rows.iter())
+            .filter(|row| row.directory.is_none())
             .map(|row| row.filename.to_string())
             .collect()
     }
 
-    fn visible_entry_count(&self, cx: &App) -> usize {
-        self.list.read(cx).delegate().visible_count()
+    #[cfg(test)]
+    pub(crate) fn visible_directory_rows(&self, cx: &App) -> Vec<(String, usize)> {
+        self.list
+            .read(cx)
+            .delegate()
+            .sections
+            .iter()
+            .flat_map(|section| section.rows.iter())
+            .filter_map(|row| {
+                row.directory
+                    .as_ref()
+                    .map(|directory| (row.title.to_string(), directory.count))
+            })
+            .collect()
     }
 }
 
@@ -5594,8 +5879,17 @@ impl Render for ProjectWorkspace {
         let has_project = self.manifest.is_some();
         let loading = self.loading;
         let availability = self.command_availability(cx, window);
-        let visible = self.visible_entry_count(cx);
+        let (visible_rows, visible_entries, scope_total) = {
+            let delegate = self.list.read(cx).delegate();
+            (
+                delegate.visible_count(),
+                delegate.entry_count(),
+                delegate.scope_total,
+            )
+        };
+        let visible = visible_entries;
         let selected_collection = self.selected_collection.clone();
+        let selected_directory = self.selected_directory.clone();
         let collections: Vec<(String, usize)> = self
             .manifest
             .as_ref()
@@ -5611,18 +5905,23 @@ impl Render for ProjectWorkspace {
                     .collect()
             })
             .unwrap_or_default();
-        let total = selected_collection
-            .as_ref()
-            .and_then(|selected| {
-                collections
-                    .iter()
-                    .find(|(name, _)| name == selected)
-                    .map(|(_, count)| *count)
-            })
-            .unwrap_or(self.entries.len());
         let query = self.last_list_query.trim().to_owned();
         let drafts_only = self.list_filter.drafts_only;
         let filter_active = drafts_only || !query.is_empty();
+        let total = selected_collection
+            .as_ref()
+            .map(|selected| {
+                if filter_active {
+                    collections
+                        .iter()
+                        .find(|(name, _)| name == selected)
+                        .map(|(_, count)| *count)
+                        .unwrap_or(0)
+                } else {
+                    scope_total
+                }
+            })
+            .unwrap_or(self.entries.len());
         let default_sort = self.list_sort.mode == SortMode::Default;
         let sort_options = self.sort_options.clone();
         let current_mode = self.list_sort.mode.clone();
@@ -5650,6 +5949,108 @@ impl Render for ProjectWorkspace {
         let collection_owner = cx.weak_entity();
         let menu_options = sort_options.clone();
         let menu_current = current_mode.clone();
+
+        let back_owner = cx.weak_entity();
+        let back_directory = selected_directory.clone();
+        let back = selected_collection.is_some().then(|| {
+            Button::new("library-back")
+                .small()
+                .ghost()
+                .icon(IconName::ArrowLeft)
+                .tooltip(if back_directory.is_empty() {
+                    "All collections"
+                } else {
+                    "Up one folder"
+                })
+                .on_click(move |_, window, cx| {
+                    let _ = back_owner.update(cx, |project, cx| {
+                        project.library_back(window, cx);
+                    });
+                })
+        });
+
+        let crumb_owner = cx.weak_entity();
+        let mut trail: Vec<(String, Option<CrumbAction>)> = Vec::new();
+        if let Some(collection) = selected_collection.as_ref() {
+            trail.push(("Library".to_owned(), Some(CrumbAction::Collections)));
+            let collection_label = collection_title(collection);
+            if selected_directory.is_empty() {
+                trail.push((collection_label, None));
+            } else {
+                trail.push((collection_label, Some(CrumbAction::Directory(Vec::new()))));
+                for (index, segment) in selected_directory.iter().enumerate() {
+                    let last = index + 1 == selected_directory.len();
+                    trail.push((
+                        segment.clone(),
+                        (!last)
+                            .then(|| CrumbAction::Directory(selected_directory[..=index].to_vec())),
+                    ));
+                }
+            }
+        }
+        let title_row = {
+            let mut row = div().h_flex().items_center().gap_1().min_w_0();
+            if trail.is_empty() {
+                row = row.child(
+                    div()
+                        .font_family(crate::theme::display_font(cx))
+                        .text_base()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .truncate()
+                        .child(SharedString::from("Library")),
+                );
+            } else {
+                let last_index = trail.len().saturating_sub(1);
+                for (index, (label, action)) in trail.into_iter().enumerate() {
+                    if index > 0 {
+                        row = row.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("›"),
+                        );
+                    }
+                    match action {
+                        Some(action) => {
+                            let owner = crumb_owner.clone();
+                            row = row.child(
+                                Button::new(format!("library-crumb-{index}"))
+                                    .small()
+                                    .ghost()
+                                    .label(label)
+                                    .on_click(move |_, window, cx| {
+                                        let _ =
+                                            owner.update(cx, |project, cx| match action.clone() {
+                                                CrumbAction::Collections => {
+                                                    project.select_collection(None, window, cx);
+                                                }
+                                                CrumbAction::Directory(segments) => {
+                                                    project.select_directory(segments, window, cx);
+                                                }
+                                            });
+                                    }),
+                            );
+                        }
+                        None => {
+                            let weight = if index == last_index {
+                                gpui_kit::FontWeight::SEMIBOLD
+                            } else {
+                                gpui_kit::FontWeight::MEDIUM
+                            };
+                            row = row.child(
+                                div()
+                                    .font_family(crate::theme::display_font(cx))
+                                    .text_base()
+                                    .font_weight(weight)
+                                    .truncate()
+                                    .child(SharedString::from(label)),
+                            );
+                        }
+                    }
+                }
+            }
+            row
+        };
         let mut view = view.child(
             div()
                 .v_flex()
@@ -5664,67 +6065,37 @@ impl Render for ProjectWorkspace {
                         .px_4()
                         .pt_4()
                         .pb_2()
-                        .when(selected_collection.is_some(), |row| {
-                            row.child(
-                                Button::new("library-back")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::ArrowLeft)
-                                    .tooltip("All collections")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.select_collection(None, window, cx)
-                                    })),
-                            )
-                        })
+                        .when_some(back, |row, back| row.child(back))
                         .child(
-                            div()
-                                .v_flex()
-                                .min_w_0()
-                                .gap_0p5()
-                                .child(
-                                    div()
-                                        .font_family(crate::theme::display_font(cx))
-                                        .text_base()
-                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                        .truncate()
-                                        .child(SharedString::from(
-                                            selected_collection
-                                                .as_deref()
-                                                .map(collection_title)
-                                                .unwrap_or_else(|| "Library".to_owned()),
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .h_flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(SharedString::from(
-                                            if selected_collection.is_some() {
-                                                if filter_active {
-                                                    format!("{visible} of {total} entries")
-                                                } else {
-                                                    format!("{total} entries")
-                                                }
-                                            } else {
-                                                format!("{} collections", collections.len())
-                                            },
-                                        ))
-                                        .when(filter_active, |row| {
-                                            row.child(
-                                                div()
-                                                    .id("filter-indicator")
-                                                    .test_support()
-                                                    .text_color(cx.theme().accent)
-                                                    .child(SharedString::from(filter_label(
-                                                        drafts_only,
-                                                        &query,
-                                                    ))),
-                                            )
-                                        }),
-                                ),
+                            div().v_flex().min_w_0().gap_0p5().child(title_row).child(
+                                div()
+                                    .h_flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(SharedString::from(if selected_collection.is_some() {
+                                        if filter_active {
+                                            format!("{visible} of {total} entries")
+                                        } else {
+                                            format!("{total} entries")
+                                        }
+                                    } else {
+                                        format!("{} collections", collections.len())
+                                    }))
+                                    .when(filter_active, |row| {
+                                        row.child(
+                                            div()
+                                                .id("filter-indicator")
+                                                .test_support()
+                                                .text_color(cx.theme().accent)
+                                                .child(SharedString::from(filter_label(
+                                                    drafts_only,
+                                                    &query,
+                                                ))),
+                                        )
+                                    }),
+                            ),
                         )
                         .child(div().flex_1())
                         .child(ui::icon_button(
@@ -6047,7 +6418,7 @@ impl Render for ProjectWorkspace {
                             cx.listener(|this, _, window, cx| this.retry_index(window, cx)),
                         )),
                 );
-        } else if visible == 0 {
+        } else if visible_rows == 0 {
             view = view.child(if filter_active {
                 div()
                     .id("project-filtered-empty")
@@ -10854,6 +11225,150 @@ export const collections = {blog, dataAuthors};
 
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| view.select_collection(None, window, cx));
+            window.render_frame(cx);
+            assert!(window.try_find("project-collections").is_some());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn library_browses_nested_directories_with_breadcrumbs(cx: &mut TestAppContext) {
+        let dir = fixture();
+        std::fs::create_dir_all(dir.path().join("src/posts/zh-cn")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/posts/ja")).unwrap();
+        std::fs::write(dir.path().join("src/posts/zh-cn/one.md"), "# One\n").unwrap();
+        std::fs::write(dir.path().join("src/posts/zh-cn/two.md"), "# Two\n").unwrap();
+        std::fs::write(dir.path().join("src/posts/ja/three.md"), "# Three\n").unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.select_collection(Some("blog".into()), window, cx)
+            });
+            window.render_frame(cx);
+            assert!(
+                window.try_find("library-crumb-0").is_some(),
+                "the breadcrumb starts at the collections index"
+            );
+            assert!(
+                window.try_find("library-crumb-1").is_none(),
+                "the current collection is plain text, not a link"
+            );
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.visible_entry_names(cx)),
+            ["a.md", "b.mdx"],
+            "a collection shows only entries at its own level"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.visible_directory_rows(cx)),
+            [("ja".to_owned(), 1), ("zh-cn".to_owned(), 2)],
+            "child folders carry recursive entry counts"
+        );
+
+        // Filtering still searches the whole selected collection, flat.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.list
+                    .update(cx, |list, cx| list.set_query("two", window, cx));
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.visible_entry_names(cx)),
+            ["two.md"]
+        );
+        assert!(
+            view.read_with(cx, |view, cx| view.visible_directory_rows(cx))
+                .is_empty()
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.clear_filter(window, cx));
+        })
+        .unwrap();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.select_directory(vec!["zh-cn".into()], window, cx)
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("library-crumb-1").is_some());
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.visible_entry_names(cx)),
+            ["one.md", "two.md"],
+            "a browsed folder lists its own entries"
+        );
+        assert!(
+            view.read_with(cx, |view, cx| view.visible_directory_rows(cx))
+                .is_empty()
+        );
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.library_back(window, cx));
+            window.render_frame(cx);
+            assert!(window.try_find("library-crumb-1").is_none());
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.visible_entry_names(cx)),
+            ["a.md", "b.mdx"],
+            "back returns to the collection root"
+        );
+
+        let nested = std::fs::canonicalize(dir.path().join("src/posts/zh-cn/two.md")).unwrap();
+        view.update(cx, |view, cx| view.focus_collection_for(&nested, cx));
+        assert_eq!(
+            view.read_with(cx, |view, _| view.selected_directory.clone()),
+            ["zh-cn"],
+            "opening a nested entry follows it in the library"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.visible_entry_names(cx)),
+            ["one.md", "two.md"]
+        );
+
+        view.update(cx, |view, cx| {
+            view.set_collection_schemas(
+                vec![(
+                    "blog".to_owned(),
+                    schema(vec![required_field(
+                        "subtitle",
+                        FieldKind::String { format: None },
+                    )]),
+                )],
+                cx,
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.entry_command(CommandId::NewEntry, None, window, cx)
+            });
+            assert!(
+                window.has_active_dialog(cx),
+                "required inputs must be collected before anything is written"
+            );
+            assert_eq!(
+                view.read_with(cx, |view, _| {
+                    view.pending_create
+                        .as_ref()
+                        .and_then(|pending| pending.directory.as_ref())
+                        .map(|directory| directory.as_str().to_owned())
+                }),
+                Some("src/posts/zh-cn".to_owned()),
+                "New entry targets the browsed folder"
+            );
+            window.press("escape", cx);
+        })
+        .unwrap();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.select_directory(Vec::new(), window, cx));
+            view.update(cx, |view, cx| view.library_back(window, cx));
             window.render_frame(cx);
             assert!(window.try_find("project-collections").is_some());
         })
