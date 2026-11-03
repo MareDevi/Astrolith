@@ -132,8 +132,10 @@ Open **Preferences…** with `Ctrl+,` or **View → Preferences…**. The sheet 
 four panes:
 
 - **General** — appearance (follow system, light or dark) with an independent
-  light and dark palette. Palettes include One, Catppuccin (Latte, Frappé,
-  Macchiato, Mocha), Nord, Gruvbox, Tokyo Night, Solarized and Rosé Pine. The
+  light and dark palette. The default pair is Manuscript (warm paper and ink)
+  and Ink (warm charcoal and parchment); One, Catppuccin (Latte, Frappé,
+  Macchiato, Mocha), Nord, Gruvbox, Tokyo Night, Solarized and Rosé Pine remain
+  available. The
   pane also controls the IDE command and arguments, default new-file extension,
   heading colours per appearance, editor font size (1–30, default 18), autosave
   delay (1, 2, 5 or 10 seconds) and Copyedit colours and toggles.
@@ -162,14 +164,19 @@ inheritance becomes visible again. Reset All deletes only preferences and the
 project registry, never recovery snapshots, save-failure records or logs, and
 then restarts.
 
-Astrolith uses the system UI font family that GPUI Kit resolves, with its own
-theme colours, spacing and layout tokens. The editor font-size setting changes
-size, not family.
+Astrolith keeps the system UI font family for chrome and sets the document in
+an installed book serif (New York or Iowan Old Style on macOS, Georgia on
+Windows, Noto Serif or another installed serif on Linux), with its own theme
+colours, spacing and layout tokens. The editor font-size setting changes size,
+not family.
 
 ## 6. Writing
 
-The workspace has four panels: collections and files on the left, the writer in
-the middle, frontmatter on the right, and preview below.
+The workspace is a writing desk: the **Library** lists collections and entries
+on the left, the page sits in the middle, **Details** holds frontmatter on the
+right, and the **Reading view** (the Astro preview controls) sits below when it
+is open. The title bar carries the project and the window commands; the document
+rail carries the active document, its collection, and save/close actions.
 
 The writer shows the document body only. Leading frontmatter and, in MDX, the
 leading contiguous ESM import/export prelude are hidden. The complete source is
@@ -195,10 +202,10 @@ Writer commands:
 - The toolbar auto-hides after typing when both sidebars are closed and
   returns on a top-edge hover. The selection toolbar appears for a non-empty
   selection and is keyboard reachable.
-- Markdown presentation includes dimmed syntax markers, monospace code spans
-  and blocks with a background, grey blockquotes, uniform headings and hanging
-  heading marks where the pane is wide enough. Type size and line height adapt
-  to the pane width.
+- The page is set in a serif at a comfortable measure, without line numbers,
+  indent guides, folding or automatic brackets. Markdown presentation includes
+  dimmed syntax markers, tinted code spans and blocks, muted italic blockquotes,
+  and uniform bold headings; type size and line height adapt to the pane width.
 - Copyedit (`Writer` menu) highlights nouns, verbs, adjectives, adverbs or
   conjunctions using a deterministic offline English classifier. Code, link
   destinations, HTML/MDX tags, frontmatter and hidden imports are excluded.
