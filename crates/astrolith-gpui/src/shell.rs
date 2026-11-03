@@ -2591,9 +2591,8 @@ impl Render for Shell {
                                         Button::new("view-menu")
                                             .small()
                                             .ghost()
-                                            .icon(IconName::LayoutPanelLeft)
+                                            .icon(IconName::PanelsTopLeft)
                                             .tooltip("Panels")
-                                            .dropdown_caret(true)
                                             .dropdown_menu(move |menu, _, _| {
                                                 let item = |label: &'static str,
                                                             kind: CommandId,
