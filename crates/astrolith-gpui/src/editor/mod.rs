@@ -1,3 +1,4 @@
+pub(crate) mod copyedit;
 pub(crate) mod formatting;
 pub(crate) mod header;
 pub(crate) mod save_coordinator;

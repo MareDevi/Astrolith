@@ -1,3 +1,4 @@
+use astrolith_core::preferences::{CopyeditCategory, CopyeditPreferences};
 use gpui_kit::{App, KeyBinding};
 
 /// Stable command identity shared by keys, toolbar, and palette.
@@ -35,6 +36,12 @@ pub(crate) enum CommandId {
     ToggleComment,
     ToggleFocusMode,
     ToggleTypewriterMode,
+    ToggleCopyeditNouns,
+    ToggleCopyeditVerbs,
+    ToggleCopyeditAdjectives,
+    ToggleCopyeditAdverbs,
+    ToggleCopyeditConjunctions,
+    ToggleAllCopyedit,
     OpenPalette,
     ToggleSidebar,
     ToggleInspector,
@@ -83,6 +90,12 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::ToggleComment,
     CommandId::ToggleFocusMode,
     CommandId::ToggleTypewriterMode,
+    CommandId::ToggleCopyeditNouns,
+    CommandId::ToggleCopyeditVerbs,
+    CommandId::ToggleCopyeditAdjectives,
+    CommandId::ToggleCopyeditAdverbs,
+    CommandId::ToggleCopyeditConjunctions,
+    CommandId::ToggleAllCopyedit,
     CommandId::OpenPalette,
     CommandId::ToggleSidebar,
     CommandId::ToggleInspector,
@@ -121,6 +134,31 @@ pub(crate) struct CommandAvailability {
 }
 
 impl CommandId {
+    /// The Copyedit category this command toggles, if any.
+    pub fn copyedit_category(self) -> Option<CopyeditCategory> {
+        match self {
+            Self::ToggleCopyeditNouns => Some(CopyeditCategory::Noun),
+            Self::ToggleCopyeditVerbs => Some(CopyeditCategory::Verb),
+            Self::ToggleCopyeditAdjectives => Some(CopyeditCategory::Adjective),
+            Self::ToggleCopyeditAdverbs => Some(CopyeditCategory::Adverb),
+            Self::ToggleCopyeditConjunctions => Some(CopyeditCategory::Conjunction),
+            _ => None,
+        }
+    }
+
+    /// The label for one command under the live Copyedit state.
+    ///
+    /// Copyedit labels come from [`CopyeditPreferences`] itself, so the
+    /// command registry, menus, tooltips and the settings pane cannot drift
+    /// from the persisted state.
+    pub fn label_with(self, copyedit: &CopyeditPreferences) -> &'static str {
+        match self.copyedit_category() {
+            Some(category) => copyedit.toggle_label(category),
+            None if self == Self::ToggleAllCopyedit => copyedit.all_toggle_label(),
+            None => self.label(),
+        }
+    }
+
     /// Whether this command can run in the given application state.
     pub fn is_available(self, state: CommandAvailability) -> bool {
         match self {
@@ -189,6 +227,22 @@ impl CommandId {
             Self::ToggleComment => "Toggle Markdown comment",
             Self::ToggleFocusMode => "Focus mode",
             Self::ToggleTypewriterMode => "Typewriter mode",
+            Self::ToggleCopyeditNouns => {
+                CopyeditPreferences::default().toggle_label(CopyeditCategory::Noun)
+            }
+            Self::ToggleCopyeditVerbs => {
+                CopyeditPreferences::default().toggle_label(CopyeditCategory::Verb)
+            }
+            Self::ToggleCopyeditAdjectives => {
+                CopyeditPreferences::default().toggle_label(CopyeditCategory::Adjective)
+            }
+            Self::ToggleCopyeditAdverbs => {
+                CopyeditPreferences::default().toggle_label(CopyeditCategory::Adverb)
+            }
+            Self::ToggleCopyeditConjunctions => {
+                CopyeditPreferences::default().toggle_label(CopyeditCategory::Conjunction)
+            }
+            Self::ToggleAllCopyedit => CopyeditPreferences::default().all_toggle_label(),
             Self::OpenPalette => "Commands…",
             Self::ToggleSidebar => "Toggle files",
             Self::ToggleInspector => "Toggle inspector",
@@ -432,25 +486,31 @@ pub(crate) fn bind_keys(cx: &mut App) {
 /// bindings use, so the OS menu cannot drift from the command registry. Linux
 /// platforms without a native menu bar simply retain the registered menus;
 /// macOS and Windows present them natively.
-pub(crate) fn install_menus(cx: &mut App) {
+pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
     let file = gpui_kit::Menu::new("File").items({
-        let mut items = items_for(&[
-            CommandId::OpenFile,
-            CommandId::OpenProject,
-            CommandId::NewEntry,
-            CommandId::Save,
-            CommandId::CloseDocument,
-            CommandId::DuplicateEntry,
-            CommandId::RenameEntry,
-            CommandId::DeleteEntry,
-        ]);
+        let mut items = items_for(
+            &[
+                CommandId::OpenFile,
+                CommandId::OpenProject,
+                CommandId::NewEntry,
+                CommandId::Save,
+                CommandId::CloseDocument,
+                CommandId::DuplicateEntry,
+                CommandId::RenameEntry,
+                CommandId::DeleteEntry,
+            ],
+            copyedit,
+        );
         items.push(gpui_kit::MenuItem::separator());
-        items.extend(items_for(&[
-            CommandId::RevealEntry,
-            CommandId::CopyPathAbsolute,
-            CommandId::CopyPathRelative,
-            CommandId::RecoverUnsaved,
-        ]));
+        items.extend(items_for(
+            &[
+                CommandId::RevealEntry,
+                CommandId::CopyPathAbsolute,
+                CommandId::CopyPathRelative,
+                CommandId::RecoverUnsaved,
+            ],
+            copyedit,
+        ));
         items.push(gpui_kit::MenuItem::separator());
         items.push(gpui_kit::MenuItem::action(
             CommandId::Quit.label(),
@@ -459,64 +519,97 @@ pub(crate) fn install_menus(cx: &mut App) {
         items
     });
     let view = gpui_kit::Menu::new("View").items({
-        let mut items = items_for(&[
-            CommandId::OpenPalette,
-            CommandId::ToggleSidebar,
-            CommandId::ToggleInspector,
-            CommandId::TogglePreview,
-            CommandId::FocusDocument,
-            CommandId::ResetLayout,
-        ]);
+        let mut items = items_for(
+            &[
+                CommandId::OpenPalette,
+                CommandId::ToggleSidebar,
+                CommandId::ToggleInspector,
+                CommandId::TogglePreview,
+                CommandId::FocusDocument,
+                CommandId::ResetLayout,
+            ],
+            copyedit,
+        );
         items.push(gpui_kit::MenuItem::separator());
-        items.extend(items_for(&[
-            CommandId::LightTheme,
-            CommandId::DarkTheme,
-            CommandId::SystemTheme,
-        ]));
+        items.extend(items_for(
+            &[
+                CommandId::LightTheme,
+                CommandId::DarkTheme,
+                CommandId::SystemTheme,
+            ],
+            copyedit,
+        ));
         items
     });
     let format = gpui_kit::Menu::new("Format").items({
-        let mut items = items_for(&[
-            CommandId::Bold,
-            CommandId::Italic,
-            CommandId::InsertLink,
-            CommandId::ToggleComment,
-        ]);
+        let mut items = items_for(
+            &[
+                CommandId::Bold,
+                CommandId::Italic,
+                CommandId::InsertLink,
+                CommandId::ToggleComment,
+            ],
+            copyedit,
+        );
         items.push(gpui_kit::MenuItem::separator());
-        items.extend(items_for(&[
-            CommandId::Heading1,
-            CommandId::Heading2,
-            CommandId::Heading3,
-            CommandId::Heading4,
-            CommandId::Paragraph,
-        ]));
+        items.extend(items_for(
+            &[
+                CommandId::Heading1,
+                CommandId::Heading2,
+                CommandId::Heading3,
+                CommandId::Heading4,
+                CommandId::Paragraph,
+            ],
+            copyedit,
+        ));
         items
     });
-    let writer = gpui_kit::Menu::new("Writer").items(items_for(&[
-        CommandId::FindInDocument,
-        CommandId::ReplaceInDocument,
-        CommandId::FindNextMatch,
-        CommandId::FindPreviousMatch,
-        CommandId::CloseFind,
-        CommandId::GoToLine,
-        CommandId::SelectNextOccurrence,
-        CommandId::CursorsAtLineEnds,
-        CommandId::FocusSelectionToolbar,
-        CommandId::ToggleFocusMode,
-        CommandId::ToggleTypewriterMode,
-    ]));
-    let preview = gpui_kit::Menu::new("Preview").items(items_for(&[
-        CommandId::StartPreview,
-        CommandId::StopPreview,
-        CommandId::OpenPreview,
-    ]));
+    let writer = gpui_kit::Menu::new("Writer").items({
+        let mut items = items_for(
+            &[
+                CommandId::FindInDocument,
+                CommandId::ReplaceInDocument,
+                CommandId::FindNextMatch,
+                CommandId::FindPreviousMatch,
+                CommandId::CloseFind,
+                CommandId::GoToLine,
+                CommandId::SelectNextOccurrence,
+                CommandId::CursorsAtLineEnds,
+                CommandId::FocusSelectionToolbar,
+                CommandId::ToggleFocusMode,
+                CommandId::ToggleTypewriterMode,
+            ],
+            copyedit,
+        );
+        items.push(gpui_kit::MenuItem::separator());
+        items.extend(items_for(
+            &[
+                CommandId::ToggleCopyeditNouns,
+                CommandId::ToggleCopyeditVerbs,
+                CommandId::ToggleCopyeditAdjectives,
+                CommandId::ToggleCopyeditAdverbs,
+                CommandId::ToggleCopyeditConjunctions,
+                CommandId::ToggleAllCopyedit,
+            ],
+            copyedit,
+        ));
+        items
+    });
+    let preview = gpui_kit::Menu::new("Preview").items(items_for(
+        &[
+            CommandId::StartPreview,
+            CommandId::StopPreview,
+            CommandId::OpenPreview,
+        ],
+        copyedit,
+    ));
     cx.set_menus([file, view, format, writer, preview]);
 }
 
-fn items_for(commands: &[CommandId]) -> Vec<gpui_kit::MenuItem> {
+fn items_for(commands: &[CommandId], copyedit: &CopyeditPreferences) -> Vec<gpui_kit::MenuItem> {
     commands
         .iter()
-        .map(|command| gpui_kit::MenuItem::action(command.label(), *command))
+        .map(|command| gpui_kit::MenuItem::action(command.label_with(copyedit), *command))
         .collect()
 }
 
@@ -616,12 +709,74 @@ mod tests {
         assert!(CommandId::OpenProject.is_available(empty));
     }
 
+    #[test]
+    fn copyedit_toggles_share_one_label_source_and_availability() {
+        let mut copyedit = CopyeditPreferences::default();
+        let commands = [
+            CommandId::ToggleCopyeditNouns,
+            CommandId::ToggleCopyeditVerbs,
+            CommandId::ToggleCopyeditAdjectives,
+            CommandId::ToggleCopyeditAdverbs,
+            CommandId::ToggleCopyeditConjunctions,
+            CommandId::ToggleAllCopyedit,
+        ];
+        for command in commands {
+            assert!(
+                command.copyedit_category().is_some() || command == CommandId::ToggleAllCopyedit
+            );
+            assert_eq!(command.label_with(&copyedit), command.label());
+        }
+        assert_eq!(
+            CommandId::ToggleCopyeditNouns.label_with(&copyedit),
+            copyedit.toggle_label(CopyeditCategory::Noun)
+        );
+        assert_eq!(
+            CommandId::ToggleAllCopyedit.label_with(&copyedit),
+            copyedit.all_toggle_label()
+        );
+
+        let states = [
+            CommandAvailability::default(),
+            CommandAvailability {
+                project_open: true,
+                active_entry: true,
+                busy: true,
+                editor_focused: true,
+                markdown_document: true,
+                selection_nonempty: true,
+            },
+        ];
+        for state in states {
+            let available = CommandId::ToggleCopyeditNouns.is_available(state);
+            for command in commands {
+                assert_eq!(
+                    command.is_available(state),
+                    available,
+                    "{} must share Copyedit availability",
+                    command.label_with(&copyedit)
+                );
+            }
+            assert!(available, "Copyedit toggles are global view commands");
+        }
+
+        copyedit.set_all(true);
+        assert_eq!(
+            CommandId::ToggleCopyeditVerbs.label_with(&copyedit),
+            "Hide verbs"
+        );
+        assert_eq!(
+            CommandId::ToggleAllCopyedit.label_with(&copyedit),
+            "Hide all copyedit"
+        );
+    }
+
     #[gpui_kit::test]
     fn application_menus_cover_every_registered_command_once(cx: &mut gpui_kit::TestAppContext) {
+        let copyedit = CopyeditPreferences::default();
         let menus = cx.update(|cx| {
             gpui_kit::init(cx);
             bind_keys(cx);
-            install_menus(cx);
+            install_menus(cx, &copyedit);
             cx.get_menus().expect("the menu bar is registered")
         });
         assert_eq!(
@@ -640,10 +795,10 @@ mod tests {
             }
         }
         for command in COMMANDS {
+            let label = command.label_with(&copyedit);
             assert!(
-                labels.iter().any(|label| label == command.label()),
-                "`{}` is missing from the menu bar",
-                command.label()
+                labels.iter().any(|candidate| candidate == label),
+                "`{label}` is missing from the menu bar"
             );
         }
         assert_eq!(

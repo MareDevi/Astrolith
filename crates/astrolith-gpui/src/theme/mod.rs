@@ -3,8 +3,23 @@ mod dark;
 mod light;
 mod tokens;
 
-use gpui_kit::{App, WindowAppearance, component::Theme};
+use gpui_kit::{App, Hsla, WindowAppearance, component::Theme, rgb, rgba};
 pub use tokens::ThemeTokens;
+
+/// Parse a persisted `#rrggbb` or `#rrggbbaa` colour into a theme colour.
+///
+/// Preference files store colours as strings so the core model needs no GPUI
+/// dependency. Validation happens at this presentation boundary; an invalid
+/// value is rejected and the caller keeps its own fallback.
+pub(crate) fn color_from_hex(value: &str) -> Option<Hsla> {
+    let digits = value.trim().strip_prefix('#')?;
+    let channel = u32::from_str_radix(digits, 16).ok()?;
+    match digits.len() {
+        6 => Some(rgb(channel).into()),
+        8 => Some(rgba(channel).into()),
+        _ => None,
+    }
+}
 
 /// User appearance preference; System remains distinct from its resolved mode.
 pub use astrolith_core::preferences::ThemePreference as ThemeMode;

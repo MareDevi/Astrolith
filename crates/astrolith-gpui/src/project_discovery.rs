@@ -2,6 +2,7 @@
 use crate::{
     commands::{CommandAvailability, CommandId},
     editor::{
+        copyedit::CopyeditConfig,
         formatting::EditorWiring,
         save_coordinator::{
             SaveCompletion, SaveCoordinator, SaveKind, SaveRequest, SaveResult, SaveStatus,
@@ -529,6 +530,8 @@ pub(crate) struct ProjectWorkspace {
     data_references_task: Option<Task<()>>,
     /// Writing modes applied to every retained session.
     writing: WritingModes,
+    /// Copyedit configuration applied to every retained session.
+    copyedit: CopyeditConfig,
 }
 
 /// What to do after a dirty session has been saved through the guarded path.
@@ -700,6 +703,7 @@ impl ProjectWorkspace {
             data_references: BTreeMap::new(),
             data_references_task: None,
             writing: WritingModes::default(),
+            copyedit: CopyeditConfig::default(),
         }
     }
     /// Save status of the active document, for the tab strip status text.
@@ -2312,6 +2316,8 @@ impl ProjectWorkspace {
                 session.update(cx, |session, cx| {
                     session.set_writing_modes(modes, window, cx)
                 });
+                let copyedit = self.copyedit.clone();
+                session.update(cx, |session, cx| session.set_copyedit_config(copyedit, cx));
                 self.watch_session(key.clone(), session.clone(), window, cx);
                 self.sessions.insert(key.clone(), session.clone());
                 if !self.tab_order.contains(&key) {
@@ -2922,6 +2928,8 @@ impl ProjectWorkspace {
                     let session = cx.new(|cx| {
                         DocumentSession::from_recovered(identity, disk, content, window, cx)
                     });
+                    let copyedit = this.copyedit.clone();
+                    session.update(cx, |session, cx| session.set_copyedit_config(copyedit, cx));
                     let key = path.clone();
                     this.watch_session(key.clone(), session.clone(), window, cx);
                     this.sessions.insert(key.clone(), session.clone());
@@ -2948,6 +2956,10 @@ impl ProjectWorkspace {
     ) {
         self.global_preferences = global;
         self.project_preferences = project;
+        let copyedit = CopyeditConfig::from_preferences(&self.global_preferences.copyedit);
+        if copyedit != self.copyedit {
+            self.apply_copyedit_config(copyedit, cx);
+        }
         // Autosave delay is a global setting; existing dirty runs adopt it.
         self.save_coordinator
             .set_delay(self.global_preferences.autosave_delay);
@@ -3462,6 +3474,24 @@ impl ProjectWorkspace {
             });
         }
         cx.notify();
+    }
+
+    /// Install Copyedit preferences on every retained session.
+    pub(crate) fn set_copyedit_config(&mut self, config: CopyeditConfig, cx: &mut Context<Self>) {
+        if config == self.copyedit {
+            return;
+        }
+        self.apply_copyedit_config(config, cx);
+    }
+
+    fn apply_copyedit_config(&mut self, config: CopyeditConfig, cx: &mut Context<Self>) {
+        self.copyedit = config.clone();
+        let sessions: Vec<Entity<DocumentSession>> = self.sessions.values().cloned().collect();
+        for session in sessions {
+            session.update(cx, |session, cx| {
+                session.set_copyedit_config(config.clone(), cx)
+            });
+        }
     }
 
     /// Move the caret to a 1-based line in the active document.
@@ -5209,7 +5239,9 @@ async fn open_directory(directory: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use astrolith_core::SourcePath;
-    use astrolith_core::preferences::CollectionPreferencesV1;
+    use astrolith_core::preferences::{
+        CollectionPreferencesV1, CopyeditCategory, CopyeditPreferences,
+    };
     use gpui_kit::{TestAppContext, WindowHandle, WindowOptions, base::Root, test::TestWindowExt};
     use std::sync::Mutex;
     fn fixture() -> tempfile::TempDir {
@@ -8618,6 +8650,154 @@ export const collections = {blog, dataAuthors};
                 dimmed.iter().any(|range| range.start == 0),
                 "the first sentence is dimmed once the caret leaves it: {dimmed:?}"
             );
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn copyedit_decorates_after_the_debounce_and_suppresses_the_active_token(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, _) = mount(cx);
+        let text = "The editor writes words.\n";
+        let session = bare_session(cx, handle, "copyedit.md", text);
+        let mut preferences = CopyeditPreferences::default();
+        preferences.set_enabled(CopyeditCategory::Noun, true);
+        let config = CopyeditConfig::from_preferences(&preferences);
+        cx.update_window(handle.into(), |_, _, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(0..0, cx));
+                session.set_copyedit_config(config, cx);
+            });
+        })
+        .unwrap();
+        wait_for(cx, |cx| {
+            session.read_with(cx, |session, _| session.copyedit.has_analysis())
+        })
+        .await;
+
+        let editor_range = text.find("editor").unwrap()..text.find("editor").unwrap() + 6;
+        session.read_with(cx, |session, cx| {
+            assert!(
+                session
+                    .copyedit
+                    .ranges(CopyeditCategory::Noun, cx)
+                    .contains(&editor_range),
+                "the background result decorates the noun after the debounce"
+            );
+        });
+
+        // Moving into the word drops its decoration over the ±2-byte window.
+        cx.update_window(handle.into(), |_, _, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(6..6, cx));
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, cx| {
+            assert!(
+                !session
+                    .copyedit
+                    .ranges(CopyeditCategory::Noun, cx)
+                    .contains(&editor_range),
+                "the active token is left undecorated"
+            );
+        });
+
+        // An edit clears the old layers immediately and the debounced result
+        // reapplies them to the new snapshot.
+        let second = "The editor writes words.\n\nNew words.\n";
+        replace_visible(cx, handle, &session, second);
+        session.read_with(cx, |session, cx| {
+            assert!(
+                session
+                    .copyedit
+                    .ranges(CopyeditCategory::Noun, cx)
+                    .is_empty(),
+                "editing clears Copyedit decorations until the next idle result"
+            );
+        });
+        wait_for(cx, |cx| {
+            session.read_with(cx, |session, _| session.copyedit.has_analysis())
+        })
+        .await;
+        let first_words = second.find("words").unwrap();
+        session.read_with(cx, |session, cx| {
+            assert!(
+                session
+                    .copyedit
+                    .ranges(CopyeditCategory::Noun, cx)
+                    .contains(&(first_words..first_words + 5)),
+                "the next background result decorates the edited snapshot"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn pasted_link_reclassifies_copyedit_with_shifted_offsets(cx: &mut TestAppContext) {
+        let (handle, _) = mount(cx);
+        let text = "The editor writes.\n";
+        let session = bare_session(cx, handle, "copyedit-link.md", text);
+        let mut preferences = CopyeditPreferences::default();
+        preferences.set_enabled(CopyeditCategory::Noun, true);
+        let config = CopyeditConfig::from_preferences(&preferences);
+        let push = handle.into();
+        cx.update_window(push, |_, _, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(18..18, cx));
+                session.set_copyedit_config(config, cx);
+            });
+        })
+        .unwrap();
+        wait_for(cx, |cx| {
+            session.read_with(cx, |session, _| session.copyedit.has_analysis())
+        })
+        .await;
+        session.read_with(cx, |session, cx| {
+            assert!(
+                session
+                    .copyedit
+                    .ranges(CopyeditCategory::Noun, cx)
+                    .contains(&(4..10)),
+                "the noun is decorated before the paste"
+            );
+        });
+
+        cx.update_window(push, |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(0..10, cx));
+                assert!(session.wrap_selection_as_link("https://wrap.dev/x", window, cx));
+            });
+        })
+        .unwrap();
+        session.read_with(cx, |session, cx| {
+            assert!(
+                session
+                    .copyedit
+                    .ranges(CopyeditCategory::Noun, cx)
+                    .is_empty(),
+                "the paste-over-selection clears the stale layers"
+            );
+        });
+        wait_for(cx, |cx| {
+            session.read_with(cx, |session, _| session.copyedit.has_analysis())
+        })
+        .await;
+        session.read_with(cx, |session, cx| {
+            let nouns = session.copyedit.ranges(CopyeditCategory::Noun, cx);
+            assert!(
+                nouns.contains(&(5..11)),
+                "the debounced result uses the shifted offset: {nouns:?}"
+            );
+            assert!(!nouns.contains(&(4..10)), "the stale offset is gone");
         });
     }
 

@@ -2,9 +2,10 @@
 //!
 //! The footer word and character counts and the Copyedit classifier both read
 //! the same snapshot, so the two never disagree about which bytes are a word.
-//! A token is a maximal run of letters, digits or apostrophes; everything else
-//! — Markdown punctuation, whitespace, symbols — separates tokens. Characters
-//! are counted without whitespace, which is what writers mean by "characters".
+//! A token is a maximal run of letters, digits, apostrophes or underscores;
+//! everything else — Markdown punctuation, whitespace, symbols — separates
+//! tokens. Characters are counted without whitespace, which is what writers
+//! mean by "characters".
 
 use std::ops::Range;
 
@@ -49,35 +50,22 @@ pub struct TokenSummary {
 
 /// Tokenize `text` once and count words and characters from that snapshot.
 pub fn token_snapshot(text: &str) -> TokenSnapshot {
-    let mut tokens = Vec::new();
+    let tokens = crate::copyedit::word_ranges(text);
     let mut characters = 0;
     let mut lines = 1;
-    let mut start: Option<usize> = None;
-    for (offset, character) in text.char_indices() {
+    for character in text.chars() {
         if !character.is_whitespace() {
             characters += 1;
         }
         if character == '\n' {
             lines += 1;
         }
-        if is_token_character(character) {
-            start.get_or_insert(offset);
-        } else if let Some(begin) = start.take() {
-            tokens.push(begin..offset);
-        }
-    }
-    if let Some(begin) = start {
-        tokens.push(begin..text.len());
     }
     TokenSnapshot {
         tokens,
         characters,
         lines,
     }
-}
-
-fn is_token_character(character: char) -> bool {
-    character.is_alphanumeric() || matches!(character, '\'' | '_')
 }
 
 #[cfg(test)]

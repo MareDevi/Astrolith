@@ -12,8 +12,10 @@ use gpui_kit::{
     Subscription, Window,
 };
 
+use crate::editor::copyedit::{CopyeditConfig, CopyeditPresentation, DEBOUNCE};
 use crate::editor::formatting::external_url;
 use crate::editor::writing_modes::{SessionPresentation, WritingModes};
+use crate::runtime;
 
 pub(crate) struct DocumentSession {
     /// The editor displays the writer projection, never the complete source.
@@ -48,6 +50,10 @@ pub(crate) struct DocumentSession {
     kind: DocumentKind,
     /// Prose, focus and typewriter presentation for this session.
     pub presentation: SessionPresentation,
+    /// Copyedit category layers and the background analysis generations.
+    pub copyedit: CopyeditPresentation,
+    /// In-flight debounce/classification task; dropping it cancels the result.
+    copyedit_task: Option<gpui_kit::Task<()>>,
     /// The word and character counts of the current visible text.
     pub counts: TokenSnapshot,
     /// [`fingerprint`] of [`Self::projection`]'s visible text, computed once per
@@ -133,6 +139,7 @@ impl DocumentSession {
                     // latch) instead of letting the next Change overwrite it.
                     this.rebuild_projection(window, cx);
                 }
+                this.refresh_copyedit(cx);
                 this.refresh_writer(cx);
                 this.dirty = this.buffer.is_dirty();
                 cx.emit(SessionChanged);
@@ -172,6 +179,8 @@ impl DocumentSession {
             disk_fingerprint,
             kind,
             presentation: SessionPresentation::new(WritingModes::default()),
+            copyedit: CopyeditPresentation::default(),
+            copyedit_task: None,
             counts,
             text_key,
             _change: change,
@@ -227,6 +236,7 @@ impl DocumentSession {
             formatted.source,
             "the mapped source must be exactly the edit the editor applied"
         );
+        self.refresh_copyedit(cx);
         self.refresh_writer(cx);
         self.dirty = self.buffer.is_dirty();
         cx.emit(SessionChanged);
@@ -270,6 +280,7 @@ impl DocumentSession {
         }
         self.apply_outcome(&outcome, false, window, cx);
         self.absorb(cx);
+        self.refresh_copyedit(cx);
         self.refresh_writer(cx);
         self.dirty = self.buffer.is_dirty();
         cx.emit(SessionChanged);
@@ -472,6 +483,67 @@ impl DocumentSession {
         cx.notify();
     }
 
+    /// Install Copyedit preferences for this session.
+    ///
+    /// A colour-only change repaints the retained analysis; a newly enabled
+    /// category without one starts a debounced background analysis.
+    pub(crate) fn set_copyedit_config(&mut self, config: CopyeditConfig, cx: &mut Context<Self>) {
+        let cursor = self
+            .editor
+            .read(cx)
+            .cursor()
+            .min(self.projection.visible.len());
+        if !self.copyedit.set_config(&self.editor, config, cursor, cx) {
+            return;
+        }
+        self.copyedit_task = None;
+        if self.copyedit.config().any_enabled() && !self.copyedit.has_analysis() {
+            self.schedule_copyedit(cx);
+        }
+        cx.notify();
+    }
+
+    /// Clear layers immediately on an edit and classify after the debounce.
+    fn refresh_copyedit(&mut self, cx: &mut Context<Self>) {
+        self.copyedit_task = None;
+        self.copyedit.invalidate(cx);
+        if self.copyedit.config().any_enabled() {
+            self.schedule_copyedit(cx);
+        }
+    }
+
+    /// Debounce, classify off the render path and apply only the newest result.
+    fn schedule_copyedit(&mut self, cx: &mut Context<Self>) {
+        let ticket = self.copyedit.issue();
+        self.copyedit_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DEBOUNCE).await;
+            // Read the snapshot only after the debounce and only if this
+            // generation is still current, so typing never clones the document.
+            let snapshot = this.update(cx, |this, _| {
+                this.copyedit
+                    .is_current(ticket)
+                    .then(|| this.projection.visible.clone())
+            });
+            let Ok(Some(visible)) = snapshot else {
+                return;
+            };
+            let analysis =
+                runtime::blocking(cx, move || crate::editor::copyedit::classify(visible)).await;
+            let Ok(analysis) = analysis else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                let cursor = this
+                    .editor
+                    .read(cx)
+                    .cursor()
+                    .min(this.projection.visible.len());
+                this.copyedit
+                    .apply(&this.editor, ticket, analysis, cursor, cx);
+            });
+        }));
+    }
+
     /// Rebuild prose decorations, the focus layer, counts and the typewriter
     /// offset after a text change.
     fn refresh_writer(&mut self, cx: &mut Context<Self>) {
@@ -492,6 +564,12 @@ impl DocumentSession {
             .refresh_prose(&self.editor, &self.projection.visible, self.text_key, cx);
         self.presentation
             .refresh_focus(&self.editor, &self.projection.visible, cx);
+        let cursor = self
+            .editor
+            .read(cx)
+            .cursor()
+            .min(self.projection.visible.len());
+        self.copyedit.refresh_cursor(&self.editor, cursor, cx);
         self.presentation.centre_cursor(&self.editor, cx);
     }
 
@@ -541,6 +619,7 @@ impl DocumentSession {
         self.kind = kind_for(identity.canonical_source().as_str());
         self.buffer.retarget(identity);
         self.rebuild_projection(window, cx);
+        self.refresh_copyedit(cx);
         self.refresh_writer(cx);
     }
 
@@ -562,6 +641,7 @@ impl DocumentSession {
             .apply_text(patched)
             .map_err(|error| error.to_string())?;
         self.rebuild_projection(window, cx);
+        self.refresh_copyedit(cx);
         self.refresh_writer(cx);
         self.dirty = self.buffer.is_dirty();
         cx.emit(SessionChanged);

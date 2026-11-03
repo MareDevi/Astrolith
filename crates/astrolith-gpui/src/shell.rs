@@ -7,6 +7,7 @@ use std::{
 use crate::{
     commands::{self, COMMANDS, CommandId},
     editor::{
+        copyedit::CopyeditConfig,
         header::DocumentHeader,
         save_coordinator::SaveStatus,
         session::SessionChanged,
@@ -70,7 +71,6 @@ pub fn open(cx: &mut App) {
         return;
     }
     commands::bind_keys(cx);
-    commands::install_menus(cx);
     cx.spawn(async move |cx| {
         let loaded = runtime::blocking(cx, || {
             settings_path().map(|path| {
@@ -100,6 +100,7 @@ pub fn open(cx: &mut App) {
                     )
                 }
             };
+            commands::install_menus(cx, &settings.copyedit);
             if let Err(error) = gpui_kit::open_window(
                 WindowOptions {
                     window_min_size: Some(size(px(800.), px(600.))),
@@ -920,6 +921,25 @@ impl Shell {
                 self.project
                     .update(cx, |project, cx| project.toggle_typewriter_mode(window, cx));
             }
+            CommandId::ToggleCopyeditNouns
+            | CommandId::ToggleCopyeditVerbs
+            | CommandId::ToggleCopyeditAdjectives
+            | CommandId::ToggleCopyeditAdverbs
+            | CommandId::ToggleCopyeditConjunctions
+            | CommandId::ToggleAllCopyedit => {
+                if let Some(category) = command.copyedit_category() {
+                    let enabled = !self.settings.copyedit.enabled(category);
+                    self.settings.copyedit.set_enabled(category, enabled);
+                } else {
+                    let enabled = !self.settings.copyedit.all_enabled();
+                    self.settings.copyedit.set_all(enabled);
+                }
+                self.persist_global(cx);
+                let config = CopyeditConfig::from_preferences(&self.settings.copyedit);
+                self.project
+                    .update(cx, |project, cx| project.set_copyedit_config(config, cx));
+                commands::install_menus(cx, &self.settings.copyedit);
+            }
             CommandId::LightTheme | CommandId::DarkTheme | CommandId::SystemTheme => {
                 self.settings.theme = match command {
                     CommandId::LightTheme => ThemeMode::Light,
@@ -963,6 +983,7 @@ impl Shell {
             .update(cx, |state, cx| state.set_query("", window, cx));
         let palette = self.palette.clone();
         let owner = cx.weak_entity();
+        let copyedit = self.settings.copyedit.clone();
         let availability = self.project.read(cx).command_availability(cx, window);
         let commands: Vec<_> = COMMANDS
             .iter()
@@ -980,7 +1001,7 @@ impl Shell {
                     .bordered(false)
                     .placeholder("Search commands…")
                     .items(commands.iter().map(|command| {
-                        let label: gpui_kit::SharedString = command.label().into();
+                        let label: gpui_kit::SharedString = command.label_with(&copyedit).into();
                         let shortcut: gpui_kit::SharedString = command
                             .shortcut()
                             .and_then(|key| gpui_kit::Keystroke::parse(key).ok())
@@ -1168,6 +1189,12 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::ToggleComment => IconName::MessageCircle,
         CommandId::ToggleFocusMode => IconName::Eye,
         CommandId::ToggleTypewriterMode => IconName::Type,
+        CommandId::ToggleCopyeditNouns
+        | CommandId::ToggleCopyeditVerbs
+        | CommandId::ToggleCopyeditAdjectives
+        | CommandId::ToggleCopyeditAdverbs
+        | CommandId::ToggleCopyeditConjunctions => IconName::Type,
+        CommandId::ToggleAllCopyedit => IconName::Asterisk,
         CommandId::LightTheme => IconName::Sun,
         CommandId::DarkTheme => IconName::Moon,
         CommandId::SystemTheme => IconName::Monitor,
@@ -1563,6 +1590,44 @@ mod tests {
             .unwrap();
             (handle.downcast::<Root>().unwrap(), view)
         })
+    }
+
+    #[gpui_kit::test]
+    async fn copyedit_commands_toggle_each_category_and_the_all_switch(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        assert!(!view.read_with(cx, |view, _| view.settings.copyedit.all_enabled()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::ToggleCopyeditNouns, window, cx)
+            });
+        })
+        .unwrap();
+        assert!(view.read_with(cx, |view, _| {
+            view.settings
+                .copyedit
+                .enabled(astrolith_core::preferences::CopyeditCategory::Noun)
+        }));
+        assert!(!view.read_with(cx, |view, _| view.settings.copyedit.all_enabled()));
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::ToggleAllCopyedit, window, cx)
+            });
+        })
+        .unwrap();
+        assert!(view.read_with(cx, |view, _| view.settings.copyedit.all_enabled()));
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::ToggleAllCopyedit, window, cx)
+            });
+        })
+        .unwrap();
+        assert!(view.read_with(cx, |view, _| {
+            astrolith_core::preferences::CopyeditCategory::ALL
+                .iter()
+                .all(|category| !view.settings.copyedit.enabled(*category))
+        }));
     }
 
     #[gpui_kit::test]

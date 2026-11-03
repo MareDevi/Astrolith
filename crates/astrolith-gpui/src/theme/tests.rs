@@ -2,6 +2,17 @@ use super::*;
 use gpui_kit::{TestAppContext, WindowAppearance, component::ActiveTheme};
 
 #[test]
+fn persisted_hex_colors_round_trip_through_the_theme_boundary() {
+    let opaque = color_from_hex("#4ec9b0").expect("six-digit colour");
+    assert_eq!(opaque.a, 1.0);
+    let translucent = color_from_hex(" #4ec9b080 ").expect("eight-digit colour");
+    assert!(translucent.a > 0.4 && translucent.a < 0.6);
+    assert!(color_from_hex("#abc").is_none());
+    assert!(color_from_hex("4ec9b0").is_none());
+    assert!(color_from_hex("#gggggg").is_none());
+}
+
+#[test]
 fn system_mode_resolves_each_platform_appearance_without_overriding_explicit_mode() {
     for (appearance, expected) in [
         (WindowAppearance::Light, ThemeMode::Light),

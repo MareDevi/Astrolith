@@ -9,6 +9,8 @@
 
 /// Retained text, revision, dirty state, and load-result identity.
 pub mod buffer;
+/// Deterministic offline Copyedit classification.
+pub mod copyedit;
 /// Pure writer formatting transforms.
 pub mod formatting;
 /// Lossless frontmatter parse and scalar field spans.
