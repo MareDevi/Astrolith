@@ -178,6 +178,21 @@ fn scans_nested_supported_sources_and_uses_astro_ids() {
             fs::canonicalize(manifest.root().join(entry.entry().source().as_str())).unwrap()
         );
     }
+    let relatives = entries
+        .iter()
+        .map(|entry| entry.relative_path().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        relatives,
+        vec![
+            "Café + Notes.md",
+            "guides/index.md",
+            "guides/nested.md",
+            "slugged.md",
+            "日本語.mdx",
+        ],
+        "the collection-relative path keeps directories even when the slug drops them"
+    );
 }
 
 fn yaml_manifest(root: &Path) -> astrolith_astro::ProjectManifest {

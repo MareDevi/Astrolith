@@ -81,6 +81,7 @@ impl EntryMetadata {
 pub struct CollectionEntry {
     entry: Entry,
     absolute_source: PathBuf,
+    relative: PathBuf,
     metadata: EntryMetadata,
 }
 
@@ -93,6 +94,15 @@ impl CollectionEntry {
     /// Return the canonical source path used to open the document.
     pub fn absolute_source(&self) -> &Path {
         &self.absolute_source
+    }
+
+    /// Return the source path below the collection's base directory.
+    ///
+    /// This is the scanned path, independent of any frontmatter slug override,
+    /// so browsers can reconstruct the directory tree even when a document's
+    /// logical ID no longer contains its segments.
+    pub fn relative_path(&self) -> &Path {
+        &self.relative
     }
 
     /// Return the bounded scalar metadata used by the file list.
@@ -385,6 +395,7 @@ pub fn scan_collections(
                 entries.push(CollectionEntry {
                     entry: Entry::new(id, source),
                     absolute_source,
+                    relative: relative_to_base.to_path_buf(),
                     metadata,
                 });
             }
