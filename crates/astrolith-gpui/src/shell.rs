@@ -281,15 +281,7 @@ impl Shell {
             .layout
             .clamp(f32::from(window.viewport_size().width));
         let global_layout = settings.layout.clone();
-        let resolved = resolve(&settings, None, None);
-        theme::apply(
-            resolved.theme,
-            window.appearance(),
-            resolved.light_theme,
-            resolved.dark_theme,
-            &settings.heading_colors,
-            cx,
-        );
+        theme::apply(&settings, window.appearance(), cx);
         let navigator = cx.new(|cx| {
             WorkspacePanel::new(
                 "navigator-panel",
@@ -414,14 +406,7 @@ impl Shell {
             }),
             cx.observe_window_appearance(window, |this, window, cx| {
                 if this.settings.theme == ThemeMode::System {
-                    theme::apply(
-                        ThemeMode::System,
-                        window.appearance(),
-                        this.settings.light_theme,
-                        this.settings.dark_theme,
-                        &this.settings.heading_colors,
-                        cx,
-                    );
+                    theme::apply(&this.settings, window.appearance(), cx);
                 }
             }),
         ];
@@ -1790,14 +1775,7 @@ impl Shell {
                     CommandId::DarkTheme => ThemeMode::Dark,
                     _ => ThemeMode::System,
                 };
-                theme::apply(
-                    self.settings.theme,
-                    window.appearance(),
-                    self.settings.light_theme,
-                    self.settings.dark_theme,
-                    &self.settings.heading_colors,
-                    cx,
-                );
+                theme::apply(&self.settings, window.appearance(), cx);
                 self.persist_global(cx);
             }
             CommandId::ResetLayout => {
@@ -2076,14 +2054,7 @@ impl Shell {
         {
             scope.preferences = preferences;
         }
-        theme::apply(
-            self.settings.theme,
-            window.appearance(),
-            self.settings.light_theme,
-            self.settings.dark_theme,
-            &self.settings.heading_colors,
-            cx,
-        );
+        theme::apply(&self.settings, window.appearance(), cx);
         self.sync_project_preferences(cx);
         self.persist_global(cx);
         self.persist_project(cx);
@@ -4867,6 +4838,13 @@ mod tests {
         open_project(cx, handle, &view, project.path().to_path_buf());
         let id = wait_for_project_scope(cx, &view, project.path()).await;
 
+        let interface_font = cx.update(|cx| {
+            cx.text_system()
+                .all_font_names()
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+        });
         open_preferences_sheet(cx, handle, &view);
         // An out-of-range font size blocks the whole apply.
         cx.update_window(handle.into(), |_, window, cx| {
@@ -4882,6 +4860,8 @@ mod tests {
         cx.update_window(handle.into(), |_, window, cx| {
             sheet.update(cx, |sheet, cx| {
                 sheet.set_text_for_tests(FieldId::FontSize, "22", window, cx);
+                sheet.set_text_for_tests(FieldId::UiFontFamily, &interface_font, window, cx);
+                sheet.set_text_for_tests(FieldId::UiFontSize, "16", window, cx);
                 sheet.set_text_for_tests(FieldId::ProjectContent, "src/entries", window, cx);
             });
             window.render_frame(cx);
@@ -4891,8 +4871,12 @@ mod tests {
         .unwrap();
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(400));
-        cx.condition(&view, |shell, _| shell.settings.editor_font_size == 22.)
-            .await;
+        cx.condition(&view, |shell, _| {
+            shell.settings.editor_font_size == 22.
+                && shell.settings.ui_font_size == 16.
+                && shell.settings.ui_font_family == interface_font
+        })
+        .await;
         let written = global_path.clone();
         cx.condition(&view, move |_, _| {
             std::fs::read(&written)
@@ -4905,6 +4889,8 @@ mod tests {
         let global = std::fs::read(&global_path).unwrap();
         let global: serde_json::Value = serde_json::from_slice(&global).unwrap();
         assert_eq!(global["editor_font_size"], 22.0);
+        assert_eq!(global["ui_font_size"], 16.0);
+        assert_eq!(global["ui_font_family"], interface_font);
         let project = project_file(&preferences_root, &id);
         assert_eq!(project["content_directory"], "src/entries");
 

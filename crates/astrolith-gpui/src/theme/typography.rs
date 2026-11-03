@@ -8,7 +8,7 @@
 
 use std::sync::OnceLock;
 
-use gpui_kit::{App, SharedString};
+use gpui_kit::{App, SharedString, component::ActiveTheme};
 
 /// Comfortable line length for prose, in logical pixels at the base size.
 pub(crate) const PROSE_MEASURE: f32 = 720.;
@@ -53,6 +53,47 @@ pub(crate) fn prose_font(cx: &App) -> SharedString {
         .clone()
 }
 
+/// The platform's resolved UI family, captured before a preference overrides it.
+pub(crate) fn system_ui_font(cx: &App) -> SharedString {
+    static RESOLVED: OnceLock<SharedString> = OnceLock::new();
+    RESOLVED
+        .get_or_init(|| cx.theme().font_family.clone())
+        .clone()
+}
+
+/// The face for interface headings.
+///
+/// The literary default pairs the book serif with a sans interface. An explicit
+/// interface family is used everywhere, including these headings, so the
+/// setting means what it says.
+pub(crate) fn display_font(cx: &App) -> SharedString {
+    let family = cx.theme().font_family.clone();
+    if family == system_ui_font(cx) {
+        prose_font(cx)
+    } else {
+        family
+    }
+}
+
+/// Whether `family` names an installed family. An empty value means the
+/// platform UI font; when the platform reports no fonts at all, accept the
+/// value and let GPUI's fallback resolve it.
+pub(crate) fn font_family_available(cx: &App, family: &str) -> bool {
+    let family = family.trim();
+    if family.is_empty() {
+        return true;
+    }
+    let installed = installed_font_names(cx);
+    installed.is_empty() || family_available_in(installed, family)
+}
+
+/// Exact, case-insensitive family match against an installed list.
+fn family_available_in(installed: &[String], family: &str) -> bool {
+    installed
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(family))
+}
+
 /// The families installed on this machine, listed once per process.
 ///
 /// Enumerating fonts can take a hundred milliseconds on macOS and the system
@@ -92,6 +133,15 @@ mod tests {
             first_installed(&["Source Serif 4", "DejaVu Serif"], &installed),
             SharedString::from("DejaVu Serif")
         );
+    }
+
+    #[test]
+    fn validates_exact_installed_families_case_insensitively() {
+        let installed = names(&["Noto Sans", "Noto Serif"]);
+        assert!(family_available_in(&installed, "Noto Sans"));
+        assert!(family_available_in(&installed, "noto serif"));
+        assert!(!family_available_in(&installed, "Noto"));
+        assert!(!family_available_in(&installed, "Missing Font"));
     }
 
     #[test]

@@ -204,14 +204,14 @@ pub(crate) fn guide_body(cx: &App) -> AnyElement {
         .children(guide_blocks(USER_GUIDE).into_iter().map(|block| {
             match block {
                 GuideBlock::Title(text) => div()
-                    .font_family(crate::theme::prose_font(cx))
+                    .font_family(crate::theme::display_font(cx))
                     .text_lg()
                     .font_semibold()
                     .pb_1()
                     .child(SharedString::from(text))
                     .into_any_element(),
                 GuideBlock::Heading(text) => div()
-                    .font_family(crate::theme::prose_font(cx))
+                    .font_family(crate::theme::display_font(cx))
                     .text_sm()
                     .font_semibold()
                     .pt_2()
@@ -245,7 +245,7 @@ pub(crate) fn shortcuts_body(groups: &[(&'static str, Vec<ShortcutRow>)], cx: &A
         .children(groups.iter().flat_map(|(title, rows)| {
             let mut elements = vec![
                 div()
-                    .font_family(crate::theme::prose_font(cx))
+                    .font_family(crate::theme::display_font(cx))
                     .text_sm()
                     .font_semibold()
                     .pt_2()

@@ -5683,7 +5683,7 @@ impl Render for ProjectWorkspace {
                                 .gap_0p5()
                                 .child(
                                     div()
-                                        .font_family(crate::theme::prose_font(cx))
+                                        .font_family(crate::theme::display_font(cx))
                                         .text_base()
                                         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                         .truncate()

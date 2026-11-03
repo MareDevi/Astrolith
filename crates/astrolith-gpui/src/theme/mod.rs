@@ -3,9 +3,12 @@ mod palettes;
 mod tokens;
 mod typography;
 
-pub(crate) use typography::{PROSE_INSET, PROSE_MEASURE, PROSE_TOP, prose_font};
+pub(crate) use typography::{
+    PROSE_INSET, PROSE_MEASURE, PROSE_TOP, display_font, font_family_available, prose_font,
+    system_ui_font,
+};
 
-use astrolith_core::preferences::{DarkColorScheme, HeadingColors, LightColorScheme};
+use astrolith_core::preferences::{DarkColorScheme, GlobalPreferencesV2, LightColorScheme};
 use gpui_kit::{
     App, Global, Hsla, WindowAppearance,
     component::{ActiveTheme, Theme},
@@ -77,21 +80,29 @@ pub fn palette(mode: ThemeMode, light: LightColorScheme, dark: DarkColorScheme) 
 ///
 /// Heading colours belong to the resolved theme, so the published prose
 /// heading is refreshed in the same pass that refreshes every window.
-pub fn apply(
-    preference: ThemeMode,
-    appearance: WindowAppearance,
-    light: LightColorScheme,
-    dark: DarkColorScheme,
-    headings: &HeadingColors,
-    cx: &mut App,
-) {
-    let mode = preference.resolve(appearance);
+pub fn apply(settings: &GlobalPreferencesV2, appearance: WindowAppearance, cx: &mut App) {
+    let mode = settings.theme.resolve(appearance);
+    let system_family = system_ui_font(cx);
+    let requested_font = settings.ui_font_family.trim();
+    let ui_font =
+        if requested_font.is_empty() || !typography::font_family_available(cx, requested_font) {
+            if !requested_font.is_empty() {
+                tracing::warn!(
+                    family = requested_font,
+                    "interface font is not installed; using the system UI font"
+                );
+            }
+            system_family
+        } else {
+            requested_font.to_owned().into()
+        };
+    let ui_font_size = gpui_kit::px(settings.ui_font_size.clamp(8., 28.));
     let kit_mode = match mode {
         ThemeMode::Dark => gpui_kit::component::ThemeMode::Dark,
         ThemeMode::Light | ThemeMode::System => gpui_kit::component::ThemeMode::Light,
     };
     Theme::change(kit_mode, None, cx);
-    let tokens = palette(mode, light, dark);
+    let tokens = palette(mode, settings.light_theme, settings.dark_theme);
     Theme::update(cx, |theme| {
         let colors = &mut theme.colors;
         colors.background = tokens.background;
@@ -205,16 +216,18 @@ pub fn apply(
         highlight.style.editor_gutter_background = Some(tokens.background);
 
         // A calm desktop scale: controls stay compact, while paper, panels and
-        // overlays share one restrained, lightly rounded silhouette.
-        theme.font_size = gpui_kit::px(14.);
+        // overlays share one restrained, lightly rounded silhouette. The base
+        // size is the user's interface size and therefore the window's rem.
+        theme.font_family = ui_font;
+        theme.font_size = ui_font_size;
         theme.mono_font_size = gpui_kit::px(13.);
         theme.radius = gpui_kit::px(6.);
         theme.radius_lg = gpui_kit::px(10.);
         theme.shadow = true;
     });
     let configured = match mode {
-        ThemeMode::Dark => headings.dark.as_deref(),
-        ThemeMode::Light | ThemeMode::System => headings.light.as_deref(),
+        ThemeMode::Dark => settings.heading_colors.dark.as_deref(),
+        ThemeMode::Light | ThemeMode::System => settings.heading_colors.light.as_deref(),
     };
     let heading = configured
         .and_then(color_from_hex)

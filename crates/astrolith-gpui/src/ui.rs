@@ -27,7 +27,7 @@ pub(crate) fn mark(cx: &App) -> impl IntoElement {
 pub(crate) fn wordmark(cx: &App) -> impl IntoElement {
     div().h_flex().items_center().gap_2().child(mark(cx)).child(
         div()
-            .font_family(crate::theme::prose_font(cx))
+            .font_family(crate::theme::display_font(cx))
             .text_sm()
             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
             .child("Astrolith"),
@@ -101,7 +101,7 @@ pub(crate) fn empty_state(
         )
         .child(
             div()
-                .font_family(crate::theme::prose_font(cx))
+                .font_family(crate::theme::display_font(cx))
                 .text_sm()
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .child(title.into()),

@@ -687,7 +687,7 @@ impl Render for PreviewPanel {
                     .child(div().size_2().rounded_full().bg(status_color))
                     .child(
                         div()
-                            .font_family(crate::theme::prose_font(cx))
+                            .font_family(crate::theme::display_font(cx))
                             .text_base()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .child("Reading view"),

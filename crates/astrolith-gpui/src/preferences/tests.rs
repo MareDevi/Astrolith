@@ -84,6 +84,19 @@ fn font_size_and_autosave_reject_unsupported_values() {
 }
 
 #[test]
+fn interface_font_size_stays_inside_the_readable_band() {
+    assert_eq!(ui_font_size_value("14").unwrap(), 14.);
+    assert_eq!(ui_font_size_value("8").unwrap(), 8.);
+    assert_eq!(ui_font_size_value("28").unwrap(), 28.);
+    for invalid in ["7", "29", "-2", "large", ""] {
+        assert!(
+            ui_font_size_value(invalid).is_err(),
+            "{invalid} must be refused"
+        );
+    }
+}
+
+#[test]
 fn ide_argv_validates_the_executable_and_known_placeholders() {
     let command = ide_command_value("hx", "{project}\n{file}\n--line\n{line}:{column}").unwrap();
     assert_eq!(command.executable, "hx");

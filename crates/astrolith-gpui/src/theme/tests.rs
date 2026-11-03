@@ -1,5 +1,5 @@
 use super::*;
-use gpui_kit::{TestAppContext, WindowAppearance, component::ActiveTheme};
+use gpui_kit::{SharedString, TestAppContext, WindowAppearance, component::ActiveTheme, px};
 
 #[test]
 fn persisted_hex_colors_round_trip_through_the_theme_boundary() {
@@ -27,18 +27,53 @@ fn system_mode_resolves_each_platform_appearance_without_overriding_explicit_mod
 }
 
 #[gpui_kit::test]
+fn explicit_interface_typography_overrides_the_theme_face_and_scale(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        let system = system_ui_font(cx);
+        let custom = cx
+            .text_system()
+            .all_font_names()
+            .into_iter()
+            .find(|family| family.as_str() != system.as_ref())
+            .unwrap_or_else(|| "Example Sans".to_owned());
+        let mut settings = GlobalPreferencesV2 {
+            theme: ThemeMode::Light,
+            ui_font_family: custom.clone(),
+            ui_font_size: 17.,
+            ..GlobalPreferencesV2::default()
+        };
+        apply(&settings, WindowAppearance::Light, cx);
+        assert_eq!(cx.theme().font_family, SharedString::from(custom.clone()));
+        assert_eq!(cx.theme().font_size, px(17.));
+        assert_eq!(
+            display_font(cx),
+            SharedString::from(custom),
+            "an explicit interface family also sets editorial headings"
+        );
+
+        settings.ui_font_family.clear();
+        settings.ui_font_size = 14.;
+        apply(&settings, WindowAppearance::Light, cx);
+        assert_eq!(cx.theme().font_size, px(14.));
+        assert_eq!(
+            display_font(cx),
+            prose_font(cx),
+            "the system UI face restores the literary display pair"
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn theme_adapter_projects_complete_semantic_roles_in_both_modes(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         for mode in [ThemeMode::Dark, ThemeMode::Light] {
-            apply(
-                mode,
-                WindowAppearance::Dark,
-                LightColorScheme::default(),
-                DarkColorScheme::default(),
-                &Default::default(),
-                cx,
-            );
+            let settings = GlobalPreferencesV2 {
+                theme: mode,
+                ..GlobalPreferencesV2::default()
+            };
+            apply(&settings, WindowAppearance::Dark, cx);
             let tokens = palette(
                 mode,
                 LightColorScheme::default(),

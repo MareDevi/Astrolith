@@ -182,6 +182,40 @@ impl PreferencesSheet {
                 cx,
             ),
         ];
+        let interface = vec![
+            self.field(
+                "preferences-field-ui-font-family",
+                "Interface font",
+                self.control(FieldId::UiFontFamily),
+                FieldExtras {
+                    field: Some(FieldId::UiFontFamily),
+                    hint: Some(
+                        "An installed font family. Empty uses the system UI font; the page keeps its book face.",
+                    ),
+                    trailing: Some(self.reset_button(
+                        FieldId::UiFontFamily,
+                        "preferences-reset-ui-font-family",
+                        cx,
+                    )),
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-ui-font-size",
+                "Interface size",
+                self.control(FieldId::UiFontSize),
+                FieldExtras {
+                    field: Some(FieldId::UiFontSize),
+                    hint: Some("8–28 logical pixels; the default is 14."),
+                    trailing: Some(self.reset_button(
+                        FieldId::UiFontSize,
+                        "preferences-reset-ui-font-size",
+                        cx,
+                    )),
+                },
+                cx,
+            ),
+        ];
         let writing = vec![
             self.field(
                 "preferences-field-font-size",
@@ -283,6 +317,14 @@ impl PreferencesSheet {
                 "Appearance",
                 Some("Colour schemes shared by every project."),
                 appearance,
+                cx,
+            ))
+            .child(self.section(
+                "Interface",
+                Some(
+                    "Typography for panels, controls and menus. The page keeps its own book face.",
+                ),
+                interface,
                 cx,
             ))
             .child(self.section(

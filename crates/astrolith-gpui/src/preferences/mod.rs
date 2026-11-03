@@ -131,6 +131,8 @@ pub(crate) enum FieldId {
     IdeArguments,
     HeadingLight,
     HeadingDark,
+    UiFontFamily,
+    UiFontSize,
     FontSize,
     ProjectContent,
     ProjectAssets,
@@ -161,6 +163,8 @@ struct Inputs {
     ide_arguments: Entity<TextareaState>,
     heading_light: Entity<InputState>,
     heading_dark: Entity<InputState>,
+    ui_font_family: Entity<InputState>,
+    ui_font_size: Entity<InputState>,
     font_size: Entity<InputState>,
     project_content: Entity<InputState>,
     project_assets: Entity<InputState>,
@@ -242,6 +246,8 @@ impl PreferencesSheet {
                 ide_arguments,
                 heading_light: input!("#1f2328"),
                 heading_dark: input!("#e6edf3"),
+                ui_font_family: input!("System UI font"),
+                ui_font_size: input!("14"),
                 font_size: input!("18"),
                 project_content: input!("Inherit the Astro content directory"),
                 project_assets: input!("Inherit the configured assets directory"),
@@ -295,6 +301,13 @@ impl PreferencesSheet {
         self.set_text(
             FieldId::HeadingDark,
             global.heading_colors.dark.as_deref().unwrap_or_default(),
+            window,
+            cx,
+        );
+        self.set_text(FieldId::UiFontFamily, &global.ui_font_family, window, cx);
+        self.set_text(
+            FieldId::UiFontSize,
+            &format_font_size(global.ui_font_size),
             window,
             cx,
         );
@@ -397,6 +410,14 @@ impl PreferencesSheet {
             light: heading_color(&self.text(FieldId::HeadingLight, cx)),
             dark: heading_color(&self.text(FieldId::HeadingDark, cx)),
         };
+        global.ui_font_family = self.text(FieldId::UiFontFamily, cx).trim().to_owned();
+        global.ui_font_size = self
+            .text(FieldId::UiFontSize, cx)
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|size| size.is_finite() && (8.0..=28.0).contains(size))
+            .unwrap_or(global.ui_font_size);
         global.editor_font_size = self
             .text(FieldId::FontSize, cx)
             .trim()
@@ -447,6 +468,13 @@ impl PreferencesSheet {
         cx: &mut Context<Self>,
     ) {
         match field {
+            FieldId::UiFontFamily => self.set_text(field, "", window, cx),
+            FieldId::UiFontSize => self.set_text(
+                field,
+                &format_font_size(GlobalPreferencesV2::default().ui_font_size),
+                window,
+                cx,
+            ),
             FieldId::FontSize => self.set_text(
                 field,
                 &format_font_size(GlobalPreferencesV2::default().editor_font_size),
@@ -682,6 +710,8 @@ impl PreferencesSheet {
             FieldId::IdeArguments => self.inputs.ide_arguments.read(cx).value(),
             FieldId::HeadingLight => self.inputs.heading_light.read(cx).value(),
             FieldId::HeadingDark => self.inputs.heading_dark.read(cx).value(),
+            FieldId::UiFontFamily => self.inputs.ui_font_family.read(cx).value(),
+            FieldId::UiFontSize => self.inputs.ui_font_size.read(cx).value(),
             FieldId::FontSize => self.inputs.font_size.read(cx).value(),
             FieldId::ProjectContent => self.inputs.project_content.read(cx).value(),
             FieldId::ProjectAssets => self.inputs.project_assets.read(cx).value(),
@@ -718,6 +748,14 @@ impl PreferencesSheet {
             FieldId::HeadingDark => self
                 .inputs
                 .heading_dark
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::UiFontFamily => self
+                .inputs
+                .ui_font_family
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::UiFontSize => self
+                .inputs
+                .ui_font_size
                 .update(cx, |input, cx| input.set_value(value, window, cx)),
             FieldId::FontSize => self
                 .inputs
@@ -840,6 +878,19 @@ impl PreferencesSheet {
         if let Err(message) = heading_color_value(&self.text(FieldId::HeadingDark, cx)) {
             insert(FieldId::HeadingDark, message);
         }
+        let ui_font_family = self.text(FieldId::UiFontFamily, cx);
+        if !theme::font_family_available(cx, &ui_font_family) {
+            insert(
+                FieldId::UiFontFamily,
+                format!(
+                    "“{}” is not an installed font family.",
+                    ui_font_family.trim()
+                ),
+            );
+        }
+        if let Err(message) = ui_font_size_value(&self.text(FieldId::UiFontSize, cx)) {
+            insert(FieldId::UiFontSize, message);
+        }
         if let Err(message) = font_size_value(&self.text(FieldId::FontSize, cx)) {
             insert(FieldId::FontSize, message);
         }
@@ -938,6 +989,16 @@ impl PreferencesSheet {
             }
             FieldId::HeadingDark => {
                 gpui_kit::component::input::Input::new(&self.inputs.heading_dark)
+                    .small()
+                    .into_any_element()
+            }
+            FieldId::UiFontFamily => {
+                gpui_kit::component::input::Input::new(&self.inputs.ui_font_family)
+                    .small()
+                    .into_any_element()
+            }
+            FieldId::UiFontSize => {
+                gpui_kit::component::input::Input::new(&self.inputs.ui_font_size)
                     .small()
                     .into_any_element()
             }
@@ -1097,7 +1158,7 @@ impl PreferencesSheet {
                     .gap_0p5()
                     .child(
                         div()
-                            .font_family(crate::theme::prose_font(cx))
+                            .font_family(crate::theme::display_font(cx))
                             .text_sm()
                             .font_semibold()
                             .child(title),
@@ -1144,7 +1205,7 @@ impl Render for PreferencesSheet {
                 div()
                     .px_2()
                     .pb_3()
-                    .font_family(crate::theme::prose_font(cx))
+                    .font_family(crate::theme::display_font(cx))
                     .text_sm()
                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .child("Preferences"),
@@ -1360,6 +1421,18 @@ pub(crate) fn font_size_value(value: &str) -> Result<f32, String> {
     };
     if !size.is_finite() || !(1.0..=30.0).contains(&size) {
         return Err("Font size must be between 1 and 30.".into());
+    }
+    Ok(size)
+}
+
+/// Validate the interface font size.
+pub(crate) fn ui_font_size_value(value: &str) -> Result<f32, String> {
+    let value = value.trim();
+    let Ok(size) = value.parse::<f32>() else {
+        return Err("Enter an interface size between 8 and 28.".into());
+    };
+    if !size.is_finite() || !(8.0..=28.0).contains(&size) {
+        return Err("Interface size must be between 8 and 28.".into());
     }
     Ok(size)
 }

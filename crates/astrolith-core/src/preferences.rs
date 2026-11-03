@@ -529,6 +529,10 @@ pub struct GlobalPreferencesV2 {
     pub window: Option<WindowGeometry>,
     /// Optional light and dark heading colors.
     pub heading_colors: HeadingColors,
+    /// Interface font family; empty uses the platform UI font.
+    pub ui_font_family: String,
+    /// Interface base font size in logical pixels; controls the rem scale.
+    pub ui_font_size: f32,
     /// Editor base font size in logical pixels.
     pub editor_font_size: f32,
     /// Idle autosave delay.
@@ -555,6 +559,8 @@ impl Default for GlobalPreferencesV2 {
             layout: PanelLayout::default(),
             window: None,
             heading_colors: HeadingColors::default(),
+            ui_font_family: String::new(),
+            ui_font_size: 14.,
             editor_font_size: 18.,
             autosave_delay: AutosaveDelay::default(),
             default_extension: FileExtension::default(),
@@ -708,6 +714,10 @@ pub struct ResolvedPreferences {
     pub layout: PanelLayout,
     /// Heading colors.
     pub heading_colors: HeadingColors,
+    /// Interface font family; empty uses the platform UI font.
+    pub ui_font_family: String,
+    /// Interface base font size in logical pixels.
+    pub ui_font_size: f32,
     /// Editor base font size.
     pub editor_font_size: f32,
     /// Idle autosave delay.
@@ -760,6 +770,8 @@ pub fn resolve(
             .and_then(|project| project.layout.clone())
             .unwrap_or_else(|| global.layout.clone()),
         heading_colors: global.heading_colors.clone(),
+        ui_font_family: global.ui_font_family.clone(),
+        ui_font_size: global.ui_font_size,
         editor_font_size: global.editor_font_size,
         autosave_delay: global.autosave_delay,
         default_extension: collection
@@ -1297,6 +1309,8 @@ mod tests {
         let bare: GlobalPreferencesV2 = serde_json::from_str("{\"version\":2}").unwrap();
         assert_eq!(bare.light_theme, LightColorScheme::Manuscript);
         assert_eq!(bare.dark_theme, DarkColorScheme::Ink);
+        assert_eq!(bare.ui_font_family, "");
+        assert_eq!(bare.ui_font_size, 14.);
     }
 
     #[test]

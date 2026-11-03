@@ -955,7 +955,7 @@ impl Render for FrontmatterForm {
                             .gap_0p5()
                             .child(
                                 div()
-                                    .font_family(crate::theme::prose_font(cx))
+                                    .font_family(crate::theme::display_font(cx))
                                     .text_base()
                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .child("Details"),
@@ -1021,7 +1021,7 @@ fn render_row(
                 .when(control.required, |label| {
                     label.child(div().text_color(cx.theme().warning).child("*"))
                 })
-                .font_family(crate::theme::prose_font(cx))
+                .font_family(crate::theme::display_font(cx))
                 .text_sm()
                 .child(row.label.clone()),
         )
