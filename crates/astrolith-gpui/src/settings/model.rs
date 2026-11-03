@@ -6,5 +6,6 @@
 
 pub(crate) use astrolith_core::preferences::{
     GLOBAL_PREFERENCES_VERSION, GlobalPreferencesV2, PROJECT_PREFERENCES_VERSION,
-    PROJECT_REGISTRY_VERSION, ProjectOpen, ProjectPreferencesV1, ProjectRegistry,
+    PROJECT_REGISTRY_VERSION, ProjectOpen, ProjectPreferencesV1, ProjectRecord, ProjectRegistry,
+    WindowGeometry,
 };

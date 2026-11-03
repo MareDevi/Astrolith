@@ -19,7 +19,8 @@ use super::{
     migrate,
     model::{
         GLOBAL_PREFERENCES_VERSION, GlobalPreferencesV2, PROJECT_PREFERENCES_VERSION,
-        PROJECT_REGISTRY_VERSION, ProjectOpen, ProjectPreferencesV1, ProjectRegistry,
+        PROJECT_REGISTRY_VERSION, ProjectOpen, ProjectPreferencesV1, ProjectRecord,
+        ProjectRegistry,
     },
 };
 
@@ -245,6 +246,27 @@ impl PreferencesStore {
         }
     }
 
+    /// Recent projects ordered by most recent open.
+    pub fn recent_projects(&self) -> (Vec<ProjectRecord>, Option<String>) {
+        match self.registry.lock() {
+            Ok(registry) => (
+                registry.value.recent().into_iter().cloned().collect(),
+                registry.warning.clone(),
+            ),
+            Err(_) => (Vec::new(), Some("Project registry unavailable.".into())),
+        }
+    }
+
+    /// Remove one project from the recent list and persist the registry.
+    pub fn remove_recent_project(&self, id: &str) -> io::Result<bool> {
+        let mut registry = lock(&self.registry)?;
+        if !registry.value.remove(id) {
+            return Ok(false);
+        }
+        registry.save_current()?;
+        Ok(true)
+    }
+
     /// Load one project scope, creating in-memory defaults for an unknown ID.
     ///
     /// The returned revision is the last accepted revision; pass a greater
@@ -302,6 +324,12 @@ impl PreferencesStore {
         let canonical = fs::canonicalize(path)?;
         if !canonical.is_dir() {
             return Err(io::Error::other("Choose a project directory."));
+        }
+        if let Some(blocked) = astrolith_workspace::paths::blocked_root(
+            &canonical,
+            astrolith_workspace::paths::home_directory().as_deref(),
+        ) {
+            return Err(io::Error::other(blocked.message()));
         }
         let canonical = canonical
             .to_str()
@@ -621,6 +649,55 @@ mod tests {
         preferences.theme = ThemePreference::Light;
         assert!(!store.save_global(1, &preferences).unwrap());
         assert_eq!(PreferencesStore::load(path).1.theme, ThemePreference::Dark);
+    }
+
+    #[test]
+    fn recent_projects_are_ordered_and_can_be_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        let (store, _, _) = PreferencesStore::load(path.clone());
+        let first = directory.path().join("one");
+        let second = directory.path().join("two");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let first = store.record_project_open(&first, Some("one"), 10).unwrap();
+        let second = store.record_project_open(&second, Some("two"), 20).unwrap();
+        let (recent, warning) = store.recent_projects();
+        assert!(warning.is_none());
+        assert_eq!(
+            recent
+                .iter()
+                .map(|project| project.id.as_str())
+                .collect::<Vec<_>>(),
+            [second.id.as_str(), first.id.as_str()]
+        );
+        assert!(store.remove_recent_project(&first.id).unwrap());
+        assert!(!store.remove_recent_project(&first.id).unwrap());
+        let (reload, _, _) = PreferencesStore::load(path);
+        let (recent, _) = reload.recent_projects();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, second.id);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_system_directory_is_refused_and_never_registered() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _, _) = PreferencesStore::load(global_path(directory.path()));
+        assert!(
+            store
+                .record_project_open(Path::new("/etc"), None, 1)
+                .is_err()
+        );
+        let (recent, _) = store.recent_projects();
+        assert!(recent.is_empty());
+        let registry_path = directory.path().join("projects.json");
+        assert!(
+            !registry_path.exists()
+                || fs::read_to_string(&registry_path)
+                    .unwrap()
+                    .contains("\"projects\":[]")
+        );
     }
 
     #[test]

@@ -8,7 +8,8 @@ use std::{
 };
 
 use crate::{
-    commands::{self, COMMANDS, CommandId},
+    commands::{self, COMMANDS, CollectionItem, CommandAvailability, CommandId},
+    drag_drop,
     editor::{
         component_builder::{ComponentBuilder, ComponentBuilderEvent},
         content_finder::{self, FinderEntry},
@@ -29,25 +30,29 @@ use crate::{
     },
     preview::PreviewPanel,
     project_discovery::{FrontmatterKey, ProjectOpened, ProjectWorkspace, now_secs},
+    recent_projects::{self, RecentEntry},
     runtime,
     settings::{
-        GlobalPreferencesV2, PreferencesStore, ProjectPreferencesV1, resolve, settings_path,
+        GlobalPreferencesV2, PreferencesStore, ProjectPreferencesV1, ProjectRecord, WindowGeometry,
+        resolve, settings_path,
     },
+    single_instance,
     theme::{self, ThemeMode},
+    url_scheme::{self, StartupRequest, StartupTarget},
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, Sizable, StyledExt, TitleBar, WindowExt,
     button::{Button, ButtonVariants},
-    command::{Command, CommandItem, CommandState},
+    command::{Command, CommandGroup, CommandItem, CommandState},
     dock::{DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
     kbd::Kbd,
     status_bar::StatusBar,
 };
 use gpui_kit::{
-    Animation, AnimationExt as _, App, AppContext, Context, Entity, FocusHandle, Focusable,
-    IntoElement, PathPromptOptions, Render, SharedString, Subscription, Task, TestSupportExt,
-    Window, WindowOptions, div, prelude::*, px, size,
+    Animation, AnimationExt as _, App, AppContext, Bounds, Context, Entity, ExternalPaths,
+    FocusHandle, Focusable, IntoElement, PathPromptOptions, Render, SharedString, Subscription,
+    Task, TestSupportExt, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, size,
 };
 
 /// Latest global and project snapshots, flushed by the quit observer.
@@ -72,12 +77,30 @@ struct ProjectScope {
 
 /// Open the shell after background preference loading; bootstrap owns no services.
 pub fn open(cx: &mut App) {
+    let arguments: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
+    let startup = url_scheme::parse_startup(std::env::args_os().skip(1));
+    let socket = single_instance::socket_path();
+    if single_instance::forward(&socket, &arguments) {
+        tracing::info!("forwarded this launch to the running Astrolith window");
+        cx.quit();
+        return;
+    }
     if let Err(error) = runtime::init(cx) {
         tracing::error!(%error, "could not start background services");
         eprintln!("Could not start background services: {error}");
         cx.quit();
         return;
     }
+    let listener = match single_instance::bind(&socket) {
+        Ok(listener) => Some(listener),
+        Err(error) => {
+            tracing::warn!(%error, "single instance is unavailable; continuing");
+            None
+        }
+    };
     commands::bind_keys(cx);
     cx.spawn(async move |cx| {
         let loaded = runtime::blocking(cx, || {
@@ -108,9 +131,17 @@ pub fn open(cx: &mut App) {
                     )
                 }
             };
-            commands::install_menus(cx, &settings.copyedit);
-            if let Err(error) = gpui_kit::open_window(
+            commands::install_menus(
+                cx,
+                &settings.copyedit,
+                CommandAvailability::default(),
+                &[],
+                &[],
+            );
+            let window_bounds = settings.window.and_then(restored_bounds);
+            let opened = gpui_kit::open_window(
                 WindowOptions {
+                    window_bounds,
                     window_min_size: Some(size(px(1000.), px(700.))),
                     ..TitleBar::window_options()
                 },
@@ -119,16 +150,57 @@ pub fn open(cx: &mut App) {
                     window.set_window_title("Astrolith");
                     cx.new(|cx| Shell::new(settings, store, warning, window, cx))
                 },
-            ) {
-                tracing::error!(error = %format_args!("{error:#}"), "could not open the main window");
-                eprintln!("Could not open Astrolith: {error:#}");
-                cx.quit();
-            } else {
-                tracing::info!("main window opened");
+            );
+            match opened {
+                Ok((window_handle, shell)) => {
+                    tracing::info!("main window opened");
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        shell.update(cx, |shell, cx| {
+                            shell.begin(startup, listener, window, cx)
+                        })
+                    });
+                }
+                Err(error) => {
+                    tracing::error!(error = %format_args!("{error:#}"), "could not open the main window");
+                    eprintln!("Could not open Astrolith: {error:#}");
+                    cx.quit();
+                }
             }
         });
     })
     .detach();
+}
+
+/// Restore stored bounds without ever opening below the enforced minimum.
+fn restored_bounds(geometry: WindowGeometry) -> Option<WindowBounds> {
+    if geometry.width < 1000. || geometry.height < 700. {
+        return None;
+    }
+    let bounds = Bounds::new(
+        point(px(geometry.x), px(geometry.y)),
+        size(px(geometry.width), px(geometry.height)),
+    );
+    Some(if geometry.maximized {
+        WindowBounds::Maximized(bounds)
+    } else {
+        WindowBounds::Windowed(bounds)
+    })
+}
+
+/// One actionable palette row.
+#[derive(Clone, Debug)]
+enum PaletteAction {
+    Command(CommandId),
+    RecentProject(String),
+    Collection(String),
+}
+
+#[derive(Clone, Debug)]
+struct PaletteEntry {
+    label: SharedString,
+    shortcut: SharedString,
+    icon: IconName,
+    action: PaletteAction,
 }
 
 pub(crate) struct Shell {
@@ -171,6 +243,16 @@ pub(crate) struct Shell {
     project_task: Option<Task<()>>,
     scope_task: Option<Task<()>>,
     warning: Option<String>,
+    /// Registered projects ordered by most recent open.
+    recent_records: Vec<ProjectRecord>,
+    /// Labels generated once for menus and the palette.
+    recent: Vec<RecentEntry>,
+    /// Entry waiting for the project index that proves membership.
+    pending_entry: Option<PathBuf>,
+    /// Last menu model installed, so render does not rebuild unchanged menus.
+    menu_signature: Option<(CommandAvailability, Vec<RecentEntry>, Vec<CollectionItem>)>,
+    /// Single-instance listener task, kept alive for the window's lifetime.
+    instance_task: Option<Task<()>>,
     focus: FocusHandle,
     /// Writer chrome auto-hide state.
     chrome: ChromeVisibility,
@@ -302,6 +384,7 @@ impl Shell {
                 }
             }),
             cx.observe_window_bounds(window, |this, window, cx| {
+                this.capture_window_geometry(window, cx);
                 let viewport = window.viewport_size();
                 if viewport == this.last_viewport {
                     return;
@@ -335,7 +418,8 @@ impl Shell {
             &project,
             window,
             |this, _, event: &ProjectOpened, window, cx| {
-                this.open_project_scope(event.root.clone(), window, cx)
+                this.open_project_scope(event.root.clone(), window, cx);
+                this.finish_pending_entry(window, cx);
             },
         ));
         // Project load, entry activation and watcher refreshes notify the
@@ -491,10 +575,389 @@ impl Shell {
             project_task: None,
             scope_task: None,
             warning,
+            recent_records: Vec::new(),
+            recent: Vec::new(),
+            pending_entry: None,
+            menu_signature: None,
+            instance_task: None,
             focus,
             chrome: ChromeVisibility::default(),
             typed: TypedCharacters::default(),
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// Finish window setup: registry loading, startup routing and the
+    /// single-instance listener.
+    fn begin(
+        &mut self,
+        startup: StartupRequest,
+        listener: Option<single_instance::Listener>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.listen_for_instances(listener, window, cx);
+        let store = self.store.clone();
+        let work = runtime::blocking(cx, move || match store {
+            Some(store) => store.recent_projects(),
+            None => (Vec::new(), None),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let loaded = work.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match loaded {
+                    Ok((records, warning)) => {
+                        if let Some(warning) = warning {
+                            this.warning = Some(warning);
+                        }
+                        this.set_registry(records);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not load the project registry");
+                    }
+                }
+                let records = this.recent_records.clone();
+                if startup.has_arguments() {
+                    this.apply_startup(startup, &records, window, cx);
+                } else if let Some(root) = recent_projects::last_openable(&records) {
+                    tracing::info!(root = %root.display(), "reopening the last project");
+                    this.project
+                        .update(cx, |project, cx| project.open_root(root, window, cx));
+                }
+                this.refresh_menus(window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_registry(&mut self, records: Vec<ProjectRecord>) {
+        self.recent = recent_projects::entries(&records);
+        self.recent_records = records;
+    }
+
+    /// Route one startup or forwarded request.
+    fn apply_startup(
+        &mut self,
+        request: StartupRequest,
+        records: &[ProjectRecord],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = request.target else {
+            if let Some(problem) = request.problem {
+                self.warning = Some(problem);
+                cx.notify();
+            }
+            return;
+        };
+        match url_scheme::route(
+            &target,
+            records,
+            astrolith_workspace::paths::home_directory().as_deref(),
+        ) {
+            url_scheme::Route::Project(root) => {
+                self.pending_entry = None;
+                self.project
+                    .update(cx, |project, cx| project.open_root(root, window, cx));
+            }
+            url_scheme::Route::Entry { root, entry } => {
+                self.pending_entry = Some(entry);
+                self.project
+                    .update(cx, |project, cx| project.open_root(root, window, cx));
+            }
+            url_scheme::Route::Invalid(message) => {
+                tracing::warn!(%message, "refused a launch target");
+                self.warning = Some(message);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Open a startup entry once its project index proves membership.
+    fn finish_pending_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.pending_entry.take() else {
+            return;
+        };
+        let result = self.project.update(cx, |project, cx| {
+            project.open_external_entry(&path, window, cx)
+        });
+        if let Err(message) = result {
+            tracing::warn!(%message, "refused a startup entry");
+            self.warning = Some(message);
+            cx.notify();
+        }
+    }
+
+    /// Accept one forwarded launch and activate this window.
+    fn listen_for_instances(
+        &mut self,
+        listener: Option<single_instance::Listener>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(listener) = listener else {
+            return;
+        };
+        #[cfg(not(unix))]
+        {
+            let _ = (listener, window, cx);
+        }
+        #[cfg(unix)]
+        {
+            let listener = match tokio::net::UnixListener::from_std(listener) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    tracing::warn!(%error, "could not listen for a second launch");
+                    return;
+                }
+            };
+            self.instance_task = Some(cx.spawn_in(window, async move |this, cx| {
+                use tokio::io::AsyncBufReadExt as _;
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let mut reader = tokio::io::BufReader::new(stream);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.is_err() {
+                        continue;
+                    }
+                    let arguments: Vec<std::ffi::OsString> = single_instance::decode(&line)
+                        .into_iter()
+                        .map(std::ffi::OsString::from)
+                        .collect();
+                    let request = url_scheme::parse_startup(arguments);
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        window.activate_window();
+                        let records = this.recent_records.clone();
+                        this.apply_startup(request, &records, window, cx);
+                    });
+                }
+            }));
+        }
+    }
+
+    /// Live availability shared by menus, palette, toolbar and context menus.
+    fn availability(&mut self, window: &Window, cx: &mut Context<Self>) -> CommandAvailability {
+        let layout = self.read_dock_layout(cx);
+        let fullscreen = window.is_fullscreen();
+        self.project.update(cx, |project, _| {
+            project.set_view_state(
+                layout.sidebar_visible,
+                layout.inspector_visible,
+                layout.preview_visible,
+                fullscreen,
+            )
+        });
+        self.project.read(cx).command_availability(cx, window)
+    }
+
+    /// Rebuild the native menu bar only when its model changed.
+    fn refresh_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let availability = self.availability(window, cx);
+        let collections = self.project.read(cx).collection_items();
+        if let Some((last, recent, last_collections)) = &self.menu_signature
+            && *last == availability
+            && *recent == self.recent
+            && *last_collections == collections
+        {
+            return;
+        }
+        commands::install_menus(
+            cx,
+            &self.settings.copyedit,
+            availability,
+            &self.recent,
+            &collections,
+        );
+        self.menu_signature = Some((availability, self.recent.clone(), collections));
+    }
+
+    /// Open one collection through its generated registry command.
+    fn open_collection(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.dock.read(cx).is_dock_open(DockPlacement::Left) {
+            self.toggle_panel(PanelKind::Sidebar, window, cx);
+        }
+        self.project
+            .update(cx, |project, cx| project.open_collection(id, window, cx));
+    }
+
+    /// Reopen one recent project from the registry.
+    fn open_recent(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(record) = self
+            .recent_records
+            .iter()
+            .find(|record| record.id == id)
+            .cloned()
+        else {
+            self.warning = Some("That project is no longer in the recent list.".into());
+            cx.notify();
+            return;
+        };
+        let target = StartupTarget::Project(PathBuf::from(&record.path));
+        let records = self.recent_records.clone();
+        let request = StartupRequest {
+            target: Some(target),
+            problem: None,
+        };
+        self.apply_startup(request, &records, window, cx);
+    }
+
+    /// Remove one registry entry and refresh every surface that lists it.
+    fn remove_recent(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let id = id.to_owned();
+        let requested = id.clone();
+        let work = runtime::blocking(cx, move || store.remove_recent_project(&requested));
+        cx.spawn_in(window, async move |this, cx| {
+            let removed = work.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match removed {
+                    Ok(Ok(true)) => {
+                        this.recent_records.retain(|record| record.id != id);
+                        this.recent = recent_projects::entries(&this.recent_records);
+                        this.refresh_menus(window, cx);
+                    }
+                    Ok(Ok(false)) => {}
+                    Ok(Err(error)) => {
+                        this.warning = Some(format!("Could not update recent projects: {error}"));
+                    }
+                    Err(error) => {
+                        this.warning = Some(format!("Could not update recent projects: {error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The Recent Projects dialog: open or remove registry entries.
+    fn open_recent_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let entries = self.recent.clone();
+        let owner = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let mut body = div().v_flex().gap_2();
+            if entries.is_empty() {
+                body = body.child(div().text_sm().child("No projects have been opened yet."));
+            }
+            for entry in &entries {
+                let open_owner = owner.clone();
+                let remove_owner = owner.clone();
+                let open_id = entry.id.clone();
+                let remove_id = entry.id.clone();
+                body = body.child(
+                    div()
+                        .h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .gap_4()
+                        .child(
+                            div().v_flex().child(entry.label.clone()).child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(entry.path.display().to_string()),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "recent-open-{}",
+                                        entry.id
+                                    )))
+                                    .label("Open")
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            window.close_dialog(cx);
+                                            let _ = open_owner.update(cx, |this, cx| {
+                                                this.open_recent(&open_id, window, cx)
+                                            });
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "recent-remove-{}",
+                                        entry.id
+                                    )))
+                                    .label("Remove")
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            let _ = remove_owner.update(cx, |this, cx| {
+                                                this.remove_recent(&remove_id, window, cx)
+                                            });
+                                        },
+                                    ),
+                                ),
+                        ),
+                );
+            }
+            dialog.title("Recent projects").w(px(560.)).child(body)
+        });
+    }
+
+    /// About: version and build identity, with no update action.
+    fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        window.open_dialog(cx, |dialog, _, cx| {
+            dialog.title("About Astrolith").w(px(420.)).child(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .text_sm()
+                    .child(SharedString::from(commands::about_text()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("A local-first Astro content editor."),
+                    ),
+            )
+        });
+    }
+
+    /// Open the project, collection or active entry in the configured IDE.
+    fn open_in_ide(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        self.project.update(cx, |project, cx| {
+            project.open_in_ide(command, None, window, cx)
+        });
+        cx.notify();
+    }
+
+    /// Handle a shell-level drop: one project directory or one in-project entry.
+    fn drop_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.project.read(cx).project_root();
+        match drag_drop::classify(&paths, root.as_deref()) {
+            Ok(drag_drop::DropTarget::Project(root)) => {
+                self.project
+                    .update(cx, |project, cx| project.open_root(root, window, cx));
+            }
+            Ok(drag_drop::DropTarget::Entry(entry)) => {
+                let result = self.project.update(cx, |project, cx| {
+                    project.open_external_entry(&entry, window, cx)
+                });
+                if let Err(message) = result {
+                    self.warning = Some(message);
+                    cx.notify();
+                }
+            }
+            Err(message) => {
+                self.warning = Some(message);
+                cx.notify();
+            }
         }
     }
 
@@ -623,6 +1086,26 @@ impl Shell {
         if visibility_changed {
             cx.notify();
         }
+    }
+
+    /// Persist the live window geometry; the 1000×700 minimum is enforced by
+    /// the window itself and this never shrinks stored values below it.
+    fn capture_window_geometry(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let bounds = window.window_bounds();
+        let maximized = matches!(bounds, WindowBounds::Maximized(_));
+        let bounds = bounds.get_bounds();
+        let geometry = WindowGeometry {
+            x: f32::from(bounds.origin.x),
+            y: f32::from(bounds.origin.y),
+            width: f32::from(bounds.size.width).max(1000.),
+            height: f32::from(bounds.size.height).max(700.),
+            maximized,
+        };
+        if self.settings.window == Some(geometry) {
+            return;
+        }
+        self.settings.window = Some(geometry);
+        self.persist_global(cx);
     }
 
     /// Persist the global scope, keeping a project layout out of the global file.
@@ -920,6 +1403,19 @@ impl Shell {
             }
             CommandId::OpenPalette => self.open_palette(window, cx),
             CommandId::OpenPreferences => self.open_preferences(window, cx),
+            CommandId::OpenRecentProjects => self.open_recent_projects(window, cx),
+            CommandId::ReloadCollections => {
+                self.project
+                    .update(cx, |project, cx| project.reload_collections(window, cx));
+            }
+            CommandId::OpenProjectInIde
+            | CommandId::OpenCollectionInIde
+            | CommandId::OpenEntryInIde => self.open_in_ide(command, window, cx),
+            CommandId::About => self.open_about(window, cx),
+            CommandId::ToggleFullscreen => {
+                window.toggle_fullscreen();
+                self.refresh_menus(window, cx);
+            }
             CommandId::OpenContentFinder => self.open_content_finder(window, cx),
             CommandId::OpenComponentBuilder => self.open_component_builder(window, cx),
             CommandId::ToggleSidebar => self.toggle_panel(PanelKind::Sidebar, window, cx),
@@ -1018,7 +1514,7 @@ impl Shell {
                 let config = CopyeditConfig::from_preferences(&self.settings.copyedit);
                 self.project
                     .update(cx, |project, cx| project.set_copyedit_config(config, cx));
-                commands::install_menus(cx, &self.settings.copyedit);
+                self.refresh_menus(window, cx);
             }
             CommandId::LightTheme | CommandId::DarkTheme | CommandId::SystemTheme => {
                 self.settings.theme = match command {
@@ -1060,6 +1556,96 @@ impl Shell {
         cx.notify();
     }
 
+    /// Build the grouped palette rows shared by the UI and its tests.
+    fn palette_groups(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<(&'static str, Vec<PaletteEntry>)> {
+        let copyedit = self.settings.copyedit.clone();
+        let availability = self.availability(window, cx);
+        let order = [
+            "File",
+            "View",
+            "Format",
+            "Writer",
+            "Preview",
+            "Help",
+            "Application",
+            "Recent projects",
+            "Collections",
+        ];
+        let mut groups: Vec<(&'static str, Vec<PaletteEntry>)> =
+            order.iter().map(|title| (*title, Vec::new())).collect();
+        for command in COMMANDS
+            .iter()
+            .copied()
+            .filter(|command| *command != CommandId::OpenPalette)
+        {
+            if !command.is_available(availability) {
+                continue;
+            }
+            let shortcut: SharedString = command
+                .shortcut()
+                .and_then(|key| gpui_kit::Keystroke::parse(key).ok())
+                .map(|key| Kbd::format(&key).into())
+                .unwrap_or_default();
+            let entry = PaletteEntry {
+                label: command.label_with(&copyedit).into(),
+                shortcut,
+                icon: command_icon(command),
+                action: PaletteAction::Command(command),
+            };
+            let title = commands::command_group(command);
+            if let Some((_, entries)) = groups.iter_mut().find(|(name, _)| *name == title) {
+                entries.push(entry);
+            }
+        }
+        if !self.recent.is_empty() {
+            let entries = groups
+                .iter_mut()
+                .find(|(name, _)| *name == "Recent projects")
+                .map(|(_, entries)| entries)
+                .expect("the recent group exists");
+            for entry in &self.recent {
+                entries.push(PaletteEntry {
+                    label: entry.label.clone().into(),
+                    shortcut: SharedString::default(),
+                    icon: IconName::FolderOpen,
+                    action: PaletteAction::RecentProject(entry.id.clone()),
+                });
+            }
+        }
+        let collections = self.project.read(cx).collection_items();
+        let available_collections: Vec<_> = collections
+            .into_iter()
+            .filter(|collection| !collection.active)
+            .collect();
+        if !available_collections.is_empty() {
+            let entries = groups
+                .iter_mut()
+                .find(|(name, _)| *name == "Collections")
+                .map(|(_, entries)| entries)
+                .expect("the collections group exists");
+            for collection in available_collections {
+                entries.push(PaletteEntry {
+                    label: commands::collection_command_label(&collection.name).into(),
+                    shortcut: SharedString::default(),
+                    icon: IconName::Folder,
+                    action: PaletteAction::Collection(collection.name),
+                });
+            }
+        }
+        let groups: Vec<(&'static str, Vec<PaletteEntry>)> = groups
+            .into_iter()
+            .filter(|(_, entries)| !entries.is_empty())
+            .collect();
+        groups
+            .into_iter()
+            .filter(|(_, entries)| !entries.is_empty())
+            .collect()
+    }
+
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_dialog(cx) {
             return;
@@ -1068,79 +1654,86 @@ impl Shell {
             .update(cx, |state, cx| state.set_query("", window, cx));
         let palette = self.palette.clone();
         let owner = cx.weak_entity();
-        let copyedit = self.settings.copyedit.clone();
-        let availability = self.project.read(cx).command_availability(cx, window);
-        let commands: Vec<_> = COMMANDS
-            .iter()
-            .copied()
-            .filter(|command| {
-                *command != CommandId::OpenPalette && command.is_available(availability)
-            })
-            .collect();
+        let groups = self.palette_groups(window, cx);
         let opening = self.opening;
         window.open_dialog(cx, move |dialog, _, _| {
             let owner = owner.clone();
-            let commands_for_confirm = commands.clone();
-            dialog.title("Command palette").w_128().child(
-                Command::new(&palette)
-                    .bordered(false)
-                    .placeholder("Search commands…")
-                    .items(commands.iter().map(|command| {
-                        let label: gpui_kit::SharedString = command.label_with(&copyedit).into();
-                        let shortcut: gpui_kit::SharedString = command
-                            .shortcut()
-                            .and_then(|key| gpui_kit::Keystroke::parse(key).ok())
-                            .map(|key| Kbd::format(&key).into())
-                            .unwrap_or_default();
-                        let command = *command;
-                        CommandItem::new()
-                            .label(label.clone())
-                            .icon(command_icon(command))
-                            .child(move |_, cx| {
-                                div()
-                                    .h_flex()
-                                    .w_full()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_4()
-                                    .child(
-                                        div()
-                                            .h_flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                Icon::new(command_icon(command))
-                                                    .small()
-                                                    .text_color(cx.theme().muted_foreground),
-                                            )
-                                            .child(label.clone()),
-                                    )
-                                    .when(!shortcut.is_empty(), |row| {
-                                        row.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(shortcut.clone()),
+            let groups_for_confirm = groups.clone();
+            let mut palette_command = Command::new(&palette)
+                .bordered(false)
+                .placeholder("Search commands…");
+            for (title, entries) in &groups {
+                let items = entries.iter().map(|entry| {
+                    let entry = entry.clone();
+                    let label = entry.label.clone();
+                    let shortcut = entry.shortcut.clone();
+                    let icon = entry.icon;
+                    CommandItem::new()
+                        .label(label.clone())
+                        .icon(icon)
+                        .child(move |_, cx| {
+                            div()
+                                .h_flex()
+                                .w_full()
+                                .items_center()
+                                .justify_between()
+                                .gap_4()
+                                .child(
+                                    div()
+                                        .h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            Icon::new(icon)
+                                                .small()
+                                                .text_color(cx.theme().muted_foreground),
                                         )
-                                    })
-                            })
-                            .disabled(command == CommandId::OpenFile && opening)
-                    }))
-                    .empty(|_, _, cx| {
-                        div()
-                            .p_4()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("No matching commands")
-                    })
-                    .on_confirm(move |index, window, cx| {
-                        let Some(command) = commands_for_confirm.get(index.row).copied() else {
-                            return;
-                        };
-                        window.close_dialog(cx);
-                        let _ = owner.update(cx, |this, cx| this.execute(command, window, cx));
-                    }),
-            )
+                                        .child(label.clone()),
+                                )
+                                .when(!shortcut.is_empty(), |row| {
+                                    row.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(shortcut.clone()),
+                                    )
+                                })
+                        })
+                        .disabled(
+                            matches!(entry.action, PaletteAction::Command(CommandId::OpenFile))
+                                && opening,
+                        )
+                });
+                palette_command =
+                    palette_command.group(CommandGroup::new().label(*title).items(items));
+            }
+            let palette_command = palette_command
+                .empty(|_, _, cx| {
+                    div()
+                        .p_4()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No matching commands")
+                })
+                .on_confirm(move |index, window, cx| {
+                    let Some(entry) = groups_for_confirm
+                        .get(index.section)
+                        .and_then(|(_, entries)| entries.get(index.row))
+                    else {
+                        return;
+                    };
+                    let action = entry.action.clone();
+                    window.close_dialog(cx);
+                    let _ = owner.update(cx, |this, cx| match action {
+                        PaletteAction::Command(command) => this.execute(command, window, cx),
+                        PaletteAction::RecentProject(id) => this.open_recent(&id, window, cx),
+                        PaletteAction::Collection(id) => this.open_collection(&id, window, cx),
+                    });
+                });
+            dialog
+                .title("Command palette")
+                .w_128()
+                .child(palette_command)
         });
         self.palette.update(cx, |state, cx| state.focus(window, cx));
     }
@@ -1206,6 +1799,7 @@ impl Shell {
         // The dock may have been resized while the sheet was open; the live
         // layout stays authoritative, like every other layout write.
         global.layout = self.settings.layout.clone();
+        global.window = self.settings.window;
         self.settings = global;
         if let Some(preferences) = edits.project
             && let Some(scope) = self.project_scope.as_mut()
@@ -1524,6 +2118,11 @@ fn command_icon(command: CommandId) -> IconName {
     match command {
         CommandId::OpenFile => IconName::FileText,
         CommandId::OpenProject => IconName::FolderOpen,
+        CommandId::OpenRecentProjects => IconName::FolderOpen,
+        CommandId::ReloadCollections => IconName::RotateCcw,
+        CommandId::OpenProjectInIde
+        | CommandId::OpenCollectionInIde
+        | CommandId::OpenEntryInIde => IconName::SquarePen,
         CommandId::NewEntry => IconName::FilePlus,
         CommandId::DuplicateEntry => IconName::Copy,
         CommandId::RenameEntry => IconName::SquarePen,
@@ -1573,12 +2172,15 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::SystemTheme => IconName::Monitor,
         CommandId::ResetLayout => IconName::RotateCcw,
         CommandId::OpenPreferences => IconName::Settings,
+        CommandId::ToggleFullscreen => IconName::Maximize,
+        CommandId::About => IconName::Info,
         CommandId::Quit => IconName::X,
     }
 }
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_menus(window, cx);
         // Activate the frontmatter form whenever the active document, its schema
         // revision or its mapped fields change. Editing the form does not change
         // this key, so live edits never rebuild the controls mid-entry.
@@ -1682,6 +2284,24 @@ impl Render for Shell {
             .key_context("Astrolith")
             .on_action(cx.listener(|this, command: &CommandId, window, cx| {
                 this.execute(*command, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, event: &commands::OpenCollection, window, cx| {
+                    this.open_collection(&event.id, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, event: &commands::OpenRecentProject, window, cx| {
+                    this.open_recent(&event.id, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, event: &commands::RemoveRecentProject, window, cx| {
+                    this.remove_recent(&event.id, window, cx)
+                }),
+            )
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.drop_paths(paths.paths().to_vec(), window, cx)
             }))
             .on_action(
                 cx.listener(|this, _: &commands::ModSlash, window, cx| this.mod_slash(window, cx)),
@@ -4149,5 +4769,255 @@ mod tests {
             view.read_with(cx, |_, cx| cx.theme().foreground),
             "reset restores the theme heading token"
         );
+    }
+
+    fn registry_store() -> (tempfile::TempDir, Arc<PreferencesStore>) {
+        let workspace = tempfile::tempdir().unwrap();
+        let (store, settings, _) =
+            PreferencesStore::load(workspace.path().join("preferences/global.json"));
+        store.save_global(1, &settings).unwrap();
+        (workspace, Arc::new(store))
+    }
+
+    #[gpui_kit::test]
+    async fn startup_reopens_the_most_recent_project_without_arguments(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (_workspace, store) = registry_store();
+        let older = project_fixture("older-site");
+        let newer = project_fixture("newer-site");
+        store
+            .record_project_open(older.path(), Some("older-site"), 10)
+            .unwrap();
+        store
+            .record_project_open(newer.path(), Some("newer-site"), 20)
+            .unwrap();
+        let expected = newer.path().canonicalize().unwrap();
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        view.update(cx, |shell, _| shell.store = Some(store));
+        let project = view.read_with(cx, |shell, _| shell.project.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.begin(StartupRequest::default(), None, window, cx)
+            });
+        })
+        .unwrap();
+        cx.condition(&project, |project, _| project.project_root().is_some())
+            .await;
+        assert_eq!(
+            project.read_with(cx, |project, _| project.project_root()),
+            Some(expected)
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn a_startup_entry_wins_over_the_last_project(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (_workspace, store) = registry_store();
+        let older = project_fixture("older-site");
+        let newer = project_fixture("newer-site");
+        store
+            .record_project_open(older.path(), Some("older-site"), 10)
+            .unwrap();
+        store
+            .record_project_open(newer.path(), Some("newer-site"), 20)
+            .unwrap();
+        let entry = newer.path().join("src/content/second.md");
+        let entry = entry.canonicalize().unwrap();
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        view.update(cx, |shell, _| shell.store = Some(store));
+        let project = view.read_with(cx, |shell, _| shell.project.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.begin(
+                    StartupRequest {
+                        target: Some(StartupTarget::Entry(entry.clone())),
+                        problem: None,
+                    },
+                    None,
+                    window,
+                    cx,
+                )
+            });
+        })
+        .unwrap();
+        cx.condition(&project, |project, _| {
+            project.active_path().as_ref() == Some(&entry)
+        })
+        .await;
+        assert_eq!(
+            project.read_with(cx, |project, _| project.project_root()),
+            Some(newer.path().canonicalize().unwrap())
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn a_protected_startup_root_is_refused_before_it_opens(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let project = view.read_with(cx, |shell, _| shell.project.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.begin(
+                    StartupRequest {
+                        target: Some(StartupTarget::Project(PathBuf::from("/etc"))),
+                        problem: None,
+                    },
+                    None,
+                    window,
+                    cx,
+                )
+            });
+        })
+        .unwrap();
+        cx.condition(&view, |shell, _| shell.warning.is_some())
+            .await;
+        assert!(
+            view.read_with(cx, |shell, _| shell.warning.clone())
+                .unwrap()
+                .contains("System directories")
+        );
+        assert_eq!(
+            project.read_with(cx, |project, _| project.project_root()),
+            None
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn recent_project_actions_open_and_remove_through_the_registry(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (_workspace, store) = registry_store();
+        let fixture = project_fixture("action-site");
+        let open = store
+            .record_project_open(fixture.path(), Some("action-site"), 10)
+            .unwrap();
+        let records = store.recent_projects().0;
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        view.update(cx, |shell, _| {
+            shell.store = Some(store.clone());
+            shell.set_registry(records);
+        });
+        let project = view.read_with(cx, |shell, _| shell.project.clone());
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        cx.dispatch_action(
+            handle.into(),
+            commands::OpenRecentProject {
+                id: open.id.clone(),
+            },
+        );
+        cx.condition(&project, |project, _| project.project_root().is_some())
+            .await;
+        assert_eq!(
+            project.read_with(cx, |project, _| project.project_root()),
+            Some(fixture.path().canonicalize().unwrap())
+        );
+
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        cx.dispatch_action(
+            handle.into(),
+            commands::RemoveRecentProject {
+                id: open.id.clone(),
+            },
+        );
+        cx.condition(&view, |shell, _| shell.recent.is_empty())
+            .await;
+        assert!(store.recent_projects().0.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn about_is_reachable_from_its_command_id(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| shell.execute(CommandId::About, window, cx));
+            assert!(window.has_active_dialog(cx));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn shell_drop_rejects_multiple_and_mixed_drops_visibly(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("note.md");
+        std::fs::write(&file, "# note\n").unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.drop_paths(
+                    vec![directory.path().to_path_buf(), file.clone()],
+                    window,
+                    cx,
+                )
+            });
+        })
+        .unwrap();
+        assert!(
+            view.read_with(cx, |shell, _| shell.warning.clone())
+                .unwrap()
+                .contains("exactly one")
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.drop_paths(vec![file.clone()], window, cx)
+            });
+        })
+        .unwrap();
+        assert!(
+            view.read_with(cx, |shell, _| shell.warning.clone())
+                .unwrap()
+                .contains("Open the project first")
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn palette_rows_include_registry_generated_recent_and_collection_commands(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let fixture = project_fixture("palette-site");
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let record = ProjectRecord {
+            id: "recent-one".into(),
+            path: fixture.path().display().to_string(),
+            display_name: "Palette Site".into(),
+            package_name: Some("palette-site".into()),
+            last_opened_at: 1,
+        };
+        view.update(cx, |shell, _| shell.set_registry(vec![record]));
+        open_project(cx, handle, &view, fixture.path().to_path_buf());
+        let project = view.read_with(cx, |shell, _| shell.project.clone());
+        cx.condition(&project, |project, _| project.project_root().is_some())
+            .await;
+        let groups = cx
+            .update_window(handle.into(), |_, window, cx| {
+                view.update(cx, |shell, cx| shell.palette_groups(window, cx))
+            })
+            .unwrap();
+        let recent = groups
+            .iter()
+            .find(|(title, _)| *title == "Recent projects")
+            .expect("recent rows are grouped");
+        assert!(recent.1.iter().any(|entry| {
+            entry.label == "Open Palette Site"
+                && matches!(&entry.action, PaletteAction::RecentProject(id) if id == "recent-one")
+        }));
+        let collections = groups
+            .iter()
+            .find(|(title, _)| *title == "Collections")
+            .expect("collection rows are generated from the live index");
+        assert!(collections.1.iter().any(|entry| {
+            entry.label == "Open Collection: blog"
+                && matches!(&entry.action, PaletteAction::Collection(id) if id == "blog")
+        }));
+        assert!(groups.iter().any(|(title, entries)| {
+            *title == "File"
+                && entries.iter().any(|entry| {
+                    entry.label == "Reload collections"
+                        && matches!(
+                            entry.action,
+                            PaletteAction::Command(CommandId::ReloadCollections)
+                        )
+                })
+        }));
     }
 }

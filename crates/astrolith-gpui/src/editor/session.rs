@@ -263,6 +263,20 @@ impl DocumentSession {
         self.counts.lines
     }
 
+    /// One-based line and column of the primary cursor in the visible text.
+    pub(crate) fn cursor_line_column(&self, cx: &App) -> (u32, u32) {
+        let visible = &self.projection.visible;
+        let offset = self.editor.read(cx).cursor().min(visible.len());
+        let prefix = &visible[..offset];
+        let line = prefix.matches('\n').count() as u32 + 1;
+        let column = prefix
+            .rsplit('\n')
+            .next()
+            .map(|line| line.chars().count() as u32 + 1)
+            .unwrap_or(1);
+        (line, column)
+    }
+
     /// Apply one formatting command as one undo transaction.
     ///
     /// The replacement is mapped through the projection before the editor is

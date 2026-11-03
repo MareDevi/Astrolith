@@ -1,12 +1,19 @@
 use astrolith_core::preferences::{CopyeditCategory, CopyeditPreferences};
 use gpui_kit::{App, KeyBinding};
 
+use crate::recent_projects::RecentEntry;
+
 /// Stable command identity shared by keys, toolbar, and palette.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, gpui_kit::Action)]
 #[action(namespace = astrolith, no_json)]
 pub(crate) enum CommandId {
     OpenFile,
     OpenProject,
+    OpenRecentProjects,
+    ReloadCollections,
+    OpenProjectInIde,
+    OpenCollectionInIde,
+    OpenEntryInIde,
     NewEntry,
     DuplicateEntry,
     RenameEntry,
@@ -58,12 +65,19 @@ pub(crate) enum CommandId {
     DarkTheme,
     SystemTheme,
     ResetLayout,
+    ToggleFullscreen,
+    About,
     Quit,
 }
 
 pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::OpenFile,
     CommandId::OpenProject,
+    CommandId::OpenRecentProjects,
+    CommandId::ReloadCollections,
+    CommandId::OpenProjectInIde,
+    CommandId::OpenCollectionInIde,
+    CommandId::OpenEntryInIde,
     CommandId::NewEntry,
     CommandId::DuplicateEntry,
     CommandId::RenameEntry,
@@ -115,6 +129,8 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::DarkTheme,
     CommandId::SystemTheme,
     CommandId::ResetLayout,
+    CommandId::ToggleFullscreen,
+    CommandId::About,
     CommandId::Quit,
 ];
 
@@ -139,6 +155,58 @@ pub(crate) struct CommandAvailability {
     pub mdx_document: bool,
     /// The active editor has a non-empty selection.
     pub selection_nonempty: bool,
+    /// An IDE command is configured in preferences.
+    pub ide_configured: bool,
+    /// The left dock is open.
+    pub sidebar_visible: bool,
+    /// The right dock is open.
+    pub inspector_visible: bool,
+    /// The bottom preview dock is open.
+    pub preview_visible: bool,
+    /// Focus mode is active.
+    pub focus_mode: bool,
+    /// Typewriter mode is active.
+    pub typewriter_mode: bool,
+    /// The window is fullscreen.
+    pub fullscreen: bool,
+}
+
+/// One collection offered as a switch command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CollectionItem {
+    /// Collection identity from the live index.
+    pub name: String,
+    /// Whether the active document already belongs to this collection.
+    pub active: bool,
+}
+
+/// The shared label for one generated collection command.
+pub(crate) fn collection_command_label(name: &str) -> String {
+    format!("Open Collection: {name}")
+}
+
+/// Open one recent project from the registry.
+#[derive(Clone, Debug, PartialEq, Eq, gpui_kit::Action)]
+#[action(namespace = astrolith, no_json)]
+pub(crate) struct OpenRecentProject {
+    /// Stable registry identity.
+    pub id: String,
+}
+
+/// Remove one project from the recent list.
+#[derive(Clone, Debug, PartialEq, Eq, gpui_kit::Action)]
+#[action(namespace = astrolith, no_json)]
+pub(crate) struct RemoveRecentProject {
+    /// Stable registry identity.
+    pub id: String,
+}
+
+/// Switch the file list to one collection.
+#[derive(Clone, Debug, PartialEq, Eq, gpui_kit::Action)]
+#[action(namespace = astrolith, no_json)]
+pub(crate) struct OpenCollection {
+    /// Collection identity from the live index.
+    pub id: String,
 }
 
 impl CommandId {
@@ -170,7 +238,13 @@ impl CommandId {
     /// Whether this command can run in the given application state.
     pub fn is_available(self, state: CommandAvailability) -> bool {
         match self {
-            Self::NewEntry | Self::OpenContentFinder => state.project_open && !state.busy,
+            Self::NewEntry | Self::OpenContentFinder | Self::ReloadCollections => {
+                state.project_open && !state.busy
+            }
+            Self::OpenProjectInIde | Self::OpenCollectionInIde => {
+                state.project_open && state.ide_configured && !state.busy
+            }
+            Self::OpenEntryInIde => state.active_entry && state.ide_configured && !state.busy,
             Self::DuplicateEntry
             | Self::RenameEntry
             | Self::DeleteEntry
@@ -207,6 +281,11 @@ impl CommandId {
         match self {
             Self::OpenFile => "Open file…",
             Self::OpenProject => "Open project…",
+            Self::OpenRecentProjects => "Manage Recent Projects…",
+            Self::ReloadCollections => "Reload collections",
+            Self::OpenProjectInIde => "Open project in IDE",
+            Self::OpenCollectionInIde => "Open collection in IDE",
+            Self::OpenEntryInIde => "Open file in IDE",
             Self::NewEntry => "New file",
             Self::DuplicateEntry => "Duplicate file",
             Self::RenameEntry => "Rename or move file…",
@@ -268,6 +347,8 @@ impl CommandId {
             Self::DarkTheme => "Dark theme",
             Self::SystemTheme => "System theme",
             Self::ResetLayout => "Reset layout",
+            Self::ToggleFullscreen => "Enter full screen",
+            Self::About => "About Astrolith",
             Self::Quit => "Quit Astrolith",
         }
     }
@@ -312,9 +393,9 @@ impl CommandId {
             }
             Self::OpenPalette => {
                 if mac {
-                    "cmd-shift-p"
+                    "cmd-p"
                 } else {
-                    "ctrl-shift-p"
+                    "ctrl-p"
                 }
             }
             Self::OpenPreferences => {
@@ -486,6 +567,15 @@ impl CommandId {
                     "ctrl-shift-t"
                 }
             }
+            Self::ToggleFullscreen => {
+                // F11 is an explicit Linux decision; other platforms reach
+                // fullscreen through the menu and command alone.
+                if cfg!(target_os = "linux") {
+                    "f11"
+                } else {
+                    return None;
+                }
+            }
             Self::Quit => {
                 if mac {
                     "cmd-q"
@@ -549,12 +639,19 @@ pub(crate) struct ContentFinderInsert;
 /// bindings use, so the OS menu cannot drift from the command registry. Linux
 /// platforms without a native menu bar simply retain the registered menus;
 /// macOS and Windows present them natively.
-pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
+pub(crate) fn install_menus(
+    cx: &mut App,
+    copyedit: &CopyeditPreferences,
+    availability: CommandAvailability,
+    recent: &[RecentEntry],
+    collections: &[CollectionItem],
+) {
     let file = gpui_kit::Menu::new("File").items({
         let mut items = items_for(
             &[
                 CommandId::OpenFile,
                 CommandId::OpenProject,
+                CommandId::ReloadCollections,
                 CommandId::NewEntry,
                 CommandId::Save,
                 CommandId::CloseDocument,
@@ -563,7 +660,36 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
                 CommandId::DeleteEntry,
             ],
             copyedit,
+            availability,
         );
+        items.push(gpui_kit::MenuItem::separator());
+        let mut recent_items: Vec<gpui_kit::MenuItem> = recent
+            .iter()
+            .map(|entry| {
+                gpui_kit::MenuItem::action(
+                    entry.label.clone(),
+                    OpenRecentProject {
+                        id: entry.id.clone(),
+                    },
+                )
+            })
+            .collect();
+        if recent_items.is_empty() {
+            recent_items.push(
+                gpui_kit::MenuItem::action("No recent projects", CommandId::OpenRecentProjects)
+                    .disabled(true),
+            );
+        }
+        let mut recent_menu = recent_items;
+        recent_menu.push(gpui_kit::MenuItem::separator());
+        recent_menu.push(menu_item(
+            CommandId::OpenRecentProjects,
+            copyedit,
+            availability,
+        ));
+        items.push(gpui_kit::MenuItem::submenu(
+            gpui_kit::Menu::new("Open Recent").items(recent_menu),
+        ));
         items.push(gpui_kit::MenuItem::separator());
         items.extend(items_for(
             &[
@@ -571,14 +697,14 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
                 CommandId::CopyPathAbsolute,
                 CommandId::CopyPathRelative,
                 CommandId::RecoverUnsaved,
+                CommandId::OpenProjectInIde,
+                CommandId::OpenEntryInIde,
             ],
             copyedit,
+            availability,
         ));
         items.push(gpui_kit::MenuItem::separator());
-        items.push(gpui_kit::MenuItem::action(
-            CommandId::Quit.label(),
-            CommandId::Quit,
-        ));
+        items.push(menu_item(CommandId::Quit, copyedit, availability));
         items
     });
     let view = gpui_kit::Menu::new("View").items({
@@ -591,9 +717,23 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
                 CommandId::TogglePreview,
                 CommandId::FocusDocument,
                 CommandId::ResetLayout,
+                CommandId::ToggleFullscreen,
             ],
             copyedit,
+            availability,
         );
+        if !collections.is_empty() {
+            items.push(gpui_kit::MenuItem::separator());
+            items.extend(collections.iter().map(|collection| {
+                gpui_kit::MenuItem::action(
+                    collection_command_label(&collection.name),
+                    OpenCollection {
+                        id: collection.name.clone(),
+                    },
+                )
+                .disabled(collection.active)
+            }));
+        }
         items.push(gpui_kit::MenuItem::separator());
         items.extend(items_for(
             &[
@@ -602,10 +742,11 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
                 CommandId::SystemTheme,
             ],
             copyedit,
+            availability,
         ));
         items
     });
-    let format = gpui_kit::Menu::new("Format").items({
+    let edit = gpui_kit::Menu::new("Edit").items({
         let mut items = items_for(
             &[
                 CommandId::Bold,
@@ -615,6 +756,7 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
                 CommandId::OpenComponentBuilder,
             ],
             copyedit,
+            availability,
         );
         items.push(gpui_kit::MenuItem::separator());
         items.extend(items_for(
@@ -626,6 +768,7 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
                 CommandId::Paragraph,
             ],
             copyedit,
+            availability,
         ));
         items
     });
@@ -646,6 +789,7 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
                 CommandId::ToggleTypewriterMode,
             ],
             copyedit,
+            availability,
         );
         items.push(gpui_kit::MenuItem::separator());
         items.extend(items_for(
@@ -658,6 +802,7 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
                 CommandId::ToggleAllCopyedit,
             ],
             copyedit,
+            availability,
         ));
         items
     });
@@ -668,15 +813,144 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
             CommandId::OpenPreview,
         ],
         copyedit,
+        availability,
     ));
-    cx.set_menus([file, view, format, writer, preview]);
+    let help =
+        gpui_kit::Menu::new("Help").items(items_for(&[CommandId::About], copyedit, availability));
+    let application = gpui_kit::Menu::new("Astrolith").items({
+        let mut items = items_for(
+            &[
+                CommandId::About,
+                CommandId::OpenPreferences,
+                CommandId::OpenCollectionInIde,
+            ],
+            copyedit,
+            availability,
+        );
+        items.push(gpui_kit::MenuItem::separator());
+        items.push(menu_item(CommandId::Quit, copyedit, availability));
+        items
+    });
+    cx.set_menus([file, edit, view, writer, preview, help, application]);
 }
 
-fn items_for(commands: &[CommandId], copyedit: &CopyeditPreferences) -> Vec<gpui_kit::MenuItem> {
+fn items_for(
+    commands: &[CommandId],
+    copyedit: &CopyeditPreferences,
+    availability: CommandAvailability,
+) -> Vec<gpui_kit::MenuItem> {
     commands
         .iter()
-        .map(|command| gpui_kit::MenuItem::action(command.label_with(copyedit), *command))
+        .map(|command| menu_item(*command, copyedit, availability))
         .collect()
+}
+
+/// The IDE commands present in the file-row context menu.
+pub(crate) const ENTRY_CONTEXT_IDE_COMMANDS: &[CommandId] = &[
+    CommandId::OpenProjectInIde,
+    CommandId::OpenCollectionInIde,
+    CommandId::OpenEntryInIde,
+];
+
+/// The palette group a command appears under, aligned with its menu.
+pub(crate) fn command_group(command: CommandId) -> &'static str {
+    match command {
+        CommandId::OpenFile
+        | CommandId::OpenProject
+        | CommandId::OpenRecentProjects
+        | CommandId::ReloadCollections
+        | CommandId::NewEntry
+        | CommandId::DuplicateEntry
+        | CommandId::RenameEntry
+        | CommandId::DeleteEntry
+        | CommandId::RevealEntry
+        | CommandId::CopyPathAbsolute
+        | CommandId::CopyPathRelative
+        | CommandId::Save
+        | CommandId::CloseDocument
+        | CommandId::RecoverUnsaved
+        | CommandId::OpenProjectInIde
+        | CommandId::OpenCollectionInIde
+        | CommandId::OpenEntryInIde => "File",
+        CommandId::OpenPalette
+        | CommandId::OpenPreferences
+        | CommandId::ToggleSidebar
+        | CommandId::ToggleInspector
+        | CommandId::TogglePreview
+        | CommandId::FocusDocument
+        | CommandId::FocusSelectionToolbar
+        | CommandId::ResetLayout
+        | CommandId::ToggleFullscreen
+        | CommandId::LightTheme
+        | CommandId::DarkTheme
+        | CommandId::SystemTheme => "View",
+        CommandId::Bold
+        | CommandId::Italic
+        | CommandId::InsertLink
+        | CommandId::ToggleComment
+        | CommandId::OpenComponentBuilder
+        | CommandId::Heading1
+        | CommandId::Heading2
+        | CommandId::Heading3
+        | CommandId::Heading4
+        | CommandId::Paragraph => "Format",
+        CommandId::FindInDocument
+        | CommandId::ReplaceInDocument
+        | CommandId::FindNextMatch
+        | CommandId::FindPreviousMatch
+        | CommandId::CloseFind
+        | CommandId::GoToLine
+        | CommandId::OpenContentFinder
+        | CommandId::SelectNextOccurrence
+        | CommandId::CursorsAtLineEnds
+        | CommandId::ToggleFocusMode
+        | CommandId::ToggleTypewriterMode
+        | CommandId::ToggleCopyeditNouns
+        | CommandId::ToggleCopyeditVerbs
+        | CommandId::ToggleCopyeditAdjectives
+        | CommandId::ToggleCopyeditAdverbs
+        | CommandId::ToggleCopyeditConjunctions
+        | CommandId::ToggleAllCopyedit => "Writer",
+        CommandId::StartPreview | CommandId::StopPreview | CommandId::OpenPreview => "Preview",
+        CommandId::About => "Help",
+        CommandId::Quit => "Application",
+    }
+}
+
+/// Build identity shown in About; P14 supplies a packaged identifier.
+pub(crate) fn build_identity() -> &'static str {
+    option_env!("ASTROLITH_BUILD_ID").unwrap_or("development build")
+}
+
+/// About content: version and build identity, with no update action.
+pub(crate) fn about_text() -> String {
+    format!(
+        "Astrolith {}\nBuild: {}\n{} · {}",
+        env!("CARGO_PKG_VERSION"),
+        build_identity(),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+/// One menu item carrying the shared label, availability and check state.
+fn menu_item(
+    command: CommandId,
+    copyedit: &CopyeditPreferences,
+    availability: CommandAvailability,
+) -> gpui_kit::MenuItem {
+    let checked = match command {
+        CommandId::ToggleSidebar => availability.sidebar_visible,
+        CommandId::ToggleInspector => availability.inspector_visible,
+        CommandId::TogglePreview => availability.preview_visible,
+        CommandId::ToggleFocusMode => availability.focus_mode,
+        CommandId::ToggleTypewriterMode => availability.typewriter_mode,
+        CommandId::ToggleFullscreen => availability.fullscreen,
+        _ => false,
+    };
+    gpui_kit::MenuItem::action(command.label_with(copyedit), command)
+        .checked(checked)
+        .disabled(!command.is_available(availability))
 }
 
 #[cfg(test)]
@@ -854,6 +1128,7 @@ mod tests {
                 markdown_document: true,
                 mdx_document: false,
                 selection_nonempty: true,
+                ..CommandAvailability::default()
             },
         ];
         for state in states {
@@ -881,12 +1156,33 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn application_menus_cover_every_registered_command_once(cx: &mut gpui_kit::TestAppContext) {
+    fn application_menus_cover_every_registered_command(cx: &mut gpui_kit::TestAppContext) {
         let copyedit = CopyeditPreferences::default();
+        let recent = vec![RecentEntry {
+            id: "site".into(),
+            path: std::path::PathBuf::from("/projects/site"),
+            label: "Open site".into(),
+        }];
+        let collections = vec![
+            CollectionItem {
+                name: "blog".into(),
+                active: false,
+            },
+            CollectionItem {
+                name: "docs".into(),
+                active: true,
+            },
+        ];
         let menus = cx.update(|cx| {
             gpui_kit::init(cx);
             bind_keys(cx);
-            install_menus(cx, &copyedit);
+            install_menus(
+                cx,
+                &copyedit,
+                CommandAvailability::default(),
+                &recent,
+                &collections,
+            );
             cx.get_menus().expect("the menu bar is registered")
         });
         assert_eq!(
@@ -894,13 +1190,29 @@ mod tests {
                 .iter()
                 .map(|menu| menu.name.to_string())
                 .collect::<Vec<_>>(),
-            ["File", "View", "Format", "Writer", "Preview"]
+            [
+                "File",
+                "Edit",
+                "View",
+                "Writer",
+                "Preview",
+                "Help",
+                "Astrolith"
+            ]
         );
         let mut labels = Vec::new();
         for menu in &menus {
             for item in &menu.items {
-                if let gpui_kit::OwnedMenuItem::Action { name, .. } = item {
-                    labels.push(name.clone());
+                match item {
+                    gpui_kit::OwnedMenuItem::Action { name, .. } => labels.push(name.clone()),
+                    gpui_kit::OwnedMenuItem::Submenu(submenu) => {
+                        for item in &submenu.items {
+                            if let gpui_kit::OwnedMenuItem::Action { name, .. } = item {
+                                labels.push(name.clone());
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -911,10 +1223,69 @@ mod tests {
                 "`{label}` is missing from the menu bar"
             );
         }
-        assert_eq!(
-            labels.len(),
-            COMMANDS.len(),
-            "every command must appear exactly once: {labels:?}"
+        assert!(labels.iter().any(|label| label == "Open site"));
+        assert!(labels.iter().any(|label| label == "Open Collection: blog"));
+        assert!(labels.iter().any(|label| label == "Open Collection: docs"));
+    }
+
+    #[test]
+    fn generated_commands_share_labels_and_availability_rules() {
+        assert_eq!(collection_command_label("blog"), "Open Collection: blog");
+        let idle = CommandAvailability::default();
+        for command in [CommandId::ReloadCollections, CommandId::OpenProjectInIde] {
+            assert!(!command.is_available(idle));
+        }
+        let open = CommandAvailability {
+            project_open: true,
+            ..CommandAvailability::default()
+        };
+        assert!(CommandId::ReloadCollections.is_available(open));
+        assert!(!CommandId::OpenProjectInIde.is_available(open));
+        let configured = CommandAvailability {
+            ide_configured: true,
+            ..open
+        };
+        assert!(CommandId::OpenProjectInIde.is_available(configured));
+        assert!(CommandId::OpenCollectionInIde.is_available(configured));
+        assert!(!CommandId::OpenEntryInIde.is_available(configured));
+        assert!(CommandId::OpenEntryInIde.is_available(CommandAvailability {
+            active_entry: true,
+            ..configured
+        }));
+        assert!(CommandId::About.is_available(idle));
+        assert!(CommandId::OpenRecentProjects.is_available(idle));
+    }
+
+    #[test]
+    fn entry_context_ide_commands_follow_shared_availability() {
+        let empty = CommandAvailability::default();
+        let project = CommandAvailability {
+            project_open: true,
+            active_entry: true,
+            ..CommandAvailability::default()
+        };
+        let configured = CommandAvailability {
+            ide_configured: true,
+            ..project
+        };
+        for command in ENTRY_CONTEXT_IDE_COMMANDS {
+            assert!(!command.is_available(empty));
+            assert!(!command.is_available(project), "{}", command.label());
+            assert!(command.is_available(configured), "{}", command.label());
+        }
+        assert!(CommandId::OpenEntryInIde.is_available(configured));
+        assert!(
+            !CommandId::OpenEntryInIde.is_available(CommandAvailability {
+                active_entry: false,
+                ..configured
+            })
         );
+    }
+
+    #[test]
+    fn about_reports_the_crate_version_and_build_identity() {
+        let text = about_text();
+        assert!(text.contains(env!("CARGO_PKG_VERSION")));
+        assert!(text.contains(build_identity()));
     }
 }

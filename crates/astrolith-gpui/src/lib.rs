@@ -1,5 +1,7 @@
 //! Native application shell and its application-owned preferences.
 mod commands;
+mod desktop_actions;
+mod drag_drop;
 mod editor;
 mod file;
 pub mod frontmatter;
@@ -7,8 +9,11 @@ mod layout;
 mod preferences;
 mod preview;
 mod project_discovery;
+mod recent_projects;
 mod runtime;
 mod settings;
 mod shell;
+mod single_instance;
 pub mod theme;
+mod url_scheme;
 pub use shell::open;

@@ -9,6 +9,6 @@ mod model;
 mod resolve;
 mod store;
 
-pub(crate) use model::{GlobalPreferencesV2, ProjectPreferencesV1};
+pub(crate) use model::{GlobalPreferencesV2, ProjectPreferencesV1, ProjectRecord, WindowGeometry};
 pub(crate) use resolve::resolve;
 pub(crate) use store::{PreferencesStore, recovery_dir, save_failure_dir, settings_path};

@@ -1,6 +1,6 @@
 # Astro Editor Linux feature-parity implementation plan
 
-**Status:** Approved on 2026-11-01; P0-P3 complete with the P3 real-window field gate still manual; P4 projection complete with the native gate accepted and matched-workload evidence; P5-P8 implemented with headless evidence and outstanding native smokes; P9 static component index/import planner complete; P10 builder UI implemented with headless integration coverage; P11 preferences UI implemented with headless coverage and a native smoke outstanding; P12 next.
+**Status:** Approved on 2026-11-01; P0-P3 complete with the P3 real-window field gate still manual; P4 projection complete with the native gate accepted and matched-workload evidence; P5-P8 implemented with headless evidence and outstanding native smokes; P9 static component index/import planner complete; P10 builder UI implemented with headless integration coverage; P11 preferences UI implemented with headless coverage and a native smoke outstanding; P12 navigation, registry commands and desktop protocols implemented with headless coverage and native protocol smokes outstanding; P13 next.
 
 **Date:** 2026-11-01
 

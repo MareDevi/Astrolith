@@ -358,6 +358,37 @@ impl IdeCommand {
     }
 }
 
+/// Persisted main-window geometry, restored on the next launch.
+///
+/// Values are logical pixels in desktop coordinates; the caller enforces the
+/// 1000×700 minimum when restoring.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowGeometry {
+    /// Desktop x origin.
+    pub x: f32,
+    /// Desktop y origin.
+    pub y: f32,
+    /// Window width in logical pixels.
+    pub width: f32,
+    /// Window height in logical pixels.
+    pub height: f32,
+    /// Whether the window was maximized; the bounds remain the restore size.
+    pub maximized: bool,
+}
+
+impl Default for WindowGeometry {
+    fn default() -> Self {
+        Self {
+            x: 0.,
+            y: 0.,
+            width: 0.,
+            height: 0.,
+            maximized: false,
+        }
+    }
+}
+
 /// Application-wide preference scope. Persisted as `global.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -368,6 +399,8 @@ pub struct GlobalPreferencesV2 {
     pub theme: ThemePreference,
     /// Global dock layout; a project layout overrides it when present.
     pub layout: PanelLayout,
+    /// Last main-window geometry; absent opens the platform default.
+    pub window: Option<WindowGeometry>,
     /// Optional light and dark heading colors.
     pub heading_colors: HeadingColors,
     /// Editor base font size in logical pixels.
@@ -390,6 +423,7 @@ impl Default for GlobalPreferencesV2 {
             version: GLOBAL_PREFERENCES_VERSION,
             theme: ThemePreference::System,
             layout: PanelLayout::default(),
+            window: None,
             heading_colors: HeadingColors::default(),
             editor_font_size: 18.,
             autosave_delay: AutosaveDelay::default(),
@@ -781,6 +815,34 @@ impl ProjectRegistry {
         });
         projects
     }
+
+    /// The registered project that owns `path`, matched by longest ancestor.
+    ///
+    /// A deep link or startup file must resolve to exactly one registered root;
+    /// a path outside every root has no owner.
+    pub fn owning_project(&self, path: &str) -> Option<&ProjectRecord> {
+        let path = normalize_path(path);
+        self.projects
+            .iter()
+            .filter(|project| path_is_within(&normalize_path(&project.path), &path))
+            .max_by_key(|project| normalize_path(&project.path).len())
+    }
+
+    /// Remove one entry from the recent list; returns whether it existed.
+    pub fn remove(&mut self, id: &str) -> bool {
+        let before = self.projects.len();
+        self.projects.retain(|project| project.id != id);
+        self.projects.len() != before
+    }
+}
+
+/// Whether `path` is `root` itself or lies beneath it at a component boundary.
+fn path_is_within(root: &str, path: &str) -> bool {
+    if cfg!(windows) {
+        Path::new(&path.to_lowercase()).starts_with(Path::new(&root.to_lowercase()))
+    } else {
+        Path::new(path).starts_with(root)
+    }
 }
 
 /// Stable identity from a display/package name plus a hash of the canonical path.
@@ -1015,6 +1077,65 @@ mod tests {
         assert_ne!(unrelated.id, first.id);
         assert_eq!(unrelated.rebound_from, None);
         assert_eq!(registry.projects.len(), 3);
+    }
+
+    #[test]
+    fn owning_project_matches_the_longest_registered_ancestor() {
+        let mut registry = ProjectRegistry::default();
+        registry.record_open("/projects/site", Some("site"), 1, |_| true);
+        registry.record_open("/projects/site/packages/nested", Some("nested"), 2, |_| {
+            true
+        });
+        assert_eq!(
+            registry
+                .owning_project("/projects/site/src/content/posts/a.md")
+                .map(|project| project.id.as_str()),
+            Some(registry.projects[0].id.as_str())
+        );
+        assert_eq!(
+            registry
+                .owning_project("/projects/site/packages/nested/src/a.md")
+                .map(|project| project.id.as_str()),
+            Some(registry.projects[1].id.as_str())
+        );
+        assert!(registry.owning_project("/elsewhere/a.md").is_none());
+        assert!(
+            registry
+                .owning_project("/projects/site-other/a.md")
+                .is_none(),
+            "a shared string prefix is not an ancestor"
+        );
+    }
+
+    #[test]
+    fn removing_a_recent_project_keeps_the_rest_ordered() {
+        let mut registry = ProjectRegistry::default();
+        let first = registry.record_open("/projects/one", Some("one"), 1, |_| true);
+        let second = registry.record_open("/projects/two", Some("two"), 2, |_| true);
+        assert_eq!(registry.recent().first().unwrap().id, second.id);
+        assert!(registry.remove(&first.id));
+        assert!(!registry.remove(&first.id));
+        assert_eq!(registry.recent().len(), 1);
+        assert_eq!(registry.recent()[0].id, second.id);
+    }
+
+    #[test]
+    fn window_geometry_round_trips_through_the_global_envelope() {
+        let global = GlobalPreferencesV2 {
+            window: Some(WindowGeometry {
+                x: 120.,
+                y: 80.,
+                width: 1280.,
+                height: 800.,
+                maximized: true,
+            }),
+            ..GlobalPreferencesV2::default()
+        };
+        let decoded: GlobalPreferencesV2 =
+            serde_json::from_str(&serde_json::to_string(&global).unwrap()).unwrap();
+        assert_eq!(decoded.window, global.window);
+        let bare: GlobalPreferencesV2 = serde_json::from_str("{\"version\":2}").unwrap();
+        assert_eq!(bare.window, None);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Owns project generations, index publication, retained sessions and load admission.
 use crate::{
-    commands::{CommandAvailability, CommandId},
+    commands::{CollectionItem, CommandAvailability, CommandId, ENTRY_CONTEXT_IDE_COMMANDS},
+    desktop_actions,
     editor::{
         assets as asset_insertion,
         component_builder::{
@@ -52,7 +53,7 @@ use astrolith_workspace::{
         DuplicateRequest, MoveRequest, NewEntryName, PathForm, ProjectScope, RevealRequest,
         ScalarValue, SystemTrash, TrashBackend, TrashRequest,
     },
-    references, scan_collections,
+    paths, references, scan_collections,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -265,7 +266,7 @@ impl ListDelegate for EntryList {
     fn render_item(
         &mut self,
         ix: IndexPath,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<ListItem> {
         let row = self.sections.get(ix.section)?.rows.get(ix.row)?;
@@ -283,6 +284,11 @@ impl ListDelegate for EntryList {
             .owner
             .upgrade()
             .is_none_or(|project| project.read(cx).is_busy());
+        let availability = self
+            .owner
+            .upgrade()
+            .map(|project| project.read(cx).command_availability(cx, window))
+            .unwrap_or_default();
         let badge = |label: &'static str, color: gpui_kit::Hsla| {
             div()
                 .px_1()
@@ -333,7 +339,8 @@ impl ListDelegate for EntryList {
                 )
             })
             .context_menu(move |menu, _, _| {
-                menu.item(entry_menu_item(&owner, CommandId::NewEntry, &path, busy))
+                let menu = menu
+                    .item(entry_menu_item(&owner, CommandId::NewEntry, &path, busy))
                     .separator()
                     .item(entry_menu_item(
                         &owner,
@@ -357,6 +364,18 @@ impl ListDelegate for EntryList {
                         &path,
                         busy,
                     ))
+                    .separator();
+                ENTRY_CONTEXT_IDE_COMMANDS
+                    .iter()
+                    .fold(menu, |menu, command| {
+                        let path = (*command == CommandId::OpenEntryInIde).then(|| path.clone());
+                        menu.item(ide_menu_item(
+                            &owner,
+                            *command,
+                            path,
+                            !command.is_available(availability),
+                        ))
+                    })
             });
         Some(
             ListItem::new(row.id.clone())
@@ -403,6 +422,23 @@ fn entry_menu_item(
         .on_click(move |_, window, cx| {
             let _ = owner.update(cx, |project, cx| {
                 project.entry_command(command, Some(path.clone()), window, cx)
+            });
+        })
+}
+
+/// One IDE context-menu item dispatching the same [`CommandId`] as the palette.
+fn ide_menu_item(
+    owner: &WeakEntity<ProjectWorkspace>,
+    command: CommandId,
+    path: Option<PathBuf>,
+    disabled: bool,
+) -> PopupMenuItem {
+    let owner = owner.clone();
+    PopupMenuItem::new(command.label())
+        .disabled(disabled)
+        .on_click(move |_, window, cx| {
+            let _ = owner.update(cx, |project, cx| {
+                project.open_in_ide(command, path.clone(), window, cx)
             });
         })
 }
@@ -542,6 +578,11 @@ pub(crate) struct ProjectWorkspace {
     data_references_task: Option<Task<()>>,
     /// Writing modes applied to every retained session.
     writing: WritingModes,
+    /// Shell view state mirrored for one authoritative availability value.
+    view_sidebar: bool,
+    view_inspector: bool,
+    view_preview: bool,
+    view_fullscreen: bool,
     /// Copyedit configuration applied to every retained session.
     copyedit: CopyeditConfig,
     /// Static component index for the open project generation.
@@ -754,6 +795,10 @@ impl ProjectWorkspace {
             data_references: BTreeMap::new(),
             data_references_task: None,
             writing: WritingModes::default(),
+            view_sidebar: true,
+            view_inspector: true,
+            view_preview: false,
+            view_fullscreen: false,
             copyedit: CopyeditConfig::default(),
             component_index: None,
             component_error: None,
@@ -2150,7 +2195,8 @@ impl ProjectWorkspace {
                 match selected {
                     Ok(Ok(Some(paths))) => {
                         if let Some(path) = paths.into_iter().next() {
-                            this.start(path, window, cx);
+                            this.loading = false;
+                            this.open_root(path, window, cx);
                         }
                     }
                     Ok(Ok(None)) => {}
@@ -2162,6 +2208,215 @@ impl ProjectWorkspace {
             });
         }));
     }
+    /// Open one project root through the protected-directory policy.
+    ///
+    /// Validation runs on the blocking lane and finishes before any watcher or
+    /// scan exists. A refused root is shown as a blocking error and never
+    /// reaches the registry.
+    pub(crate) fn open_root(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.loading = true;
+        self.open_error = None;
+        self.status = "Checking the project folder…".into();
+        cx.notify();
+        let home = paths::home_directory();
+        let requested = root.clone();
+        let work = runtime::blocking(cx, move || {
+            paths::validate_project_root(&requested, home.as_deref())
+                .map_err(|error| error.message())
+        });
+        self.retain_command_task(cx.spawn_in(window, async move |this, cx| {
+            let result = work.await.and_then(|result| result);
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(root) => this.start(root, window, cx),
+                Err(message) => {
+                    tracing::warn!(%message, "refused a project root");
+                    this.loading = false;
+                    this.open_error = Some(message.clone());
+                    this.status = format!("Could not open project: {message}");
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// Re-scan collections and report completion.
+    ///
+    /// The index publication preserves the selection, tabs, sessions
+    /// (recovery keys) and the active entry, so the preview route is retargeted
+    /// only when the entry itself changed.
+    pub(crate) fn reload_collections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.manifest.is_none() {
+            self.status = "Open a project before reloading collections.".into();
+            cx.notify();
+            return;
+        }
+        let generation = self.generation;
+        let Some(index) = self.start_index_request(cx) else {
+            return;
+        };
+        self.status = "Reloading collections…".into();
+        self.index_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let _ = index.await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.status = match this.index_error.as_ref() {
+                    Some(error) => format!("Could not reload collections: {error}"),
+                    None => format!("Collections reloaded · {} entries.", this.entries.len()),
+                };
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Collection switch commands generated from the live index.
+    pub(crate) fn collection_items(&self) -> Vec<CollectionItem> {
+        let active_collection = self
+            .active
+            .as_ref()
+            .and_then(|path| self.collection_of(path));
+        self.manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .collections()
+                    .iter()
+                    .map(|descriptor| {
+                        let name = descriptor.id().as_str().to_owned();
+                        CollectionItem {
+                            active: active_collection.as_deref() == Some(name.as_str()),
+                            name,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Select the first entry of one collection without opening it.
+    pub(crate) fn open_collection(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let section = self
+            .list
+            .read(cx)
+            .delegate()
+            .sections
+            .iter()
+            .position(|section| section.title.as_ref() == name);
+        let Some(section) = section else {
+            self.status = format!("Collection “{name}” has no entries to show.");
+            cx.notify();
+            return;
+        };
+        let rows = self.list.read(cx).delegate().sections[section].rows.len();
+        if rows == 0 {
+            self.status = format!("Collection “{name}” has no entries yet.");
+            cx.notify();
+            return;
+        }
+        self.list.update(cx, |list, cx| {
+            list.set_selected_index(Some(IndexPath::new(0).section(section)), window, cx);
+            list.scroll_to_selected_item(window, cx);
+            cx.notify();
+        });
+        self.status = format!("Collection “{name}” · {rows} entries.");
+        cx.notify();
+    }
+
+    /// Open one file only when it is an indexed content entry of this project.
+    pub(crate) fn open_external_entry(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let root = self
+            .project_root()
+            .ok_or_else(|| "Open the project before opening an entry.".to_owned())?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+        let source = relative_source(&root, &canonical)
+            .ok_or_else(|| format!("{} is outside the open project.", path.display()))?;
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.entry().source() == &source)
+            .ok_or_else(|| {
+                format!(
+                    "{} is not a content entry in this project's collections.",
+                    path.display()
+                )
+            })?;
+        self.open_entry(index, window, cx);
+        Ok(())
+    }
+
+    /// Open the project, a collection's file list or one entry in the IDE.
+    pub(crate) fn open_in_ide(
+        &mut self,
+        command: CommandId,
+        path: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let availability = self.command_availability(cx, window);
+        if !command.is_available(availability) {
+            self.status = format!(
+                "{} is unavailable until an IDE is configured and a project is open.",
+                command.label()
+            );
+            cx.notify();
+            return;
+        }
+        let Some(root) = self.project_root() else {
+            return;
+        };
+        let mut target = desktop_actions::IdeTarget {
+            project: root,
+            file: None,
+            line: None,
+            column: None,
+        };
+        if command == CommandId::OpenEntryInIde {
+            let Some(path) = path.or_else(|| self.active.clone()) else {
+                return;
+            };
+            let (line, column) = self
+                .active_session(cx)
+                .map(|session| session.read(cx).cursor_line_column(cx))
+                .unwrap_or((1, 1));
+            target.file = Some(path);
+            target.line = Some(line);
+            target.column = Some(column);
+        }
+        let argv = match desktop_actions::ide_argv(&self.global_preferences.ide, &target) {
+            Ok(argv) => argv,
+            Err(message) => {
+                self.status = message;
+                cx.notify();
+                return;
+            }
+        };
+        let spawn = runtime::spawn(cx, async move { desktop_actions::spawn_ide(argv).await });
+        self.retain_command_task(cx.spawn(async move |this, cx| {
+            let result = spawn.await.and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                this.status = match result {
+                    Ok(()) => "Opened in the IDE.".into(),
+                    Err(error) => format!("Could not open the IDE: {error}"),
+                };
+                cx.notify();
+            });
+        }));
+    }
+
     /// Switch projects, flushing every dirty buffer through the guarded path.
     ///
     /// The switch waits for the saves; a conflict or a failure cancels it and
@@ -3850,6 +4105,21 @@ impl ProjectWorkspace {
         self.writing
     }
 
+    /// Mirror the shell's dock and window state so every availability reader
+    /// gets the same flags.
+    pub(crate) fn set_view_state(
+        &mut self,
+        sidebar: bool,
+        inspector: bool,
+        preview: bool,
+        fullscreen: bool,
+    ) {
+        self.view_sidebar = sidebar;
+        self.view_inspector = inspector;
+        self.view_preview = preview;
+        self.view_fullscreen = fullscreen;
+    }
+
     /// The one availability snapshot shared by the palette, toolbar and menus.
     ///
     /// Editor focus is read from the window, which is the only source that is
@@ -3879,6 +4149,13 @@ impl ProjectWorkspace {
             markdown_document: markdown,
             mdx_document: mdx,
             selection_nonempty,
+            ide_configured: self.global_preferences.ide.is_configured(),
+            sidebar_visible: self.view_sidebar,
+            inspector_visible: self.view_inspector,
+            preview_visible: self.view_preview,
+            focus_mode: self.writing.focus,
+            typewriter_mode: self.writing.typewriter,
+            fullscreen: self.view_fullscreen,
         }
     }
 
@@ -6054,6 +6331,104 @@ mod tests {
             (handle.downcast::<Root>().unwrap(), project.unwrap())
         })
     }
+    #[gpui_kit::test]
+    fn availability_includes_view_state_and_configured_ide(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx);
+        view.update(cx, |project, cx| {
+            project.set_preferences(
+                GlobalPreferencesV2 {
+                    ide: astrolith_core::preferences::IdeCommand {
+                        executable: "code".into(),
+                        arguments: vec!["{project}".into()],
+                    },
+                    ..GlobalPreferencesV2::default()
+                },
+                None,
+                cx,
+            );
+            project.set_view_state(false, true, true, true);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            let availability = view.read(cx).command_availability(cx, window);
+            assert!(availability.ide_configured);
+            assert!(!availability.sidebar_visible);
+            assert!(availability.inspector_visible);
+            assert!(availability.preview_visible);
+            assert!(availability.fullscreen);
+            assert!(!CommandId::OpenProjectInIde.is_available(availability));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn reload_collections_preserves_selection_tabs_recovery_and_preview(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(0, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(1, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+
+        let before = view.read_with(cx, |view, cx| {
+            (
+                view.active.clone(),
+                view.open_tabs()
+                    .iter()
+                    .map(|tab| tab.path.clone())
+                    .collect::<Vec<_>>(),
+                view.sessions.keys().cloned().collect::<Vec<_>>(),
+                view.list.read(cx).selected_index(),
+                view.preview_context()
+                    .map(|(project, root, mapping)| (project.as_str().to_owned(), root, mapping)),
+                view.active_entry_id(),
+            )
+        });
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.reload_collections(window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| {
+            !view.refreshing && view.status.starts_with("Collections reloaded")
+        })
+        .await;
+
+        let after = view.read_with(cx, |view, cx| {
+            (
+                view.active.clone(),
+                view.open_tabs()
+                    .iter()
+                    .map(|tab| tab.path.clone())
+                    .collect::<Vec<_>>(),
+                view.sessions.keys().cloned().collect::<Vec<_>>(),
+                view.list.read(cx).selected_index(),
+                view.preview_context()
+                    .map(|(project, root, mapping)| (project.as_str().to_owned(), root, mapping)),
+                view.active_entry_id(),
+            )
+        });
+        assert_eq!(before, after);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.entries.len()),
+            2,
+            "the rescan publishes the same index"
+        );
+        assert!(view.read_with(cx, |view, _| view.status.contains("2 entries")));
+    }
+
     #[gpui_kit::test]
     async fn discovered_project_opens_edits_and_retains_sessions(cx: &mut TestAppContext) {
         let dir = fixture();

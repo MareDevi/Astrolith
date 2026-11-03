@@ -10,6 +10,8 @@ pub mod index;
 pub mod list;
 /// Typed, validated entry lifecycle operations.
 pub mod operations;
+/// Project-root policy for system and credential directories.
+pub mod paths;
 /// Reference-target options from file and JSON data collections.
 pub mod references;
 /// Bounded filesystem watcher batches.
