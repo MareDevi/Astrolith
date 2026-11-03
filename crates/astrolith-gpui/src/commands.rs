@@ -45,6 +45,7 @@ pub(crate) enum CommandId {
     ToggleCopyeditConjunctions,
     ToggleAllCopyedit,
     OpenPalette,
+    OpenPreferences,
     ToggleSidebar,
     ToggleInspector,
     TogglePreview,
@@ -101,6 +102,7 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::ToggleCopyeditConjunctions,
     CommandId::ToggleAllCopyedit,
     CommandId::OpenPalette,
+    CommandId::OpenPreferences,
     CommandId::ToggleSidebar,
     CommandId::ToggleInspector,
     CommandId::TogglePreview,
@@ -253,6 +255,7 @@ impl CommandId {
             }
             Self::ToggleAllCopyedit => CopyeditPreferences::default().all_toggle_label(),
             Self::OpenPalette => "Commands…",
+            Self::OpenPreferences => "Preferences…",
             Self::ToggleSidebar => "Toggle files",
             Self::ToggleInspector => "Toggle inspector",
             Self::TogglePreview => "Toggle preview",
@@ -312,6 +315,13 @@ impl CommandId {
                     "cmd-shift-p"
                 } else {
                     "ctrl-shift-p"
+                }
+            }
+            Self::OpenPreferences => {
+                if mac {
+                    "cmd-,"
+                } else {
+                    "ctrl-,"
                 }
             }
             Self::ToggleSidebar => {
@@ -575,6 +585,7 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
         let mut items = items_for(
             &[
                 CommandId::OpenPalette,
+                CommandId::OpenPreferences,
                 CommandId::ToggleSidebar,
                 CommandId::ToggleInspector,
                 CommandId::TogglePreview,
@@ -716,6 +727,19 @@ mod tests {
         // Writer modes are global view toggles, not document commands.
         assert!(CommandId::ToggleFocusMode.is_available(blurred));
         assert!(CommandId::ToggleTypewriterMode.is_available(blurred));
+    }
+
+    #[test]
+    fn preferences_is_a_global_command_with_the_standard_shortcut() {
+        let expected = if cfg!(target_os = "macos") {
+            "cmd-,"
+        } else {
+            "ctrl-,"
+        };
+        assert_eq!(CommandId::OpenPreferences.shortcut(), Some(expected));
+        assert_eq!(CommandId::OpenPreferences.label(), "Preferences…");
+        assert!(CommandId::OpenPreferences.is_available(CommandAvailability::default()));
+        assert!(COMMANDS.contains(&CommandId::OpenPreferences));
     }
 
     #[test]

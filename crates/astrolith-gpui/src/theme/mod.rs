@@ -3,8 +3,30 @@ mod dark;
 mod light;
 mod tokens;
 
-use gpui_kit::{App, Hsla, WindowAppearance, component::Theme, rgb, rgba};
+use astrolith_core::preferences::HeadingColors;
+use gpui_kit::{
+    App, Global, Hsla, WindowAppearance,
+    component::{ActiveTheme, Theme},
+    rgb, rgba,
+};
 pub use tokens::ThemeTokens;
+
+/// Heading colour for the resolved theme, published for prose rendering.
+///
+/// The preference stores `#rrggbb` strings; this global carries the colour that
+/// actually applies after parsing and theme resolution, so the editor never
+/// re-reads the preference file and an invalid value falls back once here.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ProseHeadingColor(pub Hsla);
+
+impl Global for ProseHeadingColor {}
+
+/// The active heading colour, falling back to the theme foreground.
+pub(crate) fn prose_heading_color(cx: &App) -> Hsla {
+    cx.try_global::<ProseHeadingColor>()
+        .map(|color| color.0)
+        .unwrap_or_else(|| cx.theme().foreground)
+}
 
 /// Parse a persisted `#rrggbb` or `#rrggbbaa` colour into a theme colour.
 ///
@@ -50,7 +72,15 @@ pub fn palette(mode: ThemeMode) -> ThemeTokens {
 }
 
 /// Apply colors through Kit's synchronized Component/Base theme update path.
-pub fn apply(preference: ThemeMode, appearance: WindowAppearance, cx: &mut App) {
+///
+/// Heading colours belong to the resolved theme, so the published prose
+/// heading is refreshed in the same pass that refreshes every window.
+pub fn apply(
+    preference: ThemeMode,
+    appearance: WindowAppearance,
+    headings: &HeadingColors,
+    cx: &mut App,
+) {
     let mode = preference.resolve(appearance);
     let kit_mode = match mode {
         ThemeMode::Dark => gpui_kit::component::ThemeMode::Dark,
@@ -127,6 +157,14 @@ pub fn apply(preference: ThemeMode, appearance: WindowAppearance, cx: &mut App) 
         theme.radius_lg = gpui_kit::px(8.);
         theme.shadow = true;
     });
+    let configured = match mode {
+        ThemeMode::Dark => headings.dark.as_deref(),
+        ThemeMode::Light | ThemeMode::System => headings.light.as_deref(),
+    };
+    let heading = configured
+        .and_then(color_from_hex)
+        .unwrap_or_else(|| cx.theme().foreground);
+    cx.set_global(ProseHeadingColor(heading));
 }
 
 #[cfg(test)]

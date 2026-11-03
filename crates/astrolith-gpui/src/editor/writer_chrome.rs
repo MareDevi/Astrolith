@@ -286,7 +286,7 @@ impl ProsePalette {
         let theme = cx.theme();
         Self {
             marker: theme.muted_foreground,
-            heading: theme.foreground,
+            heading: crate::theme::prose_heading_color(cx),
             code: theme.foreground,
             code_background: theme.button,
             quote: theme.muted_foreground,

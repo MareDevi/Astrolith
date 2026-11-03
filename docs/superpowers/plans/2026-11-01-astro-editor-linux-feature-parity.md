@@ -1,6 +1,6 @@
 # Astro Editor Linux feature-parity implementation plan
 
-**Status:** Approved on 2026-11-01; P0-P3 complete with the P3 real-window field gate still manual; P4 projection complete with the native gate accepted and matched-workload evidence; P5-P8 implemented with headless evidence and outstanding native smokes; P9 static component index/import planner complete with frozen oracles; P10 builder UI implemented with headless integration coverage and a native smoke outstanding; P11 next.
+**Status:** Approved on 2026-11-01; P0-P3 complete with the P3 real-window field gate still manual; P4 projection complete with the native gate accepted and matched-workload evidence; P5-P8 implemented with headless evidence and outstanding native smokes; P9 static component index/import planner complete; P10 builder UI implemented with headless integration coverage; P11 preferences UI implemented with headless coverage and a native smoke outstanding; P12 next.
 
 **Date:** 2026-11-01
 
@@ -294,6 +294,8 @@ Smoke every framework, keyboard-only flow, required blank placeholders, wrapping
 One modal/sheet with panes exactly matching upstream scope. Inline validate directories, mappings against schema kinds, URL pattern, IDE argv, font range and autosave choices. Apply atomically; Cancel mutates nothing; reset controls remove only their value. Advanced shows app/preferences versions, opens preferences folder, and Reset All requires object-specific destructive confirmation, deletes only preferences/registry (not recovery/logs), then restarts.
 
 Smoke keyboard/focus/Escape, invalid/dirty state, restart, project switching, inherited values, themes/minimum window; run full GPUI Kit design checklist.
+
+**P11 update (2026-11-03, headless complete; native smoke outstanding).** One `Ctrl+,` preferences dialog in `preferences/{mod,general,project,collection,advanced}.rs` owns panes exactly matching the upstream scopes; Project Settings and Collections exist only while a project is open. Every field carries an inline error: project-relative directories, the 1–30 font size, `#rrggbb` heading colours, IDE argv with only `{project}`/`{file}`/`{line}`/`{column}`, four field mappings checked against generated schema kinds, `{slug}` URL patterns and the fixed 1/2/5/10 autosave choices. Apply validates all panes and replaces both scopes together; Cancel and Escape drop the draft; each reset control clears only its own value so inheritance becomes visible again. Theme, layout, heading colours, font size, autosave, mappings and directory overrides take effect immediately after Apply and persist through the atomic stores. Advanced shows the application and envelope versions, opens the preferences folder with the platform opener, and Reset All confirms against its exact objects, deletes only preference files and the registry (recovery, save failures and logs are kept) and restarts with writes suppressed. `astro-auto-import` only produces a reminder. The minimum window is 1000×700. Native keyboard/focus/Escape, restart, project switching, theme and minimum-window smoke is still outstanding.
 
 ### P12 — Navigation, registry commands and desktop protocols
 

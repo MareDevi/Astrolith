@@ -31,7 +31,7 @@ fn theme_adapter_projects_complete_semantic_roles_in_both_modes(cx: &mut TestApp
     cx.update(|cx| {
         gpui_kit::init(cx);
         for mode in [ThemeMode::Dark, ThemeMode::Light] {
-            apply(mode, WindowAppearance::Dark, cx);
+            apply(mode, WindowAppearance::Dark, &Default::default(), cx);
             let tokens = palette(mode);
             assert_eq!(cx.theme().background, tokens.background);
             assert_eq!(cx.theme().foreground, tokens.foreground);

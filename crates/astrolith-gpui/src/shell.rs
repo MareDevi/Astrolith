@@ -1,7 +1,10 @@
 use std::{
     path::PathBuf,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::{
@@ -20,6 +23,9 @@ use crate::{
     layout::{
         panels::WorkspacePanel,
         state::{LayoutState, PanelKind},
+    },
+    preferences::{
+        CollectionEntry, PreferenceEdits, PreferencesContext, PreferencesEvent, PreferencesSheet,
     },
     preview::PreviewPanel,
     project_discovery::{FrontmatterKey, ProjectOpened, ProjectWorkspace, now_secs},
@@ -105,7 +111,7 @@ pub fn open(cx: &mut App) {
             commands::install_menus(cx, &settings.copyedit);
             if let Err(error) = gpui_kit::open_window(
                 WindowOptions {
-                    window_min_size: Some(size(px(800.), px(600.))),
+                    window_min_size: Some(size(px(1000.), px(700.))),
                     ..TitleBar::window_options()
                 },
                 cx,
@@ -138,6 +144,9 @@ pub(crate) struct Shell {
     finder: Entity<CommandState>,
     finder_hits: Arc<Mutex<Vec<FinderEntry>>>,
     builder: Entity<ComponentBuilder>,
+    preferences_sheet: Entity<PreferencesSheet>,
+    /// Reset All is deleting files; every pending and quit-time write is suppressed.
+    resetting: Arc<AtomicBool>,
     opening: bool,
     opening_task: Option<Task<()>>,
     file_status: String,
@@ -185,6 +194,7 @@ impl Shell {
         theme::apply(
             resolve(&settings, None, None).theme,
             window.appearance(),
+            &settings.heading_colors,
             cx,
         );
         let navigator = cx.new(|cx| {
@@ -277,6 +287,8 @@ impl Shell {
         let palette = cx.new(|cx| CommandState::new(window, cx));
         let finder = cx.new(|cx| CommandState::new(window, cx));
         let builder = cx.new(|cx| ComponentBuilder::new(window, cx));
+        let preferences_sheet = cx.new(|cx| PreferencesSheet::new(window, cx));
+        let resetting = Arc::new(AtomicBool::new(false));
         let latest = Arc::new(Mutex::new(LatestPreferences {
             global: (0, settings.clone()),
             project: None,
@@ -300,7 +312,12 @@ impl Shell {
             }),
             cx.observe_window_appearance(window, |this, window, cx| {
                 if this.settings.theme == ThemeMode::System {
-                    theme::apply(ThemeMode::System, window.appearance(), cx);
+                    theme::apply(
+                        ThemeMode::System,
+                        window.appearance(),
+                        &this.settings.heading_colors,
+                        cx,
+                    );
                 }
             }),
         ];
@@ -361,13 +378,33 @@ impl Shell {
                 }
             },
         ));
+        subscriptions.push(cx.subscribe_in(
+            &preferences_sheet,
+            window,
+            |this, _, event: &PreferencesEvent, window, cx| match event {
+                PreferencesEvent::Apply(edits) => {
+                    this.apply_preferences((**edits).clone(), window, cx);
+                    window.close_dialog(cx);
+                }
+                PreferencesEvent::ResetAll => {
+                    window.close_all_dialogs(cx);
+                    this.reset_all(cx);
+                }
+                PreferencesEvent::Cancel => window.close_dialog(cx),
+            },
+        ));
         if let Some(store) = store.clone() {
             let latest = latest.clone();
+            let resetting = resetting.clone();
             // Register on App rather than the view: last-window closure may drop the view first.
             App::on_app_quit(cx, move |cx| {
                 let store = store.clone();
                 let latest = latest.clone();
+                let flush_resetting = resetting.clone();
                 let flush = runtime::flush_on_quit(cx, move || {
+                    if flush_resetting.load(Ordering::SeqCst) {
+                        return;
+                    }
                     let snapshot = latest.lock().ok().map(|snapshot| snapshot.clone());
                     if let Some(snapshot) = snapshot {
                         let (revision, settings) = &snapshot.global;
@@ -434,6 +471,8 @@ impl Shell {
             finder,
             finder_hits: Arc::new(Mutex::new(Vec::new())),
             builder,
+            preferences_sheet,
+            resetting,
             opening: false,
             opening_task: None,
             file_status: "Readonly · No file open".into(),
@@ -588,6 +627,9 @@ impl Shell {
 
     /// Persist the global scope, keeping a project layout out of the global file.
     fn persist_global(&mut self, cx: &mut Context<Self>) {
+        if self.resetting.load(Ordering::SeqCst) {
+            return;
+        }
         self.revision += 1;
         let revision = self.revision;
         let mut settings = self.settings.clone();
@@ -607,6 +649,9 @@ impl Shell {
 
     /// Persist the open project's scope; a no-op when no project is open.
     fn persist_project(&mut self, cx: &mut Context<Self>) {
+        if self.resetting.load(Ordering::SeqCst) {
+            return;
+        }
         let Some(scope) = self.project_scope.as_mut() else {
             return;
         };
@@ -874,6 +919,7 @@ impl Shell {
                     .update(cx, |project, cx| project.prompt(window, cx));
             }
             CommandId::OpenPalette => self.open_palette(window, cx),
+            CommandId::OpenPreferences => self.open_preferences(window, cx),
             CommandId::OpenContentFinder => self.open_content_finder(window, cx),
             CommandId::OpenComponentBuilder => self.open_component_builder(window, cx),
             CommandId::ToggleSidebar => self.toggle_panel(PanelKind::Sidebar, window, cx),
@@ -980,7 +1026,12 @@ impl Shell {
                     CommandId::DarkTheme => ThemeMode::Dark,
                     _ => ThemeMode::System,
                 };
-                theme::apply(self.settings.theme, window.appearance(), cx);
+                theme::apply(
+                    self.settings.theme,
+                    window.appearance(),
+                    &self.settings.heading_colors,
+                    cx,
+                );
                 self.persist_global(cx);
             }
             CommandId::ResetLayout => {
@@ -1092,6 +1143,114 @@ impl Shell {
             )
         });
         self.palette.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// Open the single preferences sheet with the current snapshots.
+    fn open_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let collections = self
+            .project
+            .read(cx)
+            .preference_collections()
+            .into_iter()
+            .map(|(name, schema)| CollectionEntry { name, schema })
+            .collect();
+        let preferences_folder = settings_path()
+            .ok()
+            .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
+        let context = PreferencesContext {
+            global: self.settings.clone(),
+            project: self
+                .project_scope
+                .as_ref()
+                .map(|scope| scope.preferences.clone()),
+            collections,
+            auto_import: self.project.read(cx).auto_import_declared(),
+            preferences_folder,
+            warning: self.warning.clone(),
+        };
+        self.preferences_sheet
+            .update(cx, |sheet, cx| sheet.open(context, window, cx));
+        let view = self.preferences_sheet.clone();
+        let close = self.preferences_sheet.downgrade();
+        let initial_focus = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let close = close.clone();
+            if initial_focus.replace(false) {
+                view.read(cx).focus_handle(cx).focus(window, cx);
+            }
+            dialog
+                .title("Preferences")
+                .w(px(760.))
+                .max_h(px(600.))
+                .on_close(move |_, _, cx| {
+                    let _ = close.update(cx, |sheet, cx| sheet.cancel(cx));
+                })
+                .child(view.clone())
+        });
+    }
+
+    /// Replace both scopes from one validated draft and apply live effects.
+    fn apply_preferences(
+        &mut self,
+        edits: PreferenceEdits,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.resetting.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut global = edits.global;
+        // The dock may have been resized while the sheet was open; the live
+        // layout stays authoritative, like every other layout write.
+        global.layout = self.settings.layout.clone();
+        self.settings = global;
+        if let Some(preferences) = edits.project
+            && let Some(scope) = self.project_scope.as_mut()
+        {
+            scope.preferences = preferences;
+        }
+        theme::apply(
+            self.settings.theme,
+            window.appearance(),
+            &self.settings.heading_colors,
+            cx,
+        );
+        self.sync_project_preferences(cx);
+        self.persist_global(cx);
+        self.persist_project(cx);
+        cx.notify();
+    }
+
+    /// Delete preferences and the registry, then restart with defaults.
+    fn reset_all(&mut self, cx: &mut Context<Self>) {
+        self.resetting.store(true, Ordering::SeqCst);
+        self.store = None;
+        self.settings_task = None;
+        self.project_task = None;
+        self.record_latest(|latest| latest.project = None);
+        let folder = settings_path()
+            .ok()
+            .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
+        let Some(folder) = folder else {
+            cx.restart();
+            return;
+        };
+        let work = runtime::blocking(cx, move || {
+            crate::preferences::advanced::reset_preferences(&folder)
+        });
+        cx.spawn(async move |_this, cx| {
+            if let Err(error) = work
+                .await
+                .and_then(|result| result.map_err(|error| error.to_string()))
+            {
+                tracing::error!(%error, "could not reset preferences");
+            }
+            cx.update(|cx| cx.restart());
+        })
+        .detach();
     }
 
     /// Open the component builder for the active MDX document.
@@ -1413,6 +1572,7 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::DarkTheme => IconName::Moon,
         CommandId::SystemTheme => IconName::Monitor,
         CommandId::ResetLayout => IconName::RotateCcw,
+        CommandId::OpenPreferences => IconName::Settings,
         CommandId::Quit => IconName::X,
     }
 }
@@ -1783,8 +1943,13 @@ fn project_package_name(root: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{editor::component_builder::BuilderContext, frontmatter::ReferenceCatalog};
+    use crate::{
+        editor::component_builder::BuilderContext,
+        frontmatter::ReferenceCatalog,
+        preferences::{FieldId, Pane as PreferencesPane},
+    };
     use astrolith_astro::components::ComponentIndex;
+    use astrolith_core::preferences::FileExtension;
     use gpui_kit::{
         Bounds, Point, TestAppContext, WindowBounds, WindowHandle, WindowOptions, base::Root,
         point, px, size, test::TestWindowExt,
@@ -3653,5 +3818,336 @@ mod tests {
                 session.buffer.current_text()
             );
         });
+    }
+    fn open_preferences_sheet(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+        view: &Entity<Shell>,
+    ) {
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.execute(CommandId::OpenPreferences, window, cx)
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        // The sheet slides in; complete the entrance before querying content.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(
+                window.has_active_dialog(cx),
+                "Ctrl+, opens the preferences dialog"
+            );
+            window.render_frame(cx);
+        })
+        .unwrap();
+    }
+
+    async fn wait_for_project_scope(
+        cx: &mut TestAppContext,
+        view: &Entity<Shell>,
+        root: &std::path::Path,
+    ) -> String {
+        let canonical = std::fs::canonicalize(root).unwrap();
+        cx.condition(view, move |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == canonical)
+        })
+        .await;
+        view.read_with(cx, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .unwrap()
+                .preferences
+                .project_id
+                .clone()
+        })
+    }
+
+    #[gpui_kit::test]
+    async fn preferences_shortcut_opens_one_sheet_and_project_panes_need_a_project(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let (store, settings, _) =
+            PreferencesStore::load(workspace.path().join("preferences/global.json"));
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-,", cx);
+        })
+        .unwrap();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(window.has_active_dialog(cx));
+        })
+        .unwrap();
+        assert_eq!(
+            sheet.read_with(cx, |sheet, _| sheet.visible_panes()),
+            [PreferencesPane::General, PreferencesPane::Advanced]
+        );
+        assert_eq!(
+            sheet.read_with(cx, |sheet, _| sheet.active_pane()),
+            PreferencesPane::General
+        );
+
+        // Escape dismisses the sheet without applying anything.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("escape", cx);
+            assert!(!window.has_active_dialog(cx));
+        })
+        .unwrap();
+
+        let project = project_fixture("prefs-panes");
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        wait_for_project_scope(cx, &view, project.path()).await;
+        open_preferences_sheet(cx, handle, &view);
+        assert_eq!(
+            sheet.read_with(cx, |sheet, _| sheet.visible_panes()),
+            [
+                PreferencesPane::General,
+                PreferencesPane::Project,
+                PreferencesPane::Collections,
+                PreferencesPane::Advanced,
+            ]
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("escape", cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn preferences_apply_persists_both_scopes_and_cancel_changes_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        use std::time::Duration;
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let preferences_root = workspace.path().join("preferences");
+        let global_path = preferences_root.join("global.json");
+        let project = project_fixture("preferences-site");
+        {
+            let (store, settings, _) = PreferencesStore::load(global_path.clone());
+            store.save_global(1, &settings).unwrap();
+            seed_project(&store, project.path(), |preferences| {
+                preferences.content_directory = Some("src/content".into());
+            });
+        }
+        let (store, settings, _) = PreferencesStore::load(global_path.clone());
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        let id = wait_for_project_scope(cx, &view, project.path()).await;
+
+        open_preferences_sheet(cx, handle, &view);
+        // An out-of-range font size blocks the whole apply.
+        cx.update_window(handle.into(), |_, window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.set_text_for_tests(FieldId::FontSize, "31", window, cx)
+            });
+            window.render_frame(cx);
+            assert_eq!(window.find("preferences-apply").disabled(), Some(true));
+        })
+        .unwrap();
+        assert!(sheet.read_with(cx, |sheet, _| sheet.has_errors()));
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.set_text_for_tests(FieldId::FontSize, "22", window, cx);
+                sheet.set_text_for_tests(FieldId::ProjectContent, "src/entries", window, cx);
+            });
+            window.render_frame(cx);
+            assert_ne!(window.find("preferences-apply").disabled(), Some(true));
+            window.click("preferences-apply", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(400));
+        cx.condition(&view, |shell, _| shell.settings.editor_font_size == 22.)
+            .await;
+        let written = global_path.clone();
+        cx.condition(&view, move |_, _| {
+            std::fs::read(&written)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value["editor_font_size"].as_f64())
+                .is_some_and(|size| size == 22.)
+        })
+        .await;
+        let global = std::fs::read(&global_path).unwrap();
+        let global: serde_json::Value = serde_json::from_slice(&global).unwrap();
+        assert_eq!(global["editor_font_size"], 22.0);
+        let project = project_file(&preferences_root, &id);
+        assert_eq!(project["content_directory"], "src/entries");
+
+        // Reopen, change a value, then Cancel: neither scope moves.
+        open_preferences_sheet(cx, handle, &view);
+        cx.update_window(handle.into(), |_, window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.set_text_for_tests(FieldId::FontSize, "25", window, cx);
+                sheet.set_text_for_tests(FieldId::ProjectContent, "src/other", window, cx);
+            });
+            window.render_frame(cx);
+            window.click("preferences-cancel", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(400));
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |shell, _| shell.settings.editor_font_size),
+            22.
+        );
+        let project = project_file(&preferences_root, &id);
+        assert_eq!(project["content_directory"], "src/entries");
+        let global = std::fs::read(&global_path).unwrap();
+        let global: serde_json::Value = serde_json::from_slice(&global).unwrap();
+        assert_eq!(global["editor_font_size"], 22.0);
+    }
+
+    #[gpui_kit::test]
+    async fn preferences_reset_control_removes_only_its_own_value(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let preferences_root = workspace.path().join("preferences");
+        let global_path = preferences_root.join("global.json");
+        let project = project_fixture("preferences-reset");
+        {
+            let (store, settings, _) = PreferencesStore::load(global_path.clone());
+            store.save_global(1, &settings).unwrap();
+            seed_project(&store, project.path(), |preferences| {
+                preferences.content_directory = Some("src/content".into());
+                preferences.assets_directory = Some("public/images".into());
+                preferences.default_extension = Some(FileExtension::Mdx);
+            });
+        }
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        let id = wait_for_project_scope(cx, &view, project.path()).await;
+        open_preferences_sheet(cx, handle, &view);
+        cx.update_window(handle.into(), |_, window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.set_pane_for_tests(PreferencesPane::Project, cx)
+            });
+            window.render_frame(cx);
+            window.click("preferences-reset-project-content", cx);
+            window.render_frame(cx);
+            window.click("preferences-apply", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(400));
+        let written = preferences_root.join("projects").join(format!("{id}.json"));
+        cx.condition(&view, move |_, _| {
+            std::fs::read(&written)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|value| value["content_directory"].is_null())
+        })
+        .await;
+        let project = project_file(&preferences_root, &id);
+        assert!(project["content_directory"].is_null());
+        assert_eq!(project["assets_directory"], "public/images");
+        assert_eq!(project["default_extension"], "mdx");
+    }
+
+    #[gpui_kit::test]
+    async fn auto_import_reminder_shows_without_changing_the_setting(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let project = component_shell_fixture(true);
+        let workspace = tempfile::tempdir().unwrap();
+        let (store, settings, _) =
+            PreferencesStore::load(workspace.path().join("preferences/global.json"));
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        wait_for_project_scope(cx, &view, project.path()).await;
+        let project_handle = view.read_with(cx, |shell, _| shell.project.clone());
+        wait_for_components(cx, &project_handle).await;
+        assert!(project_handle.read_with(cx, |project, _| project.auto_import_declared()));
+
+        open_preferences_sheet(cx, handle, &view);
+        cx.update_window(handle.into(), |_, window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.set_pane_for_tests(PreferencesPane::Project, cx)
+            });
+            window.render_frame(cx);
+            assert!(
+                window.try_find("preferences-auto-import-notice").is_some(),
+                "the reminder is visible in the project pane"
+            );
+        })
+        .unwrap();
+        assert!(sheet.read_with(cx, |sheet, _| sheet.context_auto_import()));
+        assert_eq!(
+            sheet.read_with(cx, |sheet, _| sheet.project_insert_imports()),
+            None,
+            "the reminder never changes the user's setting"
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("escape", cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn preferences_heading_colour_applies_live_and_reset_restores_the_token(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.execute(CommandId::LightTheme, window, cx)
+            });
+        })
+        .unwrap();
+        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
+        open_preferences_sheet(cx, handle, &view);
+        cx.update_window(handle.into(), |_, window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.set_text_for_tests(FieldId::HeadingDark, "#112233", window, cx);
+                sheet.set_text_for_tests(FieldId::HeadingLight, "#445566", window, cx);
+            });
+            window.render_frame(cx);
+            window.click("preferences-apply", cx);
+        })
+        .unwrap();
+        let expected = theme::color_from_hex("#445566").unwrap();
+        assert_eq!(
+            view.read_with(cx, |_, cx| theme::prose_heading_color(cx)),
+            expected,
+            "the light heading colour is live after Apply"
+        );
+
+        // Reset removes only the light heading colour.
+        open_preferences_sheet(cx, handle, &view);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("preferences-reset-heading-light", cx);
+            window.render_frame(cx);
+            window.click("preferences-apply", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(cx, |_, cx| theme::prose_heading_color(cx)),
+            view.read_with(cx, |_, cx| cx.theme().foreground),
+            "reset restores the theme heading token"
+        );
     }
 }

@@ -790,6 +790,36 @@ impl ProjectWorkspace {
             .map(|manifest| manifest.root().to_path_buf())
     }
 
+    /// Collection identities and their generated schemas for the preferences pane.
+    ///
+    /// Schema keys cover collections discovered after the manifest; the union is
+    /// stable and sorted so the picker never reorders between renders.
+    pub(crate) fn preference_collections(&self) -> Vec<(String, Option<Arc<CollectionSchema>>)> {
+        let mut names: BTreeSet<String> = self.schemas.keys().cloned().collect();
+        if let Some(manifest) = self.manifest.as_ref() {
+            names.extend(
+                manifest
+                    .collections()
+                    .iter()
+                    .map(|descriptor| descriptor.id().as_str().to_owned()),
+            );
+        }
+        names
+            .into_iter()
+            .map(|name| {
+                let schema = self.schemas.get(&name).cloned();
+                (name, schema)
+            })
+            .collect()
+    }
+
+    /// Whether the static component index found `astro-auto-import` declared.
+    pub(crate) fn auto_import_declared(&self) -> bool {
+        self.component_index
+            .as_ref()
+            .is_some_and(|index| index.auto_import())
+    }
+
     pub(crate) fn open_tabs(&self) -> Arc<Vec<OpenTab>> {
         self.tabs.clone()
     }
