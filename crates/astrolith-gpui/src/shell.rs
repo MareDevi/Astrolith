@@ -2635,14 +2635,22 @@ impl Render for Shell {
                                                     CommandId::ToggleInspector,
                                                     inspector,
                                                 ))
-                                                .separator()
-                                                .item(item(
-                                                    "Preferences…",
-                                                    CommandId::OpenPreferences,
-                                                    false,
-                                                ))
                                             })
-                                    }),
+                                    })
+                                    .child(
+                                        Button::new("open-preferences")
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::Settings)
+                                            .tooltip(CommandId::OpenPreferences.label())
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.execute(
+                                                    CommandId::OpenPreferences,
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
+                                    ),
                             ),
                     )
                     // The reveal animation is a no-op (static end state, no

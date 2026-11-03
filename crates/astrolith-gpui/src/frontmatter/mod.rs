@@ -1293,7 +1293,8 @@ fn reference_list(
                         Button::new(("frontmatter-chip-remove", index * 64 + item_index))
                             .ghost()
                             .xsmall()
-                            .label("×")
+                            .icon(IconName::X)
+                            .tooltip("Remove item")
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.apply_remove_item(&path, item_index, cx);
                             })),
@@ -1359,7 +1360,8 @@ fn tag_control(
                         Button::new(("frontmatter-chip-remove", index * 64 + item_index))
                             .ghost()
                             .xsmall()
-                            .label("×")
+                            .icon(IconName::X)
+                            .tooltip("Remove tag")
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.apply_remove_item(&path, item_index, cx);
                             })),

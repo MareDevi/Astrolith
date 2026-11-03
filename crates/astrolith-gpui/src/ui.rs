@@ -12,13 +12,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::{App, ElementId, IntoElement, SharedString, TestSupportExt, div, prelude::*, px};
 
-/// The Astrolith nib mark. Drawn as SVG so it inherits the active text colour.
-const MARK_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.4 19 10.6 12 20.6 5 10.6Z"/><path d="M12 8.2v5.6"/><circle cx="12" cy="16.3" r="0.9" fill="currentColor" stroke="none"/></svg>"#;
-
 /// The application mark, tinted with the accent role.
 pub(crate) fn mark(cx: &App) -> impl IntoElement {
-    Icon::default()
-        .data(MARK_SVG)
+    Icon::new(IconName::Feather)
         .small()
         .text_color(cx.theme().accent)
 }
