@@ -58,6 +58,7 @@ impl WorkspacePanel {
         cx.notify();
     }
 
+    #[cfg(test)]
     pub fn is_editable(&self) -> bool {
         self.editor.is_some() && !self.readonly
     }

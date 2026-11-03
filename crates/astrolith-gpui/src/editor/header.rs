@@ -6,13 +6,14 @@
 //!
 //! It is deliberately a single quiet line rather than a stack of tab chrome:
 //! the writer should see the page, not an editor window. Additional open
-//! documents stay one click away as small chips and in the overflow menu.
+//! documents stay one click away in the overflow menu.
 
+use crate::editor::save_coordinator::SaveStatus;
 use crate::project_discovery::ProjectWorkspace;
 use crate::ui;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, Icon, Selectable, Sizable, StyledExt,
+    ActiveTheme, Sizable, StyledExt,
     button::{Button, ButtonVariants},
     menu::{DropdownMenu, PopupMenuItem},
 };
@@ -37,8 +38,9 @@ impl DocumentHeader {
 }
 
 impl Render for DocumentHeader {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs = self.project.read(cx).open_tabs();
+        let compact = f32::from(window.viewport_size().width) < 1100.;
         let active = self.project.read(cx).active_tab_index();
         if tabs.is_empty() {
             return div()
@@ -71,27 +73,25 @@ impl Render for DocumentHeader {
             .as_ref()
             .is_some_and(|tab| tab.externally_changed);
 
-        let chips = (tabs.len() > 1).then(|| {
-            div()
-                .h_flex()
-                .items_center()
-                .gap_1()
-                .min_w_0()
-                .overflow_hidden()
-                .children(tabs.iter().enumerate().map(|(index, tab)| {
-                    let path = tab.path.clone();
-                    Button::new(("document-chip", index))
-                        .xsmall()
-                        .ghost()
-                        .selected(index == active)
-                        .label(tab.label.clone())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.project.update(cx, |project, cx| {
-                                project.activate_session(&path, window, cx)
-                            });
-                        }))
-                }))
-        });
+        let save_status = self.project.read(cx).active_save_status();
+        let (state, state_tone): (SharedString, _) = match save_status {
+            Some(SaveStatus::Conflict) => ("Conflict".into(), cx.theme().danger),
+            Some(SaveStatus::Saving) => ("Saving…".into(), cx.theme().warning),
+            Some(SaveStatus::Failed(_)) => ("Save failed".into(), cx.theme().danger),
+            Some(SaveStatus::Unsaved) => ("Unsaved".into(), cx.theme().warning),
+            Some(SaveStatus::Saved) if externally_changed => {
+                ("Changed on disk".into(), cx.theme().warning)
+            }
+            Some(SaveStatus::Saved) => ("Saved".into(), cx.theme().success),
+            None if externally_changed => ("Changed on disk".into(), cx.theme().warning),
+            None if dirty => ("Unsaved".into(), cx.theme().warning),
+            None => ("Saved".into(), cx.theme().success),
+        };
+        let counts = self
+            .project
+            .read(cx)
+            .active_counts(cx)
+            .map(|counts| format!("{} words · {} characters", counts.words, counts.characters));
 
         let active_path = self.project.read(cx).active_path();
         let menu_owner = self.project.downgrade();
@@ -122,15 +122,6 @@ impl Render for DocumentHeader {
                             .items_center()
                             .gap_2()
                             .min_w_0()
-                            .when(dirty, |row| {
-                                row.child(
-                                    div()
-                                        .size_1p5()
-                                        .rounded_full()
-                                        .bg(cx.theme().accent)
-                                        .flex_shrink_0(),
-                                )
-                            })
                             .child(crate::ui::document_title(title, cx))
                             .when_some(collection, |row, collection| {
                                 row.child(crate::ui::v_divider(cx)).child(
@@ -142,20 +133,26 @@ impl Render for DocumentHeader {
                                 )
                             }),
                     )
-                    .when(externally_changed, |row| {
+                    .child(div().flex_1())
+                    .when_some((!compact).then_some(counts).flatten(), |row, counts| {
                         row.child(
                             div()
-                                .h_flex()
-                                .items_center()
-                                .gap_1()
                                 .text_xs()
-                                .text_color(cx.theme().warning)
-                                .child(Icon::new(IconName::TriangleAlert).xsmall())
-                                .child("Changed on disk"),
+                                .text_color(cx.theme().muted_foreground)
+                                .child(counts),
                         )
                     })
-                    .child(div().flex_1())
-                    .children(chips)
+                    .child(ui::v_divider(cx))
+                    .child(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(state_tone)
+                            .child(div().size_1p5().rounded_full().bg(state_tone))
+                            .child(state),
+                    )
                     .child(
                         ui::icon_button("save-document", IconName::Save, "Save file").on_click(
                             cx.listener(|this, _, window, cx| {
@@ -200,17 +197,6 @@ impl Render for DocumentHeader {
                                 }
                                 menu
                             }),
-                    )
-                    .child(
-                        ui::icon_button("close-document", IconName::X, "Close file").on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                if let Some(path) = active_path.clone() {
-                                    this.project.update(cx, |project, cx| {
-                                        project.close_path(path, window, cx)
-                                    });
-                                }
-                            }),
-                        ),
                     ),
             )
             .into_any_element()

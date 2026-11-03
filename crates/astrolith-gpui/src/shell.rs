@@ -15,7 +15,6 @@ use crate::{
         content_finder::{self, FinderEntry},
         copyedit::CopyeditConfig,
         header::DocumentHeader,
-        save_coordinator::SaveStatus,
         session::SessionChanged,
         writer_chrome::{ChromeVisibility, TypedCharacters},
     },
@@ -50,7 +49,6 @@ use gpui_kit::component::{
     dock::{DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
     kbd::Kbd,
     menu::{DropdownMenu, PopupMenuItem},
-    status_bar::StatusBar,
 };
 use gpui_kit::{
     Animation, AnimationExt as _, App, AppContext, Bounds, Context, Entity, ExternalPaths,
@@ -2481,49 +2479,8 @@ impl Render for Shell {
         });
         self.chrome
             .set_sidebars(!layout.sidebar_visible && !layout.inspector_visible);
-        let chrome_hidden = self.chrome.is_hidden();
-        let (project_name, tabs, active_index) = {
-            let project = self.project.read(cx);
-            (
-                project.project_name(),
-                project.open_tabs(),
-                project.active_tab_index(),
-            )
-        };
-        let active_tab = tabs.get(active_index);
-        // The coordinator owns the five save states: Unsaved, Saving…, Saved,
-        // Conflict and Save failed. A read-only source keeps its file status.
-        let save_status = self.project.read(cx).active_save_status();
-        let document_state: SharedString = match active_tab {
-            Some(tab) => match save_status {
-                Some(SaveStatus::Conflict) => "Conflict".into(),
-                Some(SaveStatus::Saving) => "Saving…".into(),
-                Some(SaveStatus::Failed(_)) => "Save failed".into(),
-                Some(SaveStatus::Unsaved) => "Unsaved changes".into(),
-                Some(SaveStatus::Saved) if tab.externally_changed => "Changed on disk".into(),
-                Some(SaveStatus::Saved) => "Saved".into(),
-                None if tab.externally_changed => "Changed on disk".into(),
-                None if tab.dirty => "Unsaved changes".into(),
-                None => "Saved".into(),
-            },
-            None if self.opening => "Opening file…".into(),
-            None if self.document.read(cx).is_editable() => self.file_status.clone().into(),
-            None => "No file open".into(),
-        };
-        let save_tone = match (active_tab, save_status) {
-            (Some(_), Some(SaveStatus::Conflict | SaveStatus::Failed(_))) => cx.theme().danger,
-            (Some(_), Some(SaveStatus::Saving | SaveStatus::Unsaved)) => cx.theme().warning,
-            (Some(_), Some(SaveStatus::Saved)) => cx.theme().success,
-            (Some(tab), None) if tab.externally_changed || tab.dirty => cx.theme().warning,
-            (Some(_), None) => cx.theme().success,
-            (None, _) => cx.theme().muted_foreground,
-        };
-        // One token snapshot per revision: words and characters always agree.
-        let counts = self
-            .project
-            .read(cx)
-            .active_counts(cx)
-            .map(|counts| format!("{} words · {} characters", counts.words, counts.characters));
+        let chrome_hidden = self.chrome.is_hidden() && self.warning.is_none();
+        let project_name = self.project.read(cx).project_name();
 
         let close_owner = self.project.downgrade();
         div()
@@ -2602,6 +2559,16 @@ impl Render for Shell {
                                                 .child(name),
                                         )
                                     })
+                                    .when_some(self.warning.clone(), |row, warning| {
+                                        row.child(crate::ui::v_divider(cx)).child(
+                                            div()
+                                                .max_w(px(320.))
+                                                .truncate()
+                                                .text_xs()
+                                                .text_color(cx.theme().warning)
+                                                .child(warning),
+                                        )
+                                    })
                                     .child(div().flex_1())
                                     .child(
                                         Button::new("command-palette")
@@ -2616,38 +2583,11 @@ impl Render for Shell {
                                             })),
                                     )
                                     .child({
-                                        let modes = self.project.read(cx).writing_modes();
-                                        Button::new("toggle-focus-mode")
-                                            .small()
-                                            .ghost()
-                                            .icon(IconName::Eye)
-                                            .tooltip(CommandId::ToggleFocusMode.label())
-                                            .toggled(modes.focus)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.execute(CommandId::ToggleFocusMode, window, cx)
-                                            }))
-                                    })
-                                    .child({
-                                        let modes = self.project.read(cx).writing_modes();
-                                        Button::new("toggle-typewriter-mode")
-                                            .small()
-                                            .ghost()
-                                            .icon(IconName::Type)
-                                            .tooltip(CommandId::ToggleTypewriterMode.label())
-                                            .toggled(modes.typewriter)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.execute(
-                                                    CommandId::ToggleTypewriterMode,
-                                                    window,
-                                                    cx,
-                                                )
-                                            }))
-                                    })
-                                    .child({
                                         let owner = cx.weak_entity();
                                         let sidebar = layout.sidebar_visible;
                                         let preview = layout.preview_visible;
                                         let inspector = layout.inspector_visible;
+                                        let modes = self.project.read(cx).writing_modes();
                                         Button::new("view-menu")
                                             .small()
                                             .ghost()
@@ -2671,6 +2611,17 @@ impl Render for Shell {
                                                         })
                                                 };
                                                 menu.item(item(
+                                                    "Focus mode",
+                                                    CommandId::ToggleFocusMode,
+                                                    modes.focus,
+                                                ))
+                                                .item(item(
+                                                    "Typewriter mode",
+                                                    CommandId::ToggleTypewriterMode,
+                                                    modes.typewriter,
+                                                ))
+                                                .separator()
+                                                .item(item(
                                                     "Library",
                                                     CommandId::ToggleSidebar,
                                                     sidebar,
@@ -2685,18 +2636,14 @@ impl Render for Shell {
                                                     CommandId::ToggleInspector,
                                                     inspector,
                                                 ))
+                                                .separator()
+                                                .item(item(
+                                                    "Preferences…",
+                                                    CommandId::OpenPreferences,
+                                                    false,
+                                                ))
                                             })
-                                    })
-                                    .child(
-                                        Button::new("open-preferences")
-                                            .small()
-                                            .ghost()
-                                            .icon(IconName::Settings)
-                                            .tooltip(CommandId::OpenPreferences.label())
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.execute(CommandId::OpenPreferences, window, cx)
-                                            })),
-                                    ),
+                                    }),
                             ),
                     )
                     // The reveal animation is a no-op (static end state, no
@@ -2709,29 +2656,6 @@ impl Render for Shell {
                     .into_any_element()
             })
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
-            .child({
-                let bar = StatusBar::new()
-                    .h_7()
-                    .px_4()
-                    .text_xs()
-                    .bg(cx.theme().status_bar)
-                    .border_t_1()
-                    .border_color(cx.theme().window_border)
-                    .text_color(cx.theme().muted_foreground)
-                    .left(div().size_1p5().rounded_full().bg(save_tone))
-                    .left(document_state)
-                    .left(project_name.map_or_else(
-                        || SharedString::from("No project"),
-                        |name| SharedString::from(format!("· {name}")),
-                    ))
-                    .when_some(counts, |bar, counts| bar.right(counts));
-                let bar = if let Some(warning) = self.warning.as_ref() {
-                    bar.left(div().text_color(cx.theme().warning).child(warning.clone()))
-                } else {
-                    bar
-                };
-                div().id("status-bar").test_support().child(bar)
-            })
     }
 }
 
@@ -2996,7 +2920,14 @@ mod tests {
     fn toolbar_and_native_collapse_share_live_visibility_and_restore_document_space(
         cx: &mut TestAppContext,
     ) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let settings = GlobalPreferencesV2 {
+            layout: LayoutState {
+                inspector_visible: true,
+                ..LayoutState::default()
+            },
+            ..GlobalPreferencesV2::default()
+        };
+        let (handle, view) = mount(cx, settings);
         let initial = cx
             .update_window(handle.into(), |_, window, cx| {
                 window.render_frame(cx);
@@ -3201,7 +3132,14 @@ mod tests {
 
     #[gpui_kit::test]
     fn native_drag_is_captured_and_preferences_restore_in_a_new_window(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let settings = GlobalPreferencesV2 {
+            layout: LayoutState {
+                inspector_visible: true,
+                ..LayoutState::default()
+            },
+            ..GlobalPreferencesV2::default()
+        };
+        let (handle, view) = mount(cx, settings);
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             let start = window.find("resize-handle-left").bounds().center();
@@ -3232,7 +3170,14 @@ mod tests {
     fn shrinking_after_expanded_docks_preserves_document_and_panel_geometry(
         cx: &mut TestAppContext,
     ) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let settings = GlobalPreferencesV2 {
+            layout: LayoutState {
+                inspector_visible: true,
+                ..LayoutState::default()
+            },
+            ..GlobalPreferencesV2::default()
+        };
+        let (handle, view) = mount(cx, settings);
         cx.simulate_window_resize(handle.into(), size(px(1800.), px(1100.)));
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
@@ -3266,6 +3211,10 @@ mod tests {
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
             let settings = GlobalPreferencesV2 {
                 theme: mode,
+                layout: LayoutState {
+                    inspector_visible: true,
+                    ..LayoutState::default()
+                },
                 ..GlobalPreferencesV2::default()
             };
             let (handle, _) = mount(cx, settings);
@@ -3273,7 +3222,6 @@ mod tests {
             cx.update_window(handle.into(), |_, window, cx| {
                 window.render_frame(cx);
                 assert!(window.find("title-bar").visible());
-                assert!(window.find("status-bar").visible());
                 assert!(window.find("document-header").visible());
                 for id in ["navigator-panel", "document-panel", "inspector-panel"] {
                     let bounds = window.find(id).bounds();

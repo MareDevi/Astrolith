@@ -273,7 +273,7 @@ impl Default for PanelLayout {
     fn default() -> Self {
         Self {
             sidebar_visible: true,
-            inspector_visible: true,
+            inspector_visible: false,
             preview_visible: false,
             sidebar_width: 240.,
             inspector_width: 260.,

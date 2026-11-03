@@ -41,7 +41,7 @@ mod tests {
             ..LayoutState::default()
         };
         assert!(!layout.sidebar_visible);
-        assert!(layout.inspector_visible);
+        assert!(!layout.inspector_visible);
         assert!(!layout.preview_visible);
         assert_eq!(layout.sidebar_width, 240.);
         layout.preview_visible = true;
