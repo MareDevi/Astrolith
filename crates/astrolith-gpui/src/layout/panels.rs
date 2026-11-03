@@ -89,6 +89,9 @@ impl WorkspacePanel {
                     .default_value(source.source)
             }));
         }
+        if let Some(editor) = self.editor.as_ref() {
+            crate::editor::hide_scrollbar(editor, cx);
+        }
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
     }
@@ -111,6 +114,7 @@ impl WorkspacePanel {
         wiring: Option<EditorWiring>,
         cx: &mut Context<Self>,
     ) {
+        crate::editor::hide_scrollbar(&editor, cx);
         self.title = title.into();
         self.editor = Some(editor);
         self.readonly = false;
