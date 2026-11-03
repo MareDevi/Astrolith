@@ -178,9 +178,11 @@ The workspace is a writing desk: the **Library** opens on the project's
 collection index, and selecting a collection shows only that collection's
 entries (the back arrow returns to the index). The page sits in the middle,
 **Details** holds frontmatter on the right, and the **Reading view** (the Astro
-preview controls) sits below when it is open. The title bar carries the project
-and the window commands; the document rail carries the active document, its
-collection, and save/close actions.
+preview controls) sits below when it is open. Both stay closed by default so
+the page remains the primary surface. The title bar carries the project,
+search and one view menu. The document rail carries the active document, its
+collection, save state and save action; closing and switching other open
+documents remain in its overflow menu.
 
 **New entry** creates a file in the collection you are viewing. Opening an
 entry from another collection switches the Library to that collection, so the
@@ -207,7 +209,7 @@ Writer commands:
   sentence.
 - **Typewriter mode** (`Ctrl+Shift+T`) keeps the cursor line vertically
   centred while typing, navigating and clicking.
-- The toolbar auto-hides after typing when both sidebars are closed and
+- The window chrome auto-hides after typing when both sidebars are closed and
   returns on a top-edge hover. The selection toolbar appears for a non-empty
   selection and is keyboard reachable.
 - The page is set in a serif at a comfortable measure, without line numbers,
@@ -219,7 +221,7 @@ Writer commands:
   destinations, HTML/MDX tags, frontmatter and hidden imports are excluded.
   Each category has a colour and a show/hide label in the same preferences
   state; the default is all categories off.
-- The footer shows word and character counts.
+- The document rail shows word and character counts when the window has room.
 
 Formatting commands act on visible text, preserve line endings and indentation,
 and are one undo step each: **Bold**, **Italic**, **Link…**,
