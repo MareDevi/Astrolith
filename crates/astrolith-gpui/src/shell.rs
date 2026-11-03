@@ -4148,6 +4148,9 @@ mod tests {
         assert!(view.read_with(cx, |shell, cx| { !shell.project.read(cx).is_loading() }));
 
         cx.update_window(handle.into(), |_, window, cx| {
+            project_handle.update(cx, |project, cx| {
+                project.select_first_collection_for_tests(window, cx)
+            });
             window.render_frame(cx);
             assert_ne!(window.find("entry-new").disabled(), Some(true));
             window.click("command-palette", cx);

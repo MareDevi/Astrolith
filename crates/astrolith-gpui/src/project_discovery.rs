@@ -66,7 +66,7 @@ use gpui_kit::component::{
 use gpui_kit::{
     AnyWindowHandle, App, AppContext, Context, Entity, EventEmitter, Focusable, IntoElement,
     PathPromptOptions, Render, SharedString, Subscription, Task, TestSupportExt, WeakEntity,
-    Window, div, prelude::*,
+    Window, div, prelude::*, px,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -128,6 +128,8 @@ struct EntryList {
     query: String,
     filter: EntryFilter,
     sort: EntrySort,
+    /// When set, only entries from this collection are listed.
+    collection_filter: Option<SharedString>,
     /// Resolved field mappings per collection identity.
     mappings: BTreeMap<String, FieldMappings>,
     selected: Option<IndexPath>,
@@ -143,6 +145,7 @@ impl EntryList {
             query: String::new(),
             filter: EntryFilter::default(),
             sort: EntrySort::default(),
+            collection_filter: None,
             mappings: BTreeMap::new(),
             selected: None,
             active: None,
@@ -160,6 +163,13 @@ impl EntryList {
         let mut groups: BTreeMap<&str, Vec<(usize, &CollectionEntry)>> = BTreeMap::new();
         for (index, entry) in self.entries.iter().enumerate() {
             let collection = entry.entry().id().collection().as_str();
+            if self
+                .collection_filter
+                .as_ref()
+                .is_some_and(|selected| selected.as_ref() != collection)
+            {
+                continue;
+            }
             let mappings = self.mappings.get(collection);
             if !list::matches_filter(entry, mappings, &filter) {
                 continue;
@@ -252,6 +262,9 @@ impl ListDelegate for EntryList {
         cx: &mut Context<ListState<Self>>,
     ) -> Option<impl IntoElement> {
         let section = self.sections.get(section)?;
+        if self.collection_filter.is_some() {
+            return None;
+        }
         Some(
             div()
                 .h_flex()
@@ -397,6 +410,7 @@ impl ListDelegate for EntryList {
         Some(
             ListItem::new(row.id.clone())
                 .selected(selected)
+                .when(active, |item| item.bg(cx.theme().selection).rounded_md())
                 .accessibility_label(row.search.clone())
                 .child(row_content),
         )
@@ -496,7 +510,11 @@ pub(crate) struct ProjectWorkspace {
     document: Entity<WorkspacePanel>,
     manifest: Option<Arc<ProjectManifest>>,
     entries: Arc<Vec<CollectionEntry>>,
+    /// Entry count per collection, rebuilt with the index rather than in render.
+    collection_counts: BTreeMap<String, usize>,
     list: Entity<ListState<EntryList>>,
+    /// Collection whose entries the library shows; `None` is the collection root.
+    selected_collection: Option<String>,
     tabs: Arc<Vec<OpenTab>>,
     tab_order: Vec<PathBuf>,
     display_name: Option<SharedString>,
@@ -753,7 +771,9 @@ impl ProjectWorkspace {
             document,
             manifest: None,
             entries,
+            collection_counts: BTreeMap::new(),
             list,
+            selected_collection: None,
             tabs: Arc::new(Vec::new()),
             tab_order: Vec::new(),
             display_name: None,
@@ -2233,6 +2253,7 @@ impl ProjectWorkspace {
     pub(crate) fn open_root(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.loading = true;
         self.open_error = None;
+        self.selected_collection = None;
         self.status = "Checking the project folder…".into();
         cx.notify();
         let home = paths::home_directory();
@@ -2641,10 +2662,7 @@ impl ProjectWorkspace {
                         // rebuilt reference catalog exactly like a refresh does.
                         this.apply_discovered_index(manifest, entries, cx);
                         this.start_watcher(watcher, window, cx);
-                        this.status = format!(
-                            "{} entries · Ctrl/Cmd+S saves the active document.",
-                            this.entries.len()
-                        );
+                        this.status.clear();
                         this.load_pending_recovery(window, cx);
                         this.load_collection_schemas(cx);
                         // Project preferences may already be installed; apply any
@@ -2882,6 +2900,23 @@ impl ProjectWorkspace {
             .expect("index revision exhausted");
         self.loads.clear();
         self.entries = Arc::new(entries);
+        self.collection_counts.clear();
+        for entry in self.entries.iter() {
+            *self
+                .collection_counts
+                .entry(entry.entry().id().collection().as_str().to_owned())
+                .or_default() += 1;
+        }
+        if let Some(selected) = self.selected_collection.as_deref()
+            && !self.manifest.as_ref().is_some_and(|manifest| {
+                manifest
+                    .collections()
+                    .iter()
+                    .any(|descriptor| descriptor.id().as_str() == selected)
+            })
+        {
+            self.selected_collection = None;
+        }
         self.display_name = self.manifest.as_ref().map(|manifest| {
             let root = manifest.root();
             root.file_name()
@@ -2902,6 +2937,7 @@ impl ProjectWorkspace {
         let mappings = self.collection_mappings();
         let filter = self.list_filter.clone();
         let sort = self.list_sort.clone();
+        let collection_filter = self.selected_collection.clone().map(Into::into);
         self.list.update(cx, |list, cx| {
             let delegate = list.delegate_mut();
             delegate.entries = entries;
@@ -2910,6 +2946,7 @@ impl ProjectWorkspace {
             delegate.mappings = mappings;
             delegate.filter = filter;
             delegate.sort = sort;
+            delegate.collection_filter = collection_filter;
             delegate.rebuild();
             delegate.selected = delegate
                 .selected_row()
@@ -2947,6 +2984,22 @@ impl ProjectWorkspace {
         cx: &mut Context<Self>,
     ) {
         self.open_entry(0, window, cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_first_collection_for_tests(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let collection = self
+            .manifest
+            .as_ref()
+            .and_then(|manifest| manifest.collections().first())
+            .map(|descriptor| descriptor.id().as_str().to_owned());
+        if let Some(collection) = collection {
+            self.select_collection(Some(collection), window, cx);
+        }
     }
 
     /// Whether the static component index for this generation has landed.
@@ -3108,6 +3161,7 @@ impl ProjectWorkspace {
                 }
                 self.sync_tabs(cx);
                 if self.active.as_ref() == Some(&key) {
+                    self.focus_collection_for(&key, cx);
                     self.install(&key, session, cx);
                     self.document.read(cx).focus_handle(cx).focus(window, cx);
                 }
@@ -3141,9 +3195,22 @@ impl ProjectWorkspace {
             self.save_path(outgoing, SaveKind::Automatic, window, cx);
         }
         self.active = Some(path.to_owned());
+        self.focus_collection_for(path, cx);
         self.install(path, session, cx);
         self.refresh_entry_selection(cx);
         self.document.read(cx).focus_handle(cx).focus(window, cx);
+    }
+
+    /// Keep the library on the collection that owns `path`.
+    fn focus_collection_for(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        let Some(collection) = self.session_collections.get(path).cloned() else {
+            return;
+        };
+        if self.selected_collection.as_deref() == Some(collection.as_str()) {
+            return;
+        }
+        self.selected_collection = Some(collection);
+        self.publish_list_state(cx);
     }
 
     fn refresh_entry_selection(&mut self, cx: &mut Context<Self>) {
@@ -4509,8 +4576,14 @@ impl ProjectWorkspace {
                         .find(|entry| entry.absolute_source() == active)
                 })
             });
+        let selected_descriptor = self.selected_collection.as_deref().and_then(|selected| {
+            manifest
+                .collections()
+                .iter()
+                .find(|descriptor| descriptor.id().as_str() == selected)
+        });
         let Some((collection, descriptor)) = target_entry
-            .map(|entry| {
+            .and_then(|entry| {
                 let name = entry.entry().id().collection().as_str();
                 manifest
                     .collections()
@@ -4518,7 +4591,8 @@ impl ProjectWorkspace {
                     .find(|descriptor| descriptor.id().as_str() == name)
                     .map(|descriptor| (descriptor.id().clone(), descriptor))
             })
-            .unwrap_or_else(|| {
+            .or_else(|| selected_descriptor.map(|descriptor| (descriptor.id().clone(), descriptor)))
+            .or_else(|| {
                 manifest
                     .collections()
                     .first()
@@ -5427,6 +5501,7 @@ impl ProjectWorkspace {
         let mappings = self.collection_mappings();
         let filter = self.list_filter.clone();
         let sort = self.list_sort.clone();
+        let collection_filter = self.selected_collection.clone().map(Into::into);
         self.list.update(cx, |list, cx| {
             let delegate = list.delegate_mut();
             delegate.entries = entries;
@@ -5435,12 +5510,32 @@ impl ProjectWorkspace {
             delegate.mappings = mappings;
             delegate.filter = filter;
             delegate.sort = sort;
+            delegate.collection_filter = collection_filter;
             delegate.rebuild();
             delegate.selected = delegate
                 .selected_row()
                 .map(|(section, row)| IndexPath::new(row).section(section));
             cx.notify();
         });
+    }
+
+    /// Show one collection's entries, or return to the collection root.
+    pub(crate) fn select_collection(
+        &mut self,
+        collection: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_collection == collection {
+            return;
+        }
+        self.selected_collection = collection;
+        self.list_filter = EntryFilter::default();
+        self.last_list_query.clear();
+        self.list
+            .update(cx, |list, cx| list.set_query("", window, cx));
+        self.publish_list_state(cx);
+        cx.notify();
     }
 
     pub(crate) fn toggle_drafts_only(&mut self, cx: &mut Context<Self>) {
@@ -5500,7 +5595,31 @@ impl Render for ProjectWorkspace {
         let loading = self.loading;
         let availability = self.command_availability(cx, window);
         let visible = self.visible_entry_count(cx);
-        let total = self.entries.len();
+        let selected_collection = self.selected_collection.clone();
+        let collections: Vec<(String, usize)> = self
+            .manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .collections()
+                    .iter()
+                    .map(|descriptor| {
+                        let name = descriptor.id().as_str();
+                        let count = self.collection_counts.get(name).copied().unwrap_or(0);
+                        (name.to_owned(), count)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let total = selected_collection
+            .as_ref()
+            .and_then(|selected| {
+                collections
+                    .iter()
+                    .find(|(name, _)| name == selected)
+                    .map(|(_, count)| *count)
+            })
+            .unwrap_or(self.entries.len());
         let query = self.last_list_query.trim().to_owned();
         let drafts_only = self.list_filter.drafts_only;
         let filter_active = drafts_only || !query.is_empty();
@@ -5528,6 +5647,7 @@ impl Render for ProjectWorkspace {
         let more_owner = cx.weak_entity();
         let absolute_owner = cx.weak_entity();
         let menu_owner = cx.weak_entity();
+        let collection_owner = cx.weak_entity();
         let menu_options = sort_options.clone();
         let menu_current = current_mode.clone();
         let mut view = view.child(
@@ -5544,6 +5664,18 @@ impl Render for ProjectWorkspace {
                         .px_4()
                         .pt_4()
                         .pb_2()
+                        .when(selected_collection.is_some(), |row| {
+                            row.child(
+                                Button::new("library-back")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::ArrowLeft)
+                                    .tooltip("All collections")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.select_collection(None, window, cx)
+                                    })),
+                            )
+                        })
                         .child(
                             div()
                                 .v_flex()
@@ -5554,7 +5686,13 @@ impl Render for ProjectWorkspace {
                                         .font_family(crate::theme::prose_font(cx))
                                         .text_base()
                                         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                        .child("Library"),
+                                        .truncate()
+                                        .child(SharedString::from(
+                                            selected_collection
+                                                .as_deref()
+                                                .map(collection_title)
+                                                .unwrap_or_else(|| "Library".to_owned()),
+                                        )),
                                 )
                                 .child(
                                     div()
@@ -5563,11 +5701,17 @@ impl Render for ProjectWorkspace {
                                         .gap_1()
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(SharedString::from(if filter_active {
-                                            format!("{visible} of {total} entries")
-                                        } else {
-                                            format!("{total} entries")
-                                        }))
+                                        .child(SharedString::from(
+                                            if selected_collection.is_some() {
+                                                if filter_active {
+                                                    format!("{visible} of {total} entries")
+                                                } else {
+                                                    format!("{total} entries")
+                                                }
+                                            } else {
+                                                format!("{} collections", collections.len())
+                                            },
+                                        ))
                                         .when(filter_active, |row| {
                                             row.child(
                                                 div()
@@ -5588,164 +5732,287 @@ impl Render for ProjectWorkspace {
                             IconName::FolderOpen,
                             "Open project…",
                         ))
-                        .child(
-                            Button::new("entry-more")
-                                .small()
-                                .ghost()
-                                .icon(IconName::Ellipsis)
-                                .tooltip("Library actions")
-                                .dropdown_menu(move |menu, _, _| {
-                                    let mut menu = menu;
-                                    for command in [
-                                        CommandId::DuplicateEntry,
-                                        CommandId::RenameEntry,
-                                        CommandId::DeleteEntry,
-                                        CommandId::RevealEntry,
-                                    ] {
-                                        let owner = more_owner.clone();
-                                        menu = menu.item(
-                                            PopupMenuItem::new(command.label())
-                                                .disabled(!command.is_available(availability))
-                                                .on_click(move |_, window, cx| {
-                                                    let _ = owner.update(cx, |project, cx| {
-                                                        project.entry_command(
-                                                            command, None, window, cx,
-                                                        )
-                                                    });
-                                                }),
-                                        );
-                                    }
-                                    let owner = more_owner.clone();
-                                    menu = menu
-                                        .separator()
-                                        .item(
-                                            PopupMenuItem::new("Copy relative path")
-                                                .disabled(
-                                                    !CommandId::CopyPathRelative
-                                                        .is_available(availability),
-                                                )
-                                                .on_click(move |_, window, cx| {
-                                                    let _ = owner.update(cx, |project, cx| {
-                                                        project.entry_command(
-                                                            CommandId::CopyPathRelative,
-                                                            None,
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    });
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("Copy absolute path")
-                                                .disabled(
-                                                    !CommandId::CopyPathAbsolute
-                                                        .is_available(availability),
-                                                )
-                                                .on_click({
-                                                    let owner = absolute_owner.clone();
-                                                    move |_, window, cx| {
+                        .when(selected_collection.is_some(), |row| {
+                            row.child(
+                                Button::new("entry-more")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Ellipsis)
+                                    .tooltip("Library actions")
+                                    .dropdown_menu(move |menu, _, _| {
+                                        let mut menu = menu;
+                                        for command in [
+                                            CommandId::DuplicateEntry,
+                                            CommandId::RenameEntry,
+                                            CommandId::DeleteEntry,
+                                            CommandId::RevealEntry,
+                                        ] {
+                                            let owner = more_owner.clone();
+                                            menu = menu.item(
+                                                PopupMenuItem::new(command.label())
+                                                    .disabled(!command.is_available(availability))
+                                                    .on_click(move |_, window, cx| {
                                                         let _ = owner.update(cx, |project, cx| {
                                                             project.entry_command(
-                                                                CommandId::CopyPathAbsolute,
+                                                                command, None, window, cx,
+                                                            )
+                                                        });
+                                                    }),
+                                            );
+                                        }
+                                        let owner = more_owner.clone();
+                                        menu = menu
+                                            .separator()
+                                            .item(
+                                                PopupMenuItem::new("Copy relative path")
+                                                    .disabled(
+                                                        !CommandId::CopyPathRelative
+                                                            .is_available(availability),
+                                                    )
+                                                    .on_click(move |_, window, cx| {
+                                                        let _ = owner.update(cx, |project, cx| {
+                                                            project.entry_command(
+                                                                CommandId::CopyPathRelative,
                                                                 None,
                                                                 window,
                                                                 cx,
                                                             )
                                                         });
-                                                    }
-                                                }),
-                                        )
-                                        .separator()
-                                        .item(
-                                            PopupMenuItem::new("Show drafts only")
-                                                .checked(drafts_only)
-                                                .on_click({
-                                                    let owner = menu_owner.clone();
-                                                    move |_, _, cx| {
-                                                        let _ = owner.update(cx, |project, cx| {
-                                                            project.toggle_drafts_only(cx)
-                                                        });
-                                                    }
-                                                }),
-                                        )
-                                        .separator();
-                                    for (mode, label) in menu_options.iter().cloned() {
-                                        let owner = menu_owner.clone();
-                                        let selected = mode == menu_current;
-                                        let chosen = mode.clone();
-                                        menu = menu.item(
-                                            PopupMenuItem::new(label).checked(selected).on_click(
-                                                move |_, _, cx| {
-                                                    let _ = owner.update(cx, |project, cx| {
-                                                        project.set_sort_mode(chosen.clone(), cx)
-                                                    });
-                                                },
-                                            ),
-                                        );
-                                    }
-                                    let owner = menu_owner.clone();
-                                    menu.item(
-                                        PopupMenuItem::new("Reverse sort direction")
-                                            .disabled(default_sort)
-                                            .on_click(move |_, _, cx| {
-                                                let _ = owner.update(cx, |project, cx| {
-                                                    project.toggle_sort_direction(cx)
-                                                });
-                                            }),
-                                    )
-                                    .when(
-                                        filter_active,
-                                        |menu| {
-                                            let owner = menu_owner.clone();
-                                            menu.separator().item(
-                                                PopupMenuItem::new("Clear filter").on_click(
-                                                    move |_, window, cx| {
-                                                        let _ = owner.update(cx, |project, cx| {
-                                                            project.clear_filter(window, cx)
-                                                        });
-                                                    },
-                                                ),
+                                                    }),
                                             )
-                                        },
-                                    )
-                                }),
-                        ),
-                )
-                .child(
-                    div()
-                        .h_flex()
-                        .items_center()
-                        .gap_2()
-                        .px_4()
-                        .pb_3()
-                        .child(
-                            Button::new("entry-new")
-                                .small()
-                                .icon(IconName::PenLine)
-                                .label("New entry")
-                                .tooltip(CommandId::NewEntry.label())
-                                .disabled(!CommandId::NewEntry.is_available(availability))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.entry_command(CommandId::NewEntry, None, window, cx)
-                                })),
-                        )
-                        .child(div().flex_1())
-                        .when(filter_active, |row| {
-                            row.child(
-                                Button::new("clear-filter")
-                                    .small()
-                                    .ghost()
-                                    .label("Clear filter")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.clear_filter(window, cx)
-                                    })),
+                                            .item(
+                                                PopupMenuItem::new("Copy absolute path")
+                                                    .disabled(
+                                                        !CommandId::CopyPathAbsolute
+                                                            .is_available(availability),
+                                                    )
+                                                    .on_click({
+                                                        let owner = absolute_owner.clone();
+                                                        move |_, window, cx| {
+                                                            let _ =
+                                                                owner.update(cx, |project, cx| {
+                                                                    project.entry_command(
+                                                                        CommandId::CopyPathAbsolute,
+                                                                        None,
+                                                                        window,
+                                                                        cx,
+                                                                    )
+                                                                });
+                                                        }
+                                                    }),
+                                            )
+                                            .separator()
+                                            .item(
+                                                PopupMenuItem::new("Show drafts only")
+                                                    .checked(drafts_only)
+                                                    .on_click({
+                                                        let owner = menu_owner.clone();
+                                                        move |_, _, cx| {
+                                                            let _ =
+                                                                owner.update(cx, |project, cx| {
+                                                                    project.toggle_drafts_only(cx)
+                                                                });
+                                                        }
+                                                    }),
+                                            )
+                                            .separator();
+                                        for (mode, label) in menu_options.iter().cloned() {
+                                            let owner = menu_owner.clone();
+                                            let selected = mode == menu_current;
+                                            let chosen = mode.clone();
+                                            menu = menu.item(
+                                                PopupMenuItem::new(label)
+                                                    .checked(selected)
+                                                    .on_click(move |_, _, cx| {
+                                                        let _ = owner.update(cx, |project, cx| {
+                                                            project
+                                                                .set_sort_mode(chosen.clone(), cx)
+                                                        });
+                                                    }),
+                                            );
+                                        }
+                                        let owner = menu_owner.clone();
+                                        menu.item(
+                                            PopupMenuItem::new("Reverse sort direction")
+                                                .disabled(default_sort)
+                                                .on_click(move |_, _, cx| {
+                                                    let _ = owner.update(cx, |project, cx| {
+                                                        project.toggle_sort_direction(cx)
+                                                    });
+                                                }),
+                                        )
+                                        .when(
+                                            filter_active,
+                                            |menu| {
+                                                let owner = menu_owner.clone();
+                                                menu.separator().item(
+                                                    PopupMenuItem::new("Clear filter").on_click(
+                                                        move |_, window, cx| {
+                                                            let _ =
+                                                                owner.update(cx, |project, cx| {
+                                                                    project.clear_filter(window, cx)
+                                                                });
+                                                        },
+                                                    ),
+                                                )
+                                            },
+                                        )
+                                    }),
                             )
                         }),
-                ),
+                )
+                .when(selected_collection.is_some(), |view| {
+                    view.child(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_2()
+                            .px_4()
+                            .pb_3()
+                            .child(
+                                Button::new("entry-new")
+                                    .small()
+                                    .icon(IconName::PenLine)
+                                    .label("New entry")
+                                    .tooltip(CommandId::NewEntry.label())
+                                    .disabled(!CommandId::NewEntry.is_available(availability))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.entry_command(CommandId::NewEntry, None, window, cx)
+                                    })),
+                            )
+                            .child(div().flex_1())
+                            .when(filter_active, |row| {
+                                row.child(
+                                    Button::new("clear-filter")
+                                        .small()
+                                        .ghost()
+                                        .label("Clear filter")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.clear_filter(window, cx)
+                                        })),
+                                )
+                            }),
+                    )
+                }),
         );
 
         if loading {
             view = view.child(project_loading_state(cx));
+        } else if index_error.is_none() && selected_collection.is_none() {
+            if collections.is_empty() {
+                view = view.child(
+                    div()
+                        .id("project-no-collections")
+                        .test_support()
+                        .v_flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .p_6()
+                        .child(
+                            Icon::new(IconName::BookOpen)
+                                .size_6()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(div().text_sm().child("No collections"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_center()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("This project declares no content collections."),
+                        ),
+                );
+            } else {
+                view =
+                    view.child(
+                        div()
+                            .id("project-collections")
+                            .test_support()
+                            .v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .gap_0p5()
+                            .p_2()
+                            .overflow_y_scroll()
+                            .children(collections.iter().enumerate().map(
+                                |(index, (name, count))| {
+                                    let owner = collection_owner.clone();
+                                    let chosen = name.clone();
+                                    let title = collection_title(name);
+                                    Button::new(("library-collection", index))
+                                        .ghost()
+                                        .w_full()
+                                        .h(px(56.))
+                                        .justify_start()
+                                        .child(
+                                            div()
+                                                .h_flex()
+                                                .w_full()
+                                                .items_center()
+                                                .gap_3()
+                                                .px_2()
+                                                .child(
+                                                    Icon::new(IconName::BookOpen)
+                                                        .size_4()
+                                                        .text_color(cx.theme().muted_foreground),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .v_flex()
+                                                        .min_w_0()
+                                                        .flex_1()
+                                                        .gap_0p5()
+                                                        .child(
+                                                            div()
+                                                                .font_family(
+                                                                    crate::theme::prose_font(cx),
+                                                                )
+                                                                .text_sm()
+                                                                .font_weight(
+                                                                    gpui_kit::FontWeight::MEDIUM,
+                                                                )
+                                                                .truncate()
+                                                                .child(SharedString::from(title)),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(
+                                                                    cx.theme().muted_foreground,
+                                                                )
+                                                                .child(SharedString::from(
+                                                                    format!(
+                                                                        "{count} {}",
+                                                                        if *count == 1 {
+                                                                            "entry"
+                                                                        } else {
+                                                                            "entries"
+                                                                        }
+                                                                    ),
+                                                                )),
+                                                        ),
+                                                )
+                                                .child(
+                                                    Icon::new(IconName::ChevronRight)
+                                                        .xsmall()
+                                                        .text_color(cx.theme().muted_foreground),
+                                                ),
+                                        )
+                                        .on_click(move |_, window, cx| {
+                                            let _ = owner.update(cx, |project, cx| {
+                                                project.select_collection(
+                                                    Some(chosen.clone()),
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        })
+                                },
+                            )),
+                    );
+            }
         } else if let Some(error) = index_error {
             view =
                 view.child(
@@ -5825,7 +6092,7 @@ impl Render for ProjectWorkspace {
                             .text_xs()
                             .text_center()
                             .text_color(cx.theme().muted_foreground)
-                            .child("This project's collections contain no Markdown or MDX files."),
+                            .child("This collection contains no Markdown or MDX files."),
                     )
             });
         } else {
@@ -5876,6 +6143,15 @@ fn meta_scalar(value: &MetaValue) -> Option<String> {
         MetaValue::Boolean(flag) => Some(flag.to_string()),
         MetaValue::Integer(number) => Some(number.to_string()),
         MetaValue::Real(number) => Some(number.to_string()),
+    }
+}
+
+/// Reader-facing title for a collection id.
+fn collection_title(name: &str) -> String {
+    let mut characters = name.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().chain(characters).collect(),
+        None => String::new(),
     }
 }
 
@@ -10500,8 +10776,13 @@ export const collections = {blog, dataAuthors};
         cx.condition(&view, |view, _| !view.is_loading()).await;
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.try_find("project-no-entries").is_some());
+            assert!(window.try_find("project-collections").is_some());
             assert!(window.try_find("project-loading").is_none());
+            view.update(cx, |view, cx| {
+                view.select_collection(Some("blog".into()), window, cx)
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("project-no-entries").is_some());
             view.update(cx, |view, _| {
                 view.index_error = Some("index exploded".into())
             });
@@ -10514,11 +10795,67 @@ export const collections = {blog, dataAuthors};
         let filtered = fixture();
         let (filtered_handle, filtered_view) = mount(cx);
         open_project_and_wait(cx, filtered_handle, &filtered_view, filtered.path()).await;
-        filtered_view.update(cx, |view, cx| view.toggle_drafts_only(cx));
         cx.update_window(filtered_handle.into(), |_, window, cx| {
+            filtered_view.update(cx, |view, cx| {
+                view.select_collection(Some("blog".into()), window, cx);
+                view.toggle_drafts_only(cx);
+            });
             window.render_frame(cx);
             assert!(window.try_find("project-filtered-empty").is_some());
             assert!(window.try_find("project-no-entries").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn library_lists_collections_first_and_scopes_entries(cx: &mut TestAppContext) {
+        let dir = fixture();
+        std::fs::create_dir_all(dir.path().join("src/notes")).unwrap();
+        std::fs::write(dir.path().join("src/notes/note.md"), "# Note\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/content.config.ts"),
+            "import {defineCollection} from 'astro:content'; import {glob} from 'astro/loaders'; const blog=defineCollection({loader:glob({base:'src/posts',pattern:'**/*.{md,mdx}'})}); const notes=defineCollection({loader:glob({base:'src/notes',pattern:'**/*.md'})}); export const collections={blog,notes};",
+        )
+        .unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("project-collections").is_some(),
+                "the library opens on its collection index"
+            );
+            assert!(window.try_find("project-no-entries").is_none());
+            view.update(cx, |view, cx| {
+                view.select_collection(Some("blog".into()), window, cx)
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("project-collections").is_none());
+            assert!(window.try_find("library-back").is_some());
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.visible_entry_names(cx)),
+            ["a.md", "b.mdx"],
+            "only the selected collection's entries are listed"
+        );
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.select_collection(Some("notes".into()), window, cx)
+            });
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.visible_entry_names(cx)),
+            ["note.md"]
+        );
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.select_collection(None, window, cx));
+            window.render_frame(cx);
+            assert!(window.try_find("project-collections").is_some());
         })
         .unwrap();
     }
