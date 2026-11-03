@@ -11,10 +11,11 @@ use crate::runtime;
 
 /// A backend whose results are scripted, so the panel can be tested headlessly.
 struct TestBackend {
-    start: Mutex<Result<Url, String>>,
+    start: Mutex<Result<Url, StartupFailure>>,
     stop: Mutex<Result<(), String>>,
     exit: Mutex<Option<ServerStatus>>,
     started: AtomicBool,
+    starts: std::sync::atomic::AtomicUsize,
     stopped: AtomicBool,
     aborted: AtomicBool,
 }
@@ -26,6 +27,7 @@ impl TestBackend {
             stop: Mutex::new(Ok(())),
             exit: Mutex::new(None),
             started: AtomicBool::new(false),
+            starts: std::sync::atomic::AtomicUsize::new(0),
             stopped: AtomicBool::new(false),
             aborted: AtomicBool::new(false),
         })
@@ -33,10 +35,11 @@ impl TestBackend {
 
     fn failing(message: &str) -> Arc<Self> {
         Arc::new(Self {
-            start: Mutex::new(Err(message.to_owned())),
+            start: Mutex::new(Err(StartupFailure::new(message, None))),
             stop: Mutex::new(Ok(())),
             exit: Mutex::new(None),
             started: AtomicBool::new(false),
+            starts: std::sync::atomic::AtomicUsize::new(0),
             stopped: AtomicBool::new(false),
             aborted: AtomicBool::new(false),
         })
@@ -48,8 +51,9 @@ impl TestBackend {
 }
 
 impl PreviewBackend for TestBackend {
-    fn start(&self) -> PreviewFuture<Result<Url, String>> {
+    fn start(&self) -> PreviewFuture<Result<Url, StartupFailure>> {
         self.started.store(true, Ordering::SeqCst);
+        self.starts.fetch_add(1, Ordering::SeqCst);
         let result = self.start.lock().unwrap().clone();
         Box::pin(async move { result })
     }
@@ -208,7 +212,7 @@ async fn start_while_ready_keeps_the_running_server(cx: &mut gpui_kit::TestAppCo
     let (_handle, panel, _surface) = mount(cx, backend.clone());
     panel.update(cx, |panel, cx| panel.start(cx));
     wait_for(cx, &panel, |panel| panel.status().is_ready()).await;
-    *backend.start.lock().unwrap() = Err("must not start again".to_owned());
+    *backend.start.lock().unwrap() = Err(StartupFailure::new("must not start again", None));
     panel.update(cx, |panel, cx| panel.start(cx));
     panel.read_with(cx, |panel, _| {
         assert!(panel.status().is_ready(), "status was {:?}", panel.status());
@@ -295,6 +299,10 @@ fn detach_aborts_the_backend_and_resets_state(cx: &mut gpui_kit::TestAppContext)
     panel.read_with(cx, |panel, _| {
         assert!(backend.aborted.load(Ordering::SeqCst));
         assert!(panel.project().is_none());
+        assert!(
+            panel.mapping().is_empty(),
+            "closing the project removes routes"
+        );
         assert!(matches!(panel.status(), ServerStatus::Stopped));
     });
 }
@@ -325,8 +333,7 @@ fn open_ready_entry_launches_the_surface(cx: &mut gpui_kit::TestAppContext) {
     // Set the ready state directly: the start path is covered separately, and a
     // synchronous open keeps this test independent of scheduler timing.
     panel.update(cx, |panel, cx| {
-        panel.status = ServerStatus::Ready(Url::parse("http://127.0.0.1:4321/").unwrap());
-        cx.notify();
+        panel.force_ready(Url::parse("http://127.0.0.1:4321/").unwrap(), cx);
     });
     let entry = EntryId::new("docs", "guides/nested").unwrap();
     panel.update(cx, |panel, cx| {
@@ -344,8 +351,7 @@ fn surface_failure_is_surfaced(cx: &mut gpui_kit::TestAppContext) {
     let backend = TestBackend::ready("http://127.0.0.1:4321/");
     let (_handle, panel, _surface) = mount(cx, backend);
     panel.update(cx, |panel, cx| {
-        panel.status = ServerStatus::Ready(Url::parse("http://127.0.0.1:4321/").unwrap());
-        cx.notify();
+        panel.force_ready(Url::parse("http://127.0.0.1:4321/").unwrap(), cx);
     });
     panel.update(cx, |panel, cx| {
         panel.surface = Arc::new(RecordingSurface::failing(SurfaceError::LaunchFailed {
@@ -364,5 +370,211 @@ fn surface_failure_is_surfaced(cx: &mut gpui_kit::TestAppContext) {
             "message was {:?}",
             panel.message()
         );
+    });
+}
+
+#[gpui_kit::test]
+async fn restart_stops_and_starts_the_same_backend(cx: &mut gpui_kit::TestAppContext) {
+    let _serial = Serial::acquire();
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, _surface) = mount(cx, backend.clone());
+    panel.update(cx, |panel, cx| panel.start(cx));
+    wait_for(cx, &panel, |panel| panel.status().is_ready()).await;
+
+    panel.update(cx, |panel, cx| panel.restart(cx));
+    wait_for(cx, &panel, |panel| {
+        panel.status().is_ready() && !panel.is_busy()
+    })
+    .await;
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
+        assert!(backend.stopped.load(Ordering::SeqCst));
+        assert!(
+            panel
+                .message()
+                .unwrap_or_default()
+                .contains("Preview ready"),
+            "message was {:?}",
+            panel.message()
+        );
+    });
+}
+
+#[gpui_kit::test]
+async fn start_failure_reports_the_captured_stderr_excerpt(cx: &mut gpui_kit::TestAppContext) {
+    let _serial = Serial::acquire();
+    let backend = Arc::new(TestBackend {
+        start: Mutex::new(Err(StartupFailure::new(
+            "Astro dev server exited before ready",
+            Some("Error: Cannot find module 'astro'".to_owned()),
+        ))),
+        stop: Mutex::new(Ok(())),
+        exit: Mutex::new(None),
+        started: AtomicBool::new(false),
+        starts: std::sync::atomic::AtomicUsize::new(0),
+        stopped: AtomicBool::new(false),
+        aborted: AtomicBool::new(false),
+    });
+    let (_handle, panel, _surface) = mount(cx, backend.clone());
+    panel.update(cx, |panel, cx| panel.start(cx));
+    wait_for(cx, &panel, |panel| {
+        matches!(panel.status(), ServerStatus::Failed(_))
+    })
+    .await;
+    panel.read_with(cx, |panel, _| {
+        let message = panel.message().unwrap_or_default();
+        assert!(message.contains("Astro output"), "{message:?}");
+        assert!(message.contains("Cannot find module"), "{message:?}");
+        assert_eq!(panel.phase().label(), "failed");
+    });
+
+    // Retry reuses the same backend after the project problem is fixed.
+    *backend.start.lock().unwrap() = Ok(Url::parse("http://127.0.0.1:4321/").unwrap());
+    panel.update(cx, |panel, cx| panel.start(cx));
+    wait_for(cx, &panel, |panel| panel.status().is_ready()).await;
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(panel.phase().label(), "ready");
+    });
+}
+
+#[gpui_kit::test]
+fn copy_url_is_gated_on_ready_and_reports_unmapped_entries(cx: &mut gpui_kit::TestAppContext) {
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, surface) = mount(cx, backend);
+    let entry = EntryId::new("docs", "guides/nested").unwrap();
+    panel.update(cx, |panel, cx| {
+        panel.set_entry(Some(entry.clone()), cx);
+        panel.copy_url(cx);
+    });
+    panel.read_with(cx, |panel, _| {
+        let message = panel.message().unwrap_or_default();
+        assert!(message.contains("not ready"), "{message:?}");
+        assert!(!message.contains("Copied"), "{message:?}");
+    });
+
+    panel.update(cx, |panel, cx| {
+        panel.force_ready(Url::parse("http://127.0.0.1:4321/").unwrap(), cx);
+        panel.copy_url(cx);
+    });
+    panel.read_with(cx, |panel, _| {
+        assert!(
+            panel
+                .message()
+                .unwrap_or_default()
+                .contains("Copied preview URL"),
+            "message was {:?}",
+            panel.message()
+        );
+        assert!(
+            panel
+                .message()
+                .unwrap_or_default()
+                .contains("/docs/guides/nested"),
+            "message was {:?}",
+            panel.message()
+        );
+    });
+
+    // Switching the active entry retargets the copied route.
+    let switched = EntryId::new("docs", "renamed-entry").unwrap();
+    panel.update(cx, |panel, cx| {
+        panel.set_entry(Some(switched), cx);
+        panel.copy_url(cx);
+    });
+    panel.read_with(cx, |panel, _| {
+        assert!(
+            panel
+                .message()
+                .unwrap_or_default()
+                .contains("/docs/renamed-entry"),
+            "message was {:?}",
+            panel.message()
+        );
+    });
+
+    let other = EntryId::new("notes", "private").unwrap();
+    panel.update(cx, |panel, cx| {
+        panel.set_entry(Some(other), cx);
+        panel.message = None;
+        panel.copy_url(cx);
+    });
+    panel.read_with(cx, |panel, _| {
+        let message = panel.message().unwrap_or_default();
+        assert!(message.contains("no route mapping"), "{message:?}");
+        assert!(!message.contains("Copied"), "{message:?}");
+    });
+    assert!(surface.opened().is_empty());
+}
+
+#[gpui_kit::test]
+fn same_root_reuses_the_server_and_a_new_root_rebinds(cx: &mut gpui_kit::TestAppContext) {
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, _surface) = mount(cx, backend.clone());
+    panel.update(cx, |panel, cx| {
+        panel.force_ready(Url::parse("http://127.0.0.1:4321/").unwrap(), cx);
+        panel.ensure_attached(
+            ProjectId::new("workspace-2").unwrap(),
+            PathBuf::from("/tmp/preview-test"),
+            mapping(),
+            cx,
+        );
+    });
+    panel.read_with(cx, |panel, _| {
+        assert!(
+            panel.status().is_ready(),
+            "the same root must keep the running server"
+        );
+        assert_eq!(
+            panel.project().map(ProjectId::as_str),
+            Some("workspace-2"),
+            "the project id may change while the root is reused"
+        );
+        assert!(!backend.aborted.load(Ordering::SeqCst));
+    });
+
+    // A collection change refreshes the mapping without restarting the server.
+    panel.update(cx, |panel, cx| {
+        panel.ensure_attached(
+            ProjectId::new("workspace-2").unwrap(),
+            PathBuf::from("/tmp/preview-test"),
+            RouteMapping::new().with_collection("docs", "reference"),
+            cx,
+        );
+    });
+    panel.read_with(cx, |panel, _| {
+        assert!(panel.status().is_ready());
+        assert_eq!(
+            panel.mapping().route_for("docs", "intro").as_deref(),
+            Some("reference/intro")
+        );
+    });
+
+    panel.update(cx, |panel, cx| {
+        panel.ensure_attached(
+            ProjectId::new("workspace-3").unwrap(),
+            PathBuf::from("/tmp/other-site"),
+            mapping(),
+            cx,
+        );
+    });
+    panel.read_with(cx, |panel, _| {
+        assert!(backend.aborted.load(Ordering::SeqCst));
+        assert!(matches!(panel.status(), ServerStatus::Stopped));
+        assert_eq!(panel.root(), Some(&PathBuf::from("/tmp/other-site")));
+    });
+}
+
+#[gpui_kit::test]
+fn application_exit_aborts_the_backend_without_a_notification(cx: &mut gpui_kit::TestAppContext) {
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, _surface) = mount(cx, backend.clone());
+    panel.update(cx, |panel, cx| {
+        panel.force_ready(Url::parse("http://127.0.0.1:4321/").unwrap(), cx);
+        panel.abort();
+    });
+    panel.read_with(cx, |panel, _| {
+        assert!(backend.aborted.load(Ordering::SeqCst));
+        assert!(!panel.is_attached());
+        assert!(matches!(panel.status(), ServerStatus::Stopped));
     });
 }

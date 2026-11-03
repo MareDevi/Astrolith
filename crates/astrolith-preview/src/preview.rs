@@ -73,14 +73,26 @@ impl PreviewSession {
         &self.mapping
     }
 
+    /// Resolve `entry` against the ready server without presenting it.
+    ///
+    /// Copy-preview and the open path share this resolution so a copied URL is
+    /// exactly the URL the browser receives.
+    pub fn url_for_entry(
+        &self,
+        entry: &EntryId,
+        status: &ServerStatus,
+    ) -> Result<Url, PreviewError> {
+        let base = status.url().ok_or_else(|| PreviewError::ServerNotReady {
+            status: status.label().to_owned(),
+        })?;
+        resolve_entry_url(entry, &self.mapping, base).map_err(PreviewError::Route)
+    }
+
     /// Resolve `entry` against the ready server and hand the URL to the surface.
     ///
     /// Returns the opened URL so a caller can display or re-copy it.
     pub fn open_entry(&self, entry: &EntryId, status: &ServerStatus) -> Result<Url, PreviewError> {
-        let base = status.url().ok_or_else(|| PreviewError::ServerNotReady {
-            status: status.label().to_owned(),
-        })?;
-        let url = resolve_entry_url(entry, &self.mapping, base).map_err(PreviewError::Route)?;
+        let url = self.url_for_entry(entry, status)?;
         self.surface.open(&url).map_err(PreviewError::Surface)?;
         Ok(url)
     }
@@ -111,6 +123,17 @@ mod tests {
         let url = session.open_entry(&entry(), &ready()).unwrap();
         assert_eq!(url.path(), "/docs/guides/nested");
         assert_eq!(surface.opened(), vec![url.to_string()]);
+    }
+
+    #[test]
+    fn resolves_a_url_without_opening_it() {
+        let (session, surface) = session();
+        let url = session.url_for_entry(&entry(), &ready()).unwrap();
+        assert_eq!(url.path(), "/docs/guides/nested");
+        assert!(
+            surface.opened().is_empty(),
+            "resolving a URL must not launch a browser"
+        );
     }
 
     #[test]

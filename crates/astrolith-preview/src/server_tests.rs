@@ -135,6 +135,14 @@ fn bad_exit_transitions_to_failed_with_stderr() {
             ServerStatus::Failed(message) => assert!(message.contains("boom")),
             other => panic!("expected Failed, got {other:?}"),
         }
+        let failure = server.failure().expect("a failed start retains its detail");
+        assert!(
+            failure
+                .stderr_excerpt()
+                .is_some_and(|stderr| stderr.contains("boom: cannot start")),
+            "stderr excerpt was {:?}",
+            failure.stderr_excerpt()
+        );
     });
 }
 

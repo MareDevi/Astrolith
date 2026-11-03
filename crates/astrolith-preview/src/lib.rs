@@ -18,6 +18,7 @@
 pub mod capabilities;
 pub mod config;
 pub mod external;
+pub mod lifecycle;
 pub mod preview;
 pub mod process;
 pub mod routes;
@@ -27,12 +28,13 @@ pub mod surface;
 pub use capabilities::{HostEnvironment, HostPlatform, LinuxSession, PreviewCapability};
 pub use config::{ConfigError, RouteMapping, RouteRule};
 pub use external::{ExternalBrowser, OpenCommand, Opener, SystemOpener, open_command};
+pub use lifecycle::{PreviewLifecycle, PreviewTarget, TargetChange, target_change};
 pub use preview::{PreviewError, PreviewSession};
 pub use process::{OUTPUT_CAP, OutputCapture, ProcessError, RunningProcess, SpawnSpec};
 pub use routes::{RouteError, resolve_entry_url};
 pub use server::{
     DEFAULT_STARTUP_TIMEOUT, DEFAULT_STOP_GRACE, DevServer, DevServerConfig, DevServerError,
-    ServerStatus,
+    ServerStatus, StartupFailure,
 };
 pub use surface::{PreviewSurface, RecordingSurface, SurfaceError, validate_preview_url};
 

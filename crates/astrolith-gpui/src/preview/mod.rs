@@ -11,16 +11,16 @@ use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
 use astrolith_core::{EntryId, ProjectId};
 use astrolith_preview::{
-    DevServer, DevServerConfig, ExternalBrowser, PreviewSession, PreviewSurface, RouteMapping,
-    ServerStatus,
+    DevServer, DevServerConfig, ExternalBrowser, PreviewLifecycle, PreviewSession, PreviewSurface,
+    PreviewTarget, RouteMapping, ServerStatus, StartupFailure, TargetChange, target_change,
 };
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, StyledExt,
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{
-    App, Context, FocusHandle, Focusable, IntoElement, Render, SharedString, Task, Window, div,
-    prelude::*,
+    App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString, Task,
+    Window, div, prelude::*,
 };
 use url::Url;
 
@@ -32,7 +32,7 @@ pub(crate) type PreviewFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'stat
 /// The dev-server operations the panel needs, abstracted for headless tests.
 pub(crate) trait PreviewBackend: Send + Sync + 'static {
     /// Start the dev server and resolve its base URL once it is ready.
-    fn start(&self) -> PreviewFuture<Result<Url, String>>;
+    fn start(&self) -> PreviewFuture<Result<Url, StartupFailure>>;
     /// Stop the dev server gracefully.
     fn stop(&self) -> PreviewFuture<Result<(), String>>;
     /// Poll once for a natural exit of the ready server (non-blocking).
@@ -44,6 +44,8 @@ pub(crate) trait PreviewBackend: Send + Sync + 'static {
 /// The real backend: one project-local Astro dev server on the service runtime.
 pub(crate) struct AstroPreviewBackend {
     server: Arc<tokio::sync::Mutex<DevServer>>,
+    /// Cancels a start that is still waiting for readiness (project switch).
+    cancellation: std::sync::Mutex<Option<astrolith_astro::Cancellation>>,
 }
 
 impl AstroPreviewBackend {
@@ -59,17 +61,28 @@ impl AstroPreviewBackend {
                 project,
                 DevServerConfig::new(root),
             ))),
+            cancellation: std::sync::Mutex::new(None),
         }
     }
 }
 
 impl PreviewBackend for AstroPreviewBackend {
-    fn start(&self) -> PreviewFuture<Result<Url, String>> {
+    fn start(&self) -> PreviewFuture<Result<Url, StartupFailure>> {
         let server = self.server.clone();
+        let cancellation = astrolith_astro::Cancellation::default();
+        if let Ok(mut slot) = self.cancellation.lock() {
+            *slot = Some(cancellation.clone());
+        }
         Box::pin(async move {
             tracing::info!("starting the Astro preview server");
             let mut server = server.lock().await;
-            server.start().await.map_err(|error| error.to_string())
+            match server.start_cancellable(&cancellation).await {
+                Ok(url) => Ok(url),
+                Err(error) => Err(server
+                    .failure()
+                    .cloned()
+                    .unwrap_or_else(|| StartupFailure::new(error.to_string(), None))),
+            }
         })
     }
 
@@ -91,6 +104,11 @@ impl PreviewBackend for AstroPreviewBackend {
     }
 
     fn abort(&self) {
+        if let Ok(mut slot) = self.cancellation.lock()
+            && let Some(cancellation) = slot.take()
+        {
+            cancellation.cancel();
+        }
         if let Ok(mut server) = self.server.try_lock() {
             server.abort();
         }
@@ -104,16 +122,59 @@ pub(crate) struct PreviewPanel {
     root: Option<PathBuf>,
     mapping: RouteMapping,
     surface: Arc<dyn PreviewSurface>,
-    status: ServerStatus,
+    /// Generation-checked dev-server state.
+    lifecycle: PreviewLifecycle,
     message: Option<String>,
     /// Entry the "Open in browser" button resolves, updated by the shell.
     pending_entry: Option<EntryId>,
     task: Option<Task<()>>,
     /// Watches a ready server for an unexpected exit.
     exit_task: Option<Task<()>>,
-    /// Invalidates exit watchers when the panel restarts or reattaches.
-    generation: u64,
     focus: FocusHandle,
+}
+
+/// Emitted whenever the dev-server generation or status changes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreviewStateChanged;
+
+impl EventEmitter<PreviewStateChanged> for PreviewPanel {}
+
+/// The lifecycle phase shown in the panel and used by command availability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreviewPhase {
+    /// No server is running.
+    Stopped,
+    /// A start or restart is in flight.
+    Starting,
+    /// The server is serving requests.
+    Ready,
+    /// A stop is in flight.
+    Stopping,
+    /// The last start or observation failed.
+    Failed,
+}
+
+impl PreviewPhase {
+    fn from_status(status: &ServerStatus) -> Self {
+        match status {
+            ServerStatus::Stopped => Self::Stopped,
+            ServerStatus::Starting => Self::Starting,
+            ServerStatus::Ready(_) => Self::Ready,
+            ServerStatus::Stopping => Self::Stopping,
+            ServerStatus::Failed(_) => Self::Failed,
+        }
+    }
+
+    /// Stable lowercase label shared with the service status.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Stopping => "stopping",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 impl PreviewPanel {
@@ -130,12 +191,11 @@ impl PreviewPanel {
             root: None,
             mapping: RouteMapping::new(),
             surface,
-            status: ServerStatus::Stopped,
+            lifecycle: PreviewLifecycle::new(),
             message: None,
             pending_entry: None,
             task: None,
             exit_task: None,
-            generation: 0,
             focus: cx.focus_handle(),
         }
     }
@@ -143,13 +203,46 @@ impl PreviewPanel {
     /// Current server status.
     #[cfg(test)]
     pub(crate) fn status(&self) -> &ServerStatus {
-        &self.status
+        self.lifecycle.status()
     }
 
     /// Last user-facing message (errors, opened URL, start hint).
     #[cfg(test)]
     pub(crate) fn message(&self) -> Option<&str> {
         self.message.as_deref()
+    }
+
+    /// Current lifecycle phase.
+    pub(crate) fn phase(&self) -> PreviewPhase {
+        PreviewPhase::from_status(self.lifecycle.status())
+    }
+
+    /// Whether the panel is attached to an open project.
+    pub(crate) fn is_attached(&self) -> bool {
+        self.backend.is_some()
+    }
+
+    /// Whether the panel can open or copy a URL right now.
+    pub(crate) fn is_ready(&self) -> bool {
+        self.lifecycle.status().is_ready()
+    }
+
+    /// Whether a server process is attached (starting, ready or stopping).
+    pub(crate) fn is_running(&self) -> bool {
+        matches!(
+            self.phase(),
+            PreviewPhase::Starting | PreviewPhase::Ready | PreviewPhase::Stopping
+        )
+    }
+
+    /// Whether the last operation failed and can be retried.
+    pub(crate) fn is_failed(&self) -> bool {
+        self.phase() == PreviewPhase::Failed
+    }
+
+    /// Whether a start/stop/restart operation is in flight.
+    pub(crate) fn is_busy(&self) -> bool {
+        self.task.is_some()
     }
 
     /// Set the entry the toolbar button opens (the active document's entry).
@@ -166,10 +259,31 @@ impl PreviewPanel {
         self.project.as_ref()
     }
 
+    /// Root this panel is attached to, if any.
+    #[cfg(test)]
+    pub(crate) fn root(&self) -> Option<&PathBuf> {
+        self.root.as_ref()
+    }
+
+    /// Route mapping currently in use.
+    #[cfg(test)]
+    pub(crate) fn mapping(&self) -> &RouteMapping {
+        &self.mapping
+    }
+
+    /// Mark the server ready in a unit test without a backend round trip.
+    #[cfg(test)]
+    pub(crate) fn force_ready(&mut self, url: Url, cx: &mut Context<Self>) {
+        let generation = self.lifecycle.invalidate();
+        self.lifecycle.ready(generation, url);
+        cx.notify();
+    }
+
     /// Attach the real Astro backend for `project` at `root`.
     ///
-    /// Reattaching to the *same* project only refreshes the route mapping, so a
-    /// collection change does not restart a running server.
+    /// Reattaching to the same root only refreshes the project id and route
+    /// mapping, so a collection change or reopen does not restart a running
+    /// server. A different root stops the previous server before rebinding.
     pub(crate) fn ensure_attached(
         &mut self,
         project: ProjectId,
@@ -177,21 +291,41 @@ impl PreviewPanel {
         mapping: RouteMapping,
         cx: &mut Context<Self>,
     ) {
-        if self.project.as_ref() == Some(&project) {
-            if self.mapping != mapping {
-                tracing::debug!(project = %project.as_str(), "refreshed the preview route mapping");
-                self.mapping = mapping;
-                cx.notify();
+        let current = match (self.project.as_ref(), self.root.as_ref()) {
+            (Some(project), Some(root)) => Some(PreviewTarget::new(project.clone(), root.clone())),
+            _ => None,
+        };
+        let next = PreviewTarget::new(project.clone(), root.clone());
+        match target_change(current.as_ref(), Some(&next)) {
+            TargetChange::Unchanged => {
+                let changed = self.project.as_ref() != Some(&project) || self.mapping != mapping;
+                if self.project.as_ref() != Some(&project) {
+                    tracing::debug!(
+                        project = %project.as_str(),
+                        "reusing the preview server for the same project root"
+                    );
+                    self.project = Some(project.clone());
+                }
+                if self.mapping != mapping {
+                    tracing::debug!(project = %project.as_str(), "refreshed the preview route mapping");
+                    self.mapping = mapping;
+                }
+                if changed {
+                    cx.notify();
+                    cx.emit(PreviewStateChanged);
+                }
             }
-            return;
+            TargetChange::Attach | TargetChange::Retarget => {
+                tracing::info!(
+                    project = %project.as_str(),
+                    root = %root.display(),
+                    "attaching the preview panel to a project"
+                );
+                let backend = Arc::new(AstroPreviewBackend::new(project.clone(), root.clone()));
+                self.attach(backend, project, root, mapping, cx);
+            }
+            TargetChange::Detach => {}
         }
-        tracing::info!(
-            project = %project.as_str(),
-            root = %root.display(),
-            "attaching the preview panel to a project"
-        );
-        let backend = Arc::new(AstroPreviewBackend::new(project.clone(), root.clone()));
-        self.attach(backend, project, root, mapping, cx);
     }
 
     /// Attach an arbitrary backend (the test seam).
@@ -208,6 +342,7 @@ impl PreviewPanel {
         self.project = Some(project);
         self.root = Some(root);
         self.mapping = mapping;
+        cx.emit(PreviewStateChanged);
         cx.notify();
     }
 
@@ -216,7 +351,7 @@ impl PreviewPanel {
         if self.project.is_some() {
             tracing::debug!("detaching the preview panel from its project");
         }
-        self.invalidate_exit_watch();
+        self.exit_task = None;
         self.task = None;
         if let Some(backend) = self.backend.take() {
             backend.abort();
@@ -224,30 +359,26 @@ impl PreviewPanel {
         self.project = None;
         self.root = None;
         self.mapping = RouteMapping::new();
-        self.status = ServerStatus::Stopped;
+        self.pending_entry = None;
+        self.lifecycle.detach();
         self.message = None;
+        cx.emit(PreviewStateChanged);
         cx.notify();
     }
 
     /// Kill the server synchronously for the application-exit path.
     pub(crate) fn abort(&mut self) {
-        self.invalidate_exit_watch();
+        self.exit_task = None;
         self.task = None;
         if let Some(backend) = self.backend.take() {
             backend.abort();
         }
-        self.status = ServerStatus::Stopped;
-    }
-
-    /// Abandon the current exit watcher; its generation no longer matches.
-    fn invalidate_exit_watch(&mut self) {
-        self.exit_task = None;
-        self.generation = self.generation.wrapping_add(1);
+        self.lifecycle.detach();
     }
 
     /// Start watching a ready server for an unexpected exit.
     fn watch_exit(&mut self, backend: Arc<dyn PreviewBackend>, cx: &mut Context<Self>) {
-        let generation = self.generation;
+        let generation = self.lifecycle.generation();
         self.exit_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -256,19 +387,22 @@ impl PreviewPanel {
                 let polled = runtime::spawn(cx, backend.poll_exit()).await;
                 let keep_watching = this
                     .update(cx, |this, cx| {
-                        if this.generation != generation {
+                        if !this.lifecycle.is_current(generation) {
                             return false;
                         }
                         match polled {
                             Ok(Ok(Some(status))) => {
                                 tracing::info!(status = status.label(), "Astro preview server exited");
+                                if !this.lifecycle.observed_exit(generation, status.clone()) {
+                                    return false;
+                                }
                                 this.message = Some(match &status {
                                     ServerStatus::Failed(error) => format!(
                                         "The preview server stopped unexpectedly: {error}"
                                     ),
                                     _ => "The preview server stopped.".to_owned(),
                                 });
-                                this.status = status;
+                                cx.emit(PreviewStateChanged);
                                 cx.notify();
                                 false
                             }
@@ -304,35 +438,51 @@ impl PreviewPanel {
         if self.task.is_some() {
             return;
         }
-        if self.status.is_ready() {
+        if self.is_ready() {
             self.message = Some("The preview server is already running.".to_owned());
             cx.notify();
             return;
         }
-        self.invalidate_exit_watch();
-        self.status = ServerStatus::Starting;
+        self.exit_task = None;
+        let generation = self.lifecycle.begin_start();
         self.message = Some("Starting the Astro dev server…".to_owned());
         let started = runtime::spawn(cx, backend.start());
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = started.await;
             let _ = this.update(cx, |this, cx| {
+                if !this.lifecycle.is_current(generation) {
+                    tracing::debug!("discarding a stale preview start result");
+                    return;
+                }
                 match result {
                     Ok(Ok(url)) => {
                         tracing::info!(url = %url, "Astro preview ready");
                         this.message = Some(format!("Preview ready at {url}"));
-                        this.status = ServerStatus::Ready(url);
+                        this.lifecycle.ready(generation, url);
                         this.watch_exit(backend.clone(), cx);
                     }
-                    Ok(Err(error)) | Err(error) => {
+                    Ok(Err(failure)) => {
+                        tracing::error!(%failure, "could not start the Astro preview");
+                        this.message =
+                            Some(format!("Could not start the preview: {}", failure.report()));
+                        this.lifecycle
+                            .failed(generation, failure.message().to_owned());
+                    }
+                    Err(error) => {
                         tracing::error!(%error, "could not start the Astro preview");
-                        this.message = Some(format!("Could not start the preview: {error}"));
-                        this.status = ServerStatus::Failed(error);
+                        let failure = StartupFailure::new(error, None);
+                        this.message =
+                            Some(format!("Could not start the preview: {}", failure.report()));
+                        this.lifecycle
+                            .failed(generation, failure.message().to_owned());
                     }
                 }
                 this.task = None;
+                cx.emit(PreviewStateChanged);
                 cx.notify();
             });
         }));
+        cx.emit(PreviewStateChanged);
         cx.notify();
     }
 
@@ -344,36 +494,102 @@ impl PreviewPanel {
         if self.task.is_some() {
             return;
         }
-        self.invalidate_exit_watch();
-        self.status = ServerStatus::Stopping;
+        self.exit_task = None;
+        let generation = self.lifecycle.begin_stop();
         self.message = Some("Stopping the Astro dev server…".to_owned());
         let stopped = runtime::spawn(cx, backend.stop());
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = stopped.await;
             let _ = this.update(cx, |this, cx| {
+                if !this.lifecycle.is_current(generation) {
+                    tracing::debug!("discarding a stale preview stop result");
+                    return;
+                }
                 match result {
                     Ok(Ok(())) => {
                         tracing::info!("Astro preview stopped");
-                        this.status = ServerStatus::Stopped;
+                        this.lifecycle.stopped(generation);
                         this.message = Some("Preview stopped.".to_owned());
                     }
                     Ok(Err(error)) | Err(error) => {
                         tracing::error!(%error, "could not stop the Astro preview");
-                        this.status = ServerStatus::Failed(error.clone());
+                        this.lifecycle.failed(generation, error.clone());
                         this.message = Some(format!("Could not stop the preview: {error}"));
                     }
                 }
                 this.task = None;
+                cx.emit(PreviewStateChanged);
                 cx.notify();
             });
         }));
+        cx.emit(PreviewStateChanged);
+        cx.notify();
+    }
+
+    /// Stop and start the server so configuration or dependency changes apply.
+    pub(crate) fn restart(&mut self, cx: &mut Context<Self>) {
+        let Some(backend) = self.backend.clone() else {
+            self.message = Some("Open an Astro project to restart a preview.".to_owned());
+            cx.notify();
+            return;
+        };
+        if self.task.is_some() {
+            return;
+        }
+        self.exit_task = None;
+        let generation = self.lifecycle.begin_restart();
+        self.message = Some("Restarting the Astro dev server…".to_owned());
+        let restarting = backend.clone();
+        let restarted = runtime::spawn(cx, async move {
+            restarting
+                .stop()
+                .await
+                .map_err(|message| StartupFailure::new(message, None))?;
+            restarting.start().await
+        });
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = restarted.await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.lifecycle.is_current(generation) {
+                    tracing::debug!("discarding a stale preview restart result");
+                    return;
+                }
+                match result {
+                    Ok(Ok(url)) => {
+                        tracing::info!(url = %url, "Astro preview restarted");
+                        this.message = Some(format!("Preview ready at {url}"));
+                        this.lifecycle.ready(generation, url);
+                        this.watch_exit(backend.clone(), cx);
+                    }
+                    Ok(Err(failure)) => {
+                        tracing::error!(%failure, "could not restart the Astro preview");
+                        this.message =
+                            Some(format!("Could not start the preview: {}", failure.report()));
+                        this.lifecycle
+                            .failed(generation, failure.message().to_owned());
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "could not restart the Astro preview");
+                        let failure = StartupFailure::new(error, None);
+                        this.message =
+                            Some(format!("Could not start the preview: {}", failure.report()));
+                        this.lifecycle
+                            .failed(generation, failure.message().to_owned());
+                    }
+                }
+                this.task = None;
+                cx.emit(PreviewStateChanged);
+                cx.notify();
+            });
+        }));
+        cx.emit(PreviewStateChanged);
         cx.notify();
     }
 
     /// Open `entry` in the external browser, reusing the running server.
     pub(crate) fn open_entry(&mut self, entry: &EntryId, cx: &mut Context<Self>) {
         let session = PreviewSession::new(self.mapping.clone(), self.surface.clone());
-        match session.open_entry(entry, &self.status) {
+        match session.open_entry(entry, self.lifecycle.status()) {
             Ok(url) => {
                 tracing::info!(url = %url, entry = %entry.id(), "opened a preview in the browser");
                 self.message = Some(format!("Opened {url} in the browser."));
@@ -397,10 +613,32 @@ impl PreviewPanel {
         }
     }
 
+    /// Copy the active entry's preview URL, once the server is ready.
+    pub(crate) fn copy_url(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.pending_entry.clone() else {
+            self.message = Some("Open a document to copy its preview URL.".to_owned());
+            cx.notify();
+            return;
+        };
+        let session = PreviewSession::new(self.mapping.clone(), self.surface.clone());
+        match session.url_for_entry(&entry, self.lifecycle.status()) {
+            Ok(url) => {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(url.to_string()));
+                tracing::info!(url = %url, entry = %entry.id(), "copied the preview URL");
+                self.message = Some(format!("Copied preview URL: {url}"));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not resolve the preview URL");
+                self.message = Some(error.to_string());
+            }
+        }
+        cx.notify();
+    }
+
     fn status_line(&self) -> String {
-        match self.status.url() {
+        match self.lifecycle.status().url() {
             Some(url) => format!("Preview ready at {url}"),
-            None => format!("Dev server: {}", self.status.label()),
+            None => format!("Dev server: {}", self.lifecycle.status().label()),
         }
     }
 }
@@ -412,15 +650,21 @@ impl Render for PreviewPanel {
         let message = self.message.clone();
         let start_owner = owner.clone();
         let stop_owner = owner.clone();
+        let restart_owner = owner.clone();
         let open_owner = owner.clone();
-        let ready = self.status.is_ready();
-        let running = !matches!(self.status, ServerStatus::Stopped | ServerStatus::Failed(_));
-        let url = self.status.url().map(|url| url.to_string());
-        let status_color = match &self.status {
-            ServerStatus::Ready(_) => cx.theme().success,
-            ServerStatus::Starting | ServerStatus::Stopping => cx.theme().warning,
-            ServerStatus::Failed(_) => cx.theme().danger,
-            ServerStatus::Stopped => cx.theme().muted_foreground,
+        let copy_owner = owner.clone();
+        let phase = self.phase();
+        let ready = self.is_ready();
+        let running = self.is_running();
+        let failed = self.is_failed();
+        let busy = self.is_busy();
+        let attached = self.backend.is_some();
+        let url = self.lifecycle.status().url().map(|url| url.to_string());
+        let status_color = match phase {
+            PreviewPhase::Ready => cx.theme().success,
+            PreviewPhase::Starting | PreviewPhase::Stopping => cx.theme().warning,
+            PreviewPhase::Failed => cx.theme().danger,
+            PreviewPhase::Stopped => cx.theme().muted_foreground,
         };
         div()
             .id("preview-panel")
@@ -441,6 +685,13 @@ impl Render for PreviewPanel {
                     .border_b_1()
                     .border_color(cx.theme().window_border)
                     .child(div().size_2().rounded_full().bg(status_color))
+                    .child(
+                        div()
+                            .id("preview-state")
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(phase.label()),
+                    )
                     .child(div().id("preview-status").text_sm().child(status_line))
                     .child(div().flex_1())
                     .when_some(url.clone(), |row, url| {
@@ -464,8 +715,8 @@ impl Render for PreviewPanel {
                             .child(
                                 Button::new("preview-start")
                                     .small()
-                                    .label("Start server")
-                                    .disabled(running)
+                                    .label(if failed { "Retry" } else { "Start server" })
+                                    .disabled(running || busy)
                                     .on_click(move |_, _, cx| {
                                         let _ = start_owner.update(cx, |this, cx| this.start(cx));
                                     }),
@@ -475,9 +726,20 @@ impl Render for PreviewPanel {
                                     .small()
                                     .ghost()
                                     .label("Stop")
-                                    .disabled(!running)
+                                    .disabled(!running || busy)
                                     .on_click(move |_, _, cx| {
                                         let _ = stop_owner.update(cx, |this, cx| this.stop(cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new("preview-restart")
+                                    .small()
+                                    .ghost()
+                                    .label("Restart")
+                                    .disabled(!attached || busy)
+                                    .on_click(move |_, _, cx| {
+                                        let _ =
+                                            restart_owner.update(cx, |this, cx| this.restart(cx));
                                     }),
                             )
                             .child(
@@ -489,6 +751,16 @@ impl Render for PreviewPanel {
                                     .on_click(move |_, _, cx| {
                                         let _ =
                                             open_owner.update(cx, |this, cx| this.open_active(cx));
+                                    }),
+                            )
+                            .child(
+                                Button::new("preview-copy-url")
+                                    .small()
+                                    .ghost()
+                                    .label("Copy URL")
+                                    .disabled(!ready)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = copy_owner.update(cx, |this, cx| this.copy_url(cx));
                                     }),
                             ),
                     )

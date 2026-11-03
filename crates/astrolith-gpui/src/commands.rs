@@ -59,6 +59,8 @@ pub(crate) enum CommandId {
     StartPreview,
     StopPreview,
     OpenPreview,
+    RestartPreview,
+    CopyPreviewUrl,
     FocusDocument,
     FocusSelectionToolbar,
     LightTheme,
@@ -123,6 +125,8 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::StartPreview,
     CommandId::StopPreview,
     CommandId::OpenPreview,
+    CommandId::RestartPreview,
+    CommandId::CopyPreviewUrl,
     CommandId::FocusDocument,
     CommandId::FocusSelectionToolbar,
     CommandId::LightTheme,
@@ -163,6 +167,12 @@ pub(crate) struct CommandAvailability {
     pub inspector_visible: bool,
     /// The bottom preview dock is open.
     pub preview_visible: bool,
+    /// A preview backend is attached to an open project.
+    pub preview_attached: bool,
+    /// The preview dev server is starting, ready or stopping.
+    pub preview_running: bool,
+    /// The preview dev server is ready to serve a route.
+    pub preview_ready: bool,
     /// Focus mode is active.
     pub focus_mode: bool,
     /// Typewriter mode is active.
@@ -241,6 +251,16 @@ impl CommandId {
             Self::NewEntry | Self::OpenContentFinder | Self::ReloadCollections => {
                 state.project_open && !state.busy
             }
+            Self::StartPreview => {
+                state.project_open
+                    && state.preview_attached
+                    && !state.preview_running
+                    && !state.busy
+            }
+            Self::StopPreview => state.preview_running && !state.busy,
+            Self::RestartPreview => state.preview_attached && !state.busy,
+            Self::OpenPreview => state.preview_ready && state.active_entry && !state.busy,
+            Self::CopyPreviewUrl => state.preview_ready && state.active_entry,
             Self::OpenProjectInIde | Self::OpenCollectionInIde => {
                 state.project_open && state.ide_configured && !state.busy
             }
@@ -341,6 +361,8 @@ impl CommandId {
             Self::StartPreview => "Start preview server",
             Self::StopPreview => "Stop preview server",
             Self::OpenPreview => "Open preview in browser",
+            Self::RestartPreview => "Restart preview server",
+            Self::CopyPreviewUrl => "Copy preview URL",
             Self::FocusDocument => "Focus document",
             Self::FocusSelectionToolbar => "Focus selection toolbar",
             Self::LightTheme => "Light theme",
@@ -565,6 +587,13 @@ impl CommandId {
                     "cmd-shift-t"
                 } else {
                     "ctrl-shift-t"
+                }
+            }
+            Self::OpenPreview => {
+                if mac {
+                    "cmd-enter"
+                } else {
+                    "ctrl-enter"
                 }
             }
             Self::ToggleFullscreen => {
@@ -810,7 +839,9 @@ pub(crate) fn install_menus(
         &[
             CommandId::StartPreview,
             CommandId::StopPreview,
+            CommandId::RestartPreview,
             CommandId::OpenPreview,
+            CommandId::CopyPreviewUrl,
         ],
         copyedit,
         availability,
@@ -911,7 +942,11 @@ pub(crate) fn command_group(command: CommandId) -> &'static str {
         | CommandId::ToggleCopyeditAdverbs
         | CommandId::ToggleCopyeditConjunctions
         | CommandId::ToggleAllCopyedit => "Writer",
-        CommandId::StartPreview | CommandId::StopPreview | CommandId::OpenPreview => "Preview",
+        CommandId::StartPreview
+        | CommandId::StopPreview
+        | CommandId::OpenPreview
+        | CommandId::RestartPreview
+        | CommandId::CopyPreviewUrl => "Preview",
         CommandId::About => "Help",
         CommandId::Quit => "Application",
     }
@@ -1287,5 +1322,56 @@ mod tests {
         let text = about_text();
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
         assert!(text.contains(build_identity()));
+    }
+
+    #[test]
+    fn preview_commands_follow_the_server_phase() {
+        let attached = CommandAvailability {
+            project_open: true,
+            preview_attached: true,
+            ..CommandAvailability::default()
+        };
+        assert!(CommandId::StartPreview.is_available(attached));
+        assert!(CommandId::RestartPreview.is_available(attached));
+        assert!(!CommandId::StopPreview.is_available(attached));
+        assert!(!CommandId::OpenPreview.is_available(attached));
+        assert!(!CommandId::CopyPreviewUrl.is_available(attached));
+
+        let ready = CommandAvailability {
+            preview_running: true,
+            preview_ready: true,
+            active_entry: true,
+            ..attached
+        };
+        assert!(!CommandId::StartPreview.is_available(ready));
+        assert!(CommandId::StopPreview.is_available(ready));
+        assert!(CommandId::RestartPreview.is_available(ready));
+        assert!(CommandId::OpenPreview.is_available(ready));
+        assert!(CommandId::CopyPreviewUrl.is_available(ready));
+
+        let no_entry = CommandAvailability {
+            active_entry: false,
+            ..ready
+        };
+        assert!(!CommandId::OpenPreview.is_available(no_entry));
+        assert!(!CommandId::CopyPreviewUrl.is_available(no_entry));
+
+        let stopped = CommandAvailability {
+            preview_running: false,
+            preview_ready: false,
+            ..ready
+        };
+        assert!(!CommandId::CopyPreviewUrl.is_available(stopped));
+        assert!(!CommandId::OpenPreview.is_available(stopped));
+    }
+
+    #[test]
+    fn ctrl_enter_opens_the_preview() {
+        let expected = if cfg!(target_os = "macos") {
+            "cmd-enter"
+        } else {
+            "ctrl-enter"
+        };
+        assert_eq!(CommandId::OpenPreview.shortcut(), Some(expected));
     }
 }

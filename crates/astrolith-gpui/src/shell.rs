@@ -28,7 +28,7 @@ use crate::{
     preferences::{
         CollectionEntry, PreferenceEdits, PreferencesContext, PreferencesEvent, PreferencesSheet,
     },
-    preview::PreviewPanel,
+    preview::{PreviewPanel, PreviewStateChanged},
     project_discovery::{FrontmatterKey, ProjectOpened, ProjectWorkspace, now_secs},
     recent_projects::{self, RecentEntry},
     runtime,
@@ -222,7 +222,7 @@ pub(crate) struct Shell {
     opening: bool,
     opening_task: Option<Task<()>>,
     file_status: String,
-    preview_sync_key: Option<(u64, Option<PathBuf>)>,
+    preview_sync_key: Option<(u64, Option<PathBuf>, astrolith_preview::RouteMapping)>,
     last_viewport: gpui_kit::Size<gpui_kit::Pixels>,
     _skin: Rc<DockSkin>,
     settings: GlobalPreferencesV2,
@@ -430,6 +430,12 @@ impl Shell {
             this.track_active_entry(cx);
             this.refresh_component_builder(&project, cx);
         }));
+        // Menu and palette availability follows the dev-server phase.
+        subscriptions.push(cx.subscribe_in(
+            &preview,
+            window,
+            |this, _, _: &PreviewStateChanged, window, cx| this.refresh_menus(window, cx),
+        ));
         let apply_owner = project.downgrade();
         subscriptions.push(cx.subscribe_in(
             &frontmatter,
@@ -750,7 +756,12 @@ impl Shell {
                 fullscreen,
             )
         });
-        self.project.read(cx).command_availability(cx, window)
+        let mut availability = self.project.read(cx).command_availability(cx, window);
+        let preview = self.preview.read(cx);
+        availability.preview_attached = preview.is_attached();
+        availability.preview_running = preview.is_running();
+        availability.preview_ready = preview.is_ready();
+        availability
     }
 
     /// Rebuild the native menu bar only when its model changed.
@@ -1339,12 +1350,16 @@ impl Shell {
 impl Shell {
     /// Attach the preview panel to the open project and its active entry.
     ///
-    /// Reattaching to the same project only refreshes the mapping, so a session
-    /// change never restarts a running dev server.
+    /// Reattaching to the same project root only refreshes the mapping, so a
+    /// session change never restarts a running dev server.
     fn sync_preview(&mut self, cx: &mut Context<Self>) {
         let key = {
             let project = self.project.read(cx);
-            (project.index_revision(), project.active_path())
+            let mapping = project
+                .preview_context()
+                .map(|(_, _, mapping)| mapping)
+                .unwrap_or_default();
+            (project.index_revision(), project.active_path(), mapping)
         };
         if self.preview_sync_key.as_ref() == Some(&key) {
             return;
@@ -1423,6 +1438,10 @@ impl Shell {
             CommandId::TogglePreview => self.toggle_panel(PanelKind::Preview, window, cx),
             CommandId::StartPreview => self.preview.update(cx, |preview, cx| preview.start(cx)),
             CommandId::StopPreview => self.preview.update(cx, |preview, cx| preview.stop(cx)),
+            CommandId::RestartPreview => self.preview.update(cx, |preview, cx| preview.restart(cx)),
+            CommandId::CopyPreviewUrl => {
+                self.preview.update(cx, |preview, cx| preview.copy_url(cx))
+            }
             CommandId::OpenPreview => {
                 let entry = self.project.read(cx).active_entry_id();
                 self.preview.update(cx, |preview, cx| {
@@ -2138,7 +2157,9 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::TogglePreview => IconName::PanelBottom,
         CommandId::StartPreview => IconName::Play,
         CommandId::StopPreview => IconName::Square,
+        CommandId::RestartPreview => IconName::RefreshCw,
         CommandId::OpenPreview => IconName::Globe,
+        CommandId::CopyPreviewUrl => IconName::Copy,
         CommandId::FocusDocument => IconName::FileText,
         CommandId::FocusSelectionToolbar => IconName::TextCursor,
         CommandId::FindInDocument | CommandId::ReplaceInDocument => IconName::Search,
@@ -2893,6 +2914,26 @@ mod tests {
             );
         })
         .unwrap();
+        for (command, expected) in [
+            (CommandId::RestartPreview, "Open an Astro project"),
+            (CommandId::CopyPreviewUrl, "Open a document"),
+        ] {
+            cx.update_window(handle.into(), |_, window, cx| {
+                view.update(cx, |view, cx| view.execute(command, window, cx));
+                let message = view
+                    .read(cx)
+                    .preview
+                    .read(cx)
+                    .message()
+                    .unwrap_or_default()
+                    .to_owned();
+                assert!(
+                    message.contains(expected),
+                    "{command:?} must explain the requirement, was {message:?}"
+                );
+            })
+            .unwrap();
+        }
     }
 
     #[gpui_kit::test]

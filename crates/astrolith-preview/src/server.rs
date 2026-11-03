@@ -72,6 +72,56 @@ impl ServerStatus {
     }
 }
 
+/// Failure detail from one start attempt.
+///
+/// Astro reports the actionable cause on stderr (a missing dependency, a
+/// configuration error, an occupied port). The panel shows [`Self::report`] so
+/// the user can fix the project and retry without opening a terminal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartupFailure {
+    message: String,
+    stderr_excerpt: Option<String>,
+}
+
+impl StartupFailure {
+    /// Build a failure from a short message and captured stderr.
+    pub fn new(message: impl Into<String>, stderr: Option<String>) -> Self {
+        let stderr_excerpt = stderr
+            .map(|text| excerpt(&text))
+            .filter(|text| !text.is_empty());
+        Self {
+            message: message.into(),
+            stderr_excerpt,
+        }
+    }
+
+    /// The short classification shown as the status.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The captured stderr excerpt, when the child produced one.
+    pub fn stderr_excerpt(&self) -> Option<&str> {
+        self.stderr_excerpt.as_deref()
+    }
+
+    /// The user-facing message: classification plus any stderr evidence.
+    pub fn report(&self) -> String {
+        match &self.stderr_excerpt {
+            Some(stderr) => format!("{}\n\nAstro output:\n{stderr}", self.message),
+            None => self.message.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for StartupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.report())
+    }
+}
+
+impl std::error::Error for StartupFailure {}
+
 /// Failure to start or stop the dev server.
 #[derive(Debug)]
 pub enum DevServerError {
@@ -230,6 +280,7 @@ pub struct DevServer {
     config: DevServerConfig,
     status: ServerStatus,
     process: Option<RunningProcess>,
+    last_failure: Option<StartupFailure>,
 }
 
 impl DevServer {
@@ -240,6 +291,7 @@ impl DevServer {
             config,
             status: ServerStatus::Stopped,
             process: None,
+            last_failure: None,
         }
     }
 
@@ -256,6 +308,20 @@ impl DevServer {
     /// The ready URL, if any.
     pub fn ready_url(&self) -> Option<&Url> {
         self.status.url()
+    }
+
+    /// Detail of the most recent failed start, including stderr evidence.
+    pub fn failure(&self) -> Option<&StartupFailure> {
+        self.last_failure.as_ref()
+    }
+
+    /// Record a start failure and return the same error for the caller.
+    fn fail(&mut self, error: DevServerError, stderr: Option<String>) -> DevServerError {
+        let failure = StartupFailure::new(error.to_string(), stderr);
+        tracing::error!(%failure.message, "Astro dev server start failed");
+        self.status = ServerStatus::Failed(failure.report());
+        self.last_failure = Some(failure);
+        error
     }
 
     /// Retained stdout text of the running (or last) child.
@@ -307,13 +373,20 @@ impl DevServer {
         cancellation: Option<&Cancellation>,
     ) -> Result<Url, DevServerError> {
         if matches!(self.status, ServerStatus::Starting) {
-            return Err(DevServerError::Io("server is already starting".to_owned()));
-        }
-        if self.process.is_some() {
-            return Err(DevServerError::Io(
-                "server is already running; stop it before starting again".to_owned(),
+            return Err(self.fail(
+                DevServerError::Io("server is already starting".to_owned()),
+                None,
             ));
         }
+        if self.process.is_some() {
+            return Err(self.fail(
+                DevServerError::Io(
+                    "server is already running; stop it before starting again".to_owned(),
+                ),
+                None,
+            ));
+        }
+        self.last_failure = None;
         if let Some(cancellation) = cancellation
             && cancellation.check().is_err()
         {
@@ -335,8 +408,7 @@ impl DevServer {
                 Err(error) => {
                     let message = format!("no available local port: {error}");
                     tracing::error!(%message, "could not allocate a preview port");
-                    self.status = ServerStatus::Failed(message.clone());
-                    return Err(DevServerError::Io(message));
+                    return Err(self.fail(DevServerError::Io(message), None));
                 }
             },
         };
@@ -345,8 +417,7 @@ impl DevServer {
             Ok(spec) => spec,
             Err(error) => {
                 tracing::error!(%error, "could not build the Astro dev server command");
-                self.status = ServerStatus::Failed(error.to_string());
-                return Err(error);
+                return Err(self.fail(error, None));
             }
         };
 
@@ -355,8 +426,7 @@ impl DevServer {
             Err(error) => {
                 let error = DevServerError::from(error);
                 tracing::error!(%error, "could not spawn the Astro dev server");
-                self.status = ServerStatus::Failed(error.to_string());
-                return Err(error);
+                return Err(self.fail(error, None));
             }
         };
         tracing::debug!(pid = ?process.pid(), port, "Astro dev server process spawned");
@@ -381,6 +451,7 @@ impl DevServer {
                     "Astro dev server ready"
                 );
                 self.status = ServerStatus::Ready(url.clone());
+                self.last_failure = None;
                 self.process = Some(process);
                 return Ok(url);
             }
@@ -394,24 +465,27 @@ impl DevServer {
                     // `try_wait` reports the exit.
                     let _ = process.terminate().await;
                     let text = process.combined_text();
+                    let stderr = process.stderr().text_lossy();
                     if let Some(message) = port_in_use_message(&text, port) {
                         tracing::error!(port, %message, "Astro dev server port is in use");
-                        self.status = ServerStatus::Failed(message.clone());
-                        return Err(DevServerError::PortInUse(port));
+                        return Err(self.fail(DevServerError::PortInUse(port), Some(stderr)));
                     }
-                    let stderr = process.stderr().text_lossy();
-                    let message = format!("exited ({exit}): {}", excerpt(&stderr));
-                    tracing::error!(%exit, stderr = %excerpt(&stderr), "Astro dev server exited during startup");
-                    self.status = ServerStatus::Failed(message.clone());
-                    return Err(DevServerError::Exited(message));
+                    tracing::error!(
+                        %exit,
+                        stderr = %excerpt(&stderr),
+                        "Astro dev server exited during startup"
+                    );
+                    return Err(self.fail(
+                        DevServerError::Exited(format!("exited ({exit})")),
+                        Some(stderr),
+                    ));
                 }
                 Ok(None) => {}
                 Err(error) => {
+                    let stderr = process.stderr().text_lossy();
                     let _ = process.terminate().await;
-                    let message = error.to_string();
                     tracing::error!(%error, "could not poll the Astro dev server");
-                    self.status = ServerStatus::Failed(message.clone());
-                    return Err(DevServerError::Io(message));
+                    return Err(self.fail(DevServerError::Io(error.to_string()), Some(stderr)));
                 }
             }
 
@@ -420,11 +494,12 @@ impl DevServer {
                     timeout_ms = self.config.startup_timeout.as_millis(),
                     "Astro dev server startup timed out"
                 );
+                let stderr = process.stderr().text_lossy();
                 let _ = process.terminate().await;
-                self.status = ServerStatus::Failed(
-                    DevServerError::Timeout(self.config.startup_timeout).to_string(),
-                );
-                return Err(DevServerError::Timeout(self.config.startup_timeout));
+                return Err(self.fail(
+                    DevServerError::Timeout(self.config.startup_timeout),
+                    Some(stderr),
+                ));
             }
 
             tokio::time::sleep(POLL_INTERVAL).await;
