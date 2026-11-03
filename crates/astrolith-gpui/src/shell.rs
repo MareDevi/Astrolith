@@ -21,6 +21,7 @@ use crate::{
     },
     file::{DocumentSource, read_document},
     frontmatter::{FrontmatterDocument, FrontmatterEdit, FrontmatterForm},
+    help::{self, HelpSurface},
     layout::{
         panels::WorkspacePanel,
         state::{LayoutState, PanelKind},
@@ -38,6 +39,7 @@ use crate::{
     },
     single_instance,
     theme::{self, ThemeMode},
+    update,
     url_scheme::{self, StartupRequest, StartupTarget},
 };
 use gpui_kit::assets::IconName;
@@ -243,6 +245,10 @@ pub(crate) struct Shell {
     project_task: Option<Task<()>>,
     scope_task: Option<Task<()>>,
     warning: Option<String>,
+    /// Compile-time update capability and the latest check result.
+    updates: update::CapabilityState,
+    update_status: update::Status,
+    update_task: Option<Task<()>>,
     /// Registered projects ordered by most recent open.
     recent_records: Vec<ProjectRecord>,
     /// Labels generated once for menus and the palette.
@@ -481,6 +487,14 @@ impl Shell {
                     this.reset_all(cx);
                 }
                 PreferencesEvent::Cancel => window.close_dialog(cx),
+                PreferencesEvent::OpenUserGuide => {
+                    window.close_dialog(cx);
+                    this.open_help(HelpSurface::UserGuide, window, cx);
+                }
+                PreferencesEvent::OpenKeyboardShortcuts => {
+                    window.close_dialog(cx);
+                    this.open_help(HelpSurface::KeyboardShortcuts, window, cx);
+                }
             },
         ));
         if let Some(store) = store.clone() {
@@ -548,6 +562,8 @@ impl Shell {
         .detach();
         let focus = cx.focus_handle().tab_stop(true);
         focus.focus(window, cx);
+        let updates = update::CapabilityState::detect();
+        let update_status = update::Status::initial(&updates);
         Self {
             dock,
             document,
@@ -581,6 +597,9 @@ impl Shell {
             project_task: None,
             scope_task: None,
             warning,
+            updates,
+            update_status,
+            update_task: None,
             recent_records: Vec::new(),
             recent: Vec::new(),
             pending_entry: None,
@@ -635,6 +654,7 @@ impl Shell {
             });
         })
         .detach();
+        self.schedule_launch_update_check(window, cx);
     }
 
     fn set_registry(&mut self, records: Vec<ProjectRecord>) {
@@ -761,6 +781,7 @@ impl Shell {
         availability.preview_attached = preview.is_attached();
         availability.preview_running = preview.is_running();
         availability.preview_ready = preview.is_ready();
+        availability.updates_configured = self.updates.is_enabled();
         availability
     }
 
@@ -918,6 +939,174 @@ impl Shell {
         });
     }
 
+    /// Check for updates shortly after launch without touching the render path.
+    ///
+    /// The capability is compiled in; a build without it never schedules work.
+    fn schedule_launch_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let update::CapabilityState::Enabled(capability) = self.updates.clone() else {
+            return;
+        };
+        if !matches!(&self.update_status, update::Status::Idle) {
+            return;
+        }
+        self.update_status = update::Status::Checking;
+        let running = update::Version::parse(env!("CARGO_PKG_VERSION"))
+            .expect("the crate version is a semantic version triple");
+        let skipped = self.settings.skipped_update_version.clone();
+        let timer = cx
+            .background_executor()
+            .timer(std::time::Duration::from_secs(2));
+        self.update_task = Some(cx.spawn_in(window, async move |this, cx| {
+            timer.await;
+            let checked = runtime::blocking(cx, move || {
+                update::check(&update::HttpTransport, &capability, running)
+            })
+            .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.apply_update_check(checked, skipped.as_deref());
+                if matches!(&this.update_status, update::Status::Available(_))
+                    && !window.has_active_dialog(cx)
+                {
+                    this.show_update_status(window, cx);
+                }
+                this.refresh_menus(window, cx);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// On-demand check from the menu, palette or a protocol surface.
+    fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A capability-disabled build still explains itself when dispatched
+        // programmatically, even though the command is unavailable to users.
+        let update::CapabilityState::Enabled(capability) = self.updates.clone() else {
+            self.show_update_status(window, cx);
+            return;
+        };
+        if matches!(&self.update_status, update::Status::Checking) {
+            self.show_update_status(window, cx);
+            return;
+        }
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let running = update::Version::parse(env!("CARGO_PKG_VERSION"))
+            .expect("the crate version is a semantic version triple");
+        let skipped = self.settings.skipped_update_version.clone();
+        self.update_status = update::Status::Checking;
+        self.show_update_status(window, cx);
+        self.update_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let checked = runtime::blocking(cx, move || {
+                update::check(&update::HttpTransport, &capability, running)
+            })
+            .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                window.close_dialog(cx);
+                this.apply_update_check(checked, skipped.as_deref());
+                this.show_update_status(window, cx);
+                this.refresh_menus(window, cx);
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Fold a finished background check into status and the visible warning.
+    fn apply_update_check(
+        &mut self,
+        checked: Result<Result<update::CheckOutcome, update::UpdateError>, String>,
+        skipped: Option<&str>,
+    ) {
+        let checked = checked.unwrap_or_else(|error| Err(update::UpdateError::Network(error)));
+        self.update_status = update::Status::finish(checked, skipped);
+        if let update::Status::Failed(reason) = &self.update_status {
+            self.warning = Some(format!("Could not check for updates. {reason}"));
+        }
+    }
+
+    /// Show the latest update status, with an external release download only.
+    fn show_update_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let status = self.update_status.clone();
+        let owner = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let title = match &status {
+                update::Status::Disabled(_) => "Updates unavailable",
+                update::Status::Failed(_) => "Update check failed",
+                update::Status::UpToDate(_) => "No updates",
+                update::Status::Available(_) | update::Status::Skipped(_) => "Update available",
+                update::Status::Idle | update::Status::Checking => "Update check",
+            };
+            let mut body = div()
+                .v_flex()
+                .gap_3()
+                .text_sm()
+                .child(SharedString::from(status.message()));
+            if let Some(release) = status.release() {
+                body = body
+                    .child(
+                        div()
+                            .v_flex()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Release notes"),
+                            )
+                            .child(div().text_sm().child(release.notes.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(format!("SHA-256 · {}", release.sha256))),
+                    );
+                let mut actions = div().h_flex().gap_2();
+                let download = release.artifact_url.clone();
+                actions = actions.child(
+                    Button::new("update-download")
+                        .label("Download for this platform")
+                        .on_click(move |_, _, cx| cx.open_url(&download)),
+                );
+                let page = release.page.clone();
+                actions = actions.child(
+                    Button::new("update-release-page")
+                        .label("Open release page")
+                        .on_click(move |_, _, cx| cx.open_url(&page)),
+                );
+                if matches!(&status, update::Status::Available(_)) {
+                    let version = release.version.to_string();
+                    let skip_owner = owner.clone();
+                    actions = actions.child(
+                        Button::new("update-skip-version")
+                            .label("Skip this version")
+                            .on_click(move |_, window, cx| {
+                                let _ = skip_owner
+                                    .update(cx, |this, cx| this.skip_update_version(&version, cx));
+                                window.close_dialog(cx);
+                            }),
+                    );
+                }
+                body = body.child(actions);
+            }
+            dialog.title(title).w(px(520.)).child(body)
+        });
+    }
+
+    /// Remember one release version so launch checks stop offering it.
+    fn skip_update_version(&mut self, version: &str, cx: &mut Context<Self>) {
+        self.settings.skipped_update_version = Some(version.to_owned());
+        if let update::Status::Available(release) = &self.update_status
+            && release.version.to_string() == version
+        {
+            self.update_status = update::Status::Skipped(release.clone());
+        }
+        self.persist_global(cx);
+        cx.notify();
+    }
+
     /// About: version and build identity, with no update action.
     fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_dialog(cx) {
@@ -937,6 +1126,27 @@ impl Shell {
                             .child("A local-first Astro content editor."),
                     ),
             )
+        });
+    }
+
+    /// Open a bundled help surface. Nothing here reaches the network.
+    fn open_help(&mut self, surface: HelpSurface, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let shortcuts = help::shortcut_groups(&self.settings.copyedit);
+        let paths = help::local_paths();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let body = match surface {
+                HelpSurface::UserGuide => help::guide_body(),
+                HelpSurface::KeyboardShortcuts => help::shortcuts_body(&shortcuts, cx),
+                HelpSurface::LocalData => help::local_data_body(&paths, cx),
+            };
+            dialog
+                .title(surface.title())
+                .w(px(680.))
+                .max_h(px(620.))
+                .child(body)
         });
     }
 
@@ -1427,6 +1637,12 @@ impl Shell {
             | CommandId::OpenCollectionInIde
             | CommandId::OpenEntryInIde => self.open_in_ide(command, window, cx),
             CommandId::About => self.open_about(window, cx),
+            CommandId::OpenUserGuide => self.open_help(HelpSurface::UserGuide, window, cx),
+            CommandId::OpenKeyboardShortcuts => {
+                self.open_help(HelpSurface::KeyboardShortcuts, window, cx)
+            }
+            CommandId::OpenLocalData => self.open_help(HelpSurface::LocalData, window, cx),
+            CommandId::CheckForUpdates => self.check_for_updates(window, cx),
             CommandId::ToggleFullscreen => {
                 window.toggle_fullscreen();
                 self.refresh_menus(window, cx);
@@ -2195,6 +2411,10 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::OpenPreferences => IconName::Settings,
         CommandId::ToggleFullscreen => IconName::Maximize,
         CommandId::About => IconName::Info,
+        CommandId::OpenUserGuide => IconName::Info,
+        CommandId::OpenKeyboardShortcuts => IconName::Command,
+        CommandId::OpenLocalData => IconName::FolderOpen,
+        CommandId::CheckForUpdates => IconName::CloudDownload,
         CommandId::Quit => IconName::X,
     }
 }
@@ -4972,6 +5192,47 @@ mod tests {
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |shell, cx| shell.execute(CommandId::About, window, cx));
             assert!(window.has_active_dialog(cx));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn help_surfaces_open_from_their_command_ids(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            for command in [
+                CommandId::OpenUserGuide,
+                CommandId::OpenKeyboardShortcuts,
+                CommandId::OpenLocalData,
+            ] {
+                view.update(cx, |shell, cx| shell.execute(command, window, cx));
+                assert!(
+                    window.has_active_dialog(cx),
+                    "{} did not open a dialog",
+                    command.label()
+                );
+                window.close_all_dialogs(cx);
+                assert!(!window.has_active_dialog(cx));
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn preferences_documentation_links_open_help(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| shell.open_preferences(window, cx));
+            assert!(window.has_active_dialog(cx));
+            sheet.update(cx, |_, cx| cx.emit(PreferencesEvent::OpenUserGuide));
+            assert!(window.has_active_dialog(cx));
+            window.close_all_dialogs(cx);
+
+            view.update(cx, |shell, cx| shell.open_preferences(window, cx));
+            sheet.update(cx, |_, cx| cx.emit(PreferencesEvent::OpenKeyboardShortcuts));
+            assert!(window.has_active_dialog(cx));
+            window.close_all_dialogs(cx);
         })
         .unwrap();
     }

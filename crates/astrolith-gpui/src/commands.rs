@@ -68,7 +68,11 @@ pub(crate) enum CommandId {
     SystemTheme,
     ResetLayout,
     ToggleFullscreen,
+    OpenUserGuide,
+    OpenKeyboardShortcuts,
+    OpenLocalData,
     About,
+    CheckForUpdates,
     Quit,
 }
 
@@ -134,7 +138,11 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::SystemTheme,
     CommandId::ResetLayout,
     CommandId::ToggleFullscreen,
+    CommandId::OpenUserGuide,
+    CommandId::OpenKeyboardShortcuts,
+    CommandId::OpenLocalData,
     CommandId::About,
+    CommandId::CheckForUpdates,
     CommandId::Quit,
 ];
 
@@ -179,6 +187,8 @@ pub(crate) struct CommandAvailability {
     pub typewriter_mode: bool,
     /// The window is fullscreen.
     pub fullscreen: bool,
+    /// This build carries a manifest URL and public key for update checks.
+    pub updates_configured: bool,
 }
 
 /// One collection offered as a switch command.
@@ -293,6 +303,7 @@ impl CommandId {
             Self::FocusSelectionToolbar => state.editor_focused && state.selection_nonempty,
             Self::ToggleComment => state.editor_focused && state.markdown_document,
             Self::OpenComponentBuilder => state.editor_focused && state.mdx_document,
+            Self::CheckForUpdates => state.updates_configured,
             _ => true,
         }
     }
@@ -370,7 +381,11 @@ impl CommandId {
             Self::SystemTheme => "System theme",
             Self::ResetLayout => "Reset layout",
             Self::ToggleFullscreen => "Enter full screen",
+            Self::OpenUserGuide => "User guide",
+            Self::OpenKeyboardShortcuts => "Keyboard shortcuts",
+            Self::OpenLocalData => "Privacy and local data",
             Self::About => "About Astrolith",
+            Self::CheckForUpdates => "Check for updates…",
             Self::Quit => "Quit Astrolith",
         }
     }
@@ -846,8 +861,24 @@ pub(crate) fn install_menus(
         copyedit,
         availability,
     ));
-    let help =
-        gpui_kit::Menu::new("Help").items(items_for(&[CommandId::About], copyedit, availability));
+    let help = gpui_kit::Menu::new("Help").items({
+        let mut items = items_for(
+            &[CommandId::OpenUserGuide, CommandId::OpenKeyboardShortcuts],
+            copyedit,
+            availability,
+        );
+        items.push(gpui_kit::MenuItem::separator());
+        items.extend(items_for(
+            &[
+                CommandId::OpenLocalData,
+                CommandId::About,
+                CommandId::CheckForUpdates,
+            ],
+            copyedit,
+            availability,
+        ));
+        items
+    });
     let application = gpui_kit::Menu::new("Astrolith").items({
         let mut items = items_for(
             &[
@@ -947,7 +978,11 @@ pub(crate) fn command_group(command: CommandId) -> &'static str {
         | CommandId::OpenPreview
         | CommandId::RestartPreview
         | CommandId::CopyPreviewUrl => "Preview",
+        CommandId::OpenUserGuide | CommandId::OpenKeyboardShortcuts | CommandId::OpenLocalData => {
+            "Help"
+        }
         CommandId::About => "Help",
+        CommandId::CheckForUpdates => "Help",
         CommandId::Quit => "Application",
     }
 }
@@ -1125,6 +1160,13 @@ mod tests {
         // preconditions instead of disappearing from the palette.
         assert!(CommandId::Save.is_available(empty));
         assert!(CommandId::OpenProject.is_available(empty));
+        assert!(!CommandId::CheckForUpdates.is_available(empty));
+        assert!(
+            CommandId::CheckForUpdates.is_available(CommandAvailability {
+                updates_configured: true,
+                ..CommandAvailability::default()
+            })
+        );
     }
 
     #[test]
@@ -1315,6 +1357,20 @@ mod tests {
                 ..configured
             })
         );
+    }
+
+    #[test]
+    fn help_surfaces_are_available_from_the_help_group() {
+        for command in [
+            CommandId::OpenUserGuide,
+            CommandId::OpenKeyboardShortcuts,
+            CommandId::OpenLocalData,
+        ] {
+            assert!(COMMANDS.contains(&command));
+            assert_eq!(command_group(command), "Help");
+            assert!(command.is_available(CommandAvailability::default()));
+            assert!(command.shortcut().is_none());
+        }
     }
 
     #[test]

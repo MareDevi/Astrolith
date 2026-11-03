@@ -1,4 +1,6 @@
 /target/
+/dist/
+/packaging/linux/generated/
 /.superpowers/
 /.worktrees/
 /.mise.local.toml

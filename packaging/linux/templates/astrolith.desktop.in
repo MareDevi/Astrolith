@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Astrolith
+GenericName=Astro Content Editor
+Comment=Edit Markdown and MDX content in local Astro projects
+Exec=astrolith %F
+TryExec=astrolith
+Icon=astrolith
+Terminal=false
+Categories=Office;TextEditor;
+StartupNotify=true
+MimeType=text/markdown;text/x-markdown;text/mdx;x-scheme-handler/astrolith;
+Keywords=Markdown;MDX;Astro;Editor;Text;Frontmatter;

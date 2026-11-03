@@ -1,0 +1,125 @@
+name: Release packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  APPIMAGE_EXTRACT_AND_RUN: "1"
+
+jobs:
+  package:
+    name: Package (${{ matrix.artifact }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: deb
+            task: package:deb
+            path: dist/*.deb
+          - artifact: appimage
+            task: package:appimage
+            path: dist/*.AppImage
+          - artifact: rpm
+            task: package:rpm
+            path: dist/*.rpm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Linux packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc g++ clang cmake pkg-config libfontconfig-dev libwayland-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev \
+            libvulkan-dev mesa-vulkan-drivers \
+            appstream binutils desktop-file-utils rpm librsvg2-bin shared-mime-info
+      - name: Install pinned project toolchain
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5
+        with:
+          version: 2026.10.19
+      - name: Configure update capability
+        env:
+          MANIFEST_URL: ${{ vars.ASTROLITH_UPDATE_MANIFEST_URL }}
+          PUBLIC_KEY: ${{ vars.ASTROLITH_UPDATE_PUBLIC_KEY }}
+        run: |
+          if [ -n "$MANIFEST_URL" ] && [ -n "$PUBLIC_KEY" ]; then
+            {
+              echo "ASTROLITH_UPDATE_MANIFEST_URL=$MANIFEST_URL"
+              echo "ASTROLITH_UPDATE_PUBLIC_KEY=$PUBLIC_KEY"
+            } >>"$GITHUB_ENV"
+          else
+            echo "No update manifest URL/public key configured; building a capability-disabled binary."
+          fi
+      - name: Install AppImage tooling
+        if: matrix.artifact == 'appimage'
+        run: |
+          curl -fsSL -o /usr/local/bin/linuxdeploy \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -fsSL -o /usr/local/bin/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /usr/local/bin/linuxdeploy /usr/local/bin/appimagetool
+      - name: Validate packaging metadata
+        run: mise run package:validate
+      - name: Build ${{ matrix.artifact }}
+        run: mise run ${{ matrix.task }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astrolith-${{ matrix.artifact }}
+          path: ${{ matrix.path }}
+          if-no-files-found: error
+
+  manifest:
+    name: Sign update manifest
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ASTROLITH_UPDATE_SIGNING_KEY: ${{ secrets.ASTROLITH_UPDATE_SIGNING_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install pinned project toolchain
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5
+        with:
+          version: 2026.10.19
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: astrolith-*
+          path: dist
+          merge-multiple: true
+      - name: Sign update manifest
+        if: env.ASTROLITH_UPDATE_SIGNING_KEY != ''
+        env:
+          RELEASE_PAGE: ${{ vars.ASTROLITH_RELEASE_PAGE }}
+        run: |
+          version="$(node packaging/linux/generate-metadata.mjs --print-version)"
+          page="${RELEASE_PAGE:-https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}}"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          appimage="$(ls dist/Astrolith-*.AppImage)"
+          deb="$(ls dist/*.deb)"
+          rpm="$(ls dist/*.rpm)"
+          node packaging/linux/sign-manifest.mjs \
+            --version "$version" \
+            --notes "Astrolith $version release artifacts are available on the release page." \
+            --page "$page" \
+            --artifact linux-x86_64-appimage "$appimage" "$base/$(basename "$appimage")" \
+            --artifact linux-x86_64-deb "$deb" "$base/$(basename "$deb")" \
+            --artifact linux-x86_64-rpm "$rpm" "$base/$(basename "$rpm")" \
+            --out dist/astrolith-update-manifest.json
+      - name: Explain skipped signing
+        if: env.ASTROLITH_UPDATE_SIGNING_KEY == ''
+        run: |
+          echo "ASTROLITH_UPDATE_SIGNING_KEY is not configured; no update manifest was signed." \
+            >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: env.ASTROLITH_UPDATE_SIGNING_KEY != ''
+        with:
+          name: astrolith-update-manifest
+          path: dist/astrolith-update-manifest.json
+          if-no-files-found: error

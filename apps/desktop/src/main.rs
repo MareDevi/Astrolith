@@ -6,6 +6,13 @@ mod spikes {
 use gpui_kit::{AppContext, WindowOptions};
 
 fn main() {
+    if std::env::args()
+        .skip(1)
+        .any(|argument| argument == "--version" || argument == "-V")
+    {
+        println!("astrolith {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let config = astrolith_observability::LogConfig::from_env();
     for warning in &config.warnings {
         eprintln!("Logging configuration: {warning}");

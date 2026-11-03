@@ -115,6 +115,10 @@ pub(crate) enum PreferencesEvent {
     ResetAll,
     /// Dismiss without changes.
     Cancel,
+    /// Open the bundled user guide.
+    OpenUserGuide,
+    /// Open the generated keyboard-shortcut reference.
+    OpenKeyboardShortcuts,
 }
 
 impl EventEmitter<PreferencesEvent> for PreferencesSheet {}
@@ -1119,6 +1123,25 @@ impl Render for PreferencesSheet {
                                 this.set_pane(pane, cx);
                             }))
                     }),
+            )
+            .child(div().h(px(12.)))
+            .child(
+                Button::new("preferences-user-guide")
+                    .small()
+                    .ghost()
+                    .label("User guide")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(PreferencesEvent::OpenUserGuide);
+                    })),
+            )
+            .child(
+                Button::new("preferences-shortcuts")
+                    .small()
+                    .ghost()
+                    .label("Keyboard shortcuts")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(PreferencesEvent::OpenKeyboardShortcuts);
+                    })),
             );
         let body = match self.pane {
             Pane::General => self.general_pane(cx).into_any_element(),

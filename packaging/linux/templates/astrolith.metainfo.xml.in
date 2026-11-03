@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>@DESKTOP_ID@</id>
+  <name>Astrolith</name>
+  <summary>Local-first editor for Astro Markdown and MDX content</summary>
+  <developer id="dev.astrolith">
+    <name>Astrolith Contributors</name>
+  </developer>
+  <launchable type="desktop-id">@DESKTOP_ID@.desktop</launchable>
+  <url type="homepage">https://github.com/maredevi/Astrolith</url>
+  <description>
+    <p>Astrolith is a local-first desktop editor for the Markdown and MDX entry files of Astro projects.</p>
+    <p>Files stay on disk; frontmatter is validated against the collection schema and MDX entries get a component builder.</p>
+  </description>
+  <provides>
+    <mediatype>text/markdown</mediatype>
+    <mediatype>text/x-markdown</mediatype>
+    <mediatype>text/mdx</mediatype>
+  </provides>
+  <categories>
+    <category>Office</category>
+    <category>TextEditor</category>
+  </categories>
+  <releases>
+    <release version="@VERSION@" date="@RELEASE_DATE@"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+  <metadata_license>CC0-1.0</metadata_license>
+</component>

@@ -415,6 +415,8 @@ pub struct GlobalPreferencesV2 {
     pub copyedit: CopyeditPreferences,
     /// Local telemetry consent; disabled by default and never sent anywhere.
     pub telemetry_enabled: bool,
+    /// Release version the user chose to skip in the update check.
+    pub skipped_update_version: Option<String>,
 }
 
 impl Default for GlobalPreferencesV2 {
@@ -431,6 +433,7 @@ impl Default for GlobalPreferencesV2 {
             ide: IdeCommand::default(),
             copyedit: CopyeditPreferences::default(),
             telemetry_enabled: false,
+            skipped_update_version: None,
         }
     }
 }
@@ -956,6 +959,32 @@ mod tests {
             );
         }
         assert_eq!(copyedit.all_toggle_label(), "Hide all copyedit");
+    }
+
+    #[test]
+    fn skipped_update_version_is_optional_and_survives_round_trips() {
+        let mut stored =
+            serde_json::to_value(GlobalPreferencesV2::default()).expect("serialize preferences");
+        assert!(
+            stored.get("skipped_update_version").is_some(),
+            "the field must be written"
+        );
+        stored
+            .as_object_mut()
+            .expect("preferences object")
+            .remove("skipped_update_version");
+        let loaded: GlobalPreferencesV2 =
+            serde_json::from_value(stored).expect("older files omit the field");
+        assert_eq!(loaded.skipped_update_version, None);
+
+        let chosen = GlobalPreferencesV2 {
+            skipped_update_version: Some("1.2.3".into()),
+            ..GlobalPreferencesV2::default()
+        };
+        let reloaded: GlobalPreferencesV2 =
+            serde_json::from_value(serde_json::to_value(chosen).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(reloaded.skipped_update_version.as_deref(), Some("1.2.3"));
     }
 
     #[test]

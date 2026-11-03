@@ -4159,6 +4159,7 @@ impl ProjectWorkspace {
             focus_mode: self.writing.focus,
             typewriter_mode: self.writing.typewriter,
             fullscreen: self.view_fullscreen,
+            updates_configured: false,
         }
     }
 

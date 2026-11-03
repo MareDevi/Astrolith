@@ -106,3 +106,28 @@ run = "node --test fixtures/test-astro-fixtures.test.mjs && node scripts/test-as
 [tasks."test:workspace"]
 description = "Test collection index and bounded watcher"
 run = "cargo test -p astrolith-workspace --locked"
+
+[tasks."package:metadata"]
+description = "Generate Linux desktop, AppStream and MIME metadata from the workspace version"
+run = "node packaging/linux/generate-metadata.mjs"
+
+[tasks."package:validate"]
+description = "Validate the generated desktop entry, AppStream and MIME metadata"
+run = [
+  "node packaging/linux/generate-metadata.mjs",
+  "desktop-file-validate packaging/linux/generated/astrolith.desktop",
+  "appstreamcli validate --no-net packaging/linux/generated/astrolith.metainfo.xml",
+  "node packaging/linux/validate-mime.mjs",
+]
+
+[tasks."package:deb"]
+description = "Build the Debian package into dist/"
+run = "packaging/linux/build-deb.sh"
+
+[tasks."package:appimage"]
+description = "Build the AppImage into dist/ (requires linuxdeploy and appimagetool)"
+run = "packaging/linux/build-appimage.sh"
+
+[tasks."package:rpm"]
+description = "Build the RPM into dist/ (requires rpmbuild)"
+run = "packaging/linux/build-rpm.sh"
