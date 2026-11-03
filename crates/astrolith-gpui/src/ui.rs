@@ -1,0 +1,104 @@
+//! Shared presentation primitives for the writing desk.
+//!
+//! These helpers keep the small, repeated pieces of the shell on one visual
+//! system: a quiet wordmark, compact toolbar buttons with readable icons, and
+//! the section and empty-state rhythm shared by every panel.
+
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{
+    ActiveTheme, Icon, Sizable, StyledExt,
+    button::{Button, ButtonVariants},
+};
+use gpui_kit::{App, ElementId, IntoElement, SharedString, TestSupportExt, div, prelude::*, px};
+
+/// The Astrolith nib mark. Drawn as SVG so it inherits the active text colour.
+const MARK_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.4 19 10.6 12 20.6 5 10.6Z"/><path d="M12 8.2v5.6"/><circle cx="12" cy="16.3" r="0.9" fill="currentColor" stroke="none"/></svg>"#;
+
+/// The application mark, tinted with the accent role.
+pub(crate) fn mark(cx: &App) -> impl IntoElement {
+    Icon::default()
+        .data(MARK_SVG)
+        .small()
+        .text_color(cx.theme().accent)
+}
+
+/// The wordmark shown in the window chrome.
+pub(crate) fn wordmark(cx: &App) -> impl IntoElement {
+    div().h_flex().items_center().gap_2().child(mark(cx)).child(
+        div()
+            .text_sm()
+            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+            .child("Astrolith"),
+    )
+}
+
+/// A vertical hairline used between chrome groups.
+pub(crate) fn v_divider(cx: &App) -> impl IntoElement {
+    div()
+        .w(px(1.))
+        .h_4()
+        .mx_1()
+        .bg(cx.theme().border)
+        .opacity(0.7)
+}
+
+/// A compact ghost toolbar button with a consistently sized icon.
+pub(crate) fn icon_button(
+    id: impl Into<ElementId>,
+    icon: IconName,
+    tooltip: impl Into<SharedString>,
+) -> Button {
+    Button::new(id).small().ghost().icon(icon).tooltip(tooltip)
+}
+
+/// A calm empty state used by panels that have nothing to show yet.
+pub(crate) fn empty_state(
+    id: &'static str,
+    icon: IconName,
+    title: impl Into<SharedString>,
+    body: impl Into<SharedString>,
+    action: Option<gpui_kit::AnyElement>,
+    cx: &App,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .test_support()
+        .v_flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .px_6()
+        .py_10()
+        .text_center()
+        .child(
+            div()
+                .size(px(44.))
+                .rounded_xl()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().group_box)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Icon::new(icon)
+                        .size_5()
+                        .text_color(cx.theme().muted_foreground),
+                ),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .max_w(px(260.))
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(body.into()),
+        )
+        .children(action)
+}

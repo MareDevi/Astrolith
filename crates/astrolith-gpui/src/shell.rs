@@ -49,6 +49,7 @@ use gpui_kit::component::{
     command::{Command, CommandGroup, CommandItem, CommandState},
     dock::{DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
     kbd::Kbd,
+    menu::{DropdownMenu, PopupMenuItem},
     status_bar::StatusBar,
 };
 use gpui_kit::{
@@ -280,9 +281,12 @@ impl Shell {
             .layout
             .clamp(f32::from(window.viewport_size().width));
         let global_layout = settings.layout.clone();
+        let resolved = resolve(&settings, None, None);
         theme::apply(
-            resolve(&settings, None, None).theme,
+            resolved.theme,
             window.appearance(),
+            resolved.light_theme,
+            resolved.dark_theme,
             &settings.heading_colors,
             cx,
         );
@@ -295,7 +299,15 @@ impl Shell {
                 cx,
             )
         });
-        let document = cx.new(|cx| WorkspacePanel::new("document-panel", "Welcome", "# Astrolith\n\nOpen an Astro project to edit Markdown and MDX.\n\nPress Ctrl/Cmd+S to save the active document.\n\n中文 · 日本語", window, cx));
+        let document = cx.new(|cx| {
+            WorkspacePanel::new(
+                "document-panel",
+                "Welcome",
+                "Open an Astro project, then choose an entry from the project panel to begin writing.",
+                window,
+                cx,
+            )
+        });
         let project = cx.new(|cx| ProjectWorkspace::new(document.clone(), window, cx));
         project.update(cx, |project, cx| {
             project.set_preferences(settings.clone(), None, cx)
@@ -312,7 +324,7 @@ impl Shell {
                 .unwrap_or(true)
         });
         let frontmatter = cx.new(FrontmatterForm::new);
-        let inspector = cx.new(|cx| WorkspacePanel::new("inspector-panel", "Inspector", "No collection selected\n\nCollection metadata becomes available when an Astro workspace is open.", window, cx));
+        let inspector = cx.new(|cx| WorkspacePanel::new("inspector-panel", "Properties", "No collection selected\n\nCollection metadata becomes available when an Astro workspace is open.", window, cx));
         inspector.update(cx, |panel, cx| {
             panel.set_view(frontmatter.clone().into(), cx)
         });
@@ -405,6 +417,8 @@ impl Shell {
                     theme::apply(
                         ThemeMode::System,
                         window.appearance(),
+                        this.settings.light_theme,
+                        this.settings.dark_theme,
                         &this.settings.heading_colors,
                         cx,
                     );
@@ -1779,6 +1793,8 @@ impl Shell {
                 theme::apply(
                     self.settings.theme,
                     window.appearance(),
+                    self.settings.light_theme,
+                    self.settings.dark_theme,
                     &self.settings.heading_colors,
                     cx,
                 );
@@ -2030,8 +2046,8 @@ impl Shell {
             }
             dialog
                 .title("Preferences")
-                .w(px(760.))
-                .max_h(px(600.))
+                .w(px(880.))
+                .max_h(px(680.))
                 .on_close(move |_, _, cx| {
                     let _ = close.update(cx, |sheet, cx| sheet.cancel(cx));
                 })
@@ -2063,6 +2079,8 @@ impl Shell {
         theme::apply(
             self.settings.theme,
             window.appearance(),
+            self.settings.light_theme,
+            self.settings.dark_theme,
             &self.settings.heading_colors,
             cx,
         );
@@ -2530,6 +2548,19 @@ impl Render for Shell {
                 }
             })
             .unwrap_or("—");
+        let save_tone = match (active_tab, save_status) {
+            (Some(_), Some(SaveStatus::Conflict | SaveStatus::Failed(_))) => cx.theme().danger,
+            (Some(_), Some(SaveStatus::Saving | SaveStatus::Unsaved)) => cx.theme().warning,
+            (Some(_), Some(SaveStatus::Saved)) => cx.theme().success,
+            (Some(tab), None) if tab.externally_changed || tab.dirty => cx.theme().warning,
+            (Some(_), None) => cx.theme().success,
+            (None, _) => cx.theme().muted_foreground,
+        };
+        let palette_label = if cx.theme().is_dark() {
+            self.settings.dark_theme.label()
+        } else {
+            self.settings.light_theme.label()
+        };
         // One token snapshot per revision: words and characters always agree.
         let counts = self
             .project
@@ -2603,15 +2634,12 @@ impl Render for Shell {
                                     .items_center()
                                     .gap_2()
                                     .pr_2()
-                                    .child(
-                                        Icon::new(IconName::Asterisk)
-                                            .small()
-                                            .text_color(cx.theme().accent),
-                                    )
-                                    .child(div().text_sm().child("Astrolith"))
+                                    .child(crate::ui::wordmark(cx))
                                     .when_some(project_name.clone(), |row, name| {
-                                        row.child(
+                                        row.child(crate::ui::v_divider(cx)).child(
                                             div()
+                                                .max_w(px(220.))
+                                                .truncate()
                                                 .text_xs()
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child(name),
@@ -2623,7 +2651,7 @@ impl Render for Shell {
                                             .small()
                                             .ghost()
                                             .icon(IconName::Search)
-                                            .label("Search or run a command…")
+                                            .label("Search")
                                             .tooltip(CommandId::OpenPalette.label())
                                             .track_focus(&self.palette_focus)
                                             .on_click(cx.listener(|this, _, window, cx| {
@@ -2632,25 +2660,9 @@ impl Render for Shell {
                                             })),
                                     )
                                     .child({
-                                        let availability =
-                                            self.project.read(cx).command_availability(cx, window);
-                                        Button::new("toolbar-new-entry")
-                                            .small()
-                                            .ghost()
-                                            .icon(IconName::FilePlus)
-                                            .tooltip(CommandId::NewEntry.label())
-                                            .disabled(
-                                                !CommandId::NewEntry.is_available(availability),
-                                            )
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.execute(CommandId::NewEntry, window, cx)
-                                            }))
-                                    })
-                                    .child(div().flex_1())
-                                    .child({
                                         let modes = self.project.read(cx).writing_modes();
                                         Button::new("toggle-focus-mode")
-                                            .xsmall()
+                                            .small()
                                             .ghost()
                                             .icon(IconName::Eye)
                                             .tooltip(CommandId::ToggleFocusMode.label())
@@ -2662,7 +2674,7 @@ impl Render for Shell {
                                     .child({
                                         let modes = self.project.read(cx).writing_modes();
                                         Button::new("toggle-typewriter-mode")
-                                            .xsmall()
+                                            .small()
                                             .ghost()
                                             .icon(IconName::Type)
                                             .tooltip(CommandId::ToggleTypewriterMode.label())
@@ -2675,45 +2687,60 @@ impl Render for Shell {
                                                 )
                                             }))
                                     })
-                                    .children(
-                                        [
-                                            (
-                                                "toggle-sidebar",
-                                                CommandId::ToggleSidebar,
-                                                IconName::PanelLeft,
-                                                layout.sidebar_visible,
-                                                "Toggle project panel",
-                                            ),
-                                            (
-                                                "toggle-preview",
-                                                CommandId::TogglePreview,
-                                                IconName::PanelBottom,
-                                                layout.preview_visible,
-                                                "Toggle preview panel",
-                                            ),
-                                            (
-                                                "toggle-inspector",
-                                                CommandId::ToggleInspector,
-                                                IconName::PanelRight,
-                                                layout.inspector_visible,
-                                                "Toggle inspector",
-                                            ),
-                                        ]
-                                        .map(
-                                            |(id, kind, icon, visible, tooltip)| {
-                                                Button::new(id)
-                                                    .xsmall()
-                                                    .ghost()
-                                                    .icon(icon)
-                                                    .tooltip(tooltip)
-                                                    .toggled(visible)
-                                                    .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
-                                                            this.execute(kind, window, cx)
-                                                        },
-                                                    ))
-                                            },
-                                        ),
+                                    .child(crate::ui::v_divider(cx))
+                                    .child({
+                                        let owner = cx.weak_entity();
+                                        let sidebar = layout.sidebar_visible;
+                                        let preview = layout.preview_visible;
+                                        let inspector = layout.inspector_visible;
+                                        Button::new("view-menu")
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::LayoutPanelLeft)
+                                            .label("View")
+                                            .dropdown_caret(true)
+                                            .dropdown_menu(move |menu, _, _| {
+                                                let item = |label: &'static str,
+                                                            kind: CommandId,
+                                                            checked: bool| {
+                                                    let owner = owner.clone();
+                                                    PopupMenuItem::new(label)
+                                                        .checked(checked)
+                                                        .on_click(move |_, window, cx| {
+                                                            let _ = owner.update(
+                                                                cx,
+                                                                |this, cx| {
+                                                                    this.execute(kind, window, cx)
+                                                                },
+                                                            );
+                                                        })
+                                                };
+                                                menu.item(item(
+                                                    "Project panel",
+                                                    CommandId::ToggleSidebar,
+                                                    sidebar,
+                                                ))
+                                                .item(item(
+                                                    "Preview panel",
+                                                    CommandId::TogglePreview,
+                                                    preview,
+                                                ))
+                                                .item(item(
+                                                    "Properties",
+                                                    CommandId::ToggleInspector,
+                                                    inspector,
+                                                ))
+                                            })
+                                    })
+                                    .child(
+                                        Button::new("open-preferences")
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::Settings)
+                                            .tooltip(CommandId::OpenPreferences.label())
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.execute(CommandId::OpenPreferences, window, cx)
+                                            })),
                                     ),
                             ),
                     )
@@ -2729,25 +2756,22 @@ impl Render for Shell {
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
             .child({
                 let bar = StatusBar::new()
-                    .h_6()
+                    .h_7()
                     .px_3()
                     .text_xs()
                     .bg(cx.theme().status_bar)
                     .border_t_1()
                     .border_color(cx.theme().window_border)
                     .text_color(cx.theme().muted_foreground)
-                    .left(Icon::new(IconName::Folder).xsmall())
-                    .left(project_name.unwrap_or_else(|| "No project".into()))
-                    .left(div().w_2())
+                    .left(div().size_1p5().rounded_full().bg(save_tone))
                     .left(document_state)
+                    .left(project_name.map_or_else(
+                        || SharedString::from("No project"),
+                        |name| SharedString::from(format!("· {name}")),
+                    ))
                     .when_some(counts, |bar, counts| bar.right(counts))
                     .right(language)
-                    .right("UTF-8")
-                    .right(if cx.theme().is_dark() {
-                        "One Dark"
-                    } else {
-                        "One Light"
-                    });
+                    .right(palette_label);
                 let bar = if let Some(warning) = self.warning.as_ref() {
                     bar.left(div().text_color(cx.theme().warning).child(warning.clone()))
                 } else {
@@ -3024,7 +3048,9 @@ mod tests {
             .update_window(handle.into(), |_, window, cx| {
                 window.render_frame(cx);
                 let initial = window.find("document-panel").bounds();
-                window.click("toggle-sidebar", cx);
+                view.update(cx, |view, cx| {
+                    view.execute(CommandId::ToggleSidebar, window, cx)
+                });
                 initial
             })
             .unwrap();
@@ -3033,19 +3059,25 @@ mod tests {
             assert!(!view.read(cx).settings.layout.sidebar_visible);
             window.render_frame(cx);
             assert!(window.find("document-panel").bounds().size.width > initial.size.width);
-            window.click("toggle-sidebar", cx);
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::ToggleSidebar, window, cx)
+            });
         })
         .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(window.find("document-panel").bounds(), initial);
-            window.click("toggle-inspector", cx);
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::ToggleInspector, window, cx)
+            });
         })
         .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             assert!(!view.read(cx).settings.layout.inspector_visible);
             window.render_frame(cx);
-            window.click("toggle-preview", cx);
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::TogglePreview, window, cx)
+            });
         })
         .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
@@ -3221,7 +3253,9 @@ mod tests {
             window.render_frame(cx);
             let start = window.find("resize-handle-left").bounds().center();
             window.drag(start, point(start.x + px(45.), start.y), cx);
-            window.click("toggle-inspector", cx);
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::ToggleInspector, window, cx)
+            });
         })
         .unwrap();
         let settings = cx.update(|cx| {
@@ -3339,7 +3373,15 @@ mod tests {
     ) {
         let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         cx.update_window(handle.into(), |_, window, cx| {
-            let state = view.read(cx).document.read(cx).editor.clone().unwrap();
+            let editor = cx.new(|cx| {
+                gpui_kit::component::input::EditorState::new(window, cx)
+                    .default_value("Start writing")
+            });
+            let document = view.read(cx).document.clone();
+            document.update(cx, |panel, cx| {
+                panel.show_editor("Welcome".into(), editor.clone(), None, cx)
+            });
+            let state = editor;
             window.render_frame(cx);
             window.click(("input", state.entity_id()), cx);
             window.press(
@@ -4102,9 +4144,8 @@ mod tests {
         let (handle, view) = mount(cx, GlobalPreferencesV2::default());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert_eq!(
-                window.find("toolbar-new-entry").disabled(),
-                Some(true),
+            assert!(
+                window.try_find("entry-new").is_none(),
                 "no project means no new entry"
             );
         })
@@ -4126,13 +4167,7 @@ mod tests {
 
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert_ne!(window.find("toolbar-new-entry").disabled(), Some(true));
             assert_ne!(window.find("entry-new").disabled(), Some(true));
-            assert_eq!(
-                window.find("entry-rename").disabled(),
-                Some(true),
-                "row commands need an active entry"
-            );
             window.click("command-palette", cx);
             window.input("Duplicate file", cx);
         })
@@ -4170,9 +4205,7 @@ mod tests {
         }
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            for id in ["entry-rename", "entry-delete", "entry-reveal", "copy-path"] {
-                assert_ne!(window.find(id).disabled(), Some(true), "{id}");
-            }
+            assert_ne!(window.find("entry-new").disabled(), Some(true));
             window.click("command-palette", cx);
             assert!(window.has_active_dialog(cx));
             window.input("Duplicate file", cx);
@@ -5006,6 +5039,47 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn palette_selection_applies_live_and_persists(cx: &mut TestAppContext) {
+        use astrolith_core::preferences::{DarkColorScheme, LightColorScheme};
+
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.execute(CommandId::LightTheme, window, cx)
+            });
+        })
+        .unwrap();
+        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
+        open_preferences_sheet(cx, handle, &view);
+        cx.update_window(handle.into(), |_, window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.set_palettes_for_tests(
+                    LightColorScheme::NordLight,
+                    DarkColorScheme::TokyoNight,
+                    cx,
+                )
+            });
+            window.render_frame(cx);
+            window.click("preferences-apply", cx);
+        })
+        .unwrap();
+        let (light, dark) = view.read_with(cx, |shell, _| {
+            (shell.settings.light_theme, shell.settings.dark_theme)
+        });
+        assert_eq!(light, LightColorScheme::NordLight);
+        assert_eq!(dark, DarkColorScheme::TokyoNight);
+        let expected = theme::palette(
+            ThemeMode::Light,
+            LightColorScheme::NordLight,
+            DarkColorScheme::TokyoNight,
+        );
+        assert_eq!(
+            view.read_with(cx, |_, cx| cx.theme().background),
+            expected.background
+        );
+    }
+
+    #[gpui_kit::test]
     async fn preferences_heading_colour_applies_live_and_reset_restores_the_token(
         cx: &mut TestAppContext,
     ) {
@@ -5039,7 +5113,9 @@ mod tests {
         open_preferences_sheet(cx, handle, &view);
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("preferences-reset-heading-light", cx);
+            sheet.update(cx, |sheet, cx| {
+                sheet.reset_field(FieldId::HeadingLight, window, cx)
+            });
             window.render_frame(cx);
             window.click("preferences-apply", cx);
         })

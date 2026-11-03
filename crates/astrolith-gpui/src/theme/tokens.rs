@@ -2,9 +2,9 @@ use gpui_kit::Hsla;
 
 /// Semantic roles owned by Astrolith; Kit supplies interaction/status roles.
 ///
-/// The palette follows Zed's One Dark and One Light themes: a flat editor
-/// surface, slightly darker panel chrome, hairline borders and a single blue
-/// accent. Components read roles, never raw palette values.
+/// Every selectable colour scheme fills these roles: a flat editor surface,
+/// slightly recessed panel chrome, hairline borders and one accent. Components
+/// read roles, never raw palette values.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct ThemeTokens {

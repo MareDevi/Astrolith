@@ -917,20 +917,27 @@ impl Render for FrontmatterForm {
             .v_flex()
             .size_full()
             .overflow_y_scroll()
+            .bg(cx.theme().background)
             .child(
                 div()
                     .h_flex()
                     .items_center()
                     .justify_between()
-                    .px_3()
-                    .py_2()
+                    .px_4()
+                    .pt_3()
+                    .pb_2()
                     .border_b_1()
-                    .border_color(cx.theme().window_border)
+                    .border_color(cx.theme().border)
                     .child(
                         div()
                             .v_flex()
                             .gap_0p5()
-                            .child(div().text_sm().child("Frontmatter"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child("Properties"),
+                            )
                             .child(
                                 div()
                                     .text_xs()
@@ -940,11 +947,6 @@ impl Render for FrontmatterForm {
                                         editor.controls().len()
                                     ))),
                             ),
-                    )
-                    .child(
-                        Icon::new(IconName::FileText)
-                            .small()
-                            .text_color(cx.theme().muted_foreground),
                     ),
             )
             .when_some(notice, |form, notice| {
@@ -957,7 +959,7 @@ impl Render for FrontmatterForm {
                         .child(notice),
                 )
             })
-            .child(div().v_flex().gap_3().p_3().children(rows))
+            .child(div().v_flex().gap_4().p_4().children(rows))
     }
 }
 
@@ -997,17 +999,8 @@ fn render_row(
                 .when(control.required, |label| {
                     label.child(div().text_color(cx.theme().warning).child("*"))
                 })
-                .child(row.label.clone())
-                .when_some(control.role, |label, role| {
-                    label.child(div().text_color(cx.theme().muted_foreground).child(
-                        SharedString::from(match role {
-                            FieldRole::Title => "title",
-                            FieldRole::Description => "description",
-                            FieldRole::Draft => "draft",
-                            FieldRole::Date => "date",
-                        }),
-                    ))
-                }),
+                .text_sm()
+                .child(row.label.clone()),
         )
         .child(
             div()
@@ -1026,7 +1019,7 @@ fn render_row(
                         Button::new(("frontmatter-remove", index))
                             .ghost()
                             .xsmall()
-                            .label("Remove")
+                            .icon(IconName::X)
                             .tooltip("Remove this optional field")
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.apply_remove_field(&path, cx);
@@ -1038,7 +1031,7 @@ fn render_row(
     let mut row_view = div()
         .id(("frontmatter-field", index))
         .v_flex()
-        .gap_1()
+        .gap_1p5()
         .when(row.hierarchy > 0, |view| {
             view.pl(px((row.hierarchy * 12) as f32))
         })

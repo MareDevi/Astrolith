@@ -31,8 +31,19 @@ fn theme_adapter_projects_complete_semantic_roles_in_both_modes(cx: &mut TestApp
     cx.update(|cx| {
         gpui_kit::init(cx);
         for mode in [ThemeMode::Dark, ThemeMode::Light] {
-            apply(mode, WindowAppearance::Dark, &Default::default(), cx);
-            let tokens = palette(mode);
+            apply(
+                mode,
+                WindowAppearance::Dark,
+                LightColorScheme::default(),
+                DarkColorScheme::default(),
+                &Default::default(),
+                cx,
+            );
+            let tokens = palette(
+                mode,
+                LightColorScheme::default(),
+                DarkColorScheme::default(),
+            );
             assert_eq!(cx.theme().background, tokens.background);
             assert_eq!(cx.theme().foreground, tokens.foreground);
             assert_eq!(cx.theme().sidebar, tokens.surface);
@@ -50,7 +61,7 @@ fn theme_adapter_projects_complete_semantic_roles_in_both_modes(cx: &mut TestApp
             assert_eq!(cx.theme().window_border, tokens.border_variant);
             assert_eq!(cx.theme().caret, tokens.caret);
             assert_eq!(cx.theme().font_size, gpui_kit::px(14.));
-            assert_eq!(cx.theme().radius, gpui_kit::px(6.));
+            assert_eq!(cx.theme().radius, gpui_kit::px(8.));
             assert_ne!(tokens.background, tokens.foreground);
             assert!(tokens.background.a > 0.99 && tokens.foreground.a > 0.99);
         }

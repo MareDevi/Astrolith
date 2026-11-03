@@ -8,8 +8,62 @@ impl PreferencesSheet {
         let theme_label = match self.theme {
             ThemePreference::Light => "Light",
             ThemePreference::Dark => "Dark",
-            ThemePreference::System => "System",
+            ThemePreference::System => "Follow system",
         };
+        let light_theme_weak = weak.clone();
+        let current_light = self.light_theme;
+        let light_theme = Button::new("preferences-light-theme")
+            .small()
+            .outline()
+            .label(self.light_theme.label())
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for scheme in LightColorScheme::ALL {
+                    let weak = light_theme_weak.clone();
+                    let selected = scheme == current_light;
+                    menu = menu.item(
+                        PopupMenuItem::new(scheme.label())
+                            .checked(selected)
+                            .on_click(move |_, _, cx| {
+                                let _ = weak.update(cx, |sheet, cx| {
+                                    sheet.light_theme = scheme;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
+            .into_any_element();
+
+        let dark_theme_weak = weak.clone();
+        let current_dark = self.dark_theme;
+        let dark_theme = Button::new("preferences-dark-theme")
+            .small()
+            .outline()
+            .label(self.dark_theme.label())
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for scheme in DarkColorScheme::ALL {
+                    let weak = dark_theme_weak.clone();
+                    let selected = scheme == current_dark;
+                    menu = menu.item(
+                        PopupMenuItem::new(scheme.label())
+                            .checked(selected)
+                            .on_click(move |_, _, cx| {
+                                let _ = weak.update(cx, |sheet, cx| {
+                                    sheet.dark_theme = scheme;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
+            .into_any_element();
+
         let extension_label = match self.global_extension {
             FileExtension::Md => "Markdown (.md)",
             FileExtension::Mdx => "MDX (.mdx)",
@@ -25,9 +79,9 @@ impl PreferencesSheet {
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu;
                 for (label, preference) in [
+                    ("Follow system", ThemePreference::System),
                     ("Light", ThemePreference::Light),
                     ("Dark", ThemePreference::Dark),
-                    ("System", ThemePreference::System),
                 ] {
                     let weak = theme_weak.clone();
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
@@ -91,7 +145,113 @@ impl PreferencesSheet {
             })
             .into_any_element();
 
-        let fields = vec![
+        let appearance = vec![
+            self.field(
+                "preferences-field-theme",
+                "Appearance",
+                theme,
+                FieldExtras {
+                    field: None,
+                    hint: Some(
+                        "Follow system keeps the light and dark palettes in sync with the desktop.",
+                    ),
+                    trailing: None,
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-light-theme",
+                "Light palette",
+                light_theme,
+                FieldExtras {
+                    field: None,
+                    hint: Some("Used when the appearance resolves to light."),
+                    trailing: None,
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-dark-theme",
+                "Dark palette",
+                dark_theme,
+                FieldExtras {
+                    field: None,
+                    hint: Some("Used when the appearance resolves to dark."),
+                    trailing: None,
+                },
+                cx,
+            ),
+        ];
+        let writing = vec![
+            self.field(
+                "preferences-field-font-size",
+                "Editor font size",
+                self.control(FieldId::FontSize),
+                FieldExtras {
+                    field: Some(FieldId::FontSize),
+                    hint: Some("1–30 logical pixels; the default is 18."),
+                    trailing: Some(self.reset_button(
+                        FieldId::FontSize,
+                        "preferences-reset-font-size",
+                        cx,
+                    )),
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-autosave",
+                "Idle autosave",
+                autosave,
+                FieldExtras {
+                    field: None,
+                    hint: Some("Dirty documents save after this much idle time."),
+                    trailing: None,
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-default-extension",
+                "New files",
+                extension,
+                FieldExtras {
+                    field: None,
+                    hint: Some("Extension used for new entries unless a project or collection overrides it."),
+                    trailing: None,
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-heading-light",
+                "Light heading colour",
+                self.control(FieldId::HeadingLight),
+                FieldExtras {
+                    field: Some(FieldId::HeadingLight),
+                    hint: Some("Optional #rrggbb or #rrggbbaa. Empty keeps the palette heading colour."),
+                    trailing: Some(self.reset_button(
+                        FieldId::HeadingLight,
+                        "preferences-reset-heading-light",
+                        cx,
+                    )),
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-heading-dark",
+                "Dark heading colour",
+                self.control(FieldId::HeadingDark),
+                FieldExtras {
+                    field: Some(FieldId::HeadingDark),
+                    hint: Some("Optional #rrggbb or #rrggbbaa. Empty keeps the palette heading colour."),
+                    trailing: Some(self.reset_button(
+                        FieldId::HeadingDark,
+                        "preferences-reset-heading-dark",
+                        cx,
+                    )),
+                },
+                cx,
+            ),
+        ];
+        let external = vec![
             self.field(
                 "preferences-field-ide-executable",
                 "IDE command",
@@ -114,90 +274,27 @@ impl PreferencesSheet {
                 },
                 cx,
             ),
-            self.field(
-                "preferences-field-theme",
-                "Theme",
-                theme,
-                FieldExtras {
-                    field: None,
-                    hint: Some("System follows the desktop appearance and is the default."),
-                    trailing: None,
-                },
-                cx,
-            ),
-            self.field(
-                "preferences-field-default-extension",
-                "New files",
-                extension,
-                FieldExtras {
-                    field: None,
-                    hint: Some("Extension used for new entries unless a project or collection overrides it."),
-                    trailing: None,
-                },
-                cx,
-            ),
-            self.field(
-                "preferences-field-autosave",
-                "Idle autosave",
-                autosave,
-                FieldExtras {
-                    field: None,
-                    hint: Some("Dirty documents save after this much idle time."),
-                    trailing: None,
-                },
-                cx,
-            ),
-            self.field(
-                "preferences-field-font-size",
-                "Editor font size",
-                self.control(FieldId::FontSize),
-                FieldExtras {
-                    field: Some(FieldId::FontSize),
-                    hint: Some("1–30 logical pixels; the default is 18."),
-                    trailing: Some(self.reset_button(FieldId::FontSize,
-                    "preferences-reset-font-size",
-                    cx,
-                )),
-                },
-                cx,
-            ),
-            self.field(
-                "preferences-field-heading-light",
-                "Light heading colour",
-                self.control(FieldId::HeadingLight),
-                FieldExtras {
-                    field: Some(FieldId::HeadingLight),
-                    hint: Some("Optional #rrggbb or #rrggbbaa. Empty keeps the theme heading colour."),
-                    trailing: Some(self.reset_button(FieldId::HeadingLight,
-                    "preferences-reset-heading-light",
-                    cx,
-                )),
-                },
-                cx,
-            ),
-            self.field(
-                "preferences-field-heading-dark",
-                "Dark heading colour",
-                self.control(FieldId::HeadingDark),
-                FieldExtras {
-                    field: Some(FieldId::HeadingDark),
-                    hint: Some("Optional #rrggbb or #rrggbbaa. Empty keeps the theme heading colour."),
-                    trailing: Some(self.reset_button(FieldId::HeadingDark,
-                    "preferences-reset-heading-dark",
-                    cx,
-                )),
-                },
-                cx,
-            ),
         ];
         div()
             .v_flex()
             .w_full()
-            .gap_6()
+            .gap_4()
             .child(self.section(
-                "Editor",
-                Some("These settings are shared by every project."),
-                fields,
+                "Appearance",
+                Some("Colour schemes shared by every project."),
+                appearance,
+                cx,
+            ))
+            .child(self.section(
+                "Writing",
+                Some("Editor typography and document defaults."),
+                writing,
+                cx,
+            ))
+            .child(self.section(
+                "External editor",
+                Some("How Astrolith opens files in another program."),
+                external,
                 cx,
             ))
             .into_any_element()

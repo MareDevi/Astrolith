@@ -34,7 +34,7 @@ use crate::editor::session::DocumentSession;
 /// Space the toolbar needs for its four controls.
 pub(crate) const TOOLBAR_WIDTH: f32 = 176.;
 /// Toolbar height including its padding.
-pub(crate) const TOOLBAR_HEIGHT: f32 = 32.;
+pub(crate) const TOOLBAR_HEIGHT: f32 = 38.;
 const MARGIN: f32 = 8.;
 const GAP: f32 = 6.;
 
@@ -65,18 +65,20 @@ pub(crate) fn placement(
     toolbar_width: f32,
     toolbar_height: f32,
 ) -> ToolbarPlacement {
-    let min_x = f32::from(viewport.origin.x) + MARGIN;
-    let max_x =
-        (f32::from(viewport.origin.x) + f32::from(viewport.size.width) - toolbar_width - MARGIN)
-            .max(min_x);
+    let viewport_left = f32::from(viewport.origin.x);
+    let viewport_top = f32::from(viewport.origin.y);
+    // A viewport smaller than the toolbar plus its margins cannot honour both
+    // edges; keep the far edge (the visible content end) inside the viewport.
+    let max_x = (viewport_left + f32::from(viewport.size.width) - toolbar_width - MARGIN)
+        .max(viewport_left);
+    let min_x = (viewport_left + MARGIN).min(max_x);
     let desired_x =
         f32::from(selection.origin.x) + f32::from(selection.size.width) / 2. - toolbar_width / 2.;
     let x = desired_x.clamp(min_x, max_x);
 
-    let min_y = f32::from(viewport.origin.y) + MARGIN;
-    let max_y =
-        (f32::from(viewport.origin.y) + f32::from(viewport.size.height) - toolbar_height - MARGIN)
-            .max(min_y);
+    let max_y = (viewport_top + f32::from(viewport.size.height) - toolbar_height - MARGIN)
+        .max(viewport_top);
+    let min_y = (viewport_top + MARGIN).min(max_y);
     let above = f32::from(selection.origin.y) - toolbar_height - GAP;
     let below = f32::from(selection.origin.y) + f32::from(selection.size.height) + GAP;
     let y = (if above >= min_y { above } else { below }).clamp(min_y, max_y);
@@ -152,16 +154,17 @@ fn toolbar_body(
         .h_flex()
         .items_center()
         .gap_1()
-        .p_1()
-        .rounded_md()
+        .p_1p5()
+        .rounded_lg()
         .border_1()
         .border_color(cx.theme().border)
         .bg(cx.theme().popover)
+        .shadow_lg()
         .text_color(cx.theme().popover_foreground)
         .children(buttons.into_iter().map(|(id, command, icon)| {
             let session = session.clone();
             Button::new(id)
-                .xsmall()
+                .small()
                 .ghost()
                 .tab_index(0)
                 .icon(icon)

@@ -680,23 +680,30 @@ impl Render for PreviewPanel {
                     .h_flex()
                     .items_center()
                     .gap_2()
-                    .px_3()
-                    .py_2()
+                    .px_4()
+                    .py_2p5()
                     .border_b_1()
-                    .border_color(cx.theme().window_border)
+                    .border_color(cx.theme().border)
                     .child(div().size_2().rounded_full().bg(status_color))
                     .child(
                         div()
                             .id("preview-state")
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(status_line),
+                    )
+                    .child(
+                        div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(phase.label()),
                     )
-                    .child(div().id("preview-status").text_sm().child(status_line))
                     .child(div().flex_1())
                     .when_some(url.clone(), |row, url| {
                         row.child(
                             div()
+                                .max_w(gpui_kit::px(320.))
+                                .truncate()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(url),
@@ -707,7 +714,7 @@ impl Render for PreviewPanel {
                 div()
                     .v_flex()
                     .gap_3()
-                    .p_3()
+                    .p_4()
                     .child(
                         div()
                             .h_flex()

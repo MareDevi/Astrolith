@@ -17,8 +17,9 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use astrolith_astro::schema::{CollectionSchema, FieldKind};
 use astrolith_core::preferences::{
-    AutosaveDelay, CollectionPreferencesV1, FieldMappings, FileExtension, GlobalPreferencesV2,
-    HeadingColors, IdeCommand, ImagePathMode, ProjectPreferencesV1, ThemePreference,
+    AutosaveDelay, CollectionPreferencesV1, DarkColorScheme, FieldMappings, FileExtension,
+    GlobalPreferencesV2, HeadingColors, IdeCommand, ImagePathMode, LightColorScheme,
+    ProjectPreferencesV1, ThemePreference,
 };
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt, WindowExt,
@@ -182,6 +183,8 @@ pub(crate) struct PreferencesSheet {
     context: Option<PreferencesContext>,
     pane: Pane,
     theme: ThemePreference,
+    light_theme: LightColorScheme,
+    dark_theme: DarkColorScheme,
     global_extension: FileExtension,
     autosave: AutosaveDelay,
     project_image_mode: Option<ImagePathMode>,
@@ -224,6 +227,8 @@ impl PreferencesSheet {
             context: None,
             pane: Pane::General,
             theme: ThemePreference::default(),
+            light_theme: LightColorScheme::default(),
+            dark_theme: DarkColorScheme::default(),
             global_extension: FileExtension::default(),
             autosave: AutosaveDelay::default(),
             project_image_mode: None,
@@ -270,6 +275,8 @@ impl PreferencesSheet {
         let project = context.project.clone();
         let global = context.global.clone();
         self.theme = global.theme;
+        self.light_theme = global.light_theme;
+        self.dark_theme = global.dark_theme;
         self.global_extension = global.default_extension;
         self.autosave = global.autosave_delay;
         self.set_text(FieldId::IdeExecutable, &global.ide.executable, window, cx);
@@ -382,6 +389,8 @@ impl PreferencesSheet {
         let context = self.context.as_ref()?;
         let mut global = context.global.clone();
         global.theme = self.theme;
+        global.light_theme = self.light_theme;
+        global.dark_theme = self.dark_theme;
         global.default_extension = self.global_extension;
         global.autosave_delay = self.autosave;
         global.heading_colors = HeadingColors {
@@ -510,6 +519,18 @@ impl PreferencesSheet {
     ) {
         self.set_text(field, value, window, cx);
         self.refresh_errors(cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_palettes_for_tests(
+        &mut self,
+        light: LightColorScheme,
+        dark: DarkColorScheme,
+        cx: &mut Context<Self>,
+    ) {
+        self.light_theme = light;
+        self.dark_theme = dark;
+        cx.notify();
     }
 
     #[cfg(test)]
@@ -1066,16 +1087,26 @@ impl PreferencesSheet {
         div()
             .v_flex()
             .w_full()
-            .gap_3()
-            .child(div().text_sm().font_semibold().child(title))
-            .when_some(hint, |column, hint| {
-                column.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(hint),
-                )
-            })
+            .gap_4()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().group_box)
+            .child(
+                div()
+                    .v_flex()
+                    .gap_0p5()
+                    .child(div().text_sm().font_semibold().child(title))
+                    .when_some(hint, |column, hint| {
+                        column.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(hint),
+                        )
+                    }),
+            )
             .children(children)
             .into_any_element()
     }
@@ -1101,12 +1132,19 @@ impl Render for PreferencesSheet {
         }
         let navigation = div()
             .v_flex()
-            .w(px(168.))
+            .w(px(184.))
             .flex_shrink_0()
             .gap_1()
-            .border_r_1()
-            .border_color(cx.theme().border)
             .pr_3()
+            .child(
+                div()
+                    .px_2()
+                    .pb_2()
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Settings"),
+            )
             .children(
                 Pane::ALL
                     .into_iter()
@@ -1124,7 +1162,7 @@ impl Render for PreferencesSheet {
                             }))
                     }),
             )
-            .child(div().h(px(12.)))
+            .child(div().h(px(20.)))
             .child(
                 Button::new("preferences-user-guide")
                     .small()

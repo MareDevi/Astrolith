@@ -8,7 +8,7 @@ use crate::editor::writing_modes::{ProseTypography, prose_typography};
 use crate::runtime;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, Icon, Sizable, StyledExt,
+    ActiveTheme, StyledExt,
     dock::{BasePanel, Panel, PanelEvent},
     input::{Editor, EditorState},
 };
@@ -80,11 +80,8 @@ impl WorkspacePanel {
         {
             // A readonly file is a new snapshot, not an edit of the previous
             // document. Initial content avoids the full replacement edit path.
-            self.editor = Some(cx.new(|cx| {
-                EditorState::new(window, cx)
-                    .language("markdown")
-                    .default_value(source.source)
-            }));
+            self.editor =
+                Some(cx.new(|cx| EditorState::new(window, cx).default_value(source.source)));
         }
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
@@ -149,23 +146,16 @@ impl WorkspacePanel {
         id: &'static str,
         title: &'static str,
         content: &'static str,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let toolbar_focus = cx.focus_handle().tab_stop(true);
-        let editor = (id == "document-panel").then(|| {
-            cx.new(|cx| {
-                EditorState::new(window, cx)
-                    .language("markdown")
-                    .default_value(content)
-            })
-        });
         Self {
             id,
             title: title.into(),
             content: content.into(),
             focus: cx.focus_handle().tab_stop(true),
-            editor,
+            editor: None,
             readonly: true,
             header: None,
             view: None,
@@ -295,28 +285,16 @@ impl BasePanel for WorkspacePanel {
 }
 impl Panel for WorkspacePanel {
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let icon = match self.id {
-            "navigator-panel" => IconName::FolderTree,
-            "inspector-panel" => IconName::SlidersHorizontal,
-            "preview-panel" => IconName::Globe,
-            _ => IconName::FileText,
-        };
         div()
-            .h_flex()
-            .items_center()
-            .gap_1p5()
-            .child(
-                Icon::new(icon)
-                    .small()
-                    .text_color(cx.theme().muted_foreground),
-            )
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
             .child(self.title.clone())
     }
     fn tab_name(&self, _: &App) -> Option<SharedString> {
         Some(self.title.clone())
     }
     fn title_bar(&self, _: &App) -> bool {
-        // The document panel draws its own Zed-style tab strip and breadcrumb.
+        // The document draws its own tab strip; tool docks keep the dock header.
         self.id != "document-panel"
     }
 }
@@ -362,6 +340,7 @@ impl Render for WorkspacePanel {
                 });
                 let preview_image = self.preview.image();
                 let mut element = Editor::new(&editor)
+                    .font_family(cx.theme().font_family.clone())
                     .readonly(self.readonly)
                     .bordered(false)
                     .aria_label(if self.readonly {
@@ -383,7 +362,20 @@ impl Render for WorkspacePanel {
                     let paste = wiring.hooks.paste.clone();
                     element = element.on_paste(move |item, window, cx| (paste)(item, window, cx));
                 }
-                let mut body = div().flex_1().min_h_0().relative().child(element);
+                let mut body = div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .h_flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .h_full()
+                            .w_full()
+                            .max_w(gpui_kit::px(860.))
+                            .px_6()
+                            .child(element),
+                    );
                 if let Some(hooks) = wiring.as_ref().map(|wiring| wiring.hooks.clone()) {
                     let mouse_down = hooks.mouse_down.clone();
                     body = body.on_mouse_down(MouseButton::Left, move |event, window, cx| {
@@ -427,13 +419,14 @@ impl Render for WorkspacePanel {
                 view.child(div().flex_1().min_h_0().child(content.clone()))
             })
             .when(self.editor.is_none() && self.view.is_none(), |view| {
-                view.child(
-                    div()
-                        .p_4()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(self.content.clone()),
-                )
+                view.child(crate::ui::empty_state(
+                    "document-empty",
+                    IconName::NotebookPen,
+                    "No file open",
+                    self.content.clone(),
+                    None,
+                    cx,
+                ))
             })
     }
 }

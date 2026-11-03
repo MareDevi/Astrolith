@@ -20,7 +20,7 @@ use crate::{
     },
     frontmatter::{FrontmatterEdit, ReferenceCatalog},
     layout::panels::WorkspacePanel,
-    runtime, settings,
+    runtime, settings, ui,
 };
 use astrolith_astro::{
     Cancellation, DiscoveryOutcome, DiscoveryRequest, ProjectManifest,
@@ -255,12 +255,18 @@ impl ListDelegate for EntryList {
                 .items_center()
                 .justify_between()
                 .px_3()
-                .py_1()
+                .pt_3()
+                .pb_1()
                 .text_xs()
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(cx.theme().muted_foreground)
                 .child(section.title.clone())
-                .child(SharedString::from(section.rows.len().to_string())),
+                .child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .opacity(0.7)
+                        .child(SharedString::from(section.rows.len().to_string())),
+                ),
         )
     }
     fn render_item(
@@ -291,10 +297,9 @@ impl ListDelegate for EntryList {
             .unwrap_or_default();
         let badge = |label: &'static str, color: gpui_kit::Hsla| {
             div()
-                .px_1()
+                .px_1p5()
                 .rounded_sm()
-                .border_1()
-                .border_color(color)
+                .bg(color.opacity(0.12))
                 .text_color(color)
                 .text_xs()
                 .child(label)
@@ -305,17 +310,21 @@ impl ListDelegate for EntryList {
             .min_w_0()
             .items_center()
             .gap_2()
-            .child(Icon::new(IconName::FileText).small().text_color(if active {
-                cx.theme().foreground
-            } else {
-                cx.theme().muted_foreground
-            }))
             .child(
                 div()
                     .v_flex()
                     .min_w_0()
                     .flex_1()
-                    .child(div().min_w_0().truncate().child(title))
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .when(active, |title| {
+                                title.font_weight(gpui_kit::FontWeight::MEDIUM)
+                            })
+                            .child(title),
+                    )
                     .when(show_filename, |row| {
                         row.child(
                             div()
@@ -5516,63 +5525,64 @@ impl Render for ProjectWorkspace {
                 .into_any_element();
         }
 
+        let more_owner = cx.weak_entity();
+        let absolute_owner = cx.weak_entity();
         let mut view = view.child(
             div()
                 .v_flex()
+                .flex_shrink_0()
                 .border_b_1()
-                .border_color(cx.theme().window_border)
+                .border_color(cx.theme().border)
                 .child(
                     div()
                         .h_flex()
                         .items_center()
                         .justify_between()
-                        .px_2()
-                        .py_1()
+                        .gap_2()
+                        .px_3()
+                        .pt_3()
+                        .pb_2()
                         .child(
                             div()
-                                .h_flex()
-                                .items_center()
-                                .gap_2()
+                                .v_flex()
+                                .min_w_0()
+                                .gap_0p5()
                                 .child(
                                     div()
+                                        .text_sm()
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .child("Entries"),
+                                )
+                                .child(
+                                    div()
+                                        .h_flex()
+                                        .items_center()
+                                        .gap_1()
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(SharedString::from(format!(
-                                            "{visible}/{total} entries"
-                                        ))),
-                                )
-                                .when(filter_active, |row| {
-                                    row.child(
-                                        div()
-                                            .id("filter-indicator")
-                                            .test_support()
-                                            .h_flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .px_1()
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(cx.theme().accent)
-                                            .text_xs()
-                                            .text_color(cx.theme().accent)
-                                            .child(SharedString::from(filter_label(
-                                                drafts_only,
-                                                &query,
-                                            ))),
-                                    )
-                                }),
-                        )
-                        .child(
-                            Button::new("open-project")
-                                .xsmall()
-                                .ghost()
-                                .icon(IconName::FolderOpen)
-                                .tooltip("Open project…")
-                                .disabled(loading)
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.prompt(window, cx)),
+                                        .child(SharedString::from(format!("{visible} of {total}")))
+                                        .when(filter_active, |row| {
+                                            row.child(
+                                                div()
+                                                    .id("filter-indicator")
+                                                    .test_support()
+                                                    .px_1p5()
+                                                    .rounded_sm()
+                                                    .bg(cx.theme().accent.opacity(0.12))
+                                                    .text_color(cx.theme().accent)
+                                                    .child(SharedString::from(filter_label(
+                                                        drafts_only,
+                                                        &query,
+                                                    ))),
+                                            )
+                                        }),
                                 ),
-                        ),
+                        )
+                        .child(ui::icon_button(
+                            "open-project",
+                            IconName::FolderOpen,
+                            "Open project…",
+                        )),
                 )
                 .child(
                     div()
@@ -5580,47 +5590,90 @@ impl Render for ProjectWorkspace {
                         .items_center()
                         .gap_1()
                         .px_2()
-                        .pb_1()
-                        .child(entry_toolbar_button(
-                            "entry-new",
-                            CommandId::NewEntry,
-                            IconName::FilePlus,
-                            availability,
-                            cx,
-                        ))
-                        .child(entry_toolbar_button(
-                            "entry-duplicate",
-                            CommandId::DuplicateEntry,
-                            IconName::Copy,
-                            availability,
-                            cx,
-                        ))
-                        .child(entry_toolbar_button(
-                            "entry-rename",
-                            CommandId::RenameEntry,
-                            IconName::SquarePen,
-                            availability,
-                            cx,
-                        ))
-                        .child(entry_toolbar_button(
-                            "entry-delete",
-                            CommandId::DeleteEntry,
-                            IconName::Trash,
-                            availability,
-                            cx,
-                        ))
-                        .child(entry_toolbar_button(
-                            "entry-reveal",
-                            CommandId::RevealEntry,
-                            IconName::FolderOpen,
-                            availability,
-                            cx,
-                        ))
-                        .child(copy_path_button(availability, cx))
+                        .pb_2()
+                        .child(
+                            Button::new("entry-new")
+                                .small()
+                                .icon(IconName::PenLine)
+                                .label("New entry")
+                                .tooltip(CommandId::NewEntry.label())
+                                .disabled(!CommandId::NewEntry.is_available(availability))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.entry_command(CommandId::NewEntry, None, window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("entry-more")
+                                .small()
+                                .ghost()
+                                .icon(IconName::Ellipsis)
+                                .tooltip("More entry actions")
+                                .dropdown_menu(move |menu, _, _| {
+                                    let mut menu = menu;
+                                    for command in [
+                                        CommandId::DuplicateEntry,
+                                        CommandId::RenameEntry,
+                                        CommandId::DeleteEntry,
+                                        CommandId::RevealEntry,
+                                    ] {
+                                        let owner = more_owner.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(command.label())
+                                                .disabled(!command.is_available(availability))
+                                                .on_click(move |_, window, cx| {
+                                                    let _ = owner.update(cx, |project, cx| {
+                                                        project.entry_command(
+                                                            command, None, window, cx,
+                                                        )
+                                                    });
+                                                }),
+                                        );
+                                    }
+                                    let owner = more_owner.clone();
+                                    menu.separator()
+                                        .item(
+                                            PopupMenuItem::new("Copy relative path")
+                                                .disabled(
+                                                    !CommandId::CopyPathRelative
+                                                        .is_available(availability),
+                                                )
+                                                .on_click(move |_, window, cx| {
+                                                    let _ = owner.update(cx, |project, cx| {
+                                                        project.entry_command(
+                                                            CommandId::CopyPathRelative,
+                                                            None,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    });
+                                                }),
+                                        )
+                                        .item(
+                                            PopupMenuItem::new("Copy absolute path")
+                                                .disabled(
+                                                    !CommandId::CopyPathAbsolute
+                                                        .is_available(availability),
+                                                )
+                                                .on_click({
+                                                    let owner = absolute_owner.clone();
+                                                    move |_, window, cx| {
+                                                        let _ = owner.update(cx, |project, cx| {
+                                                            project.entry_command(
+                                                                CommandId::CopyPathAbsolute,
+                                                                None,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        });
+                                                    }
+                                                }),
+                                        )
+                                }),
+                        )
                         .child(div().flex_1())
                         .child(
                             Button::new("filter-drafts")
-                                .xsmall()
+                                .small()
                                 .ghost()
                                 .icon(IconName::ListFilter)
                                 .tooltip("Show drafts only")
@@ -5634,11 +5687,10 @@ impl Render for ProjectWorkspace {
                             let options = sort_options;
                             let current = current_mode.clone();
                             Button::new("sort-mode")
-                                .xsmall()
+                                .small()
                                 .ghost()
                                 .icon(IconName::ArrowUpDown)
-                                .label(sort_label)
-                                .tooltip("Sort entries")
+                                .tooltip(format!("Sort entries · {sort_label}"))
                                 .dropdown_menu(move |menu, _, _| {
                                     let mut menu = menu;
                                     for (mode, label) in options.iter().cloned() {
@@ -5659,20 +5711,18 @@ impl Render for ProjectWorkspace {
                                 })
                         })
                         .child(
-                            Button::new("sort-direction")
-                                .xsmall()
-                                .ghost()
-                                .icon(direction_icon)
-                                .tooltip("Reverse sort direction")
-                                .disabled(default_sort)
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.toggle_sort_direction(cx)),
-                                ),
+                            ui::icon_button(
+                                "sort-direction",
+                                direction_icon,
+                                "Reverse sort direction",
+                            )
+                            .disabled(default_sort)
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_sort_direction(cx))),
                         )
                         .when(filter_active, |row| {
                             row.child(
                                 Button::new("clear-filter")
-                                    .xsmall()
+                                    .small()
                                     .ghost()
                                     .label("Clear")
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -5819,6 +5869,15 @@ fn meta_scalar(value: &MetaValue) -> Option<String> {
     }
 }
 
+fn filter_label(drafts_only: bool, query: &str) -> String {
+    match (drafts_only, query.is_empty()) {
+        (true, true) => "Drafts only".to_owned(),
+        (true, false) => format!("Drafts · “{query}”"),
+        (false, false) => format!("“{query}”"),
+        (false, true) => String::new(),
+    }
+}
+
 /// The initial-scan state, distinct from the empty and error states.
 fn project_loading_state(cx: &mut Context<ProjectWorkspace>) -> impl IntoElement {
     div()
@@ -5828,12 +5887,12 @@ fn project_loading_state(cx: &mut Context<ProjectWorkspace>) -> impl IntoElement
         .flex_1()
         .items_center()
         .justify_center()
-        .gap_2()
+        .gap_3()
         .p_6()
         .child(
-            Icon::new(IconName::RotateCcw)
-                .size_6()
-                .text_color(cx.theme().muted_foreground),
+            gpui_kit::component::spinner::Spinner::new()
+                .large()
+                .color(cx.theme().muted_foreground),
         )
         .child(div().text_sm().child("Scanning collections…"))
         .child(
@@ -5846,125 +5905,39 @@ fn project_loading_state(cx: &mut Context<ProjectWorkspace>) -> impl IntoElement
 
 /// The failed-open state: distinct from "never opened" and from an index error.
 fn project_open_error_state(message: &str, cx: &mut Context<ProjectWorkspace>) -> impl IntoElement {
-    div()
-        .id("project-open-error")
-        .test_support()
-        .v_flex()
-        .flex_1()
-        .items_center()
-        .justify_center()
-        .gap_3()
-        .p_6()
-        .child(
-            Icon::new(IconName::TriangleAlert)
-                .size_8()
-                .text_color(cx.theme().danger),
-        )
-        .child(div().text_sm().child("Could not open project"))
-        .child(
-            div()
-                .text_xs()
-                .text_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(message.to_owned())),
-        )
-        .child(
+    ui::empty_state(
+        "project-open-error",
+        IconName::TriangleAlert,
+        "Could not open project",
+        message.to_owned(),
+        Some(
             Button::new("retry-open-project")
                 .small()
                 .label("Choose another project…")
-                .on_click(cx.listener(|this, _, window, cx| this.prompt(window, cx))),
-        )
+                .on_click(cx.listener(|this, _, window, cx| this.prompt(window, cx)))
+                .into_any_element(),
+        ),
+        cx,
+    )
 }
 
 /// The no-project state.
 fn project_empty_state(loading: bool, cx: &mut Context<ProjectWorkspace>) -> impl IntoElement {
-    div()
-        .id("project-empty")
-        .test_support()
-        .v_flex()
-        .flex_1()
-        .items_center()
-        .justify_center()
-        .gap_3()
-        .p_6()
-        .child(
-            Icon::new(IconName::FolderOpen)
-                .size_8()
-                .text_color(cx.theme().muted_foreground),
-        )
-        .child(div().text_sm().child("No project open"))
-        .child(
-            div()
-                .text_xs()
-                .text_center()
-                .text_color(cx.theme().muted_foreground)
-                .child("Open an Astro project to browse its content collections."),
-        )
-        .child(
+    ui::empty_state(
+        "project-empty",
+        IconName::FolderOpen,
+        "No project open",
+        "Open an Astro project to browse its content collections.",
+        Some(
             Button::new("open-project")
                 .small()
                 .label("Open project…")
                 .disabled(loading)
-                .on_click(cx.listener(|this, _, window, cx| this.prompt(window, cx))),
-        )
-}
-
-/// One toolbar button that dispatches a registry command with shared availability.
-fn entry_toolbar_button(
-    id: &'static str,
-    command: CommandId,
-    icon: IconName,
-    availability: CommandAvailability,
-    cx: &mut Context<ProjectWorkspace>,
-) -> Button {
-    Button::new(id)
-        .xsmall()
-        .ghost()
-        .icon(icon)
-        .tooltip(command.label())
-        .disabled(!command.is_available(availability))
-        .on_click(
-            cx.listener(move |this, _, window, cx| this.entry_command(command, None, window, cx)),
-        )
-}
-
-/// The copy-path control offers both forms through the same command IDs.
-fn copy_path_button(
-    availability: CommandAvailability,
-    cx: &mut Context<ProjectWorkspace>,
-) -> impl IntoElement {
-    let owner = cx.weak_entity();
-    let available = CommandId::CopyPathAbsolute.is_available(availability);
-    Button::new("copy-path")
-        .xsmall()
-        .ghost()
-        .icon(IconName::Copy)
-        .tooltip("Copy path")
-        .disabled(!available)
-        .dropdown_menu(move |menu, _, _| {
-            let mut menu = menu;
-            for (command, label) in [
-                (CommandId::CopyPathAbsolute, "Absolute path"),
-                (CommandId::CopyPathRelative, "Project-relative path"),
-            ] {
-                let owner = owner.clone();
-                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                    let _ = owner.update(cx, |project, cx| {
-                        project.entry_command(command, None, window, cx)
-                    });
-                }));
-            }
-            menu
-        })
-}
-
-fn filter_label(drafts_only: bool, query: &str) -> String {
-    match (drafts_only, query.is_empty()) {
-        (true, true) => "Drafts only".to_owned(),
-        (true, false) => format!("Drafts · “{query}”"),
-        (false, false) => format!("“{query}”"),
-        (false, true) => String::new(),
-    }
+                .on_click(cx.listener(|this, _, window, cx| this.prompt(window, cx)))
+                .into_any_element(),
+        ),
+        cx,
+    )
 }
 
 /// Deepest directory shared by every collection base.

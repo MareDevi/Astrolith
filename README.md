@@ -41,7 +41,8 @@ exist but are neither delivered nor supported.
 - **Preview** — project-local Astro dev server with start/stop/restart/retry,
   route tracking and external-browser presentation (the only Linux surface).
 - **Preferences** — global/project/collection overrides with one resolver,
-  advanced versions and scoped Reset All.
+  independent light and dark palettes (One, Catppuccin, Nord, Gruvbox, Tokyo
+  Night, Solarized, Rosé Pine), advanced versions and scoped Reset All.
 - **Desktop integration** — application menus from one command registry,
   keyboard shortcuts, command palette, IDE argv launch, `astrolith://open?path=`
   scheme handling, MIME associations in packages, and single-instance launch.

@@ -16,6 +16,7 @@ mod settings;
 mod shell;
 mod single_instance;
 pub mod theme;
+mod ui;
 mod update;
 mod url_scheme;
 pub use shell::open;

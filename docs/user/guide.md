@@ -131,10 +131,12 @@ and destinations escape brackets, parentheses and backslashes.
 Open **Preferences…** with `Ctrl+,` or **View → Preferences…**. The sheet has
 four panes:
 
-- **General** — IDE command and arguments, theme (light/dark/system), default
-  new-file extension, heading colours per theme, editor font size (1–30,
-  default 18), autosave delay (1, 2, 5 or 10 seconds) and Copyedit colours and
-  toggles.
+- **General** — appearance (follow system, light or dark) with an independent
+  light and dark palette. Palettes include One, Catppuccin (Latte, Frappé,
+  Macchiato, Mocha), Nord, Gruvbox, Tokyo Night, Solarized and Rosé Pine. The
+  pane also controls the IDE command and arguments, default new-file extension,
+  heading colours per appearance, editor font size (1–30, default 18), autosave
+  delay (1, 2, 5 or 10 seconds) and Copyedit colours and toggles.
 - **Project Settings** — content, assets and MDX component directories,
   absolute versus document-relative image paths, default extension override,
   title/date/description/draft field mappings, and the experimental

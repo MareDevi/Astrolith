@@ -132,11 +132,8 @@ impl DocumentSession {
         let dirty = buffer.is_dirty();
         let counts = token_snapshot(&projection.visible);
         let text_key = fingerprint(&projection.visible);
-        let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .language("markdown")
-                .default_value(projection.visible.clone())
-        });
+        let editor =
+            cx.new(|cx| EditorState::new(window, cx).default_value(projection.visible.clone()));
         let change = cx.subscribe_in(
             &editor,
             window,

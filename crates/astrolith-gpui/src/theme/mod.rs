@@ -1,9 +1,8 @@
 //! Application appearance policy and the pinned Kit adapter.
-mod dark;
-mod light;
+mod palettes;
 mod tokens;
 
-use astrolith_core::preferences::HeadingColors;
+use astrolith_core::preferences::{DarkColorScheme, HeadingColors, LightColorScheme};
 use gpui_kit::{
     App, Global, Hsla, WindowAppearance,
     component::{ActiveTheme, Theme},
@@ -64,10 +63,10 @@ impl ResolveTheme for ThemeMode {
 }
 
 /// Return a complete application palette. Callers resolve System first.
-pub fn palette(mode: ThemeMode) -> ThemeTokens {
+pub fn palette(mode: ThemeMode, light: LightColorScheme, dark: DarkColorScheme) -> ThemeTokens {
     match mode {
-        ThemeMode::Dark => dark::tokens(),
-        ThemeMode::Light | ThemeMode::System => light::tokens(),
+        ThemeMode::Dark => palettes::dark(dark),
+        ThemeMode::Light | ThemeMode::System => palettes::light(light),
     }
 }
 
@@ -78,6 +77,8 @@ pub fn palette(mode: ThemeMode) -> ThemeTokens {
 pub fn apply(
     preference: ThemeMode,
     appearance: WindowAppearance,
+    light: LightColorScheme,
+    dark: DarkColorScheme,
     headings: &HeadingColors,
     cx: &mut App,
 ) {
@@ -87,7 +88,7 @@ pub fn apply(
         ThemeMode::Light | ThemeMode::System => gpui_kit::component::ThemeMode::Light,
     };
     Theme::change(kit_mode, None, cx);
-    let tokens = palette(mode);
+    let tokens = palette(mode, light, dark);
     Theme::update(cx, |theme| {
         let colors = &mut theme.colors;
         colors.background = tokens.background;
@@ -141,20 +142,63 @@ pub fn apply(
 
         colors.scrollbar = tokens.scrollbar;
         colors.scrollbar_thumb = tokens.scrollbar_thumb;
-        colors.scrollbar_thumb_hover = tokens.border;
+        colors.scrollbar_thumb_hover = tokens.muted;
         colors.group_box = tokens.surface;
         colors.group_box_foreground = tokens.foreground;
         colors.link = tokens.link;
         colors.danger = tokens.danger;
+        colors.danger_hover = tokens.danger;
+        colors.danger_active = tokens.danger;
+        colors.danger_foreground = tokens.background;
         colors.warning = tokens.warning;
+        colors.warning_hover = tokens.warning;
+        colors.warning_active = tokens.warning;
+        colors.warning_foreground = tokens.background;
         colors.success = tokens.success;
+        colors.success_hover = tokens.success;
+        colors.success_active = tokens.success;
+        colors.success_foreground = tokens.background;
         colors.info = tokens.info;
+        colors.info_hover = tokens.info;
+        colors.info_active = tokens.info;
+        colors.info_foreground = tokens.background;
 
-        // Zed's chrome is compact: a 14 px UI scale, 13 px code, 6 px radii.
+        colors.secondary = tokens.elevated;
+        colors.secondary_hover = tokens.hover;
+        colors.secondary_active = tokens.active;
+        colors.secondary_foreground = tokens.foreground;
+        colors.link_hover = tokens.accent;
+        colors.link_active = tokens.accent;
+        colors.overlay = Hsla::black().opacity(0.28);
+        colors.progress_bar = tokens.accent;
+        colors.switch = tokens.accent;
+        colors.switch_thumb = tokens.background;
+        colors.skeleton = tokens.hover;
+        colors.slider_bar = tokens.border;
+        colors.slider_thumb = tokens.accent;
+        colors.accordion = tokens.background;
+        colors.drag_border = tokens.accent;
+        colors.drop_target = tokens.selection;
+        colors.description_list_label = tokens.surface;
+        colors.description_list_label_foreground = tokens.muted;
+        colors.tab_bar_segmented = tokens.surface;
+
+        colors.table = tokens.background;
+        colors.table_head = tokens.surface;
+        colors.table_head_foreground = tokens.muted;
+        colors.table_hover = tokens.hover;
+        colors.table_active = tokens.selection;
+        colors.table_active_border = tokens.accent;
+        colors.table_even = tokens.background;
+        colors.table_row_border = tokens.border_variant;
+        colors.table_foot = tokens.surface;
+        colors.table_foot_foreground = tokens.muted;
+
+        // A compact desktop scale with a soft, writing-friendly radius.
         theme.font_size = gpui_kit::px(14.);
         theme.mono_font_size = gpui_kit::px(13.);
-        theme.radius = gpui_kit::px(6.);
-        theme.radius_lg = gpui_kit::px(8.);
+        theme.radius = gpui_kit::px(8.);
+        theme.radius_lg = gpui_kit::px(12.);
         theme.shadow = true;
     });
     let configured = match mode {
