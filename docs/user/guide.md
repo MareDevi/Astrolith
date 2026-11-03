@@ -135,10 +135,11 @@ four panes:
   light and dark palette. The default pair is Manuscript (warm paper and ink)
   and Ink (warm charcoal and parchment); One, Catppuccin (Latte, Frappé,
   Macchiato, Mocha), Nord, Gruvbox, Tokyo Night, Solarized and Rosé Pine remain
-  available. The
-  pane also controls the IDE command and arguments, default new-file extension,
-  heading colours per appearance, editor font size (1–30, default 18), autosave
-  delay (1, 2, 5 or 10 seconds) and Copyedit colours and toggles.
+  available. The pane also controls the IDE command and arguments, default
+  new-file extension,
+  heading colours per appearance, interface font family and size (8–28,
+  default 14), editor font size (1–30, default 18), autosave delay (1, 2, 5 or
+  10 seconds) and Copyedit colours and toggles.
 - **Project Settings** — content, assets and MDX component directories,
   absolute versus document-relative image paths, default extension override,
   title/date/description/draft field mappings, and the experimental
@@ -164,11 +165,12 @@ inheritance becomes visible again. Reset All deletes only preferences and the
 project registry, never recovery snapshots, save-failure records or logs, and
 then restarts.
 
-Astrolith keeps the system UI font family for chrome and sets the document in
-an installed book serif (New York or Iowan Old Style on macOS, Georgia on
-Windows, Noto Serif or another installed serif on Linux), with its own theme
-colours, spacing and layout tokens. The editor font-size setting changes size,
-not family.
+Astrolith uses the system UI font until you name another installed family in
+**Preferences → Interface font**; that family also sets interface headings,
+while the document keeps its installed book serif (New York or Iowan Old Style
+on macOS, Georgia on Windows, Noto Serif or another installed serif on Linux).
+**Interface size** controls the UI scale and spacing; **Editor font size**
+changes the page size independently.
 
 ## 6. Writing
 
