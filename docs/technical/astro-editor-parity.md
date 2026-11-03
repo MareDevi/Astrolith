@@ -534,7 +534,7 @@ those claims.
 | 94 | Pass | Formatting commands read editor focus in `CommandAvailability`, never a stale document flag. |
 | 95 | Pass | Menu items carry `CommandId` actions dispatched by `shell.rs::execute`; no menu-only handler. |
 | 96 | Manual native pending | Fullscreen is a View command and menu item, with `F11` bound only on Linux; native toggle not recorded. |
-| 97 | Manual native pending | `single_instance.rs` socket forwarding and focus path plus startup argument delivery; native cold/warm launch not recorded. |
+| 97 | Manual native pending | Warm hand-off verified on Wayland 2026-11-03: a second launch exits 0, the first window activates and opens the forwarded project or entry without reopening the project; cold launch observed. Focus/unminimise visibility is not programmatically recorded. |
 | 98 | Explicit blocker | MIME declarations and startup-file routing are implemented (`packaging/linux/` metadata, `url_scheme.rs`), but no installed package has exercised a real association/open. Packaging evidence prerequisite. |
 | 99 | Manual native pending | `url_scheme.rs` validates scheme, project root and content-entry membership for cold and warm launches; native protocol registration/launch not recorded. |
 | 100 | Pass | `desktop_actions.rs` argv expansion for `{project}`/`{file}`/`{line}`/`{column}`, no shell, path validation, control-character refusal. |

@@ -86,7 +86,14 @@ pub(crate) fn parse_startup(arguments: impl IntoIterator<Item = OsString>) -> St
                 }
             }
         }
-        match target_from_path(Path::new(text)) {
+        let path = if Path::new(text).is_absolute() {
+            PathBuf::from(text)
+        } else {
+            std::env::current_dir()
+                .map(|directory| directory.join(text))
+                .unwrap_or_else(|_| PathBuf::from(text))
+        };
+        match target_from_path(&path) {
             Ok(target) => {
                 request.target = Some(target);
                 return request;
@@ -176,6 +183,9 @@ pub(crate) fn route(
                     path.display()
                 ));
             }
+            // Registry roots are canonical; canonicalize the spelling the
+            // launch supplied so a symlinked or relative path still matches.
+            let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
             let Some(record) = projects
                 .iter()
                 .filter(|record| {
@@ -211,6 +221,49 @@ mod tests {
             display_name: id.into(),
             package_name: Some(id.into()),
             last_opened_at: 1,
+        }
+    }
+
+    #[test]
+    fn a_relative_startup_argument_becomes_absolute() {
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        std::fs::write(directory.path().join("note.md"), "# note\n").unwrap();
+        let relative = directory
+            .path()
+            .strip_prefix(std::env::current_dir().unwrap())
+            .unwrap()
+            .join("note.md");
+        let request = parse_startup([relative.into_os_string()]);
+        match request.target {
+            Some(StartupTarget::Entry(path)) => assert!(path.is_absolute(), "{path:?}"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_entry_spelling_routes_to_the_registered_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("site");
+        std::fs::create_dir_all(root.join("src/content")).unwrap();
+        let entry = root.join("src/content/a.md");
+        std::fs::write(&entry, "# a\n").unwrap();
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let record = record("site", root.to_str().unwrap());
+        match route(
+            &StartupTarget::Entry(link.join("src/content/a.md")),
+            &[record],
+            None,
+        ) {
+            Route::Entry {
+                root: matched_root,
+                entry: matched_entry,
+            } => {
+                assert_eq!(matched_root, root);
+                assert_eq!(matched_entry, std::fs::canonicalize(&entry).unwrap());
+            }
+            other => panic!("unexpected {other:?}"),
         }
     }
 

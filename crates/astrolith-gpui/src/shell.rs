@@ -87,8 +87,9 @@ pub fn open(cx: &mut App) {
     let socket = single_instance::socket_path();
     if single_instance::forward(&socket, &arguments) {
         tracing::info!("forwarded this launch to the running Astrolith window");
-        cx.quit();
-        return;
+        // `App::quit` only stops an already running loop; before the first
+        // window exists it would leave this process waiting indefinitely.
+        std::process::exit(0);
     }
     if let Err(error) = runtime::init(cx) {
         tracing::error!(%error, "could not start background services");
@@ -684,13 +685,21 @@ impl Shell {
         ) {
             url_scheme::Route::Project(root) => {
                 self.pending_entry = None;
-                self.project
-                    .update(cx, |project, cx| project.open_root(root, window, cx));
+                if self.project.read(cx).project_root().as_deref() != Some(root.as_path()) {
+                    self.project
+                        .update(cx, |project, cx| project.open_root(root, window, cx));
+                }
             }
             url_scheme::Route::Entry { root, entry } => {
+                let already_open =
+                    self.project.read(cx).project_root().as_deref() == Some(root.as_path());
                 self.pending_entry = Some(entry);
-                self.project
-                    .update(cx, |project, cx| project.open_root(root, window, cx));
+                if already_open {
+                    self.finish_pending_entry(window, cx);
+                } else {
+                    self.project
+                        .update(cx, |project, cx| project.open_root(root, window, cx));
+                }
             }
             url_scheme::Route::Invalid(message) => {
                 tracing::warn!(%message, "refused a launch target");
@@ -731,7 +740,7 @@ impl Shell {
         }
         #[cfg(unix)]
         {
-            let listener = match tokio::net::UnixListener::from_std(listener) {
+            let listener = match runtime::chain_listener(cx, listener) {
                 Ok(listener) => listener,
                 Err(error) => {
                     tracing::warn!(%error, "could not listen for a second launch");
@@ -740,20 +749,30 @@ impl Shell {
             };
             self.instance_task = Some(cx.spawn_in(window, async move |this, cx| {
                 use tokio::io::AsyncBufReadExt as _;
-                loop {
-                    let Ok((stream, _)) = listener.accept().await else {
-                        break;
-                    };
-                    let mut reader = tokio::io::BufReader::new(stream);
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).await.is_err() {
-                        continue;
+                let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+                // Tokio I/O must be polled inside the service runtime; the
+                // decoded request crosses back to this entity over a channel.
+                let _service = runtime::spawn(cx, async move {
+                    loop {
+                        let Ok((stream, _)) = listener.accept().await else {
+                            break;
+                        };
+                        let mut reader = tokio::io::BufReader::new(stream);
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).await.is_err() {
+                            continue;
+                        }
+                        let arguments: Vec<std::ffi::OsString> = single_instance::decode(&line)
+                            .into_iter()
+                            .map(std::ffi::OsString::from)
+                            .collect();
+                        let request = url_scheme::parse_startup(arguments);
+                        if sender.send(request).await.is_err() {
+                            break;
+                        }
                     }
-                    let arguments: Vec<std::ffi::OsString> = single_instance::decode(&line)
-                        .into_iter()
-                        .map(std::ffi::OsString::from)
-                        .collect();
-                    let request = url_scheme::parse_startup(arguments);
+                });
+                while let Some(request) = receiver.recv().await {
                     let _ = this.update_in(cx, |this, window, cx| {
                         window.activate_window();
                         let records = this.recent_records.clone();

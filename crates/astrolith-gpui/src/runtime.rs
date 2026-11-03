@@ -73,6 +73,21 @@ where
     })
 }
 
+/// Register a bound standard Unix listener with the service reactor.
+///
+/// Tokio requires the registration to happen inside a runtime context; GPUI's
+/// spawn context is not a Tokio runtime, so the handle must be entered here.
+#[cfg(unix)]
+pub(crate) fn chain_listener<C: AppContext>(
+    cx: &C,
+    listener: std::os::unix::net::UnixListener,
+) -> io::Result<tokio::net::UnixListener> {
+    listener.set_nonblocking(true)?;
+    let handle = cx.read_global(|service: &ServiceRuntime, _| service.handle.clone());
+    let _entered = handle.enter();
+    tokio::net::UnixListener::from_std(listener)
+}
+
 /// Limit synchronous service work without occupying GPUI's CPU worker pool.
 /// Cancellation cannot interrupt a started operation; its permit remains held.
 pub(crate) fn blocking<C, F, R>(cx: &C, work: F) -> Task<Result<R, String>>
@@ -178,6 +193,34 @@ mod tests {
             })
             .await;
         assert_eq!(result.unwrap(), 7);
+    }
+
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    async fn listener_registration_enters_the_service_reactor(cx: &mut TestAppContext) {
+        setup(cx);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("handoff.sock");
+        let bound = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let listener = cx.update(|cx| chain_listener(cx, bound)).unwrap();
+        let read = cx.update(|cx| {
+            spawn(cx, async move {
+                use tokio::io::AsyncBufReadExt as _;
+                let (stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
+                let mut reader = tokio::io::BufReader::new(stream);
+                let mut line = String::new();
+                reader
+                    .read_line(&mut line)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>(line)
+            })
+        });
+        let mut client = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        use std::io::Write as _;
+        client.write_all(b"{\"path\":\"/tmp/project\"}\n").unwrap();
+        let line = read.await.unwrap().unwrap();
+        assert_eq!(line, "{\"path\":\"/tmp/project\"}\n");
     }
 
     struct Dropped(Option<oneshot::Sender<()>>);
