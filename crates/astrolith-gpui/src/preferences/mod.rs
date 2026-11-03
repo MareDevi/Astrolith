@@ -134,6 +134,7 @@ pub(crate) enum FieldId {
     UiFontFamily,
     UiFontSize,
     FontSize,
+    EditorWidth,
     ProjectContent,
     ProjectAssets,
     ProjectMdx,
@@ -166,6 +167,7 @@ struct Inputs {
     ui_font_family: Entity<InputState>,
     ui_font_size: Entity<InputState>,
     font_size: Entity<InputState>,
+    editor_width: Entity<InputState>,
     project_content: Entity<InputState>,
     project_assets: Entity<InputState>,
     project_mdx: Entity<InputState>,
@@ -249,6 +251,7 @@ impl PreferencesSheet {
                 ui_font_family: input!("System UI font"),
                 ui_font_size: input!("14"),
                 font_size: input!("18"),
+                editor_width: input!("720"),
                 project_content: input!("Inherit the Astro content directory"),
                 project_assets: input!("Inherit the configured assets directory"),
                 project_mdx: input!("Inherit the MDX component directory"),
@@ -307,13 +310,19 @@ impl PreferencesSheet {
         self.set_text(FieldId::UiFontFamily, &global.ui_font_family, window, cx);
         self.set_text(
             FieldId::UiFontSize,
-            &format_font_size(global.ui_font_size),
+            &format_number(global.ui_font_size),
             window,
             cx,
         );
         self.set_text(
             FieldId::FontSize,
-            &format_font_size(global.editor_font_size),
+            &format_number(global.editor_font_size),
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::EditorWidth,
+            &format_number(global.editor_width),
             window,
             cx,
         );
@@ -425,6 +434,13 @@ impl PreferencesSheet {
             .ok()
             .filter(|size| size.is_finite() && (1.0..=30.0).contains(size))
             .unwrap_or(global.editor_font_size);
+        global.editor_width = self
+            .text(FieldId::EditorWidth, cx)
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|width| width.is_finite() && (480.0..=1200.0).contains(width))
+            .unwrap_or(global.editor_width);
         global.ide = ide_command(
             &self.text(FieldId::IdeExecutable, cx),
             &self.text(FieldId::IdeArguments, cx),
@@ -471,13 +487,19 @@ impl PreferencesSheet {
             FieldId::UiFontFamily => self.set_text(field, "", window, cx),
             FieldId::UiFontSize => self.set_text(
                 field,
-                &format_font_size(GlobalPreferencesV2::default().ui_font_size),
+                &format_number(GlobalPreferencesV2::default().ui_font_size),
                 window,
                 cx,
             ),
             FieldId::FontSize => self.set_text(
                 field,
-                &format_font_size(GlobalPreferencesV2::default().editor_font_size),
+                &format_number(GlobalPreferencesV2::default().editor_font_size),
+                window,
+                cx,
+            ),
+            FieldId::EditorWidth => self.set_text(
+                field,
+                &format_number(GlobalPreferencesV2::default().editor_width),
                 window,
                 cx,
             ),
@@ -713,6 +735,7 @@ impl PreferencesSheet {
             FieldId::UiFontFamily => self.inputs.ui_font_family.read(cx).value(),
             FieldId::UiFontSize => self.inputs.ui_font_size.read(cx).value(),
             FieldId::FontSize => self.inputs.font_size.read(cx).value(),
+            FieldId::EditorWidth => self.inputs.editor_width.read(cx).value(),
             FieldId::ProjectContent => self.inputs.project_content.read(cx).value(),
             FieldId::ProjectAssets => self.inputs.project_assets.read(cx).value(),
             FieldId::ProjectMdx => self.inputs.project_mdx.read(cx).value(),
@@ -760,6 +783,10 @@ impl PreferencesSheet {
             FieldId::FontSize => self
                 .inputs
                 .font_size
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::EditorWidth => self
+                .inputs
+                .editor_width
                 .update(cx, |input, cx| input.set_value(value, window, cx)),
             FieldId::ProjectContent => self
                 .inputs
@@ -894,6 +921,9 @@ impl PreferencesSheet {
         if let Err(message) = font_size_value(&self.text(FieldId::FontSize, cx)) {
             insert(FieldId::FontSize, message);
         }
+        if let Err(message) = editor_width_value(&self.text(FieldId::EditorWidth, cx)) {
+            insert(FieldId::EditorWidth, message);
+        }
         if let Err(message) = ide_command_value(
             &self.text(FieldId::IdeExecutable, cx),
             &self.text(FieldId::IdeArguments, cx),
@@ -1005,6 +1035,11 @@ impl PreferencesSheet {
             FieldId::FontSize => gpui_kit::component::input::Input::new(&self.inputs.font_size)
                 .small()
                 .into_any_element(),
+            FieldId::EditorWidth => {
+                gpui_kit::component::input::Input::new(&self.inputs.editor_width)
+                    .small()
+                    .into_any_element()
+            }
             FieldId::ProjectContent => {
                 gpui_kit::component::input::Input::new(&self.inputs.project_content)
                     .small()
@@ -1425,6 +1460,18 @@ pub(crate) fn font_size_value(value: &str) -> Result<f32, String> {
     Ok(size)
 }
 
+/// Validate the editor's prose column width.
+pub(crate) fn editor_width_value(value: &str) -> Result<f32, String> {
+    let value = value.trim();
+    let Ok(width) = value.parse::<f32>() else {
+        return Err("Enter a width between 480 and 1200.".into());
+    };
+    if !width.is_finite() || !(480.0..=1200.0).contains(&width) {
+        return Err("Width must be between 480 and 1200.".into());
+    }
+    Ok(width)
+}
+
 /// Validate the interface font size.
 pub(crate) fn ui_font_size_value(value: &str) -> Result<f32, String> {
     let value = value.trim();
@@ -1584,7 +1631,7 @@ pub(super) fn ide_command(executable: &str, arguments: &str) -> Option<IdeComman
     ide_command_value(executable, arguments).ok()
 }
 
-pub(super) fn format_font_size(size: f32) -> String {
+pub(super) fn format_number(size: f32) -> String {
     if size.fract() == 0. {
         format!("{}", size as i64)
     } else {

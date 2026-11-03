@@ -138,7 +138,8 @@ four panes:
   available. The pane also controls the IDE command and arguments, default
   new-file extension,
   heading colours per appearance, interface font family and size (8–28,
-  default 14), editor font size (1–30, default 18), autosave delay (1, 2, 5 or
+  default 14), editor font size (1–30, default 18), editor width (480–1200,
+  default 720), autosave delay (1, 2, 5 or
   10 seconds) and Copyedit colours and toggles.
 - **Project Settings** — content, assets and MDX component directories,
   absolute versus document-relative image paths, default extension override,
@@ -170,7 +171,8 @@ Astrolith uses the system UI font until you name another installed family in
 while the document keeps its installed book serif (New York or Iowan Old Style
 on macOS, Georgia on Windows, Noto Serif or another installed serif on Linux).
 **Interface size** controls the UI scale and spacing; **Editor font size**
-changes the page size independently.
+changes the page size independently. **Editor width** sets the widest prose
+column before it centers in a wider pane.
 
 ## 6. Writing
 

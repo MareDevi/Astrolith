@@ -2505,8 +2505,9 @@ impl Render for Shell {
             })
         .max(320.);
         let base_font_size = self.settings.editor_font_size;
+        let measure = self.settings.editor_width;
         self.document.update(cx, |panel, cx| {
-            panel.set_prose_width(base_font_size, pane_width, cx)
+            panel.set_prose_width(base_font_size, pane_width, measure, cx)
         });
         self.chrome
             .set_sidebars(!layout.sidebar_visible && !layout.inspector_visible);

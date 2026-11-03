@@ -32,8 +32,8 @@ pub(crate) struct WorkspacePanel {
     /// Focus handle of the selection toolbar, so focusing one of its buttons
     /// keeps the overlay mounted and reachable.
     pub(crate) toolbar_focus: FocusHandle,
-    /// Base prose size from preferences and the document pane width.
-    prose: Option<(f32, f32)>,
+    /// Base prose size, the document pane width and the configured measure.
+    prose: Option<(f32, f32, f32)>,
     /// Alt-hover preview and its in-flight request.
     preview: ImagePreviewState,
     preview_source: Option<PreviewSource>,
@@ -124,9 +124,10 @@ impl WorkspacePanel {
         &mut self,
         base_font_size: f32,
         pane_width: f32,
+        measure: f32,
         cx: &mut Context<Self>,
     ) {
-        let next = (base_font_size, pane_width);
+        let next = (base_font_size, pane_width, measure);
         if self.prose == Some(next) {
             return;
         }
@@ -329,7 +330,11 @@ impl Render for WorkspacePanel {
                 let editor = editor.clone();
                 let typography = self
                     .prose
-                    .map(|(base, width)| prose_typography(width, base));
+                    .map(|(base, width, _)| prose_typography(width, base));
+                let measure = self
+                    .prose
+                    .map(|(_, _, measure)| measure)
+                    .unwrap_or(crate::theme::PROSE_MEASURE);
                 let wiring = self.wiring.clone();
                 let overlay = wiring.as_ref().and_then(|wiring| {
                     // Focus on the document, the toolbar or one of its buttons
@@ -378,7 +383,7 @@ impl Render for WorkspacePanel {
                         div()
                             .h_full()
                             .w_full()
-                            .max_w(px(crate::theme::PROSE_MEASURE))
+                            .max_w(px(measure))
                             .px(px(crate::theme::PROSE_INSET))
                             .pt(px(crate::theme::PROSE_TOP))
                             .child(element),

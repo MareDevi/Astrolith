@@ -233,6 +233,21 @@ impl PreferencesSheet {
                 cx,
             ),
             self.field(
+                "preferences-field-editor-width",
+                "Editor width",
+                self.control(FieldId::EditorWidth),
+                FieldExtras {
+                    field: Some(FieldId::EditorWidth),
+                    hint: Some("480–1200 logical pixels; the default is 720."),
+                    trailing: Some(self.reset_button(
+                        FieldId::EditorWidth,
+                        "preferences-reset-editor-width",
+                        cx,
+                    )),
+                },
+                cx,
+            ),
+            self.field(
                 "preferences-field-autosave",
                 "Idle autosave",
                 autosave,

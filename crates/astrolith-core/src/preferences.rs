@@ -535,6 +535,8 @@ pub struct GlobalPreferencesV2 {
     pub ui_font_size: f32,
     /// Editor base font size in logical pixels.
     pub editor_font_size: f32,
+    /// Widest prose column in logical pixels.
+    pub editor_width: f32,
     /// Idle autosave delay.
     pub autosave_delay: AutosaveDelay,
     /// Extension used for new entries unless a narrower scope overrides it.
@@ -562,6 +564,7 @@ impl Default for GlobalPreferencesV2 {
             ui_font_family: String::new(),
             ui_font_size: 14.,
             editor_font_size: 18.,
+            editor_width: 720.,
             autosave_delay: AutosaveDelay::default(),
             default_extension: FileExtension::default(),
             ide: IdeCommand::default(),
@@ -1311,6 +1314,7 @@ mod tests {
         assert_eq!(bare.dark_theme, DarkColorScheme::Ink);
         assert_eq!(bare.ui_font_family, "");
         assert_eq!(bare.ui_font_size, 14.);
+        assert_eq!(bare.editor_width, 720.);
     }
 
     #[test]
