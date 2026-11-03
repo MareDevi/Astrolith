@@ -585,6 +585,81 @@ fn block_sequence_remove_and_set_preserve_other_items() {
 }
 
 #[test]
+fn indentless_block_sequence_is_readable_and_round_trips() {
+    let source = "---\ntitle: x\ntags:\n- GalGame\n- Astro  # keep\nseries: 电子蝶梦\ntoc: true\n---\nbody\n";
+    let document = parse_document(source).expect("indentless block sequence parses");
+    let tags = document.field_info("tags").unwrap();
+    assert_eq!(tags.shape, FieldShape::Sequence);
+    assert_eq!(tags.sequence_style, Some(SequenceStyle::Block));
+    assert_eq!(tags.items, Some(vec![string("GalGame"), string("Astro")]));
+    assert_eq!(tags.raw.as_deref(), Some("- GalGame\n- Astro  # keep"));
+    assert_eq!(document.field("series"), Some(&string("电子蝶梦")));
+    assert_eq!(
+        document.field("toc"),
+        Some(&FrontmatterValue::Boolean(true))
+    );
+    assert_eq!(serialize_document(&document).unwrap(), source);
+}
+
+#[test]
+fn indentless_block_sequence_items_are_editable() {
+    let source = "---\ntitle: x\ntags:\n- one\n- two\ndraft: false\n---\nbody\n";
+    let mut document = parse_document(source).unwrap();
+    document
+        .set_sequence_item("tags", 1, string("second"))
+        .unwrap();
+    document
+        .insert_sequence_item("tags", 2, string("three"))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&document).unwrap(),
+        "---\ntitle: x\ntags:\n- one\n- second\n- three\ndraft: false\n---\nbody\n"
+    );
+    document.remove_sequence_item("tags", 0).unwrap();
+    assert_eq!(
+        serialize_document(&document).unwrap(),
+        "---\ntitle: x\ntags:\n- second\n- three\ndraft: false\n---\nbody\n"
+    );
+
+    let mut only = parse_document("---\ntags:\n- one\n---\n").unwrap();
+    only.remove_sequence_item("tags", 0).unwrap();
+    assert_eq!(serialize_document(&only).unwrap(), "---\ntags: []\n---\n");
+}
+
+#[test]
+fn indentless_nested_sequence_keeps_parent_path() {
+    let source = "---\nauthor:\n  name: Ada\n  tags:\n  - rust\n  - astro\ndraft: false\n---\n";
+    let mut document = parse_document(source).unwrap();
+    let tags = document.field_info("author.tags").unwrap();
+    assert_eq!(tags.items, Some(vec![string("rust"), string("astro")]));
+    document
+        .insert_sequence_item("author.tags", 2, string("editor"))
+        .unwrap();
+    assert_eq!(
+        serialize_document(&document).unwrap(),
+        "---\nauthor:\n  name: Ada\n  tags:\n  - rust\n  - astro\n  - editor\ndraft: false\n---\n"
+    );
+}
+
+#[test]
+fn indentless_sequence_raw_replacement_reindents_under_key() {
+    let mut document = parse_document("---\ntags:\n- a\n---\n").unwrap();
+    document.replace_raw("tags", "- b\n- c").unwrap();
+    assert_eq!(
+        serialize_document(&document).unwrap(),
+        "---\ntags:\n  - b\n  - c\n---\n"
+    );
+}
+
+#[test]
+fn bare_sequence_frontmatter_is_refused() {
+    assert!(matches!(
+        parse_document("---\n- one\n- two\n---\n"),
+        Err(DocumentError::InvalidFrontmatter)
+    ));
+}
+
+#[test]
 fn validate_value_accepts_and_refuses_inline_yaml() {
     use crate::yaml::validate_value;
     for good in ["[a, b]", "{x: 1}", "\"quoted\"", "plain", "3"] {

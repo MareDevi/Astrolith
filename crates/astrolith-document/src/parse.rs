@@ -10,12 +10,15 @@
 //! The editable subset is a YAML block mapping whose leaves are plain, quoted
 //! or null scalars, whose containers are nested block mappings or block/flow
 //! sequences of scalars, and whose container values can be replaced as
-//! validated raw YAML. [`ParsedDocument::fields`] exposes a read-only shape
-//! snapshot for every field, while [`ParsedDocument::insert_field`],
-//! [`ParsedDocument::remove_field`], the sequence item methods and
-//! [`ParsedDocument::replace_raw`] record byte patches that only take effect on
-//! serialization. Inserting into a document that has no frontmatter creates a
-//! leading block after any byte-order mark and leaves the body byte-for-byte.
+//! validated raw YAML. A block sequence may be indented under its key or start
+//! at the key's own indentation (indentless sequence); both styles are
+//! item-editable when every item is a scalar. [`ParsedDocument::fields`] exposes
+//! a read-only shape snapshot for every field, while
+//! [`ParsedDocument::insert_field`], [`ParsedDocument::remove_field`], the
+//! sequence item methods and [`ParsedDocument::replace_raw`] record byte patches
+//! that only take effect on serialization. Inserting into a document that has no
+//! frontmatter creates a leading block after any byte-order mark and leaves the
+//! body byte-for-byte.
 //!
 //! Block scalars (`|`, `>`) are preserved as opaque fields that can be read but
 //! not patched; anchors, aliases, tags, merge keys, quoted or complex keys,
@@ -668,7 +671,13 @@ impl ParsedDocument {
         }
         if matches!(field.shape, FieldShape::Mapping | FieldShape::Sequence) {
             let span = field.key_line.end..field.block.end;
-            let indent = field.child_indent.unwrap_or(field.indent + 2);
+            // An indentless sequence's child indentation equals its own, so
+            // re-indent a raw replacement one level deeper: emitting it at the
+            // key's indentation would turn a mapping value into sibling keys.
+            let indent = field
+                .child_indent
+                .filter(|child| *child > field.indent)
+                .unwrap_or(field.indent + 2);
             let rendered = render_block_raw(raw, indent, self.line_ending).map_err(|reason| {
                 DocumentError::UnsupportedPatch {
                     path: path.to_owned(),
@@ -1192,7 +1201,13 @@ fn scan_fields(inner: &str, base: usize, fields: &mut Vec<Field>) -> Result<(), 
         let rest_trimmed = rest.trim_start_matches(' ');
         if rest_trimmed.is_empty() || rest_trimmed.starts_with('#') {
             match next_content(inner, &lines, index) {
-                Some((child_indent, child_content)) if child_indent > indent => {
+                // An indentless block sequence starts at the key's own
+                // indentation, so equal indentation opens a child only for a
+                // sequence item.
+                Some((child_indent, child_content))
+                    if child_indent > indent
+                        || (child_indent == indent && is_sequence_item(child_content)) =>
+                {
                     if is_sequence_item(child_content) {
                         let (field, next) = parse_block_sequence(
                             inner,
@@ -1426,7 +1441,13 @@ fn parse_block_sequence(
             continue;
         }
         let indent = leading_indent(text)?;
-        if indent <= key.indent {
+        if indent < key.indent {
+            break;
+        }
+        let content = &text[indent..];
+        // Items may share the key's indentation (indentless sequence); then the
+        // sequence ends at the next same-indent line that is not an item.
+        if indent == key.indent && !is_sequence_item(content) && !trimmed.starts_with('#') {
             break;
         }
         last_end = base + lines[cursor].next;
@@ -1434,7 +1455,6 @@ fn parse_block_sequence(
             cursor += 1;
             continue;
         }
-        let content = &text[indent..];
         let expected_indent = *item_indent.get_or_insert(indent);
         if indent != expected_indent || !is_sequence_item(content) {
             editable = false;
