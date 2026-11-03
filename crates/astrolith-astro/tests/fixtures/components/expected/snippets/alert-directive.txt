@@ -1,0 +1,3 @@
+<Alert level="warn" dismissible={false} client:load>
+  Something happened
+</Alert>

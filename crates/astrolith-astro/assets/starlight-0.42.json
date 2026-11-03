@@ -1,0 +1,119 @@
+{
+  "version": "0.42",
+  "package": "@astrojs/starlight",
+  "specifier": "@astrojs/starlight/components",
+  "components": [
+    {
+      "name": "Aside",
+      "description": "Highlight supplementary content with a type, title and icon.",
+      "slots": ["default"],
+      "props": [
+        { "name": "type", "kind": { "enum": ["note", "tip", "caution", "danger"] }, "required": false, "default": { "string": "note" }, "description": "Visual variant of the aside." },
+        { "name": "title", "kind": "string", "required": false, "description": "Heading shown above the aside body." },
+        { "name": "icon", "kind": "string", "required": false, "description": "Starlight icon name." }
+      ]
+    },
+    {
+      "name": "Badge",
+      "description": "Display a small status label.",
+      "slots": [],
+      "props": [
+        { "name": "text", "kind": "string", "required": true, "description": "Badge text." },
+        { "name": "variant", "kind": { "enum": ["default", "note", "danger", "success", "caution", "tip"] }, "required": false, "default": { "string": "default" }, "description": "Badge colour variant." },
+        { "name": "size", "kind": { "enum": ["small", "medium", "large"] }, "required": false, "default": { "string": "small" }, "description": "Badge size." },
+        { "name": "class", "kind": "string", "required": false, "description": "Additional CSS classes." }
+      ]
+    },
+    {
+      "name": "Card",
+      "description": "Group related content in a card with an optional icon.",
+      "slots": ["default"],
+      "props": [
+        { "name": "title", "kind": "string", "required": true, "description": "Card heading." },
+        { "name": "icon", "kind": "string", "required": false, "description": "Starlight icon name." }
+      ]
+    },
+    {
+      "name": "CardGrid",
+      "description": "Lay out cards in a responsive grid.",
+      "slots": ["default"],
+      "props": [
+        { "name": "stagger", "kind": "boolean", "required": false, "default": { "boolean": false }, "description": "Offset alternating cards on wide screens." }
+      ]
+    },
+    {
+      "name": "Icon",
+      "description": "Render a Starlight icon.",
+      "slots": [],
+      "props": [
+        { "name": "name", "kind": "string", "required": true, "description": "Starlight icon name." },
+        { "name": "label", "kind": "string", "required": false, "description": "Accessible label; omit for decorative icons." },
+        { "name": "color", "kind": "string", "required": false, "description": "CSS colour." },
+        { "name": "size", "kind": "string", "required": false, "default": { "string": "1em" }, "description": "CSS size." },
+        { "name": "class", "kind": "string", "required": false, "description": "Additional CSS classes." }
+      ]
+    },
+    {
+      "name": "Tabs",
+      "description": "Group content into tab panels.",
+      "slots": ["default"],
+      "props": [
+        { "name": "syncKey", "kind": "string", "required": false, "description": "Keep the active tab in sync across tab groups with the same key." }
+      ]
+    },
+    {
+      "name": "TabItem",
+      "description": "One tab panel inside Tabs.",
+      "slots": ["default"],
+      "props": [
+        { "name": "label", "kind": "string", "required": true, "description": "Tab label." },
+        { "name": "icon", "kind": "string", "required": false, "description": "Starlight icon name." }
+      ]
+    },
+    {
+      "name": "LinkCard",
+      "description": "Link to another page with a title and description.",
+      "slots": [],
+      "props": [
+        { "name": "title", "kind": "string", "required": true, "description": "Link title." },
+        { "name": "description", "kind": "string", "required": false, "description": "Short description." },
+        { "name": "href", "kind": "string", "required": false, "description": "Link destination." }
+      ]
+    },
+    {
+      "name": "Steps",
+      "description": "Render an ordered list as numbered steps.",
+      "slots": ["default"],
+      "props": []
+    },
+    {
+      "name": "FileTree",
+      "description": "Render a directory tree from an unordered list.",
+      "slots": ["default"],
+      "props": []
+    },
+    {
+      "name": "LinkButton",
+      "description": "Render a call-to-action link styled as a button.",
+      "slots": ["default"],
+      "props": [
+        { "name": "href", "kind": "string", "required": true, "description": "Link destination." },
+        { "name": "icon", "kind": "string", "required": false, "description": "Starlight icon name." },
+        { "name": "iconPlacement", "kind": { "enum": ["start", "end"] }, "required": false, "default": { "string": "end" }, "description": "Icon position." },
+        { "name": "variant", "kind": { "enum": ["primary", "secondary", "minimal"] }, "required": false, "default": { "string": "primary" }, "description": "Button variant." }
+      ]
+    },
+    {
+      "name": "Code",
+      "description": "Render a code block through Expressive Code.",
+      "slots": [],
+      "props": [
+        { "name": "code", "kind": "string", "required": true, "description": "Code to render; child content is not supported." },
+        { "name": "lang", "kind": "string", "required": false, "description": "Language for syntax highlighting." },
+        { "name": "meta", "kind": "string", "required": false, "description": "Raw meta string passed to the syntax highlighter." },
+        { "name": "locale", "kind": "string", "required": false, "description": "Locale for localized UI strings." },
+        { "name": "class", "kind": "string", "required": false, "description": "Additional CSS classes." }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # Astro Editor Linux feature-parity implementation plan
 
-**Status:** Approved on 2026-11-01; P0-P3 complete with the P3 real-window field gate still manual; P4 projection complete with the native gate accepted and matched-workload evidence; P5 writer commands/chrome and P6 autosave/lifecycle flush implemented with headless evidence (P6 native smoke outstanding); P7 copyedit and P8 assets/Content Finder/image preview implemented with headless evidence and native smokes outstanding; P9 next.
+**Status:** Approved on 2026-11-01; P0-P3 complete with the P3 real-window field gate still manual; P4 projection complete with the native gate accepted and matched-workload evidence; P5/P6/P7/P8 implemented with headless evidence and outstanding native smokes; P9 static component index and import planner implemented with frozen complete-source oracles; P10 next.
 
 **Date:** 2026-11-01
 

@@ -1,0 +1,44 @@
+---
+import type { Level, Tone } from "./types";
+
+/**
+ * A framed callout with an optional named header. It never runs project code.
+ */
+interface Props {
+  /** Callout heading. */
+  title: string;
+  /** Visual tone of the callout. */
+  tone?: Tone;
+  /** Severity level. */
+  level?: Level;
+  /** Number of repetitions. */
+  count?: number;
+  /** Whether the body starts expanded. */
+  open?: boolean;
+  /** Timestamp shown in the footer. */
+  updated?: Date;
+  /** Short tags. */
+  tags?: string[];
+  /** Numeric counts. */
+  counts?: number[];
+  /** Cover image resolved by the asset service. */
+  cover?: ImageMetadata;
+  /** Related blog entry. */
+  related?: CollectionEntry<"blog">;
+}
+
+const {
+  title,
+  tone = "note",
+  level = "low",
+  count = 0,
+  open = true,
+  tags = [],
+} = Astro.props;
+---
+
+<section class:list={["callout", tone]} data-open={open}>
+  <slot name="header" />
+  <strong>{title}</strong>
+  <div class="callout-body"><slot /></div>
+</section>
