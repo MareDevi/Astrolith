@@ -288,7 +288,7 @@ impl ProsePalette {
             marker: theme.muted_foreground,
             heading: crate::theme::prose_heading_color(cx),
             code: theme.foreground,
-            code_background: theme.button,
+            code_background: theme.group_box,
             quote: theme.muted_foreground,
         }
     }
@@ -311,7 +311,7 @@ pub(crate) fn prose_decorations(
             let style = match token {
                 ProseToken::Marker => HighlightStyle {
                     color: Some(palette.marker),
-                    fade_out: Some(if hanging { 0.5 } else { 0.25 }),
+                    fade_out: Some(if hanging { 0.62 } else { 0.42 }),
                     ..HighlightStyle::default()
                 },
                 ProseToken::Heading => HighlightStyle {

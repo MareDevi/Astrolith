@@ -47,7 +47,7 @@ use astrolith_preview::RouteMapping;
 use astrolith_workspace::{
     CollectionEntry, CollectionWatcher, MetaValue, ReferenceOption,
     assets::AssetLocation,
-    list::{self, EntryFilter, EntrySort, SortDirection, SortMode},
+    list::{self, EntryFilter, EntrySort, SortMode},
     operations::{
         self, CopyPathRequest, CreateRequest, CreationField, CreationInput, CreationInputKind,
         DuplicateRequest, MoveRequest, NewEntryName, PathForm, ProjectScope, RevealRequest,
@@ -116,6 +116,8 @@ struct EntryRow {
 
 struct EntrySection {
     title: SharedString,
+    /// Uppercase heading, built once per index refresh.
+    heading: SharedString,
     rows: Vec<EntryRow>,
 }
 
@@ -172,6 +174,7 @@ impl EntryList {
             });
             let mut section = EntrySection {
                 title: collection.to_owned().into(),
+                heading: collection.to_uppercase().into(),
                 rows: Vec::with_capacity(rows.len()),
             };
             for (index, entry) in rows {
@@ -254,13 +257,13 @@ impl ListDelegate for EntryList {
                 .h_flex()
                 .items_center()
                 .justify_between()
-                .px_3()
-                .pt_3()
+                .px_4()
+                .pt_4()
                 .pb_1()
                 .text_xs()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
                 .text_color(cx.theme().muted_foreground)
-                .child(section.title.clone())
+                .child(section.heading.clone())
                 .child(
                     div()
                         .text_color(cx.theme().muted_foreground)
@@ -297,11 +300,10 @@ impl ListDelegate for EntryList {
             .unwrap_or_default();
         let badge = |label: &'static str, color: gpui_kit::Hsla| {
             div()
-                .px_1p5()
-                .rounded_sm()
-                .bg(color.opacity(0.12))
-                .text_color(color)
+                .flex_shrink_0()
                 .text_xs()
+                .text_color(color)
+                .opacity(0.9)
                 .child(label)
         };
         let row_content = div()
@@ -320,8 +322,12 @@ impl ListDelegate for EntryList {
                         div()
                             .min_w_0()
                             .truncate()
+                            .font_family(crate::theme::prose_font(cx))
+                            .text_sm()
                             .when(active, |title| {
-                                title.font_weight(gpui_kit::FontWeight::MEDIUM)
+                                title
+                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                    .text_color(cx.theme().accent)
                             })
                             .child(title),
                     )
@@ -336,7 +342,9 @@ impl ListDelegate for EntryList {
                         )
                     }),
             )
-            .when(mdx, |row| row.child(badge("MDX", cx.theme().accent)))
+            .when(mdx, |row| {
+                row.child(badge("MDX", cx.theme().muted_foreground))
+            })
             .when(draft, |row| row.child(badge("Draft", cx.theme().warning)))
             .when(!date.is_empty(), |row| {
                 row.child(
@@ -757,7 +765,7 @@ impl ProjectWorkspace {
             refreshing: false,
             index_error: None,
             open_error: None,
-            status: "Open an Astro project to edit local Markdown and MDX.".into(),
+            status: String::new(),
             task: None,
             watch_task: None,
             schema_task: None,
@@ -3174,7 +3182,12 @@ impl ProjectWorkspace {
         self.document.update(cx, |document, cx| {
             document.show_editor(title, editor, Some(wiring), cx)
         });
-        self.status = if session.read(cx).externally_changed {"Source changed on disk. This buffer is retained; close and reopen an unchanged document to reload."} else {"Editing in memory · Ctrl/Cmd+S saves."}.into();
+        self.status = if session.read(cx).externally_changed {
+            "Document changed on disk. This buffer is retained; close and reopen to reload."
+        } else {
+            ""
+        }
+        .into();
         cx.notify();
     }
     pub(crate) fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4075,14 +4088,6 @@ impl ProjectWorkspace {
             self.list_sort.mode = SortMode::Default;
         }
         self.sort_options = options;
-    }
-
-    fn sort_label(&self) -> SharedString {
-        self.sort_options
-            .iter()
-            .find(|(mode, _)| mode == &self.list_sort.mode)
-            .map(|(_, label)| label.clone())
-            .unwrap_or_else(|| SharedString::from("Default"))
     }
 
     /// Entry commands wait only for the initial project scan. A watcher refresh
@@ -5499,14 +5504,9 @@ impl Render for ProjectWorkspace {
         let query = self.last_list_query.trim().to_owned();
         let drafts_only = self.list_filter.drafts_only;
         let filter_active = drafts_only || !query.is_empty();
-        let sort_label = self.sort_label();
         let default_sort = self.list_sort.mode == SortMode::Default;
         let sort_options = self.sort_options.clone();
         let current_mode = self.list_sort.mode.clone();
-        let direction_icon = match self.list_sort.direction {
-            SortDirection::Ascending => IconName::ArrowUp,
-            SortDirection::Descending => IconName::ArrowDown,
-        };
         let index_error = self.index_error.clone();
         let open_error = self.open_error.clone();
         let override_problems = self.override_problems.clone();
@@ -5527,20 +5527,22 @@ impl Render for ProjectWorkspace {
 
         let more_owner = cx.weak_entity();
         let absolute_owner = cx.weak_entity();
+        let menu_owner = cx.weak_entity();
+        let menu_options = sort_options.clone();
+        let menu_current = current_mode.clone();
         let mut view = view.child(
             div()
                 .v_flex()
                 .flex_shrink_0()
                 .border_b_1()
-                .border_color(cx.theme().border)
+                .border_color(cx.theme().border.opacity(0.55))
                 .child(
                     div()
                         .h_flex()
                         .items_center()
-                        .justify_between()
                         .gap_2()
-                        .px_3()
-                        .pt_3()
+                        .px_4()
+                        .pt_4()
                         .pb_2()
                         .child(
                             div()
@@ -5549,9 +5551,10 @@ impl Render for ProjectWorkspace {
                                 .gap_0p5()
                                 .child(
                                     div()
-                                        .text_sm()
+                                        .font_family(crate::theme::prose_font(cx))
+                                        .text_base()
                                         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                        .child("Entries"),
+                                        .child("Library"),
                                 )
                                 .child(
                                     div()
@@ -5560,15 +5563,16 @@ impl Render for ProjectWorkspace {
                                         .gap_1()
                                         .text_xs()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(SharedString::from(format!("{visible} of {total}")))
+                                        .child(SharedString::from(if filter_active {
+                                            format!("{visible} of {total} entries")
+                                        } else {
+                                            format!("{total} entries")
+                                        }))
                                         .when(filter_active, |row| {
                                             row.child(
                                                 div()
                                                     .id("filter-indicator")
                                                     .test_support()
-                                                    .px_1p5()
-                                                    .rounded_sm()
-                                                    .bg(cx.theme().accent.opacity(0.12))
                                                     .text_color(cx.theme().accent)
                                                     .child(SharedString::from(filter_label(
                                                         drafts_only,
@@ -5578,36 +5582,18 @@ impl Render for ProjectWorkspace {
                                         }),
                                 ),
                         )
+                        .child(div().flex_1())
                         .child(ui::icon_button(
                             "open-project",
                             IconName::FolderOpen,
                             "Open project…",
-                        )),
-                )
-                .child(
-                    div()
-                        .h_flex()
-                        .items_center()
-                        .gap_1()
-                        .px_2()
-                        .pb_2()
-                        .child(
-                            Button::new("entry-new")
-                                .small()
-                                .icon(IconName::PenLine)
-                                .label("New entry")
-                                .tooltip(CommandId::NewEntry.label())
-                                .disabled(!CommandId::NewEntry.is_available(availability))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.entry_command(CommandId::NewEntry, None, window, cx)
-                                })),
-                        )
+                        ))
                         .child(
                             Button::new("entry-more")
                                 .small()
                                 .ghost()
                                 .icon(IconName::Ellipsis)
-                                .tooltip("More entry actions")
+                                .tooltip("Library actions")
                                 .dropdown_menu(move |menu, _, _| {
                                     let mut menu = menu;
                                     for command in [
@@ -5630,7 +5616,8 @@ impl Render for ProjectWorkspace {
                                         );
                                     }
                                     let owner = more_owner.clone();
-                                    menu.separator()
+                                    menu = menu
+                                        .separator()
                                         .item(
                                             PopupMenuItem::new("Copy relative path")
                                                 .disabled(
@@ -5668,34 +5655,23 @@ impl Render for ProjectWorkspace {
                                                     }
                                                 }),
                                         )
-                                }),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            Button::new("filter-drafts")
-                                .small()
-                                .ghost()
-                                .icon(IconName::ListFilter)
-                                .tooltip("Show drafts only")
-                                .toggled(drafts_only)
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.toggle_drafts_only(cx)),
-                                ),
-                        )
-                        .child({
-                            let owner = cx.weak_entity();
-                            let options = sort_options;
-                            let current = current_mode.clone();
-                            Button::new("sort-mode")
-                                .small()
-                                .ghost()
-                                .icon(IconName::ArrowUpDown)
-                                .tooltip(format!("Sort entries · {sort_label}"))
-                                .dropdown_menu(move |menu, _, _| {
-                                    let mut menu = menu;
-                                    for (mode, label) in options.iter().cloned() {
-                                        let owner = owner.clone();
-                                        let selected = mode == current;
+                                        .separator()
+                                        .item(
+                                            PopupMenuItem::new("Show drafts only")
+                                                .checked(drafts_only)
+                                                .on_click({
+                                                    let owner = menu_owner.clone();
+                                                    move |_, _, cx| {
+                                                        let _ = owner.update(cx, |project, cx| {
+                                                            project.toggle_drafts_only(cx)
+                                                        });
+                                                    }
+                                                }),
+                                        )
+                                        .separator();
+                                    for (mode, label) in menu_options.iter().cloned() {
+                                        let owner = menu_owner.clone();
+                                        let selected = mode == menu_current;
                                         let chosen = mode.clone();
                                         menu = menu.item(
                                             PopupMenuItem::new(label).checked(selected).on_click(
@@ -5707,24 +5683,59 @@ impl Render for ProjectWorkspace {
                                             ),
                                         );
                                     }
-                                    menu
-                                })
-                        })
+                                    let owner = menu_owner.clone();
+                                    menu.item(
+                                        PopupMenuItem::new("Reverse sort direction")
+                                            .disabled(default_sort)
+                                            .on_click(move |_, _, cx| {
+                                                let _ = owner.update(cx, |project, cx| {
+                                                    project.toggle_sort_direction(cx)
+                                                });
+                                            }),
+                                    )
+                                    .when(
+                                        filter_active,
+                                        |menu| {
+                                            let owner = menu_owner.clone();
+                                            menu.separator().item(
+                                                PopupMenuItem::new("Clear filter").on_click(
+                                                    move |_, window, cx| {
+                                                        let _ = owner.update(cx, |project, cx| {
+                                                            project.clear_filter(window, cx)
+                                                        });
+                                                    },
+                                                ),
+                                            )
+                                        },
+                                    )
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_2()
+                        .px_4()
+                        .pb_3()
                         .child(
-                            ui::icon_button(
-                                "sort-direction",
-                                direction_icon,
-                                "Reverse sort direction",
-                            )
-                            .disabled(default_sort)
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_sort_direction(cx))),
+                            Button::new("entry-new")
+                                .small()
+                                .icon(IconName::PenLine)
+                                .label("New entry")
+                                .tooltip(CommandId::NewEntry.label())
+                                .disabled(!CommandId::NewEntry.is_available(availability))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.entry_command(CommandId::NewEntry, None, window, cx)
+                                })),
                         )
+                        .child(div().flex_1())
                         .when(filter_active, |row| {
                             row.child(
                                 Button::new("clear-filter")
                                     .small()
                                     .ghost()
-                                    .label("Clear")
+                                    .label("Clear filter")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.clear_filter(window, cx)
                                     })),
@@ -5819,11 +5830,10 @@ impl Render for ProjectWorkspace {
             });
         } else {
             view = view.child(
-                div().flex_1().min_h_0().child(
-                    List::new(&self.list)
-                        .small()
-                        .search_placeholder("Filter by file or title"),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(List::new(&self.list).search_placeholder("Filter by file or title")),
             );
         }
 

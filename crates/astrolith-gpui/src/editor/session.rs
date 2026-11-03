@@ -132,8 +132,17 @@ impl DocumentSession {
         let dirty = buffer.is_dirty();
         let counts = token_snapshot(&projection.visible);
         let text_key = fingerprint(&projection.visible);
-        let editor =
-            cx.new(|cx| EditorState::new(window, cx).default_value(projection.visible.clone()));
+        // A writing surface is not a code buffer: no line numbers, indent
+        // guides, folding or automatic bracket insertion.
+        let editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .line_number(false)
+                .indent_guides(false)
+                .folding(false)
+                .auto_close(false)
+                .smart_indent(false)
+                .default_value(projection.visible.clone())
+        });
         let change = cx.subscribe_in(
             &editor,
             window,

@@ -49,15 +49,15 @@ const WIDE: f32 = 1.12;
 pub(crate) fn prose_typography(pane_width: f32, base_font_size: f32) -> ProseTypography {
     let base = base_font_size.clamp(12., 32.);
     let (factor, ratio) = if pane_width <= 640. {
-        (NARROW, 1.8)
+        (NARROW, 1.85)
     } else if pane_width <= 960. {
         let t = (pane_width - 640.) / 320.;
-        (NARROW + (1. - NARROW) * t, 1.8 - 0.1 * t)
+        (NARROW + (1. - NARROW) * t, 1.85 - 0.1 * t)
     } else if pane_width <= 1400. {
         let t = (pane_width - 960.) / 440.;
-        (1. + (WIDE - 1.) * t, 1.7 - 0.1 * t)
+        (1. + (WIDE - 1.) * t, 1.75 - 0.1 * t)
     } else {
-        (WIDE, 1.6)
+        (WIDE, 1.65)
     };
     ProseTypography {
         font_size: ((base * factor) * 2.).round() / 2.,

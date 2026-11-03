@@ -1,8 +1,9 @@
 //! Shared presentation primitives for the writing desk.
 //!
 //! These helpers keep the small, repeated pieces of the shell on one visual
-//! system: a quiet wordmark, compact toolbar buttons with readable icons, and
-//! the section and empty-state rhythm shared by every panel.
+//! system: a quiet wordmark, compact toolbar buttons with readable icons, a
+//! serif voice for document names, and the section and empty-state rhythm
+//! shared by every panel.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -26,6 +27,7 @@ pub(crate) fn mark(cx: &App) -> impl IntoElement {
 pub(crate) fn wordmark(cx: &App) -> impl IntoElement {
     div().h_flex().items_center().gap_2().child(mark(cx)).child(
         div()
+            .font_family(crate::theme::prose_font(cx))
             .text_sm()
             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
             .child("Astrolith"),
@@ -51,6 +53,16 @@ pub(crate) fn icon_button(
     Button::new(id).small().ghost().icon(icon).tooltip(tooltip)
 }
 
+/// A document title, set in the book face.
+pub(crate) fn document_title(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
+    div()
+        .min_w_0()
+        .truncate()
+        .font_family(crate::theme::prose_font(cx))
+        .text_sm()
+        .child(text.into())
+}
+
 /// A calm empty state used by panels that have nothing to show yet.
 pub(crate) fn empty_state(
     id: &'static str,
@@ -74,7 +86,7 @@ pub(crate) fn empty_state(
         .child(
             div()
                 .size(px(44.))
-                .rounded_xl()
+                .rounded_lg()
                 .border_1()
                 .border_color(cx.theme().border)
                 .bg(cx.theme().group_box)
@@ -89,13 +101,14 @@ pub(crate) fn empty_state(
         )
         .child(
             div()
+                .font_family(crate::theme::prose_font(cx))
                 .text_sm()
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .child(title.into()),
         )
         .child(
             div()
-                .max_w(px(260.))
+                .max_w(px(280.))
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(body.into()),

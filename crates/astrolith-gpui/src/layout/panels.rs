@@ -80,8 +80,13 @@ impl WorkspacePanel {
         {
             // A readonly file is a new snapshot, not an edit of the previous
             // document. Initial content avoids the full replacement edit path.
-            self.editor =
-                Some(cx.new(|cx| EditorState::new(window, cx).default_value(source.source)));
+            self.editor = Some(cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .line_number(false)
+                    .indent_guides(false)
+                    .folding(false)
+                    .default_value(source.source)
+            }));
         }
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
@@ -132,7 +137,7 @@ impl WorkspacePanel {
         self.editor = None;
         self.wiring = None;
         self.title = "Document".into();
-        self.content = "Select a collection entry to edit its source.".into();
+        self.content = "Choose an entry from the library to begin writing.".into();
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
     }
@@ -294,8 +299,9 @@ impl Panel for WorkspacePanel {
         Some(self.title.clone())
     }
     fn title_bar(&self, _: &App) -> bool {
-        // The document draws its own tab strip; tool docks keep the dock header.
-        self.id != "document-panel"
+        // Every panel carries its own editorial header; the dock must not add
+        // a second, IDE-like tab strip above it.
+        false
     }
 }
 impl Render for WorkspacePanel {
@@ -310,7 +316,6 @@ impl Render for WorkspacePanel {
             .min_h_0()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .focus_visible(|style| style.border_1().border_color(cx.theme().ring))
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                 if !event.modifiers.alt {
                     this.dismiss_preview(cx);
@@ -340,7 +345,7 @@ impl Render for WorkspacePanel {
                 });
                 let preview_image = self.preview.image();
                 let mut element = Editor::new(&editor)
-                    .font_family(cx.theme().font_family.clone())
+                    .font_family(crate::theme::prose_font(cx))
                     .readonly(self.readonly)
                     .bordered(false)
                     .aria_label(if self.readonly {
@@ -372,8 +377,9 @@ impl Render for WorkspacePanel {
                         div()
                             .h_full()
                             .w_full()
-                            .max_w(gpui_kit::px(860.))
-                            .px_6()
+                            .max_w(px(crate::theme::PROSE_MEASURE))
+                            .px(px(crate::theme::PROSE_INSET))
+                            .pt(px(crate::theme::PROSE_TOP))
                             .child(element),
                     );
                 if let Some(hooks) = wiring.as_ref().map(|wiring| wiring.hooks.clone()) {

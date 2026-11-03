@@ -317,6 +317,27 @@ fn insert_path(root: &mut Map<String, Value>, path: &str, value: Value) {
     }
 }
 
+/// Capitalized presentation of a control family.
+fn kind_display(label: &'static str) -> &'static str {
+    match label {
+        "text" => "Text",
+        "number" => "Number",
+        "integer" => "Integer",
+        "boolean" => "Boolean",
+        "date" => "Date",
+        "image" => "Image",
+        "enum" => "Choice",
+        "reference" => "Reference",
+        "reference list" => "References",
+        "tags" => "Tags",
+        "object" => "Group",
+        "raw yaml" => "YAML",
+        "literal" => "Fixed",
+        "read-only" => "Read only",
+        other => other,
+    }
+}
+
 /// Short label for a schema leaf kind (used for tests and diagnostics).
 pub fn kind_label(kind: &FieldKind) -> &'static str {
     match kind {
@@ -805,7 +826,7 @@ fn build_rows(
             label: SharedString::from(control.name.clone()),
             aria_label: SharedString::from(format!("frontmatter field {}", control.path)),
             path: SharedString::from(control.path.clone()),
-            kind_label: control_label(&control.kind),
+            kind_label: kind_display(control_label(&control.kind)),
             hierarchy: control.path.matches('.').count(),
             is_object,
             read_only_label: read_only_label(control, is_object),
@@ -898,7 +919,7 @@ impl Render for FrontmatterForm {
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Select a collection entry to edit its metadata."),
+                        .child("Choose an entry to see its details."),
                 );
         };
         let notice = self.notice.clone();
@@ -924,19 +945,20 @@ impl Render for FrontmatterForm {
                     .items_center()
                     .justify_between()
                     .px_4()
-                    .pt_3()
-                    .pb_2()
+                    .pt_4()
+                    .pb_3()
                     .border_b_1()
-                    .border_color(cx.theme().border)
+                    .border_color(cx.theme().border.opacity(0.55))
                     .child(
                         div()
                             .v_flex()
                             .gap_0p5()
                             .child(
                                 div()
-                                    .text_sm()
+                                    .font_family(crate::theme::prose_font(cx))
+                                    .text_base()
                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .child("Properties"),
+                                    .child("Details"),
                             )
                             .child(
                                 div()
@@ -959,7 +981,7 @@ impl Render for FrontmatterForm {
                         .child(notice),
                 )
             })
-            .child(div().v_flex().gap_4().p_4().children(rows))
+            .child(div().v_flex().gap_5().p_4().children(rows))
     }
 }
 
@@ -999,6 +1021,7 @@ fn render_row(
                 .when(control.required, |label| {
                     label.child(div().text_color(cx.theme().warning).child("*"))
                 })
+                .font_family(crate::theme::prose_font(cx))
                 .text_sm()
                 .child(row.label.clone()),
         )

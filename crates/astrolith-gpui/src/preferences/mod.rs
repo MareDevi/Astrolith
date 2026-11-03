@@ -1088,16 +1088,20 @@ impl PreferencesSheet {
             .v_flex()
             .w_full()
             .gap_4()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().group_box)
+            .py_4()
+            .border_b_1()
+            .border_color(cx.theme().border.opacity(0.5))
             .child(
                 div()
                     .v_flex()
                     .gap_0p5()
-                    .child(div().text_sm().font_semibold().child(title))
+                    .child(
+                        div()
+                            .font_family(crate::theme::prose_font(cx))
+                            .text_sm()
+                            .font_semibold()
+                            .child(title),
+                    )
                     .when_some(hint, |column, hint| {
                         column.child(
                             div()
@@ -1139,11 +1143,11 @@ impl Render for PreferencesSheet {
             .child(
                 div()
                     .px_2()
-                    .pb_2()
-                    .text_xs()
+                    .pb_3()
+                    .font_family(crate::theme::prose_font(cx))
+                    .text_sm()
                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Settings"),
+                    .child("Preferences"),
             )
             .children(
                 Pane::ALL

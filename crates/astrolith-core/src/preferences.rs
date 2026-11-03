@@ -42,10 +42,12 @@ pub enum ThemePreference {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum LightColorScheme {
+    /// Warm paper, iron-gall ink and a burnt-sienna accent.
+    #[default]
+    Manuscript,
     /// Astrolith's One Light palette.
     OneLight,
     /// Catppuccin Latte.
-    #[default]
     CatppuccinLatte,
     /// Nord's snow-storm light variant.
     NordLight,
@@ -61,7 +63,8 @@ pub enum LightColorScheme {
 
 impl LightColorScheme {
     /// Every light palette, in menu order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
+        Self::Manuscript,
         Self::OneLight,
         Self::CatppuccinLatte,
         Self::NordLight,
@@ -74,6 +77,7 @@ impl LightColorScheme {
     /// User-facing palette name.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Manuscript => "Manuscript",
             Self::OneLight => "One Light",
             Self::CatppuccinLatte => "Catppuccin Latte",
             Self::NordLight => "Nord Light",
@@ -91,10 +95,12 @@ impl LightColorScheme {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DarkColorScheme {
+    /// Warm ink, parchment text and a lamp-lit accent.
+    #[default]
+    Ink,
     /// Astrolith's One Dark palette.
     OneDark,
     /// Catppuccin Mocha.
-    #[default]
     CatppuccinMocha,
     /// Catppuccin Macchiato.
     CatppuccinMacchiato,
@@ -116,7 +122,8 @@ pub enum DarkColorScheme {
 
 impl DarkColorScheme {
     /// Every dark palette, in menu order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
+        Self::Ink,
         Self::OneDark,
         Self::CatppuccinMocha,
         Self::CatppuccinMacchiato,
@@ -132,6 +139,7 @@ impl DarkColorScheme {
     /// User-facing palette name.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Ink => "Ink",
             Self::OneDark => "One Dark",
             Self::CatppuccinMocha => "Catppuccin Mocha",
             Self::CatppuccinMacchiato => "Catppuccin Macchiato",
@@ -1275,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    fn color_schemes_round_trip_and_absent_fields_default_to_catppuccin() {
+    fn color_schemes_round_trip_and_absent_fields_default_to_the_literary_pair() {
         let global = GlobalPreferencesV2 {
             light_theme: LightColorScheme::NordLight,
             dark_theme: DarkColorScheme::GruvboxDark,
@@ -1287,8 +1295,8 @@ mod tests {
         assert_eq!(decoded.dark_theme, DarkColorScheme::GruvboxDark);
 
         let bare: GlobalPreferencesV2 = serde_json::from_str("{\"version\":2}").unwrap();
-        assert_eq!(bare.light_theme, LightColorScheme::CatppuccinLatte);
-        assert_eq!(bare.dark_theme, DarkColorScheme::CatppuccinMocha);
+        assert_eq!(bare.light_theme, LightColorScheme::Manuscript);
+        assert_eq!(bare.dark_theme, DarkColorScheme::Ink);
     }
 
     #[test]

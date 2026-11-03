@@ -1,6 +1,9 @@
 //! Application appearance policy and the pinned Kit adapter.
 mod palettes;
 mod tokens;
+mod typography;
+
+pub(crate) use typography::{PROSE_INSET, PROSE_MEASURE, PROSE_TOP, prose_font};
 
 use astrolith_core::preferences::{DarkColorScheme, HeadingColors, LightColorScheme};
 use gpui_kit::{
@@ -194,11 +197,19 @@ pub fn apply(
         colors.table_foot = tokens.surface;
         colors.table_foot_foreground = tokens.muted;
 
-        // A compact desktop scale with a soft, writing-friendly radius.
+        // The document is a page, not a code buffer: the editor shares the
+        // page colour, hides the active-line band and keeps the gutter quiet.
+        let highlight = std::sync::Arc::make_mut(&mut theme.highlight_theme);
+        highlight.style.editor_background = Some(tokens.background);
+        highlight.style.editor_active_line = Some(tokens.background);
+        highlight.style.editor_gutter_background = Some(tokens.background);
+
+        // A calm desktop scale: controls stay compact, while paper, panels and
+        // overlays share one restrained, lightly rounded silhouette.
         theme.font_size = gpui_kit::px(14.);
         theme.mono_font_size = gpui_kit::px(13.);
-        theme.radius = gpui_kit::px(8.);
-        theme.radius_lg = gpui_kit::px(12.);
+        theme.radius = gpui_kit::px(6.);
+        theme.radius_lg = gpui_kit::px(10.);
         theme.shadow = true;
     });
     let configured = match mode {

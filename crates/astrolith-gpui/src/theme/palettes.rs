@@ -73,6 +73,22 @@ impl Base {
 /// Tokens for one light palette.
 pub(super) fn light(scheme: LightColorScheme) -> ThemeTokens {
     let base = match scheme {
+        LightColorScheme::Manuscript => Base {
+            background: 0xf7f3ea,
+            foreground: 0x2c2925,
+            surface: 0xf1ece1,
+            elevated: 0xe9e2d4,
+            muted: 0x8b8377,
+            border: 0xd9d0c0,
+            border_variant: 0xe7dfd0,
+            accent: 0x8a4b32,
+            accent_foreground: 0xf7f3ea,
+            selection: 0xeadfcc,
+            danger: 0xa33b32,
+            warning: 0xa06b1f,
+            success: 0x5f7048,
+            info: 0x4c6b74,
+        },
         LightColorScheme::OneLight => Base {
             background: 0xfafafa,
             foreground: 0x383a42,
@@ -192,6 +208,22 @@ pub(super) fn light(scheme: LightColorScheme) -> ThemeTokens {
 /// Tokens for one dark palette.
 pub(super) fn dark(scheme: DarkColorScheme) -> ThemeTokens {
     let base = match scheme {
+        DarkColorScheme::Ink => Base {
+            background: 0x1b1916,
+            foreground: 0xded7c8,
+            surface: 0x161411,
+            elevated: 0x282521,
+            muted: 0x8b8375,
+            border: 0x37332c,
+            border_variant: 0x12110f,
+            accent: 0xc6926a,
+            accent_foreground: 0x1b1916,
+            selection: 0x38332b,
+            danger: 0xc56b62,
+            warning: 0xc79a5b,
+            success: 0x8a9a6b,
+            info: 0x7d9aa3,
+        },
         DarkColorScheme::OneDark => Base {
             background: 0x282c34,
             foreground: 0xabb2bf,

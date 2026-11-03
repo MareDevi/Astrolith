@@ -193,7 +193,7 @@ pub(crate) fn local_paths() -> Vec<LocalPathRow> {
 }
 
 /// Render the bundled guide as plain text inside a scrollable body.
-pub(crate) fn guide_body() -> AnyElement {
+pub(crate) fn guide_body(cx: &App) -> AnyElement {
     div()
         .id("help-user-guide")
         .v_flex()
@@ -204,12 +204,14 @@ pub(crate) fn guide_body() -> AnyElement {
         .children(guide_blocks(USER_GUIDE).into_iter().map(|block| {
             match block {
                 GuideBlock::Title(text) => div()
-                    .text_sm()
+                    .font_family(crate::theme::prose_font(cx))
+                    .text_lg()
                     .font_semibold()
                     .pb_1()
                     .child(SharedString::from(text))
                     .into_any_element(),
                 GuideBlock::Heading(text) => div()
+                    .font_family(crate::theme::prose_font(cx))
                     .text_sm()
                     .font_semibold()
                     .pt_2()
@@ -243,6 +245,7 @@ pub(crate) fn shortcuts_body(groups: &[(&'static str, Vec<ShortcutRow>)], cx: &A
         .children(groups.iter().flat_map(|(title, rows)| {
             let mut elements = vec![
                 div()
+                    .font_family(crate::theme::prose_font(cx))
                     .text_sm()
                     .font_semibold()
                     .pt_2()

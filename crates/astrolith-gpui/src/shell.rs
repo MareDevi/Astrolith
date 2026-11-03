@@ -294,7 +294,7 @@ impl Shell {
             WorkspacePanel::new(
                 "navigator-panel",
                 "Project",
-                "No project open\n\nOpen a local document to view its source.",
+                "No project open\n\nOpen a project to browse its library.",
                 window,
                 cx,
             )
@@ -303,7 +303,7 @@ impl Shell {
             WorkspacePanel::new(
                 "document-panel",
                 "Welcome",
-                "Open an Astro project, then choose an entry from the project panel to begin writing.",
+                "Open a project, then choose an entry from the library to begin writing.",
                 window,
                 cx,
             )
@@ -1171,7 +1171,7 @@ impl Shell {
         let paths = help::local_paths();
         window.open_dialog(cx, move |dialog, _, cx| {
             let body = match surface {
-                HelpSurface::UserGuide => help::guide_body(),
+                HelpSurface::UserGuide => help::guide_body(cx),
                 HelpSurface::KeyboardShortcuts => help::shortcuts_body(&shortcuts, cx),
                 HelpSurface::LocalData => help::local_data_body(&paths, cx),
             };
@@ -2539,15 +2539,6 @@ impl Render for Shell {
             None if self.document.read(cx).is_editable() => self.file_status.clone().into(),
             None => "No file open".into(),
         };
-        let language = active_tab
-            .map(|tab| {
-                if tab.label.ends_with(".mdx") {
-                    "MDX"
-                } else {
-                    "Markdown"
-                }
-            })
-            .unwrap_or("—");
         let save_tone = match (active_tab, save_status) {
             (Some(_), Some(SaveStatus::Conflict | SaveStatus::Failed(_))) => cx.theme().danger,
             (Some(_), Some(SaveStatus::Saving | SaveStatus::Unsaved)) => cx.theme().warning,
@@ -2555,11 +2546,6 @@ impl Render for Shell {
             (Some(tab), None) if tab.externally_changed || tab.dirty => cx.theme().warning,
             (Some(_), None) => cx.theme().success,
             (None, _) => cx.theme().muted_foreground,
-        };
-        let palette_label = if cx.theme().is_dark() {
-            self.settings.dark_theme.label()
-        } else {
-            self.settings.light_theme.label()
         };
         // One token snapshot per revision: words and characters always agree.
         let counts = self
@@ -2636,7 +2622,7 @@ impl Render for Shell {
                                     .pr_2()
                                     .child(crate::ui::wordmark(cx))
                                     .when_some(project_name.clone(), |row, name| {
-                                        row.child(crate::ui::v_divider(cx)).child(
+                                        row.child(
                                             div()
                                                 .max_w(px(220.))
                                                 .truncate()
@@ -2651,7 +2637,6 @@ impl Render for Shell {
                                             .small()
                                             .ghost()
                                             .icon(IconName::Search)
-                                            .label("Search")
                                             .tooltip(CommandId::OpenPalette.label())
                                             .track_focus(&self.palette_focus)
                                             .on_click(cx.listener(|this, _, window, cx| {
@@ -2687,7 +2672,6 @@ impl Render for Shell {
                                                 )
                                             }))
                                     })
-                                    .child(crate::ui::v_divider(cx))
                                     .child({
                                         let owner = cx.weak_entity();
                                         let sidebar = layout.sidebar_visible;
@@ -2697,7 +2681,7 @@ impl Render for Shell {
                                             .small()
                                             .ghost()
                                             .icon(IconName::LayoutPanelLeft)
-                                            .label("View")
+                                            .tooltip("Panels")
                                             .dropdown_caret(true)
                                             .dropdown_menu(move |menu, _, _| {
                                                 let item = |label: &'static str,
@@ -2716,17 +2700,17 @@ impl Render for Shell {
                                                         })
                                                 };
                                                 menu.item(item(
-                                                    "Project panel",
+                                                    "Library",
                                                     CommandId::ToggleSidebar,
                                                     sidebar,
                                                 ))
                                                 .item(item(
-                                                    "Preview panel",
+                                                    "Reading view",
                                                     CommandId::TogglePreview,
                                                     preview,
                                                 ))
                                                 .item(item(
-                                                    "Properties",
+                                                    "Details",
                                                     CommandId::ToggleInspector,
                                                     inspector,
                                                 ))
@@ -2757,7 +2741,7 @@ impl Render for Shell {
             .child({
                 let bar = StatusBar::new()
                     .h_7()
-                    .px_3()
+                    .px_4()
                     .text_xs()
                     .bg(cx.theme().status_bar)
                     .border_t_1()
@@ -2769,9 +2753,7 @@ impl Render for Shell {
                         || SharedString::from("No project"),
                         |name| SharedString::from(format!("· {name}")),
                     ))
-                    .when_some(counts, |bar, counts| bar.right(counts))
-                    .right(language)
-                    .right(palette_label);
+                    .when_some(counts, |bar, counts| bar.right(counts));
                 let bar = if let Some(warning) = self.warning.as_ref() {
                     bar.left(div().text_color(cx.theme().warning).child(warning.clone()))
                 } else {
