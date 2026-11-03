@@ -172,11 +172,17 @@ not family.
 
 ## 6. Writing
 
-The workspace is a writing desk: the **Library** lists collections and entries
-on the left, the page sits in the middle, **Details** holds frontmatter on the
-right, and the **Reading view** (the Astro preview controls) sits below when it
-is open. The title bar carries the project and the window commands; the document
-rail carries the active document, its collection, and save/close actions.
+The workspace is a writing desk: the **Library** opens on the project's
+collection index, and selecting a collection shows only that collection's
+entries (the back arrow returns to the index). The page sits in the middle,
+**Details** holds frontmatter on the right, and the **Reading view** (the Astro
+preview controls) sits below when it is open. The title bar carries the project
+and the window commands; the document rail carries the active document, its
+collection, and save/close actions.
+
+**New entry** creates a file in the collection you are viewing. Opening an
+entry from another collection switches the Library to that collection, so the
+list always matches the page beside it.
 
 The writer shows the document body only. Leading frontmatter and, in MDX, the
 leading contiguous ESM import/export prelude are hidden. The complete source is
