@@ -1,6 +1,6 @@
 # Astro Editor Linux feature-parity implementation plan
 
-**Status:** Approved on 2026-11-01; P0-P3 complete with the P3 real-window field gate still manual; P4 projection complete with the native gate accepted and matched-workload evidence; P5/P6/P7/P8 implemented with headless evidence and outstanding native smokes; P9 static component index and import planner implemented with frozen complete-source oracles; P10 next.
+**Status:** Approved on 2026-11-01; P0-P3 complete with the P3 real-window field gate still manual; P4 projection complete with the native gate accepted and matched-workload evidence; P5-P8 implemented with headless evidence and outstanding native smokes; P9 static component index/import planner complete with frozen oracles; P10 builder UI implemented with headless integration coverage and a native smoke outstanding; P11 next.
 
 **Date:** 2026-11-01
 
@@ -283,6 +283,9 @@ Implement all component/index/import semantics from §3.8 without running projec
 Implement searchable framework-grouped palette, metadata/help, typed prop controls, optional-prop toggle, client directives, image and collection-entry pickers, tag preview, Ctrl+Enter insertion and tracked Tab/Shift+Tab/Escape placeholders. Apply planned imports to complete source and tag to projection with stale-plan revalidation; undo behavior matches §3.8.
 
 Smoke every framework, keyboard-only flow, required blank placeholders, wrapping content, asset import, `getEntry`, existing import reuse, add-import off/on, auto-import warning, dirty body and concurrent external edit.
+
+
+**P10 update (2026-11-03, headless complete; native gate outstanding).** The builder lives in `component_builder/{mod,palette,form,snippets}.rs` and is reachable only for `.mdx` sessions; the Format menu re-checks document kind, so a `.md` never opens it or inserts a tag. Palette ordering/search, required summaries, typed controls with defaults, optional omission and toggle-all, image and `getEntry` pickers, tag preview, Esc/back, Ctrl+Enter insertion, Starlight scaffolds (Tabs with two TabItem and their imports merged into the same named import, CardGrid/Card, Steps, FileTree) and auto-import warnings are implemented. Insertion revalidates the plan against live source, applies imports to complete source and the tag through the projection as one undo step (undo leaves the import), and tracked decorations plus an ordered offset list drive Tab/Shift+Tab/Escape placeholders; zero-width placeholders are anchored and their offsets advance as text is typed. Tests cover tag-only and tag-plus-import bytes, stale-plan refusal, undo-leaves-import, placeholder navigation, the `.md`/`.mdx` key split, palette grouping/warnings and builder indexing refresh. Native Wayland smoke remains: every framework keyboard-only, required blanks, wrapping content, asset/`getEntry` picks, existing-import reuse, add-import off/on, auto-import warning, dirty body and concurrent external edit.
 
 ### P11 — Complete preferences UI
 

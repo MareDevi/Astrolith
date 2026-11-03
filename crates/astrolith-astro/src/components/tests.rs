@@ -734,6 +734,18 @@ fn plan(
     current: &[CorroboratedImport],
     other: &[CorroboratedImport],
 ) -> Result<ImportPlan, ImportError> {
+    plan_with_extra(document, component, &[], values, enabled, current, other)
+}
+
+fn plan_with_extra(
+    document: &str,
+    component: &Component,
+    extra_components: &[Component],
+    values: &[PlannedValue],
+    enabled: bool,
+    current: &[CorroboratedImport],
+    other: &[CorroboratedImport],
+) -> Result<ImportPlan, ImportError> {
     let root = fixture_root();
     let document = root.join(document);
     let source = std::fs::read_to_string(&document).unwrap();
@@ -742,6 +754,7 @@ fn plan(
         root: &root,
         document: &document,
         component,
+        extra_components,
         values,
         enabled,
         current_collection_imports: current,
@@ -793,6 +806,66 @@ fn import_plan_preserves_quote_semicolon_and_multiline_style() {
     assert_eq!(
         trailing.source(),
         expected_file("imports", "trailing-comment.mdx")
+    );
+}
+
+#[test]
+fn import_plan_merges_scaffold_children_into_one_named_import() {
+    let index = index();
+    let tabs = package(&index, "Tabs");
+    let tab_item = package(&index, "TabItem").clone();
+    let planned = plan_with_extra(
+        "src/content/blog/plain.mdx",
+        tabs,
+        &[tab_item.clone(), tab_item],
+        &[],
+        true,
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        planned
+            .source()
+            .contains("import { Tabs, TabItem } from \"@astrojs/starlight/components\";\n"),
+        "{}",
+        planned.source()
+    );
+    assert_eq!(
+        planned
+            .source()
+            .matches("@astrojs/starlight/components")
+            .count(),
+        1,
+        "children share the selected component's named import"
+    );
+
+    // A document that already imports the package reuses its named import.
+    let grid = package(&index, "CardGrid");
+    let card = package(&index, "Card").clone();
+    let merged = plan_with_extra(
+        "src/content/blog/package-bound.mdx",
+        grid,
+        &[card],
+        &[],
+        true,
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        merged
+            .source()
+            .contains("import { Code, CardGrid, Card } from \"@astrojs/starlight/components\";\n"),
+        "{}",
+        merged.source()
+    );
+    assert_eq!(
+        merged
+            .source()
+            .matches("@astrojs/starlight/components")
+            .count(),
+        1
     );
 }
 
@@ -1089,6 +1162,7 @@ fn import_plan_is_opt_in_and_rejects_stale_plans() {
         root: &root,
         document: &document,
         component: card,
+        extra_components: &[],
         values: &[],
         enabled: false,
         current_collection_imports: &[],
@@ -1103,4 +1177,26 @@ fn import_plan_is_opt_in_and_rejects_stale_plans() {
         Err(ImportError::StaleSource)
     );
     assert!(disabled.revalidate(&source).is_ok());
+}
+
+#[test]
+fn import_scan_reports_default_and_named_value_bindings() {
+    let source = "---\ntitle: Scan\n---\nimport Callout from '@components/mdx/Callout.astro';\nimport { Tabs, TabItem as Tab } from '@astrojs/starlight/components'\nimport type { ImageMetadata } from 'astro';\n\nBody\n";
+    let document = Path::new("/project/src/content/blog/scan.mdx");
+    let imports = scan_imports(source, document);
+    let pairs: Vec<(&str, &str)> = imports
+        .iter()
+        .map(|import| (import.name.as_str(), import.specifier.as_str()))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("Callout", "@components/mdx/Callout.astro"),
+            ("Tabs", "@astrojs/starlight/components"),
+            ("Tab", "@astrojs/starlight/components"),
+        ]
+    );
+    assert!(imports.iter().all(|import| import.document == document));
+    // A malformed prelude contributes nothing rather than failing the scan.
+    assert!(scan_imports("---\ntitle: x\n", document).is_empty());
 }

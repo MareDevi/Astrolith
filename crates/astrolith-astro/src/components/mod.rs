@@ -16,6 +16,7 @@ pub use discover::{
 };
 pub use imports::{
     CorroboratedImport, ImportError, ImportPlan, ImportPlanRequest, PlannedValue, plan_imports,
+    provisional_identifiers, scan_imports,
 };
 pub use snippet::{
     ClientDirectiveValue, PlaceholderKind, Snippet, SnippetError, SnippetPlaceholder, SnippetValue,

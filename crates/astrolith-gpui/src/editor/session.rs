@@ -6,11 +6,17 @@ use astrolith_document::{
     TextEdit, TokenSnapshot, WriterProjection, apply_visible_edit, diff_visible, format_document,
     map_visible_offset, project_writer, token_snapshot,
 };
-use gpui_kit::component::input::{EditorState, InputEvent, Position};
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::input::{
+    EditorState, InputEvent, Position, RangeDecoration, RangeDecorationCollection,
+    RangeDecorationStyle,
+};
 use gpui_kit::{
     App, AppContext, Context, Entity, EventEmitter, Focusable, Pixels, Point, SharedString,
     Subscription, Window,
 };
+
+use crate::editor::component_builder::snippets::PreparedInsertion;
 
 use crate::editor::copyedit::{CopyeditConfig, CopyeditPresentation, DEBOUNCE};
 use crate::editor::formatting::external_url;
@@ -59,9 +65,27 @@ pub(crate) struct DocumentSession {
     /// [`fingerprint`] of [`Self::projection`]'s visible text, computed once per
     /// text change so presentation refreshes never re-hash the document.
     text_key: u64,
+    /// Snippet placeholder ranges in visible bytes, in insertion order.
+    placeholders: Vec<Range<usize>>,
+    /// The placeholder Tab moves from next.
+    placeholder_index: usize,
+    /// Caret offset from each tracked decoration anchor's start.
+    ///
+    /// Editor decorations refuse empty ranges, so every zero-width placeholder
+    /// is tracked by the character immediately before it (or after it at the
+    /// start of the text); this offset maps the anchor back to the caret.
+    placeholder_offsets: Vec<usize>,
+    /// Tracked decoration layer covering the placeholder anchors.
+    placeholder_collection: Option<RangeDecorationCollection>,
+    /// Visible text length when the placeholder ranges were last resolved.
+    ///
+    /// An edit that grows the text without moving an anchor happened at that
+    /// anchor's edge, so the caret offset advances by the inserted length.
+    placeholder_text_len: usize,
     _change: Subscription,
     _cursor: Subscription,
     _blur: Subscription,
+    _placeholder_keys: Subscription,
 }
 pub(crate) struct SessionChanged;
 impl EventEmitter<SessionChanged> for DocumentSession {}
@@ -139,6 +163,7 @@ impl DocumentSession {
                     // latch) instead of letting the next Change overwrite it.
                     this.rebuild_projection(window, cx);
                 }
+                this.sync_placeholders(cx);
                 this.refresh_copyedit(cx);
                 this.refresh_writer(cx);
                 this.dirty = this.buffer.is_dirty();
@@ -164,6 +189,39 @@ impl DocumentSession {
                 }
             },
         );
+        // Tab, Shift+Tab and Escape navigate insertion placeholders before the
+        // editor consumes those keys. Interceptors run before key bindings, so
+        // an active placeholder set owns them; an empty set passes through.
+        let placeholder_weak = cx.weak_entity();
+        let placeholder_focus = editor.read(cx).focus_handle(cx);
+        let placeholder_keys = cx.intercept_keystrokes({
+            let weak = placeholder_weak;
+            let focus = placeholder_focus;
+            move |event, window, cx| {
+                if !focus.is_focused(window) {
+                    return;
+                }
+                let step = match event.keystroke.key.as_str() {
+                    "tab" if event.keystroke.modifiers.shift => -1,
+                    "tab" => 1,
+                    "escape"
+                        if !event.keystroke.modifiers.shift
+                            && !event.keystroke.modifiers.control
+                            && !event.keystroke.modifiers.alt
+                            && !event.keystroke.modifiers.platform =>
+                    {
+                        0
+                    }
+                    _ => return,
+                };
+                let handled = weak
+                    .update(cx, |session, cx| session.handle_placeholder_key(step, cx))
+                    .unwrap_or(false);
+                if handled {
+                    cx.stop_propagation();
+                }
+            }
+        });
         Self {
             editor,
             buffer,
@@ -183,9 +241,15 @@ impl DocumentSession {
             copyedit_task: None,
             counts,
             text_key,
+            placeholders: Vec::new(),
+            placeholder_index: 0,
+            placeholder_offsets: Vec::new(),
+            placeholder_collection: None,
+            placeholder_text_len: 0,
             _change: change,
             _cursor: cursor,
             _blur: blur,
+            _placeholder_keys: placeholder_keys,
         }
     }
 
@@ -489,6 +553,225 @@ impl DocumentSession {
     /// Project-relative source this session edits.
     pub(crate) fn canonical_source(&self) -> &str {
         self.buffer.identity().canonical_source().as_str()
+    }
+
+    /// Insert one prepared component tag after applying its import plan.
+    ///
+    /// The plan is revalidated against the live complete source, the tag is
+    /// mapped through the projection, and only then is anything written. The
+    /// import patch edits complete source without touching undo history, and the
+    /// tag insertion is one editor transaction, so undo removes the component
+    /// and intentionally leaves the harmless import in place.
+    pub(crate) fn insert_component(
+        &mut self,
+        prepared: PreparedInsertion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.absorb(cx);
+        prepared
+            .plan
+            .revalidate(self.buffer.current_text())
+            .map_err(|error| format!("{error}. Insert again to re-plan the imports."))?;
+        let selection = self.editor.read(cx).selected_range();
+        let caret = prepared
+            .tag
+            .placeholders
+            .first()
+            .map_or(selection.start + prepared.tag.text.len(), |placeholder| {
+                selection.start + placeholder.range.start
+            });
+        // The tag must be placeable in the visible text before the import patch
+        // touches anything, so a refused insertion leaves the source untouched.
+        apply_visible_edit(
+            self.buffer.current_text(),
+            &self.projection,
+            TextEdit::replace(selection.clone(), prepared.tag.text.clone()),
+        )
+        .map_err(|error| format!("The tag was refused and the source was kept: {error}"))?;
+        if prepared.changes_imports(self.buffer.current_text()) {
+            // Import edits live in the hidden prelude; a plan that would change
+            // visible text is refused rather than shifting the selection.
+            let visible = project_or_complete(prepared.plan.source(), self.kind)
+                .0
+                .visible;
+            if visible != self.projection.visible {
+                return Err(
+                    "The import plan would change the document body; nothing was inserted."
+                        .to_owned(),
+                );
+            }
+            self.buffer
+                .apply_text(prepared.plan.source().to_owned())
+                .map_err(|error| error.to_string())?;
+            self.rebuild_projection(window, cx);
+        }
+        let outcome = FormatOutcome {
+            replacement: prepared.tag.text.clone(),
+            range: selection.clone(),
+            selection: caret..caret,
+        };
+        self.apply_outcome(&outcome, false, window, cx);
+        self.absorb(cx);
+        let ranges = prepared
+            .tag
+            .placeholders
+            .iter()
+            .map(|placeholder| {
+                selection.start + placeholder.range.start..selection.start + placeholder.range.end
+            })
+            .collect();
+        self.install_placeholders(ranges, cx);
+        self.dirty = self.buffer.is_dirty();
+        cx.emit(SessionChanged);
+        cx.notify();
+        Ok(())
+    }
+
+    /// The current placeholder ranges, for navigation and tests.
+    #[cfg(test)]
+    pub(crate) fn placeholder_ranges(&self) -> &[Range<usize>] {
+        &self.placeholders
+    }
+
+    /// Handle Tab, Shift+Tab and Escape while placeholders are active.
+    ///
+    /// Returns whether the key was consumed. Escape always ends navigation; an
+    /// empty set passes the key through to its normal editor meaning.
+    fn handle_placeholder_key(&mut self, step: i32, cx: &mut Context<Self>) -> bool {
+        if self.placeholders.is_empty() {
+            return false;
+        }
+        if step == 0 {
+            self.clear_placeholders(cx);
+            return true;
+        }
+        self.sync_placeholders(cx);
+        if self.placeholders.is_empty() {
+            return false;
+        }
+        let count = self.placeholders.len();
+        self.placeholder_index = if step > 0 {
+            (self.placeholder_index + 1) % count
+        } else {
+            (self.placeholder_index + count - 1) % count
+        };
+        let range = self.placeholders[self.placeholder_index].clone();
+        self.editor
+            .update(cx, |editor, cx| editor.set_selected_range(range, cx));
+        cx.notify();
+        true
+    }
+
+    /// Read back the tracked ranges after an edit.
+    ///
+    /// Decorations are not undo history: when the inserted tag is undone the
+    /// tracked ranges disappear, and a count mismatch ends navigation instead of
+    /// jumping to a guessed offset. Typing at a placeholder leaves its anchor
+    /// in place, so the caret offset advances by the inserted length; otherwise
+    /// Shift+Tab would return before the text just typed.
+    fn sync_placeholders(&mut self, cx: &mut Context<Self>) {
+        let Some(collection) = self.placeholder_collection.clone() else {
+            return;
+        };
+        let anchors = collection.get_ranges(cx);
+        if anchors.len() == self.placeholders.len()
+            && anchors.len() == self.placeholder_offsets.len()
+        {
+            let (text_len, caret) = {
+                let editor = self.editor.read(cx);
+                (editor.text().len(), editor.selected_range().start)
+            };
+            let grew = text_len.saturating_sub(self.placeholder_text_len);
+            let mut positions = Vec::with_capacity(anchors.len());
+            for (anchor, offset) in anchors.iter().zip(&mut self.placeholder_offsets) {
+                let position = anchor.start + *offset;
+                // The anchor did not move and the caret sits exactly after the
+                // inserted text: this placeholder was typed into.
+                if grew > 0 && position + grew == caret {
+                    *offset += grew;
+                }
+                positions.push(anchor.start + *offset);
+            }
+            self.placeholder_text_len = text_len;
+            self.placeholders = positions
+                .into_iter()
+                .map(|position| position..position)
+                .collect();
+            if self.placeholder_index >= self.placeholders.len() {
+                self.placeholder_index = 0;
+            }
+        } else {
+            collection.dispose(cx);
+            self.placeholder_collection = None;
+            self.placeholders.clear();
+            self.placeholder_offsets.clear();
+            self.placeholder_index = 0;
+            self.placeholder_text_len = 0;
+        }
+    }
+
+    /// Decorate the placeholder ranges and put the caret in the first one.
+    fn install_placeholders(&mut self, ranges: Vec<Range<usize>>, cx: &mut Context<Self>) {
+        self.clear_placeholders(cx);
+        let Some(first) = ranges.first().cloned() else {
+            return;
+        };
+        let text = self.editor.read(cx).text();
+        let text_len = text.len();
+        let color = cx.theme().primary;
+        // Decorations reject empty ranges, so anchor each zero-width placeholder
+        // to the character next to it and remember the caret offset.
+        let mut decorations = Vec::with_capacity(ranges.len());
+        let mut offsets = Vec::with_capacity(ranges.len());
+        for range in &ranges {
+            let position = range.start;
+            let (anchor, offset) = if position > 0 {
+                let mut start = position - 1;
+                while start > 0 && !text.is_char_boundary(start) {
+                    start -= 1;
+                }
+                (start..position, position - start)
+            } else {
+                let mut end = 1;
+                while end < text.len() && !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                (0..end.min(text.len()), 0)
+            };
+            if anchor.is_empty() {
+                continue;
+            }
+            offsets.push(offset);
+            decorations.push(
+                RangeDecoration::new(anchor)
+                    .with_style(RangeDecorationStyle::Fill)
+                    .with_color(color),
+            );
+        }
+        if decorations.is_empty() {
+            return;
+        }
+        let collection = self.editor.update(cx, |editor, cx| {
+            editor.create_range_decorations_collection(decorations, cx)
+        });
+        self.placeholder_collection = Some(collection);
+        self.placeholder_offsets = offsets;
+        self.placeholders = ranges;
+        self.placeholder_index = 0;
+        self.placeholder_text_len = text_len;
+        self.editor
+            .update(cx, |editor, cx| editor.set_selected_range(first, cx));
+    }
+
+    fn clear_placeholders(&mut self, cx: &mut Context<Self>) {
+        if let Some(collection) = self.placeholder_collection.take() {
+            collection.dispose(cx);
+        }
+        self.placeholders.clear();
+        self.placeholder_offsets.clear();
+        self.placeholder_index = 0;
+        self.placeholder_text_len = 0;
     }
 
     /// Insert literal text at the selection as one undo step.

@@ -1368,7 +1368,7 @@ fn tag_control(
 /// is copied through the asset service first. Both outcomes use the configured
 /// relative or project-root path mode, and the manual path input is never
 /// validated here.
-fn resolve_image_pick(
+pub(crate) fn resolve_image_pick(
     root: Option<PathBuf>,
     source: Option<String>,
     assets: Option<AssetLocation>,

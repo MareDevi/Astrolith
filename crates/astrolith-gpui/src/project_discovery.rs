@@ -3,6 +3,10 @@ use crate::{
     commands::{CommandAvailability, CommandId},
     editor::{
         assets as asset_insertion,
+        component_builder::{
+            BuilderContext, ComponentSelection, ImagePickContext,
+            snippets::{InsertionContext, prepare},
+        },
         content_finder::{self, FinderEntry},
         copyedit::CopyeditConfig,
         formatting::EditorWiring,
@@ -18,8 +22,11 @@ use crate::{
     runtime, settings,
 };
 use astrolith_astro::{
-    Cancellation, DiscoveryOutcome, DiscoveryRequest, ProjectManifest, contained_path,
-    inspect_project, read_bounded,
+    Cancellation, DiscoveryOutcome, DiscoveryRequest, ProjectManifest,
+    components::{
+        ComponentIndex, ComponentIndexRequest, CorroboratedImport, inspect_components, scan_imports,
+    },
+    contained_path, inspect_project, read_bounded,
     schema::generation::{SchemaGenerationRequest, generate_collection_schemas},
     schema::{CollectionSchema, FieldKind, SchemaFreshness, SchemaRefresh, schema_fingerprint},
 };
@@ -537,6 +544,13 @@ pub(crate) struct ProjectWorkspace {
     writing: WritingModes,
     /// Copyedit configuration applied to every retained session.
     copyedit: CopyeditConfig,
+    /// Static component index for the open project generation.
+    component_index: Option<Arc<ComponentIndex>>,
+    component_error: Option<String>,
+    component_loading: bool,
+    /// Imports seen in indexed entries, for corroborating component specifiers.
+    component_imports: Arc<Vec<CorroboratedImport>>,
+    component_task: Option<Task<()>>,
 }
 
 /// What to do after a dirty session has been saved through the guarded path.
@@ -602,6 +616,32 @@ pub struct ActiveFrontmatter {
     /// Live editor text, including unsaved changes.
     pub text: String,
 }
+/// Upper bound on indexed entries scanned for corroborated imports.
+const MAX_COMPONENT_IMPORT_FILES: usize = 256;
+/// Upper bound on one scanned entry source.
+const MAX_COMPONENT_IMPORT_BYTES: u64 = 256 * 1024;
+
+/// Read the value imports of indexed entries, best effort and bounded.
+///
+/// A scan never fails an insertion: unreadable, oversized or unparseable entry
+/// documents simply contribute nothing.
+fn scan_component_imports(sources: &[PathBuf]) -> Vec<CorroboratedImport> {
+    let mut imports = Vec::new();
+    for source in sources.iter().take(MAX_COMPONENT_IMPORT_FILES) {
+        let Ok(metadata) = std::fs::metadata(source) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > MAX_COMPONENT_IMPORT_BYTES {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(source) else {
+            continue;
+        };
+        imports.extend(scan_imports(&text, source));
+    }
+    imports
+}
+
 impl Drop for ProjectWorkspace {
     fn drop(&mut self) {
         tracing::debug!(
@@ -715,6 +755,11 @@ impl ProjectWorkspace {
             data_references_task: None,
             writing: WritingModes::default(),
             copyedit: CopyeditConfig::default(),
+            component_index: None,
+            component_error: None,
+            component_loading: false,
+            component_imports: Arc::new(Vec::new()),
+            component_task: None,
         }
     }
     /// Save status of the active document, for the tab strip status text.
@@ -1258,6 +1303,7 @@ impl ProjectWorkspace {
         self.rebuild_sort_options();
         self.rebuild_references();
         self.publish_list_state(cx);
+        self.load_components(cx);
         cx.notify();
     }
 
@@ -1683,6 +1729,212 @@ impl ProjectWorkspace {
         inserted
     }
 
+    /// Index the project's MDX components and the imports indexed entries use.
+    ///
+    /// Discovery is bounded static analysis on the blocking lane and carries the
+    /// current generation, so a superseded walk is dropped before publication.
+    fn load_components(&mut self, cx: &mut Context<Self>) {
+        let Some(manifest) = self.manifest.clone() else {
+            self.component_index = None;
+            self.component_error = None;
+            self.component_loading = false;
+            return;
+        };
+        let generation = self.generation;
+        let root = manifest.root().to_path_buf();
+        let cancellation = self.cancellation.clone();
+        let directory = self.resolved_for(None).mdx_component_directory;
+        let sources: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .map(|entry| root.join(entry.entry().source().as_str()))
+            .collect();
+        self.component_loading = true;
+        self.component_task = Some(cx.spawn(async move |this, cx| {
+            let work = runtime::blocking(cx, move || {
+                let mut request = ComponentIndexRequest::new(root, generation, cancellation);
+                if let Some(directory) = directory {
+                    request = request.with_components_directory(directory);
+                }
+                let index = inspect_components(&request).map_err(|error| error.to_string())?;
+                let imports = scan_component_imports(&sources);
+                Ok((index, imports))
+            });
+            let Ok(result) = work.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.component_loading = false;
+                match result {
+                    Ok((index, imports)) => {
+                        this.component_index = Some(Arc::new(index));
+                        this.component_error = None;
+                        this.component_imports = Arc::new(imports);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "component index unavailable");
+                        this.component_index = None;
+                        this.component_error = Some(error);
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The component builder's indexed context for the active document.
+    pub(crate) fn component_builder_context(&self) -> Result<BuilderContext, String> {
+        let path = self
+            .active
+            .clone()
+            .ok_or_else(|| "Open an MDX document before inserting components.".to_owned())?;
+        let collection = self.session_collections.get(&path).cloned();
+        let resolved = self.resolved_for(collection.as_deref());
+        let images = (|| {
+            let root = self.project_root()?;
+            let source = self.active_relative_source()?;
+            Some(ImagePickContext {
+                assets: self.asset_location(collection.as_deref()).ok(),
+                root,
+                source,
+                path_mode: resolved.image_path_mode,
+            })
+        })();
+        let index = self
+            .component_index
+            .clone()
+            .unwrap_or_else(|| Arc::new(ComponentIndex::default()));
+        Ok(BuilderContext {
+            index,
+            imports_enabled: resolved.insert_mdx_imports == Some(true),
+            references: (*self.references).clone(),
+            images,
+            loading: self.component_loading,
+            error: self.component_error.clone(),
+        })
+    }
+
+    /// Insert one chosen component: plan imports again, then edit the writer.
+    ///
+    /// The plan is computed from the live complete source at this moment, so a
+    /// change since the form opened is re-planned rather than applied stale.
+    pub(crate) fn insert_component(
+        &mut self,
+        selection: ComponentSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let Some(path) = self.active.clone() else {
+            return Err("Open an MDX document before inserting components.".to_owned());
+        };
+        let collection = self.session_collections.get(&path).cloned();
+        let Some(session) = self.sessions.get(&path).cloned() else {
+            return Err("The active document is not editable.".to_owned());
+        };
+        // Menus reach this executor without the palette's availability gate, so
+        // the document kind is checked again here, not only when it opens.
+        if session.read(cx).kind() != DocumentKind::Mdx {
+            let message = "Components can only be inserted into MDX documents.".to_owned();
+            self.status = message.clone();
+            cx.notify();
+            return Err(message);
+        }
+        let root = self
+            .project_root()
+            .ok_or_else(|| "Open a project before inserting components.".to_owned())?;
+        let source = self
+            .active_relative_source()
+            .ok_or_else(|| "The active document is outside the project.".to_owned())?;
+        let document = root.join(&source);
+        session.update(cx, |session, cx| session.sync_buffer(cx));
+        let text = session.read(cx).buffer.current_text().to_owned();
+        let visible = session.read(cx).projection.visible.clone();
+        let editor_selection = session.read(cx).editor.read(cx).selected_range();
+        let (current_imports, other_imports) = self.corroborated_imports(collection.as_deref());
+        let catalog = self.component_index.clone();
+        let prepared = match prepare(&InsertionContext {
+            component: &selection.component,
+            values: selection.values,
+            planned: selection.planned,
+            content: selection.content,
+            client_directive: selection.client_directive,
+            root: &root,
+            document: &document,
+            source: &text,
+            imports_enabled: selection.imports_enabled,
+            current_imports: &current_imports,
+            other_imports: &other_imports,
+            catalog: catalog.as_deref().map_or(&[], ComponentIndex::components),
+            visible: &visible,
+            selection: editor_selection,
+        }) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // Planning failures are visible like insertion failures.
+                self.status = error.clone();
+                cx.notify();
+                return Err(error);
+            }
+        };
+        let imported = prepared.changes_imports(&text);
+        let warnings = prepared.plan.warnings().join(" ");
+        let result = session.update(cx, |session, cx| {
+            session.insert_component(prepared, window, cx)
+        });
+        match result {
+            Ok(()) => {
+                self.status = if imported {
+                    format!(
+                        "Inserted {}. Its import was added; undo removes only the component.",
+                        selection.component.name
+                    )
+                } else {
+                    format!("Inserted {}.", selection.component.name)
+                };
+                if !warnings.is_empty() {
+                    self.status.push(' ');
+                    self.status.push_str(&warnings);
+                }
+                cx.notify();
+                Ok(())
+            }
+            Err(error) => {
+                self.status = error.clone();
+                cx.notify();
+                Err(error)
+            }
+        }
+    }
+
+    /// Split cached imports into the active collection first, then the rest.
+    fn corroborated_imports(
+        &self,
+        collection: Option<&str>,
+    ) -> (Vec<CorroboratedImport>, Vec<CorroboratedImport>) {
+        let mut collections: HashMap<PathBuf, String> = HashMap::new();
+        if let Some(root) = self.project_root() {
+            for entry in self.entries.iter() {
+                collections.insert(
+                    root.join(entry.entry().source().as_str()),
+                    entry.entry().id().collection().as_str().to_owned(),
+                );
+            }
+        }
+        let mut current = Vec::new();
+        let mut other = Vec::new();
+        for import in self.component_imports.iter() {
+            if collections.get(&import.document).map(String::as_str) == collection {
+                current.push(import.clone());
+            } else {
+                other.push(import.clone());
+            }
+        }
+        (current, other)
+    }
+
     /// Copy dropped files into assets and insert their Markdown.
     ///
     /// Copying runs on the blocking service lane; nothing here touches the disk
@@ -2023,6 +2275,11 @@ impl ProjectWorkspace {
         self.references_revision = 0;
         self.data_references.clear();
         self.data_references_task = None;
+        self.component_index = None;
+        self.component_error = None;
+        self.component_loading = false;
+        self.component_imports = Arc::new(Vec::new());
+        self.component_task = None;
         self.pending_create = None;
         self.pending_recovery.clear();
         self.manifest = None;
@@ -2388,6 +2645,12 @@ impl ProjectWorkspace {
         cx: &mut Context<Self>,
     ) {
         self.open_entry(0, window, cx);
+    }
+
+    /// Whether the static component index for this generation has landed.
+    #[cfg(test)]
+    pub(crate) fn components_loaded(&self) -> bool {
+        !self.component_loading && self.component_index.is_some()
     }
 
     fn open_entry(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -3194,6 +3457,7 @@ impl ProjectWorkspace {
         self.rebuild_sort_options();
         self.rebuild_references();
         self.publish_list_state(cx);
+        self.load_components(cx);
         // The initial open happens before the project scope is known; apply the
         // resolved content-directory overrides and re-index when they differ.
         self.refresh_collection_bases(cx);
@@ -3376,6 +3640,7 @@ impl ProjectWorkspace {
         self.reconcile_sessions(cx);
         self.load_data_references(cx);
         self.rebuild_references();
+        self.load_components(cx);
         if !diagnostics.is_empty() {
             self.status = format!("Project diagnostics: {}", diagnostics.join("; "));
         }
@@ -3570,9 +3835,9 @@ impl ProjectWorkspace {
                 .focus_handle(cx)
                 .is_focused(window)
         });
-        let markdown = session
-            .as_ref()
-            .is_some_and(|session| session.read(cx).kind() == DocumentKind::Markdown);
+        let kind = session.as_ref().map(|session| session.read(cx).kind());
+        let markdown = kind == Some(DocumentKind::Markdown);
+        let mdx = kind == Some(DocumentKind::Mdx);
         let selection_nonempty = session
             .as_ref()
             .is_some_and(|session| !session.read(cx).editor.read(cx).selected_range().is_empty());
@@ -3582,6 +3847,7 @@ impl ProjectWorkspace {
             busy: self.is_busy(),
             editor_focused: focused,
             markdown_document: markdown,
+            mdx_document: mdx,
             selection_nonempty,
         }
     }
@@ -10642,5 +10908,466 @@ export const collections = {blog, dataAuthors};
             let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
             assert_eq!(copied.as_deref(), Some(expected), "{}", command.label());
         }
+    }
+
+    /// A real Astro project with one indexed project component and two entries.
+    fn component_builder_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("node_modules/astro")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/@astrojs/mdx")).unwrap();
+        std::fs::write(
+            root.join("node_modules/astro/package.json"),
+            r#"{"version":"5.18.2"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("node_modules/@astrojs/mdx/package.json"),
+            r#"{"version":"4.3.14","peerDependencies":{"astro":"^5.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"builder-fixture","dependencies":{"astro":"5.18.2","@astrojs/starlight":"0.42.8"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("astro.config.mjs"),
+            "import { defineConfig } from 'astro/config';\nimport mdx from '@astrojs/mdx';\nexport default defineConfig({ integrations: [mdx()] });\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/components")).unwrap();
+        std::fs::write(
+            root.join("src/components/Callout.astro"),
+            "---\n/**\n * A framed callout.\n */\ninterface Props {\n  /** Callout heading. */\n  title: string;\n  /** Visual tone. */\n  tone?: \"note\" | \"tip\";\n  /** Cover image. */\n  cover?: ImageMetadata;\n}\n---\n\n<section><slot /></section>\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/components/lower.astro"),
+            "---\ninterface Props {\n  label: string;\n}\n---\n\n<span>{label}</span>\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/content/blog")).unwrap();
+        std::fs::write(
+            root.join("src/content.config.ts"),
+            "import { defineCollection } from 'astro:content';\nimport { glob } from 'astro/loaders';\nconst blog = defineCollection({ loader: glob({ base: 'src/content', pattern: '**/*.{md,mdx}' }) });\nexport const collections = { blog };\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/content/blog/post.mdx"),
+            "---\ntitle: Post\n---\n\n# Body\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    async fn wait_for_components(cx: &mut TestAppContext, view: &Entity<ProjectWorkspace>) {
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| {
+                !view.component_loading && view.component_index.is_some()
+            }) {
+                return;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        panic!("the component index never loaded");
+    }
+
+    fn callout(
+        view: &Entity<ProjectWorkspace>,
+        cx: &mut TestAppContext,
+    ) -> astrolith_astro::components::Component {
+        view.read_with(cx, |view, _| {
+            view.component_index
+                .as_ref()
+                .expect("the component index is loaded")
+                .components()
+                .iter()
+                .find(|component| {
+                    component.name == "Callout"
+                        && matches!(
+                            component.location,
+                            astrolith_astro::components::ComponentLocation::Project { .. }
+                        )
+                })
+                .expect("the fixture Callout is indexed")
+                .clone()
+        })
+    }
+
+    fn component_selection(
+        component: &astrolith_astro::components::Component,
+        title: &str,
+        imports_enabled: bool,
+    ) -> ComponentSelection {
+        let mut form = crate::editor::component_builder::form::FormState::new(component, None);
+        let index = form
+            .fields()
+            .iter()
+            .position(|field| field.prop.name == "title")
+            .expect("Callout has a title prop");
+        form.set_text(index, title);
+        ComponentSelection {
+            component: component.clone(),
+            values: form.values(),
+            planned: form.planned_values(),
+            content: None,
+            client_directive: None,
+            imports_enabled,
+        }
+    }
+
+    fn select_visible_end(session: &Entity<DocumentSession>, cx: &mut TestAppContext) {
+        let end = session.read_with(cx, |session, _| session.projection.visible.len());
+        cx.update(|cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(end..end, cx));
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn component_insertion_writes_the_tag_and_only_the_planned_import(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = component_builder_fixture();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        wait_for_components(cx, &view).await;
+        let (_, session) = open_entry_for(cx, handle, &view, "src/content/blog/post.mdx").await;
+        let component = callout(&view, cx);
+
+        select_visible_end(&session, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.insert_component(component_selection(&component, "Hello", false), window, cx)
+            })
+        })
+        .unwrap()
+        .expect("the tag inserts without imports");
+        assert_eq!(
+            session.read_with(cx, |session, _| session.buffer.current_text().to_owned()),
+            "---\ntitle: Post\n---\n\n# Body\n\n<Callout title=\"Hello\">\n  \n</Callout>\n",
+            "imports off must add the tag only"
+        );
+
+        // Undo the tag, then insert the same component with imports enabled.
+        let editor = session.read_with(cx, |session, _| session.editor.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press("ctrl-z", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        select_visible_end(&session, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.insert_component(component_selection(&component, "Hello", true), window, cx)
+            })
+        })
+        .unwrap()
+        .expect("the tag inserts with its planned import");
+        let imported = session.read_with(cx, |session, _| session.buffer.current_text().to_owned());
+        assert_eq!(
+            imported,
+            "---\ntitle: Post\n---\n\nimport Callout from \"../../components/Callout.astro\";\n\n# Body\n\n<Callout title=\"Hello\">\n  \n</Callout>\n",
+            "imports on must add the planned import and the tag"
+        );
+        assert!(view.read_with(cx, |view, _| view.status.contains("Its import was added")));
+    }
+
+    fn named_component(
+        view: &Entity<ProjectWorkspace>,
+        cx: &mut TestAppContext,
+        name: &str,
+    ) -> astrolith_astro::components::Component {
+        view.read_with(cx, |view, _| {
+            view.component_index
+                .as_ref()
+                .expect("the component index is loaded")
+                .components()
+                .iter()
+                .find(|component| component.name == name)
+                .unwrap_or_else(|| panic!("{name} is indexed"))
+                .clone()
+        })
+    }
+
+    #[gpui_kit::test]
+    async fn insertion_plans_against_a_dirty_body(cx: &mut TestAppContext) {
+        let dir = component_builder_fixture();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        wait_for_components(cx, &view).await;
+        let (_, session) = open_entry_for(cx, handle, &view, "src/content/blog/post.mdx").await;
+        let component = callout(&view, cx);
+
+        // Type without saving: the plan and the tag must both use the live text.
+        select_visible_end(&session, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session.insert_snippet("Unsaved paragraph.\n".to_owned(), window, cx)
+            })
+        })
+        .unwrap();
+        assert!(session.read_with(cx, |session, _| session.buffer.is_dirty()));
+        select_visible_end(&session, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.insert_component(component_selection(&component, "Hello", true), window, cx)
+            })
+        })
+        .unwrap()
+        .expect("a dirty body still takes the tag and its import");
+        assert_eq!(
+            session.read_with(cx, |session, _| session.buffer.current_text().to_owned()),
+            concat!(
+                "---\ntitle: Post\n---\n\n",
+                "import Callout from \"../../components/Callout.astro\";\n",
+                "\n# Body\nUnsaved paragraph.\n\n",
+                "<Callout title=\"Hello\">\n  \n</Callout>\n",
+            )
+        );
+        assert!(session.read_with(cx, |session, _| session.buffer.is_dirty()));
+    }
+
+    #[gpui_kit::test]
+    async fn a_non_importable_name_inserts_the_tag_and_reports_the_warning(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = component_builder_fixture();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        wait_for_components(cx, &view).await;
+        let (_, session) = open_entry_for(cx, handle, &view, "src/content/blog/post.mdx").await;
+        let lower = named_component(&view, cx, "lower");
+        let selection = ComponentSelection {
+            values: crate::editor::component_builder::form::FormState::new(&lower, None).values(),
+            planned: Vec::new(),
+            content: None,
+            client_directive: None,
+            imports_enabled: true,
+            component: lower,
+        };
+        select_visible_end(&session, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.insert_component(selection, window, cx))
+        })
+        .unwrap()
+        .expect("the tag still inserts; only the import is refused");
+        let text = session.read_with(cx, |session, _| session.buffer.current_text().to_owned());
+        assert!(text.contains("<lower"), "{text:?}");
+        assert!(!text.contains("import lower"), "{text:?}");
+        assert!(
+            view.read_with(cx, |view, _| view.status.contains("uppercase")),
+            "the planning warning is surfaced: {}",
+            view.read_with(cx, |view, _| view.status.clone())
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn stale_import_plan_is_refused_at_insertion_and_surfaced(cx: &mut TestAppContext) {
+        let dir = component_builder_fixture();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        wait_for_components(cx, &view).await;
+        let (path, session) = open_entry_for(cx, handle, &view, "src/content/blog/post.mdx").await;
+        let component = callout(&view, cx);
+        let root = view.read_with(cx, |view, _| view.project_root().unwrap());
+        let source = session.read_with(cx, |session, _| session.buffer.current_text().to_owned());
+        let visible = session.read_with(cx, |session, _| session.projection.visible.clone());
+        let selection = component_selection(&component, "Hello", true);
+        let prepared = prepare(&InsertionContext {
+            component: &component,
+            values: selection.values,
+            planned: selection.planned,
+            content: None,
+            client_directive: None,
+            root: &root,
+            document: &path,
+            source: &source,
+            imports_enabled: true,
+            current_imports: &[],
+            other_imports: &[],
+            catalog: &[],
+            visible: &visible,
+            selection: 0..0,
+        })
+        .expect("the plan is valid for the original source");
+
+        // The document changes between planning and insertion.
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session.insert_snippet("changed ".to_owned(), window, cx)
+            })
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let changed = session.read_with(cx, |session, _| session.buffer.current_text().to_owned());
+        assert_ne!(changed, source);
+        let error = cx
+            .update_window(handle.into(), |_, window, cx| {
+                session.update(cx, |session, cx| {
+                    session.insert_component(prepared, window, cx)
+                })
+            })
+            .unwrap()
+            .expect_err("a stale plan must be refused");
+        assert!(error.contains("stale"), "{error}");
+        assert_eq!(
+            session.read_with(cx, |session, _| session.buffer.current_text().to_owned()),
+            changed,
+            "a refused stale plan must not write anything"
+        );
+
+        // A real planning failure is shown in the workspace status and keeps the source.
+        let mut form = crate::editor::component_builder::form::FormState::new(&component, None);
+        let title = form
+            .fields()
+            .iter()
+            .position(|field| field.prop.name == "title")
+            .unwrap();
+        form.set_text(title, "Hello");
+        let cover = form
+            .fields()
+            .iter()
+            .position(|field| field.prop.name == "cover")
+            .unwrap();
+        form.set_text(cover, "../assets/missing.png");
+        let failing = ComponentSelection {
+            component: component.clone(),
+            values: form.values(),
+            planned: form.planned_values(),
+            content: None,
+            client_directive: None,
+            imports_enabled: true,
+        };
+        let before = session.read_with(cx, |session, _| session.buffer.current_text().to_owned());
+        let error = cx
+            .update_window(handle.into(), |_, window, cx| {
+                view.update(cx, |view, cx| view.insert_component(failing, window, cx))
+            })
+            .unwrap()
+            .expect_err("a missing planned image must fail visibly");
+        assert!(error.contains("missing.png"), "{error}");
+        assert_eq!(view.read_with(cx, |view, _| view.status.clone()), error);
+        assert_eq!(
+            session.read_with(cx, |session, _| session.buffer.current_text().to_owned()),
+            before
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn undo_removes_the_inserted_tag_and_leaves_the_import(cx: &mut TestAppContext) {
+        let dir = component_builder_fixture();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        wait_for_components(cx, &view).await;
+        let (_, session) = open_entry_for(cx, handle, &view, "src/content/blog/post.mdx").await;
+        let component = callout(&view, cx);
+        select_visible_end(&session, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.insert_component(component_selection(&component, "Hello", true), window, cx)
+            })
+        })
+        .unwrap()
+        .unwrap();
+        assert!(session.read_with(cx, |session, _| {
+            session.buffer.current_text().contains("<Callout")
+        }));
+
+        let editor = session.read_with(cx, |session, _| session.editor.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press("ctrl-z", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let text = session.read_with(cx, |session, _| session.buffer.current_text().to_owned());
+        assert!(!text.contains("<Callout"), "{text:?}");
+        assert!(
+            text.contains("import Callout from \"../../components/Callout.astro\";"),
+            "undo intentionally keeps the harmless import: {text:?}"
+        );
+        assert!(text.contains("# Body"), "{text:?}");
+    }
+
+    #[gpui_kit::test]
+    async fn placeholder_navigation_visits_the_blank_required_prop_and_exits(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = component_builder_fixture();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        wait_for_components(cx, &view).await;
+        let (_, session) = open_entry_for(cx, handle, &view, "src/content/blog/post.mdx").await;
+        let component = callout(&view, cx);
+        select_visible_end(&session, cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.insert_component(component_selection(&component, "", false), window, cx)
+            })
+        })
+        .unwrap()
+        .unwrap();
+
+        let ranges = session.read_with(cx, |session, _| session.placeholder_ranges().to_vec());
+        assert_eq!(
+            ranges.len(),
+            2,
+            "blank title and wrapped content placeholders"
+        );
+        let caret = session.read_with(cx, |session, cx| session.editor.read(cx).selected_range());
+        assert_eq!(
+            caret.start, ranges[0].start,
+            "the empty required prop receives the caret"
+        );
+
+        let editor = session.read_with(cx, |session, _| session.editor.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press("tab", cx);
+        })
+        .unwrap();
+        let caret = session.read_with(cx, |session, cx| session.editor.read(cx).selected_range());
+        assert_eq!(
+            caret.start, ranges[1].start,
+            "Tab moves to the content placeholder"
+        );
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("shift-tab", cx);
+        })
+        .unwrap();
+        let caret = session.read_with(cx, |session, cx| session.editor.read(cx).selected_range());
+        assert_eq!(
+            caret.start, ranges[0].start,
+            "Shift+Tab returns to the required prop"
+        );
+        let before = session.read_with(cx, |session, _| session.buffer.current_text().to_owned());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("escape", cx);
+        })
+        .unwrap();
+        assert!(
+            session.read_with(cx, |session, _| session.placeholder_ranges().is_empty()),
+            "Escape ends placeholder navigation"
+        );
+        assert_eq!(
+            session.read_with(cx, |session, _| session.buffer.current_text().to_owned()),
+            before,
+            "placeholder navigation must not edit the source"
+        );
     }
 }

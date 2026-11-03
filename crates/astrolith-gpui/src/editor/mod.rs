@@ -1,4 +1,5 @@
 pub(crate) mod assets;
+pub(crate) mod component_builder;
 pub(crate) mod content_finder;
 pub(crate) mod copyedit;
 pub(crate) mod formatting;

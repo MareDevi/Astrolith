@@ -7,6 +7,7 @@ use std::{
 use crate::{
     commands::{self, COMMANDS, CommandId},
     editor::{
+        component_builder::{ComponentBuilder, ComponentBuilderEvent},
         content_finder::{self, FinderEntry},
         copyedit::CopyeditConfig,
         header::DocumentHeader,
@@ -136,6 +137,7 @@ pub(crate) struct Shell {
     palette_focus: FocusHandle,
     finder: Entity<CommandState>,
     finder_hits: Arc<Mutex<Vec<FinderEntry>>>,
+    builder: Entity<ComponentBuilder>,
     opening: bool,
     opening_task: Option<Task<()>>,
     file_status: String,
@@ -274,6 +276,7 @@ impl Shell {
         });
         let palette = cx.new(|cx| CommandState::new(window, cx));
         let finder = cx.new(|cx| CommandState::new(window, cx));
+        let builder = cx.new(|cx| ComponentBuilder::new(window, cx));
         let latest = Arc::new(Mutex::new(LatestPreferences {
             global: (0, settings.clone()),
             project: None,
@@ -321,9 +324,10 @@ impl Shell {
         // Project load, entry activation and watcher refreshes notify the
         // workspace without emitting a text-edit event; the preview panel must
         // still attach on open and follow the active entry.
-        subscriptions.push(cx.observe(&project, |this, _, cx| {
+        subscriptions.push(cx.observe(&project, |this, project, cx| {
             this.sync_preview(cx);
             this.track_active_entry(cx);
+            this.refresh_component_builder(&project, cx);
         }));
         let apply_owner = project.downgrade();
         subscriptions.push(cx.subscribe_in(
@@ -334,6 +338,27 @@ impl Shell {
                 let _ = apply_owner.update(cx, |project, cx| {
                     project.apply_frontmatter_edit(edit, window, cx)
                 });
+            },
+        ));
+        // The builder form owns its own inputs; the shell only performs the
+        // insertion it asks for and closes the dialog on success.
+        subscriptions.push(cx.subscribe_in(
+            &builder,
+            window,
+            |this, builder, event: &ComponentBuilderEvent, window, cx| {
+                let ComponentBuilderEvent::Insert(selection) = event;
+                let result = this.project.update(cx, |project, cx| {
+                    project.insert_component(selection.clone(), window, cx)
+                });
+                match result {
+                    Ok(()) => {
+                        window.close_dialog(cx);
+                        builder.update(cx, |builder, cx| builder.close(cx));
+                    }
+                    Err(message) => {
+                        builder.update(cx, |builder, cx| builder.fail(message, cx));
+                    }
+                }
             },
         ));
         if let Some(store) = store.clone() {
@@ -408,6 +433,7 @@ impl Shell {
             palette_focus: cx.focus_handle().tab_stop(true),
             finder,
             finder_hits: Arc::new(Mutex::new(Vec::new())),
+            builder,
             opening: false,
             opening_task: None,
             file_status: "Readonly · No file open".into(),
@@ -849,6 +875,7 @@ impl Shell {
             }
             CommandId::OpenPalette => self.open_palette(window, cx),
             CommandId::OpenContentFinder => self.open_content_finder(window, cx),
+            CommandId::OpenComponentBuilder => self.open_component_builder(window, cx),
             CommandId::ToggleSidebar => self.toggle_panel(PanelKind::Sidebar, window, cx),
             CommandId::ToggleInspector => self.toggle_panel(PanelKind::Inspector, window, cx),
             CommandId::TogglePreview => self.toggle_panel(PanelKind::Preview, window, cx),
@@ -1065,6 +1092,82 @@ impl Shell {
             )
         });
         self.palette.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// Open the component builder for the active MDX document.
+    ///
+    /// The Format menu is not gated before P12, so the command itself re-checks
+    /// the document kind: an MDX tag must never be offered for Markdown.
+    fn open_component_builder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        if !self
+            .project
+            .read(cx)
+            .command_availability(cx, window)
+            .mdx_document
+        {
+            self.file_status = "The component builder is available in MDX documents only.".into();
+            cx.notify();
+            return;
+        }
+        let context = match self.project.read(cx).component_builder_context() {
+            Ok(context) => context,
+            Err(message) => {
+                self.file_status = message;
+                cx.notify();
+                return;
+            }
+        };
+        self.builder
+            .update(cx, |builder, cx| builder.open(context, window, cx));
+        let view = self.builder.clone();
+        let close = self.builder.downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let close = close.clone();
+            dialog
+                .title("Insert MDX component")
+                .w_128()
+                .on_close(move |_, _, cx| {
+                    let _ = close.update(cx, |builder, cx| builder.close(cx));
+                })
+                .child(view.clone())
+        });
+        self.builder
+            .update(cx, |builder, cx| builder.focus_search(window, cx));
+    }
+
+    /// Hand a republished component index to an open builder.
+    ///
+    /// Opening the builder during the initial walk would otherwise leave a
+    /// permanently empty palette; the project notifies on publication, and an
+    /// open form keeps its state.
+    fn refresh_component_builder(
+        &mut self,
+        project: &Entity<ProjectWorkspace>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.builder.read(cx).is_open() {
+            return;
+        }
+        if let Ok(context) = project.read(cx).component_builder_context() {
+            self.builder
+                .update(cx, |builder, cx| builder.refresh(context, cx));
+        }
+    }
+
+    /// `Mod+/` dispatch: a comment in `.md`, the component builder in `.mdx`.
+    fn mod_slash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let availability = self.project.read(cx).command_availability(cx, window);
+        if !availability.editor_focused {
+            return;
+        }
+        if availability.markdown_document {
+            self.execute(CommandId::ToggleComment, window, cx);
+        } else if availability.mdx_document {
+            self.execute(CommandId::OpenComponentBuilder, window, cx);
+        }
     }
 
     /// Open the searchable index of every entry in the project.
@@ -1297,6 +1400,7 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::Heading4 => IconName::Heading4,
         CommandId::Paragraph => IconName::Pilcrow,
         CommandId::ToggleComment => IconName::MessageCircle,
+        CommandId::OpenComponentBuilder => IconName::FilePlus,
         CommandId::ToggleFocusMode => IconName::Eye,
         CommandId::ToggleTypewriterMode => IconName::Type,
         CommandId::ToggleCopyeditNouns
@@ -1419,6 +1523,9 @@ impl Render for Shell {
             .on_action(cx.listener(|this, command: &CommandId, window, cx| {
                 this.execute(*command, window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &commands::ModSlash, window, cx| this.mod_slash(window, cx)),
+            )
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -1676,6 +1783,8 @@ fn project_package_name(root: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{editor::component_builder::BuilderContext, frontmatter::ReferenceCatalog};
+    use astrolith_astro::components::ComponentIndex;
     use gpui_kit::{
         Bounds, Point, TestAppContext, WindowBounds, WindowHandle, WindowOptions, base::Root,
         point, px, size, test::TestWindowExt,
@@ -3156,5 +3265,393 @@ mod tests {
                 assert!(editor.read(cx).focus_handle(cx).is_focused(window));
             }).unwrap();
         }
+    }
+
+    /// A real Astro project with a project component, a package catalog and
+    /// both a Markdown and an MDX entry.
+    fn component_shell_fixture(auto_import: bool) -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir_all(root.join("node_modules/astro")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/@astrojs/mdx")).unwrap();
+        std::fs::write(
+            root.join("node_modules/astro/package.json"),
+            r#"{"version":"5.18.2"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("node_modules/@astrojs/mdx/package.json"),
+            r#"{"version":"4.3.14","peerDependencies":{"astro":"^5.0.0"}}"#,
+        )
+        .unwrap();
+        let dependencies = if auto_import {
+            r#"{"name":"builder-site","dependencies":{"astro":"5.18.2","@astrojs/starlight":"0.42.8"},"devDependencies":{"astro-auto-import":"0.4.4"}}"#
+        } else {
+            r#"{"name":"builder-site","dependencies":{"astro":"5.18.2","@astrojs/starlight":"0.42.8"}}"#
+        };
+        std::fs::write(root.join("package.json"), dependencies).unwrap();
+        std::fs::write(
+            root.join("astro.config.mjs"),
+            "import { defineConfig } from 'astro/config';\nimport mdx from '@astrojs/mdx';\nexport default defineConfig({ integrations: [mdx()] });\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/components")).unwrap();
+        std::fs::write(
+            root.join("src/components/Callout.astro"),
+            "---\n/**\n * A framed callout.\n */\ninterface Props {\n  /** Callout heading. */\n  title: string;\n  /** Visual tone. */\n  tone?: \"note\" | \"tip\";\n}\n---\n\n<section><slot /></section>\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src/content")).unwrap();
+        std::fs::write(
+            root.join("src/content.config.ts"),
+            "import { defineCollection } from 'astro:content';\nimport { glob } from 'astro/loaders';\nconst blog = defineCollection({ loader: glob({ base: './src/content', pattern: '**/*.{md,mdx}' }) });\nexport const collections = { blog };\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/content/first.md"), "# First\n").unwrap();
+        std::fs::write(root.join("src/content/doc.mdx"), "# Document\n").unwrap();
+        directory
+    }
+
+    async fn wait_for_components(cx: &mut TestAppContext, project: &Entity<ProjectWorkspace>) {
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if project.read_with(cx, |project, _| project.components_loaded()) {
+                return;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        panic!("the component index never loaded");
+    }
+
+    async fn open_source(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+        project: &Entity<ProjectWorkspace>,
+        source: &str,
+    ) -> std::path::PathBuf {
+        let source = source.to_owned();
+        cx.update_window(handle.into(), |_, window, cx| {
+            project.update(cx, |project, cx| {
+                project.reopen_last_entry(Some(&source), window, cx)
+            })
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if let Some(path) = project.read_with(cx, |project, cx| {
+                project
+                    .active_path()
+                    .filter(|_| project.active_session(cx).is_some())
+                    .filter(|path| path.ends_with(&source))
+            }) {
+                return path;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        panic!("the session never opened for {source}");
+    }
+
+    #[gpui_kit::test]
+    async fn mod_slash_comments_markdown_and_opens_the_component_builder_for_mdx(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let directory = component_shell_fixture(false);
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        open_project(cx, handle, &view, directory.path().to_path_buf());
+        let project = view.read_with(cx, |view, _| view.project.clone());
+        cx.condition(&project, |project, _| !project.is_loading())
+            .await;
+        wait_for_components(cx, &project).await;
+
+        open_source(cx, handle, &project, "src/content/first.md").await;
+        let session = project.read_with(cx, |project, cx| project.active_session(cx).unwrap());
+        let editor = session.read_with(cx, |session, _| session.editor.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| editor.set_selected_range(0..7, cx));
+            });
+            window.press("ctrl-/", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(
+                !window.has_active_dialog(cx),
+                "Mod+/ in Markdown must not open the MDX builder"
+            );
+        })
+        .unwrap();
+        session.read_with(cx, |session, _| {
+            assert!(
+                session.projection.visible.contains("<!--"),
+                "Mod+/ in Markdown toggles a comment: {:?}",
+                session.projection.visible
+            );
+        });
+
+        open_source(cx, handle, &project, "src/content/doc.mdx").await;
+        let session = project.read_with(cx, |project, cx| project.active_session(cx).unwrap());
+        let editor = session.read_with(cx, |session, _| session.editor.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press("ctrl-/", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(
+                window.has_active_dialog(cx),
+                "Mod+/ in MDX opens the component builder"
+            );
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(
+                !window.has_active_dialog(cx),
+                "Esc closes the builder from the palette"
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn builder_palette_groups_searches_and_warns_without_changing_the_setting(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let directory = component_shell_fixture(true);
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        open_project(cx, handle, &view, directory.path().to_path_buf());
+        let project = view.read_with(cx, |view, _| view.project.clone());
+        cx.condition(&project, |project, _| !project.is_loading())
+            .await;
+        wait_for_components(cx, &project).await;
+        open_source(cx, handle, &project, "src/content/doc.mdx").await;
+        let session = project.read_with(cx, |project, cx| project.active_session(cx).unwrap());
+        let editor = session.read_with(cx, |session, _| session.editor.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press("ctrl-/", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let builder = view.read_with(cx, |view, _| view.builder.clone());
+
+        let rows = builder.read_with(cx, |builder, _| builder.palette_rows());
+        let first = rows.first().expect("the palette has rows");
+        assert_eq!(first.0, "Callout", "project components come first");
+        assert_eq!(first.1, None, "a project component has no package group");
+        assert_eq!(first.2, "Requires title");
+        let first_package = rows
+            .iter()
+            .position(|row| row.1.is_some())
+            .expect("package components follow the project group");
+        assert!(rows[..first_package].iter().all(|row| row.1.is_none()));
+        let tabs = rows
+            .iter()
+            .find(|row| row.0 == "Tabs")
+            .expect("the Starlight catalog is indexed");
+        assert_eq!(tabs.1.as_deref(), Some("@astrojs/starlight/components"));
+        assert_eq!(tabs.2, "1 optional");
+        assert!(
+            builder.read_with(cx, |builder, _| builder.auto_import_warning().is_some()),
+            "declaring astro-auto-import shows the warning"
+        );
+
+        // Search through the real palette input.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.input("tabs", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let hits = builder.read_with(cx, |builder, _| builder.palette_rows());
+        assert_eq!(hits[0].0, "Tabs", "exact names rank first: {hits:?}");
+        assert_eq!(hits[0].1.as_deref(), Some("@astrojs/starlight/components"));
+
+        // Opening and searching never flip the per-project import opt-in.
+        assert!(
+            !project.read_with(cx, |project, _| {
+                project
+                    .component_builder_context()
+                    .expect("an active document has a builder context")
+                    .imports_enabled
+            }),
+            "the warning must not mutate the project setting"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn the_format_menu_command_cannot_open_the_builder_for_markdown(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let directory = component_shell_fixture(false);
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        open_project(cx, handle, &view, directory.path().to_path_buf());
+        let project = view.read_with(cx, |view, _| view.project.clone());
+        cx.condition(&project, |project, _| !project.is_loading())
+            .await;
+        wait_for_components(cx, &project).await;
+        open_source(cx, handle, &project, "src/content/first.md").await;
+
+        // The menu item is not gated before P12, so the executor must refuse a
+        // Markdown document even though the command was dispatched directly.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::OpenComponentBuilder, window, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(
+                !window.has_active_dialog(cx),
+                "the builder must not open for Markdown"
+            );
+        })
+        .unwrap();
+        assert!(
+            view.read_with(cx, |view, _| view.file_status.contains("MDX")),
+            "the refusal is visible: {}",
+            view.read_with(cx, |view, _| view.file_status.clone())
+        );
+        assert!(view.read_with(cx, |view, cx| {
+            view.builder.read_with(cx, |builder, _| !builder.is_open())
+        }));
+    }
+
+    #[gpui_kit::test]
+    async fn builder_opened_while_indexing_refreshes_when_the_index_publishes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let directory = component_shell_fixture(false);
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        open_project(cx, handle, &view, directory.path().to_path_buf());
+        let project = view.read_with(cx, |view, _| view.project.clone());
+        cx.condition(&project, |project, _| !project.is_loading())
+            .await;
+        wait_for_components(cx, &project).await;
+        open_source(cx, handle, &project, "src/content/doc.mdx").await;
+
+        // Open the builder with the context it would have had mid-walk.
+        let builder = view.read_with(cx, |view, _| view.builder.clone());
+        let loading = BuilderContext {
+            index: Arc::new(ComponentIndex::default()),
+            imports_enabled: false,
+            references: ReferenceCatalog::new(),
+            images: None,
+            loading: true,
+            error: None,
+        };
+        cx.update_window(handle.into(), |_, window, cx| {
+            builder.update(cx, |builder, cx| builder.open(loading, window, cx));
+        })
+        .unwrap();
+        assert!(
+            builder.read_with(cx, |builder, _| builder.palette_rows().is_empty()),
+            "a mid-walk context starts empty"
+        );
+
+        // The project's publication notification refreshes the open palette.
+        cx.update(|cx| project.update(cx, |_, cx| cx.notify()));
+        cx.run_until_parked();
+        let rows = builder.read_with(cx, |builder, _| builder.palette_rows());
+        assert!(
+            rows.iter().any(|row| row.0 == "Callout"),
+            "the published index replaces the loading palette: {rows:?}"
+        );
+        assert!(
+            !builder.read_with(cx, |builder, _| builder.is_loading()),
+            "the loading note is cleared once the index publishes"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn builder_escape_returns_to_the_palette_and_ctrl_enter_inserts(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let directory = component_shell_fixture(false);
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        open_project(cx, handle, &view, directory.path().to_path_buf());
+        let project = view.read_with(cx, |view, _| view.project.clone());
+        cx.condition(&project, |project, _| !project.is_loading())
+            .await;
+        wait_for_components(cx, &project).await;
+        open_source(cx, handle, &project, "src/content/doc.mdx").await;
+        let session = project.read_with(cx, |project, cx| project.active_session(cx).unwrap());
+        let editor = session.read_with(cx, |session, _| session.editor.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press("ctrl-/", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let builder = view.read_with(cx, |view, _| view.builder.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.input("callout", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("enter", cx);
+        })
+        .unwrap();
+        assert!(
+            builder.read_with(cx, |builder, _| builder.stage_is_form()),
+            "Enter opens the highlighted component's form"
+        );
+
+        // Esc goes back to the palette without closing the dialog.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("escape", cx);
+        })
+        .unwrap();
+        assert!(!builder.read_with(cx, |builder, _| builder.stage_is_form()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(window.has_active_dialog(cx));
+            window.press("enter", cx);
+        })
+        .unwrap();
+        assert!(builder.read_with(cx, |builder, _| builder.stage_is_form()));
+        let preview = builder
+            .read_with(cx, |builder, _| builder.preview_tag())
+            .expect("the form previews its tag");
+        assert!(preview.starts_with("<Callout"), "{preview:?}");
+
+        // Ctrl+Enter inserts and closes the dialog.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("ctrl-enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(!window.has_active_dialog(cx));
+        })
+        .unwrap();
+        session.read_with(cx, |session, _| {
+            assert!(
+                session
+                    .buffer
+                    .current_text()
+                    .contains("<Callout title=\"\">"),
+                "Ctrl+Enter inserts the tag: {:?}",
+                session.buffer.current_text()
+            );
+        });
     }
 }

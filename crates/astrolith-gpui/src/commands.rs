@@ -35,6 +35,7 @@ pub(crate) enum CommandId {
     Heading4,
     Paragraph,
     ToggleComment,
+    OpenComponentBuilder,
     ToggleFocusMode,
     ToggleTypewriterMode,
     ToggleCopyeditNouns,
@@ -90,6 +91,7 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::Heading4,
     CommandId::Paragraph,
     CommandId::ToggleComment,
+    CommandId::OpenComponentBuilder,
     CommandId::ToggleFocusMode,
     CommandId::ToggleTypewriterMode,
     CommandId::ToggleCopyeditNouns,
@@ -131,6 +133,8 @@ pub(crate) struct CommandAvailability {
     /// The active document is Markdown, so `Mod+/` toggles a comment rather
     /// than opening the MDX builder.
     pub markdown_document: bool,
+    /// The active document is MDX, so `Mod+/` opens the component builder.
+    pub mdx_document: bool,
     /// The active editor has a non-empty selection.
     pub selection_nonempty: bool,
 }
@@ -192,6 +196,7 @@ impl CommandId {
             | Self::CursorsAtLineEnds => state.editor_focused,
             Self::FocusSelectionToolbar => state.editor_focused && state.selection_nonempty,
             Self::ToggleComment => state.editor_focused && state.markdown_document,
+            Self::OpenComponentBuilder => state.editor_focused && state.mdx_document,
             _ => true,
         }
     }
@@ -228,6 +233,7 @@ impl CommandId {
             Self::Heading4 => "Heading 4",
             Self::Paragraph => "Paragraph",
             Self::ToggleComment => "Toggle Markdown comment",
+            Self::OpenComponentBuilder => "Insert MDX component…",
             Self::ToggleFocusMode => "Focus mode",
             Self::ToggleTypewriterMode => "Typewriter mode",
             Self::ToggleCopyeditNouns => {
@@ -449,7 +455,7 @@ impl CommandId {
                     "ctrl-alt-0"
                 }
             }
-            Self::ToggleComment => {
+            Self::ToggleComment | Self::OpenComponentBuilder => {
                 if mac {
                     "cmd-/"
                 } else {
@@ -484,10 +490,25 @@ impl CommandId {
 
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys(COMMANDS.iter().filter_map(|command| {
+        // `Mod+/` is document-kind dependent: one physical key dispatches the
+        // Markdown comment toggle or the MDX builder. The two registry entries
+        // advertise the same key, so the generic binding skips both.
+        if matches!(
+            command,
+            CommandId::ToggleComment | CommandId::OpenComponentBuilder
+        ) {
+            return None;
+        }
         command
             .shortcut()
             .map(|key| KeyBinding::new(key, *command, Some("Astrolith")))
     }));
+    let mod_slash = if cfg!(target_os = "macos") {
+        "cmd-/"
+    } else {
+        "ctrl-/"
+    };
+    cx.bind_keys([KeyBinding::new(mod_slash, ModSlash, Some("Astrolith"))]);
     // The Content Finder's secondary Enter inserts a link instead of opening
     // the entry. It is scoped to the dialog, so ordinary Enter keeps working.
     let insert = if cfg!(target_os = "macos") {
@@ -501,6 +522,11 @@ pub(crate) fn bind_keys(cx: &mut App) {
         Some("ContentFinder"),
     )]);
 }
+
+/// The kind-dependent `Mod+/` key: a comment in `.md`, the builder in `.mdx`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, gpui_kit::Action)]
+#[action(namespace = astrolith, no_json)]
+pub(crate) struct ModSlash;
 
 /// Insert the selected Content Finder entry as a Markdown link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, gpui_kit::Action)]
@@ -575,6 +601,7 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
                 CommandId::Italic,
                 CommandId::InsertLink,
                 CommandId::ToggleComment,
+                CommandId::OpenComponentBuilder,
             ],
             copyedit,
         );
@@ -674,8 +701,18 @@ mod tests {
         // `.mdx` reserves Mod+/ for the component builder.
         assert!(!CommandId::ToggleComment.is_available(CommandAvailability {
             markdown_document: false,
+            mdx_document: true,
             ..focused
         }));
+        assert!(
+            CommandId::OpenComponentBuilder.is_available(CommandAvailability {
+                markdown_document: false,
+                mdx_document: true,
+                ..focused
+            })
+        );
+        assert!(!CommandId::OpenComponentBuilder.is_available(focused));
+        assert!(!CommandId::OpenComponentBuilder.is_available(blurred));
         // Writer modes are global view toggles, not document commands.
         assert!(CommandId::ToggleFocusMode.is_available(blurred));
         assert!(CommandId::ToggleTypewriterMode.is_available(blurred));
@@ -688,9 +725,21 @@ mod tests {
         for command in COMMANDS {
             assert!(ids.insert(*command));
             if let Some(key) = command.shortcut() {
+                // `Mod+/` is one physical key with two document-kind commands,
+                // dispatched by `ModSlash`; every other shortcut is unique.
+                if matches!(
+                    command,
+                    CommandId::ToggleComment | CommandId::OpenComponentBuilder
+                ) {
+                    continue;
+                }
                 assert!(keys.insert(key));
             }
         }
+        assert_eq!(
+            CommandId::ToggleComment.shortcut(),
+            CommandId::OpenComponentBuilder.shortcut()
+        );
     }
 
     #[test]
@@ -779,6 +828,7 @@ mod tests {
                 busy: true,
                 editor_focused: true,
                 markdown_document: true,
+                mdx_document: false,
                 selection_nonempty: true,
             },
         ];

@@ -49,6 +49,10 @@ pub struct ImportPlanRequest<'a> {
     pub root: &'a Path,
     pub document: &'a Path,
     pub component: &'a Component,
+    /// Catalog components the generated tag also references, such as the
+    /// `TabItem` children of a Starlight `Tabs` scaffold. They are planned with
+    /// the selected component, so every binding lands in one named import.
+    pub extra_components: &'a [Component],
     pub values: &'a [PlannedValue],
     /// Per-project opt-in; off leaves the source untouched.
     pub enabled: bool,
@@ -204,6 +208,41 @@ struct PlannedImport {
     binding: String,
 }
 
+/// Read the value bindings another document establishes in its import prelude.
+///
+/// Used to corroborate an existing specifier for a component before falling
+/// back to a relative path. Parsing is best-effort: a document whose prelude
+/// cannot be read contributes nothing, because a scan must never fail an
+/// insertion.
+pub fn scan_imports(source: &str, document: &Path) -> Vec<CorroboratedImport> {
+    let Ok(model) = parse_source(source) else {
+        return Vec::new();
+    };
+    let mut imports = Vec::new();
+    for statement in &model.imports {
+        if statement.type_only {
+            continue;
+        }
+        if let Some(binding) = &statement.default_binding {
+            imports.push(CorroboratedImport {
+                name: binding.clone(),
+                specifier: statement.module.clone(),
+                document: document.to_path_buf(),
+            });
+        }
+        if let Some(named) = &statement.named {
+            for (_, local) in &named.names {
+                imports.push(CorroboratedImport {
+                    name: local.clone(),
+                    specifier: statement.module.clone(),
+                    document: document.to_path_buf(),
+                });
+            }
+        }
+    }
+    imports
+}
+
 /// Plan complete-source import edits for one component insertion.
 pub fn plan_imports(request: &ImportPlanRequest<'_>) -> Result<ImportPlan, ImportError> {
     let source_hash = hash_source(request.source);
@@ -253,6 +292,7 @@ pub fn plan_imports(request: &ImportPlanRequest<'_>) -> Result<ImportPlan, Impor
     let mut loader = "getEntry".to_owned();
 
     plan_component_import(
+        request.component,
         request,
         &document,
         &model,
@@ -260,6 +300,17 @@ pub fn plan_imports(request: &ImportPlanRequest<'_>) -> Result<ImportPlan, Impor
         &mut planned,
         &mut warnings,
     )?;
+    for extra in request.extra_components {
+        plan_component_import(
+            extra,
+            request,
+            &document,
+            &model,
+            &mut used,
+            &mut planned,
+            &mut warnings,
+        )?;
+    }
 
     for value in request.values {
         match value {
@@ -420,6 +471,7 @@ pub fn plan_imports(request: &ImportPlanRequest<'_>) -> Result<ImportPlan, Impor
 }
 
 fn plan_component_import(
+    component: &Component,
     request: &ImportPlanRequest<'_>,
     document: &Path,
     model: &SourceModel,
@@ -427,7 +479,6 @@ fn plan_component_import(
     planned: &mut Vec<PlannedImport>,
     warnings: &mut Vec<String>,
 ) -> Result<(), ImportError> {
-    let component = request.component;
     let name = component.name.clone();
     if let Some(binding) = model.bindings.get(&name) {
         if binding_matches_component(binding, component, document) {
@@ -586,6 +637,32 @@ fn plan_entry(
     used.insert(constant.clone());
     identifiers.insert(prop.to_owned(), constant);
     Ok(())
+}
+
+/// The identifiers a plan would give these values before collision suffixing.
+///
+/// A preview cannot run the planner (it resolves filesystem paths and reads the
+/// complete source), so it shows this shape instead; the insertion replaces it
+/// with the exact identifier the plan resolves.
+pub fn provisional_identifiers(values: &[PlannedValue]) -> BTreeMap<String, String> {
+    let mut identifiers = BTreeMap::new();
+    for value in values {
+        match value {
+            PlannedValue::Image { prop, path } => {
+                identifiers.insert(prop.clone(), image_identifier(Path::new(path)));
+            }
+            PlannedValue::Entry { prop, .. } => {
+                let base = camel_identifier(prop);
+                let identifier = if base.is_empty() {
+                    "entry".to_owned()
+                } else {
+                    format!("{base}Entry")
+                };
+                identifiers.insert(prop.clone(), identifier);
+            }
+        }
+    }
+    identifiers
 }
 
 fn entry_constants(
