@@ -46,7 +46,7 @@ use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, Sizable, StyledExt, TitleBar, WindowExt,
     button::{Button, ButtonVariants},
     command::{Command, CommandGroup, CommandItem, CommandState},
-    dock::{DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
+    dock::{BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
     kbd::Kbd,
     menu::{DropdownMenu, PopupMenuItem},
 };
@@ -213,6 +213,9 @@ pub(crate) struct Shell {
     frontmatter: Entity<FrontmatterForm>,
     frontmatter_key: Option<FrontmatterKey>,
     preview: Entity<PreviewPanel>,
+    /// The reading-view panel; kept here because the bottom dock is removed
+    /// entirely while the view is hidden.
+    preview_panel: Entity<WorkspacePanel>,
     palette: Entity<CommandState>,
     palette_focus: FocusHandle,
     finder: Entity<CommandState>,
@@ -339,11 +342,6 @@ impl Shell {
                     panel_handle(inspector),
                     settings.layout.inspector_visible,
                 ),
-                (
-                    DockPlacement::Bottom,
-                    panel_handle(preview_panel),
-                    settings.layout.preview_visible,
-                ),
             ] {
                 area.set_dock(
                     placement,
@@ -368,12 +366,18 @@ impl Shell {
                 window,
                 cx,
             );
-            area.set_dock_size(
-                DockPlacement::Bottom,
-                px(settings.layout.preview_height),
-                window,
-                cx,
-            );
+            // The reading view exists only while it is visible: a closed bottom
+            // dock would otherwise keep a collapsed strip that can be dragged
+            // back out.
+            if settings.layout.preview_visible {
+                attach_preview_dock(
+                    area,
+                    panel_handle(preview_panel.clone()),
+                    settings.layout.preview_height,
+                    window,
+                    cx,
+                );
+            }
         });
         let palette = cx.new(|cx| CommandState::new(window, cx));
         let finder = cx.new(|cx| CommandState::new(window, cx));
@@ -570,6 +574,7 @@ impl Shell {
             frontmatter,
             frontmatter_key: None,
             preview,
+            preview_panel,
             palette,
             palette_focus: cx.focus_handle().tab_stop(true),
             finder,
@@ -1526,7 +1531,6 @@ impl Shell {
             for (placement, visible) in [
                 (DockPlacement::Left, layout.sidebar_visible),
                 (DockPlacement::Right, layout.inspector_visible),
-                (DockPlacement::Bottom, layout.preview_visible),
             ] {
                 if dock.is_dock_open(placement) != visible {
                     dock.toggle_dock(placement, window, cx);
@@ -1534,11 +1538,29 @@ impl Shell {
             }
             dock.set_dock_size(DockPlacement::Left, px(layout.sidebar_width), window, cx);
             dock.set_dock_size(DockPlacement::Right, px(layout.inspector_width), window, cx);
-            if layout.preview_visible {
-                dock.set_dock_size(DockPlacement::Bottom, px(layout.preview_height), window, cx);
-            }
         });
+        self.set_preview_visible(layout.preview_visible, layout.preview_height, window, cx);
         self.applying_layout = false;
+    }
+
+    /// Show or hide the reading view by the bottom dock's presence.
+    ///
+    /// A closed bottom dock is not hidden: the dock keeps a collapsed strip
+    /// that still paints and can be dragged back over the document. Removing
+    /// the dock is the only state that leaves no trace, so hiding removes it
+    /// and showing attaches it again at `height`.
+    fn set_preview_visible(
+        &mut self,
+        visible: bool,
+        height: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panel = panel_handle(self.preview_panel.clone());
+        self.dock.update(cx, |dock, cx| match visible {
+            true => attach_preview_dock(dock, panel, height, window, cx),
+            false => dock.remove_dock(DockPlacement::Bottom, window, cx),
+        });
     }
 
     /// Record the active document as the open project's last entry.
@@ -1561,10 +1583,20 @@ impl Shell {
     }
 
     fn toggle_panel(&mut self, kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(kind, PanelKind::Preview) {
+            // Presence, not open state: a closed bottom dock would leave its
+            // collapsed strip on screen.
+            let visible = !self.dock.read(cx).has_dock(DockPlacement::Bottom);
+            let height = self.settings.layout.preview_height;
+            self.set_preview_visible(visible, height, window, cx);
+            // LayoutChanged also captures the new visibility.
+            cx.notify();
+            return;
+        }
         let placement = match kind {
             PanelKind::Sidebar => DockPlacement::Left,
             PanelKind::Inspector => DockPlacement::Right,
-            PanelKind::Preview => DockPlacement::Bottom,
+            PanelKind::Preview => unreachable!("handled above"),
         };
         self.dock
             .update(cx, |area, cx| area.toggle_dock(placement, window, cx));
@@ -1780,11 +1812,9 @@ impl Shell {
                 let mut layout = LayoutState::default();
                 layout.clamp(f32::from(window.viewport_size().width));
                 self.dock.update(cx, |area, cx| {
-                    for (placement, visible) in [
-                        (DockPlacement::Left, true),
-                        (DockPlacement::Right, true),
-                        (DockPlacement::Bottom, false),
-                    ] {
+                    for (placement, visible) in
+                        [(DockPlacement::Left, true), (DockPlacement::Right, true)]
+                    {
                         if area.is_dock_open(placement) != visible {
                             area.toggle_dock(placement, window, cx);
                         }
@@ -1797,6 +1827,7 @@ impl Shell {
                         cx,
                     );
                 });
+                self.set_preview_visible(layout.preview_visible, layout.preview_height, window, cx);
             }
         }
         cx.notify();
@@ -2666,6 +2697,33 @@ impl Render for Shell {
     }
 }
 
+/// Attach the reading view as the bottom dock.
+///
+/// The bottom dock is deliberately not collapsible. A closed bottom dock keeps
+/// a 29px strip so it can be dragged or clicked back open, which is not
+/// "hidden" in a writer's sense; the shell hides the reading view by removing
+/// the dock instead, and reopening restores it at `height`.
+fn attach_preview_dock(
+    dock: &mut DockArea,
+    panel: Arc<dyn BasePanelView>,
+    height: f32,
+    window: &mut Window,
+    cx: &mut Context<DockArea>,
+) {
+    if !dock.has_dock(DockPlacement::Bottom) {
+        dock.set_dock(
+            DockPlacement::Bottom,
+            DockLayout::tabs().panel_view(panel, cx),
+            window,
+            cx,
+        );
+    } else if !dock.is_dock_open(DockPlacement::Bottom) {
+        dock.toggle_dock(DockPlacement::Bottom, window, cx);
+    }
+    dock.set_dock_collapsible(DockPlacement::Bottom, false, window, cx);
+    dock.set_dock_size(DockPlacement::Bottom, px(height), window, cx);
+}
+
 /// Scope a debounced write reports its outcome to.
 #[derive(Clone, Copy)]
 enum SaveScope {
@@ -2978,6 +3036,52 @@ mod tests {
             assert!(window.find("preview-panel").visible());
         })
         .unwrap();
+        let stored_height = cx.update(|cx| view.read(cx).settings.layout.preview_height);
+        let opened = cx
+            .update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                let opened = window.find("document-panel").bounds();
+                view.update(cx, |view, cx| {
+                    view.execute(CommandId::TogglePreview, window, cx)
+                });
+                opened
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(!view.read(cx).settings.layout.preview_visible);
+            assert!(
+                !view.read(cx).dock.read(cx).has_dock(DockPlacement::Bottom),
+                "hiding the reading view must remove the dock, not leave a \
+                 collapsed strip that can be dragged back"
+            );
+            window.render_frame(cx);
+            assert!(
+                window.find("document-panel").bounds().size.height > opened.size.height,
+                "the document must reclaim the reading view's height"
+            );
+            assert!(
+                window
+                    .try_find("preview-panel")
+                    .is_none_or(|panel| !panel.visible()),
+                "no part of the reading view may stay on screen"
+            );
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::TogglePreview, window, cx)
+            });
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(view.read(cx).settings.layout.preview_visible);
+            window.render_frame(cx);
+            assert!(view.read(cx).dock.read(cx).has_dock(DockPlacement::Bottom));
+            assert_eq!(
+                view.read(cx).dock.read(cx).dock_size(DockPlacement::Bottom),
+                Some(px(stored_height)),
+                "reopening must restore the height the reading view had"
+            );
+            assert!(window.find("preview-panel").visible());
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
@@ -3188,11 +3292,13 @@ mod tests {
         cx.simulate_window_resize(handle.into(), size(px(1800.), px(1100.)));
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::TogglePreview, window, cx)
+            });
             view.read(cx).dock.clone().update(cx, |dock, cx| {
                 for placement in [DockPlacement::Left, DockPlacement::Right] {
                     dock.set_dock_size(placement, px(650.), window, cx);
                 }
-                dock.toggle_dock(DockPlacement::Bottom, window, cx);
                 dock.set_dock_size(DockPlacement::Bottom, px(650.), window, cx);
             });
         })
