@@ -107,3 +107,16 @@ Two headless tests pass: `startup_auto_applies_pending_recovery_and_never_overwr
 
 **M04 gate status (headless):** The document core ("no known path silently destroys unsaved content or overwrites conflicting disk changes") is enforced by lossless patching, baseline-compared atomic saves and content-compared recovery cleanup, and the shell adopts them; the previously-open form-overwrite path is fixed and regression-tested. The gate is **satisfied headlessly**; it is **not** declared fully closed until the native acceptance runbook is executed by a human (native evidence remains PENDING).
 
+## Indentless block sequences (2026-11-03)
+
+A real blog note (`SakuranoUta.md`) hit the Inspector notice "Frontmatter cannot be edited safely" with `UnsupportedFrontmatter { reason: "sequence items are only supported directly under a mapping key" }`. Its frontmatter is valid YAML that puts the block sequence at the key's own indentation:
+
+```yaml
+tags:
+- GalGame
+```
+
+`crates/astrolith-document/src/parse.rs` now accepts that style. An empty-value key opens a child sequence when the next significant line is a sequence item at the key's indentation or deeper; the sequence ends at the next same-indent line that is neither an item nor a comment. Items stay item-editable (`set_sequence_item`, `insert_sequence_item`, `remove_sequence_item` insert at the item's real indentation), untouched bytes round-trip exactly, and a raw replacement of an indentless container is re-indented one level under its key so a mapping value cannot turn into sibling keys. A bare root sequence is still refused as invalid frontmatter.
+
+Five unit tests cover readability/round-trip with a following key, item set/insert/remove, a nested `author.tags` path, raw replacement, and the bare-sequence refusal. A throwaway probe against the reported file confirmed exact round-trip and that editing `tags` leaves every body byte unchanged (probe deleted, not committed). `mise run check` exited 0 on 2026-11-03: doctor, formatting, warnings-denied Clippy, locked build, workspace tests (820 passed, 0 failed, 4 ignored) and Astro fixture compatibility PASS. **Known limits:** a same-indent comment after the last item belongs to the sequence block (removing the field removes it), and an indentless sequence whose items are not all scalars stays read-only/raw-editable exactly like the indented form.
+
