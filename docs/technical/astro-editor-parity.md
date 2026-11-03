@@ -3,7 +3,9 @@
 Status: **P0 evidence, frozen.** This document records the shipped Linux end-user behavior of
 upstream Astro Editor at a pinned commit, maps each behavior to one Astrolith acceptance scenario and
 one owning implementation task, records intentional safety divergences, and closes the ownership of
-every item that the source survey could not attribute to P1–P15.
+every item that the source survey could not attribute to P1–P15. A P15 final audit, recorded on
+2026-11-03 in §21, assigns every row one of Pass, manual-native-pending or explicit-blocker with file
+evidence; the ledger body is unchanged.
 
 It contains no upstream implementation code. Every description below is a behavioral statement
 derived from the cited source, configuration or user documentation at the pinned commit; acceptance
@@ -352,3 +354,267 @@ Additional unattributed items from the survey are resolved as follows:
   unavailable, and the final parity gate follows that document.
 - Scenarios assume `fixtures/parity-project/`; if the fixture cannot exercise a row, the row's
   evidence is incomplete and the row cannot be marked Pass at the release gate.
+
+## 21. P15 final audit
+
+Date: 2026-11-03. This section walks every frozen row in §4–§16 and states its status after
+P1–P15. The ledger above is unchanged; this audit is the acceptance record.
+
+**Status vocabulary**
+
+- **Pass** — implemented, and headless evidence covers the acceptance semantics named by the row.
+  The file evidence is listed. Native visual or OS confirmation is still part of the release gate
+  in §21.2, but no row-specific native observation is the sole basis of the claim.
+- **Manual native pending** — implemented, but the row's defining observation is a native
+  interaction or output (visual rendering, pointer, hover, drag, native dialog, OS launch, window
+  geometry, protocol/association launch, or real crash/restart) with no recorded real-platform run.
+- **Explicit blocker** — cannot be marked Pass at the release gate: a sub-feature is blocked by the
+  pinned editor API, or a packaging/signing prerequisite or clean-environment evidence is missing.
+
+P15 itself added the Help surfaces, user/privacy/developer documentation, README and these status
+records. P15's focused headless verification is recorded in §21.3. Earlier headless evidence is the
+one recorded in the P-task updates of the implementation plan; this audit does not rerun or upgrade
+those claims.
+
+### 21.1 Per-row status
+
+#### Projects (rows 1–7)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 1 | Pass | `crates/astrolith-gpui/src/project_discovery.rs` (`prompt`, `open_root`), `recent_projects.rs`; one `OpenProject` command in `commands.rs`. |
+| 2 | Pass | `project_discovery.rs` blocked-directory guard before scan; `settings/store.rs` refuses to register a rejected path. |
+| 3 | Pass | `settings/store.rs` atomic registry, stable IDs and canonical paths; `astrolith-core/src/preferences.rs` envelope types. |
+| 4 | Pass | `shell.rs` startup load and `url_scheme.rs` startup precedence. |
+| 5 | Pass | `astrolith-astro/src/discovery.rs`, `config.rs`, `pattern.rs`, `schema/generation.rs`; diagnostics surfaced by `project_discovery.rs`. |
+| 6 | Pass | `project_discovery.rs` reload path retaining selection, tabs, recovery keys and preview route. |
+| 7 | Pass | `editor/save_coordinator.rs` and project-switch flush in `project_discovery.rs`; conflict/failure cancels the switch. |
+
+#### Entries and file list (rows 8–21)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 8 | Pass | `astrolith-workspace/src/index.rs`, `prune`/reconcile in `project_discovery.rs`; counts refresh after operations. |
+| 9 | Pass | `project_discovery.rs` file-row projection; mapped title/date plus MDX and draft badges. |
+| 10 | Pass | `project_discovery.rs` subdirectory navigation and breadcrumb state; `operations.rs` path validation. |
+| 11 | Pass | `astrolith-workspace/src/operations.rs` create with resolved extension and date-name collision search. |
+| 12 | Pass | `operations.rs` `creation_plan`; only required representable fields are written, otherwise creation inputs. |
+| 13 | Pass | `astrolith-core/src/preferences.rs` resolver plus `operations.rs` extension resolution. |
+| 14 | Pass | `operations.rs` duplicate preserves bytes and derives `-copy`/`-copy-2` names. |
+| 15 | Pass | `operations.rs` rename/move validation and `project_discovery.rs` retargeting of tab, index, recovery, preview and watcher. |
+| 16 | Pass | `operations.rs` desktop-trash request (pinned `trash`), dirty Save/Discard guard, no permanent fallback. |
+| 17 | Manual native pending | `operations.rs` reveal target is the containing directory and `copy_path` returns both forms; opening the directory through the Linux file manager has no recorded native run. |
+| 18 | Pass | Mapped draft field and literal `true` filter in `project_discovery.rs`; active-filter header state. |
+| 19 | Pass | Case-insensitive filename/title filtering in `project_discovery.rs`. |
+| 20 | Pass | `astrolith-workspace/src/list.rs` sort modes, stable keys and direction; Default keeps undated-first ordering. |
+| 21 | Manual native pending | Empty/loading/error state model in `project_discovery.rs`; visual distinctness has no recorded native observation. |
+
+#### Navigation and chrome (rows 22–27)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 22 | Pass | `commands.rs` `COMMANDS`, labels, shortcuts and `CommandAvailability`; palette groups in `shell.rs`; menu-coverage test. |
+| 23 | Pass | `ToggleSidebar`, `ToggleInspector`, `FocusDocument` dispatch and menu check state in `commands.rs`/`shell.rs`. |
+| 24 | Pass | Generated `Open Collection: <name>` items from the live index, filtered when active. |
+| 25 | Pass | Toolbar controls dispatch command IDs and read shared availability in `shell.rs`. |
+| 26 | Pass | `editor/writer_chrome.rs` auto-hide gating on both sidebars, top-edge restore and reduced-motion handling, with headless tests. |
+| 27 | Manual native pending | `settings/mod.rs` window geometry persistence and 1000×700 minimum in `shell.rs`; native size/position restore has no recorded run. |
+
+#### Writer surface (rows 28–45)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 28 | Pass | `astrolith-document/src/projection.rs` plus `editor/session.rs`; the P4 real-window gate was accepted on 2026-11-01. |
+| 29 | Manual native pending | Responsive typography and hanging-heading geometry in `editor/writing_modes.rs` and `writer_chrome.rs`; visual result not recorded natively. |
+| 30 | Pass | Heading colours and font size in `astrolith-core/src/preferences.rs`, `preferences/general.rs` and `theme/mod.rs`; apply/persist/reset tested headlessly. |
+| 31 | Manual native pending | Markdown presentation decorations in `editor/writer_chrome.rs` and `editor/formatting.rs`; native visual result not recorded. |
+| 32 | Pass | `astrolith-document/src/formatting.rs` bold/italic/link/heading/paragraph/comment over visible ranges, one undo step, hidden-boundary refusal. |
+| 33 | Pass | Link transform edits the URL inside an existing link and inserts `[text]()` for an empty selection. |
+| 34 | Pass | Native find/replace wiring in `project_discovery.rs` over public search APIs; replacement runs as one undo step. |
+| 35 | Pass | Go-to-line dialog and one-based line mapping in `project_discovery.rs`; validated cursor movement. |
+| 36 | Explicit blocker | Select-next from the active selection and line-end cursors are proven; select-next across every cursor, Ctrl-click cursors and distinct per-range atomic edits are blocked by the pinned API. See `docs/technical/editor-capabilities.md` §4 rows 10/11/13/14/28 and §11.2 (a)/(c)/(d). |
+| 37 | Pass | Native editor undo/redo, indent, list continuation and selection retained; snippet-field navigation is implemented in `editor/component_builder/snippets.rs`. |
+| 38 | Manual native pending | Sentence detection in `astrolith-document/src/sentences.rs` and dimming decorations in `editor/writing_modes.rs`; native visual dimming not recorded. |
+| 39 | Manual native pending | Typewriter scroll formula in `editor/writing_modes.rs` with geometry tests; native centering not recorded. |
+| 40 | Pass | URL-over-selection paste in `editor/session.rs`/`editor/assets.rs`; one undo step. |
+| 41 | Manual native pending | Modified-click URL resolution and external open wiring; no recorded native browser launch. |
+| 42 | Manual native pending | `project_discovery.rs` drop path and `astrolith-workspace/src/assets.rs` copy/Markdown insertion; P8 native file-drop smoke outstanding. |
+| 43 | Manual native pending | `editor/image_preview.rs` range hit test, bounded fetch/decode and dismissal; native hover/modifier-release not recorded. |
+| 44 | Pass | `editor/save_coordinator.rs` blur and switch requests queue behind an in-flight save; clean manual save is a no-op. |
+| 45 | Pass | Project name and dirty state are rendered in `shell.rs`/`editor/header.rs` from the live document status. |
+
+#### Assets, links and frontmatter images (rows 46–52)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 46 | Pass | `astrolith-workspace/src/assets.rs` sanitisation, date prefix, atomic bounded collision suffix and containment checks. |
+| 47 | Pass | Image-versus-link Markdown from the fixed raster/SVG set in `assets.rs`. |
+| 48 | Pass | Document-relative and project-root path modes in `assets.rs`, including nested documents. |
+| 49 | Manual native pending | `editor/content_finder.rs` search/open/insert over mapped title or id; native dialog interaction not recorded. |
+| 50 | Pass | URL pattern substitution, percent-encoded slug, entry-id fallback and bracket/parenthesis escaping in `assets.rs`. |
+| 51 | Manual native pending | Frontmatter image control copies through the asset service, honours path mode, accepts a verbatim manual path and clears; native file picker not recorded. |
+| 52 | Pass | Nested `image()` renders the real image control in `frontmatter/fields.rs`. |
+
+#### MDX component builder (rows 53–61)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 53 | Pass | Document-kind-dependent `Ctrl+/` dispatch in `commands.rs` and `shell.rs`; builder commands require MDX. |
+| 54 | Pass | `astrolith-astro/src/components/discover.rs` recursive discovery, containment, `index.*` skip, no execution. |
+| 55 | Pass | `components/props.rs` and frozen fixtures cover Astro, React, Vue, Svelte, relative types, malformed fallback and slots. |
+| 56 | Manual native pending | `component_builder/palette.rs` search, framework groups, required summary and description; native palette interaction not recorded. |
+| 57 | Manual native pending | `component_builder/form.rs` typed controls, defaults, optional omission and keyboard contract; native keyboard run not recorded. |
+| 58 | Manual native pending | Wrapping scaffolds and tracked placeholders in `component_builder/snippets.rs`/`mod.rs`; native insertion/placeholder navigation not recorded. |
+| 59 | Pass | `components/starlight.rs` versioned catalog gated on the declared dependency; duplicates listed separately. |
+| 60 | Pass | `components/imports.rs` and `components/snippet.rs` plan complete-source bytes, preserve style, merge named imports, revalidate and leave the import on undo. |
+| 61 | Pass | Auto-import warning is surfaced without changing the setting (`project_discovery.rs`, preferences). |
+
+#### Save, conflict, recovery, external changes (rows 62–68)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 62 | Pass | `editor/save_coordinator.rs` 1/2/5/10 s idle deadlines and 10 s maximum checkpoint. |
+| 63 | Pass | Save status transitions in `save_coordinator.rs`; failure artifact in `editor/save_failure.rs`; recovery store in `astrolith-document/src/recovery.rs`. |
+| 64 | Pass | `astrolith-document/src/yaml/` lossless patches and `projection.rs` complete-source stitching; comments, quoting, unknown fields, CRLF and hidden imports preserved. |
+| 65 | Pass | `astrolith-document/src/save.rs` atomic write with baseline conflict detection; `save_coordinator.rs` blocks on conflict. |
+| 66 | Pass | `astrolith-workspace/src/watcher.rs` debounce, separate channels and rescan safety net; reconciliation in `project_discovery.rs`. |
+| 67 | Pass | Dirty buffers win; clean buffers reconcile tab, selection and preview after an external change. |
+| 68 | Manual native pending | Close/quit prompt, quit flush, project-switch ordering and rename re-subscription are implemented and headlessly tested; the real window close/quit path has no recorded native run. |
+
+#### Frontmatter form (rows 69–78)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 69 | Pass | Field ordering from schema plus alphabetical unknown fields in `frontmatter/mod.rs`. |
+| 70 | Pass | Defaults are hints/prefill-only; existing files never materialise schema defaults. |
+| 71 | Pass | One control per schema kind in `frontmatter/fields.rs`. |
+| 72 | Pass | Single/array reference pickers, data-collection targets, image control and validated raw-YAML fallback. |
+| 73 | Pass | Descriptions, defaults, constraints and required markers; validation never blocks the guarded save. |
+| 74 | Pass | File-based JSON data collections feed references and stay out of the editable collection list. |
+| 75 | Pass | Schema watcher and generation revisions refresh the form without dropping dirty edits; stale results dropped. |
+| 76 | Pass | Mapped title is first and offers copy-as-slug without document or disk mutation. |
+| 77 | Pass | Mapping changes move list, sort, filter and panel together through the single resolver. |
+| 78 | Pass | Lossless refusal for anchors, aliases, tags and complex keys, with a visible validation message and raw control. |
+
+#### Copyedit (rows 79–82)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 79 | Pass | Five category toggles plus all-toggle with persisted colours and show/hide labels in `astrolith-core/src/preferences.rs` and `editor/copyedit.rs`. |
+| 80 | Pass | One persisted default and one label source; a settings/command-label consistency test. |
+| 81 | Pass | Debounced generation ticketing, stale-result rejection, active-token window suppression and atomic layer replacement. |
+| 82 | Pass | `astrolith-document/src/copyedit/` excludes fenced/inline code, link destinations, tags, frontmatter and hidden imports. |
+
+#### Preview (row 83)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 83 | Manual native pending | `astrolith-preview/src/lifecycle.rs` root-scoped reuse, generation tickets, failure excerpts; `preview/` panel retargeting, restart, retry and route commands. Native server/browser mutation run not recorded. |
+
+#### Preferences (rows 84–92, 107)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 84 | Pass | One sheet with General, Project Settings, Collections and Advanced; project panes gated on an open project; `Ctrl+,`. |
+| 85 | Pass | General fields validate and apply atomically; Cancel/Escape discard; per-value reset. |
+| 86 | Pass | Project directories, image mode, extension override, mappings and experimental import insertion; MDX directory is project-only. |
+| 87 | Pass | Collection overrides resolve above project above global; mappings checked against schema kinds; `{slug}` pattern validated. |
+| 88 | Manual native pending | Advanced versions, folder action and scoped Reset All with confirmation are implemented and headlessly tested; native folder opening/restart not recorded. |
+| 89 | Pass | `settings/store.rs` atomic files, preserved unknown envelope fields, one migration retaining `preferences.v1.migrated.json`, quarantined corruption surfaced in Preferences. |
+| 90 | Manual native pending | Theme resolution and persistence are tested headlessly; first-paint native appearance not recorded. |
+| 91 | Pass | Decision: Astrolith keeps the GPUI Kit default UI family, whose pinned `gpui-component-0.8.1` theme resolves `.SystemUIFont` through the public text system (`src/theme/system_font.rs`); `theme/mod.rs` does not override the family. Astrolith keeps its own colour, spacing and layout tokens. Recorded here because P11 did not land a separate note. |
+| 92 | Pass | Filters, sort, search and draft view are session-only and reset on project switch; pane layout, last entry and preview dock height persist per project (the ledger's "preview width" is implemented as the bottom dock height). |
+| 107 | Manual native pending | Window state restore and minimum size are implemented in `settings/mod.rs`/`shell.rs`; native restore not recorded. |
+
+#### Desktop and platform (rows 93–106)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 93 | Pass | `commands.rs` builds File/Edit/View/Writer/Preview/Help/Astrolith menus from the registry; headless menu-coverage test. |
+| 94 | Pass | Formatting commands read editor focus in `CommandAvailability`, never a stale document flag. |
+| 95 | Pass | Menu items carry `CommandId` actions dispatched by `shell.rs::execute`; no menu-only handler. |
+| 96 | Manual native pending | Fullscreen is a View command and menu item, with `F11` bound only on Linux; native toggle not recorded. |
+| 97 | Manual native pending | `single_instance.rs` socket forwarding and focus path plus startup argument delivery; native cold/warm launch not recorded. |
+| 98 | Explicit blocker | MIME declarations and startup-file routing are implemented (`packaging/linux/` metadata, `url_scheme.rs`), but no installed package has exercised a real association/open. Packaging evidence prerequisite. |
+| 99 | Manual native pending | `url_scheme.rs` validates scheme, project root and content-entry membership for cold and warm launches; native protocol registration/launch not recorded. |
+| 100 | Pass | `desktop_actions.rs` argv expansion for `{project}`/`{file}`/`{line}`/`{column}`, no shell, path validation, control-character refusal. |
+| 101 | Pass | Project/collection/file IDE commands are gated on a configured executable in `commands.rs`. |
+| 102 | Manual native pending | Reveal resolves and opens the containing directory (`operations.rs`); native file-manager launch not recorded. |
+| 103 | Manual native pending | Context menus use command IDs and availability; native pointer positioning not recorded. |
+| 104 | Manual native pending | `drag_drop.rs` classifies one project directory or one in-project entry and rejects mixed/multiple drops; editor drops feed assets. OS drag delivery not recorded for the current build. |
+| 105 | Explicit blocker | AppImage/`.deb`/`.rpm` recipes and one metadata source exist (`packaging/linux/`), but no clean-environment install/launch/uninstall run exists for any artifact. |
+| 106 | Explicit blocker | `update.rs` verifies an Ed25519-signed HTTPS manifest and SHA-256 digests, offers only an external download and is capability-disabled without a URL/key. No signing key, no published signed manifest and no packaged check exist. |
+
+#### Help, logs, privacy (rows 108–115)
+
+| Row | Status | Evidence |
+|---|---|---|
+| 108 | Pass | Help menu commands open the bundled guide and registry-generated shortcut reference (`commands.rs`, `help.rs`, `shell.rs`); headless dialog tests. No external URL. |
+| 109 | Pass | Preferences navigation links emit guide/shortcut events; the shell closes the sheet and opens the real help surface; headless test. |
+| 110 | Pass | Documented log path and redaction rules in `docs/technical/logging.md`, `astrolith-observability`; daily JSON files with seven retained. Rotation is by daily count, not upstream's two size-capped files; this implementation difference is recorded here and in the privacy page. |
+| 111 | Pass | `telemetry_enabled` is local consent state only; there is no telemetry endpoint, identifier, queue or telemetry network code. Privacy documentation states this; the only Astrolith network request is the configured signed update manifest. |
+| 112 | Manual native pending | Durable recovery records, in-app restore and conflict-safe keys are implemented and headlessly tested; a real crash/restart recovery run has no recorded native evidence. |
+| 113 | Pass | `editor/save_failure.rs` writes timestamp, error class, versions, build identity and project-relative source only; a test asserts the field set and excludes content. |
+| 114 | Pass | About shows version and build identity, dispatchable from menu and palette through one command ID, with no update action. |
+| 115 | Pass | `docs/user/privacy.md` and Help → Privacy and local data state no telemetry and a signed-manifest-only update request. |
+
+### 21.2 Release-gate status
+
+Counts across the 115 audited rows: **84 Pass, 27 manual-native-pending, 4 explicit-blocker**.
+
+The 27 manual-native-pending rows are: 17, 21, 27, 29, 31, 38, 39, 41, 42, 43, 49, 51, 56, 57,
+58, 68, 83, 88, 90, 96, 97, 99, 102, 103, 104, 107, 112. Each needs a real Linux Wayland run (or
+the matching OS interaction) before it can be marked Pass. Native IME, focus, scaling, rendering
+and latency remain separate acceptance items recorded in the milestone documents, not ledger rows.
+
+The 4 explicit blockers are:
+
+- **Row 36** — GPUI public multicursor gaps: select-next across all cursors, Ctrl-click cursor
+  placement and distinct per-range atomic edits (`editor-capabilities.md` §4, §6, §11.2).
+- **Rows 98 and 105** — packaging evidence: no clean-environment install, launch, MIME
+  association, protocol registration or uninstall run for any artifact; provisional icons; no
+  license.
+- **Row 106** — release signing and update evidence: no signing key or published signed manifest,
+  The AppStream homepage is `https://github.com/maredevi/Astrolith` (user-supplied 2026-11-03), and no packaged build
+  has performed a signed check.
+
+P14 is therefore documented as **implemented with pending packaging prerequisites**, not as
+verified delivery. The final release gate in the parity plan remains blocked on those items and on
+the manual-native-pending rows.
+
+### 21.3 P15 headless verification recorded by this task
+
+- `cargo test -p astrolith-gpui --lib help::` — 6 passed: guide block parsing, bundled-guide
+  identity, Linux shortcut-reference coverage of every registered shortcut, menu-ordered shortcut
+  groups, four local paths with no content, and relative documentation links resolving.
+- `cargo test -p astrolith-gpui --lib commands::tests` — 12 passed, including the new Help command
+  availability/group test and the existing menu-coverage test.
+- `cargo test -p astrolith-gpui --lib help_surfaces_open_from_their_command_ids` — 1 passed: all
+  three Help surfaces open a dialog from their command IDs.
+- `cargo test -p astrolith-gpui --lib about_is_reachable_from_its_command_id` — 1 passed.
+- `cargo test -p astrolith-gpui --lib preferences_documentation_links_open_help` — 1 passed: the
+  preferences guide/shortcut links emit the events and reach the real help surfaces.
+- `cargo test -p astrolith-gpui --locked --lib preferences::` — 10 passed after adding the links.
+- `cargo test -p astrolith-gpui --lib` — 327 passed, 4 ignored after all P15 changes; a subsequent
+  focused `--locked` run confirmed the updated lockfile.
+- `cargo clippy -p astrolith-gpui --all-targets --locked -- -D warnings` — no issues.
+
+These runs do not replace `mise run check`; the integration owner still runs the full gate.
+
+### 21.4 Disposable probes and stale references
+
+The editor and layout spikes remain **not removed**: `apps/desktop/src/main.rs` still dispatches
+`--spike=editor` and `--spike=layout`, `mise run dev:editor` / `dev:layout` invoke them, and the
+editor probe still exercises the public GPUI facade. Removing them would require deleting that
+runtime dispatch and its tests, which is outside P15. Their retention is documented in
+`docs/technical/development.md` §7.
+
+No aliases or dead documentation were deleted. The provisional task names `test:schema`,
+`test:preview` and `test:ui` in the historical implementation plan were never added to `mise.toml`;
+the current focused tasks are listed in `docs/technical/development.md` §2 and `mise.toml` remains
+the authority. Historical milestone and review documents are preserved.
+
+One non-row gap is recorded for honesty: P0 probed clipboard image delivery, but no ledger row
+requires clipboard asset pasting and P8 implements only OS file drops plus URL-over-selection paste.
+The user guide lists clipboard images and file-manager file lists under Linux limits instead of
+claiming the behavior.

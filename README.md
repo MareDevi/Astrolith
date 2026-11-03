@@ -1,111 +1,140 @@
 # Astrolith
 
-Astrolith is a native Rust/GPUI Kit application for the planned Astro Content Collections editor. M01 provides a persistent dock layout, system/light/dark appearance, a searchable command palette, and readonly local UTF-8 file navigation. M02 adds static Astro project discovery, a watched collection index, and retained editable Markdown/MDX sessions. M03 adds schema-driven frontmatter forms and validation. M04 adds lossless saving with conflict detection and unsaved-content recovery. M05 adds project-local Astro preview servers with external-browser presentation and an opt-in real-server gate. M06 adds preview capability detection and a native application menu bar.
+Astrolith is a native Rust/GPUI Kit editor for [Astro](https://astro.build)
+content collections on Linux. It opens an Astro project, lists its collections
+and entries, edits Markdown, MDX and YAML sources, renders schema-driven
+frontmatter forms, builds MDX component tags from static prop metadata, and
+saves with conflict detection and durable recovery.
 
-M00 manual acceptance was confirmed by the user. The original design specification remains absent; the user authorized the existing M01 plan as this stage's authority. See [the decision record](docs/technical/m01-authority.md) and [M01 verification](docs/technical/m01-progress.md).
+**Status: Linux alpha.** The feature-parity implementation is complete with
+headless evidence. Native Wayland evidence for some interactions, packaged
+artifact checks and release signing are still outstanding; see
+[Linux limits and known gaps](docs/user/guide.md#14-linux-limits-and-known-gaps)
+before relying on a feature for production work. macOS and Windows code paths
+exist but are neither delivered nor supported.
 
-## Development environment
+## Features
 
-Install [Mise](https://mise.jdx.dev/getting-started.html) and the native prerequisites below, then run from this repository:
+- **Projects and collections** — recent-project registry and reopen, Astro 5/6/7
+  discovery for Markdown, MDX and YAML collections, generated-schema
+  integration, nested collections, diagnostics for configuration it cannot
+  prove statically, and a bounded filesystem watcher.
+- **Entries** — create with schema-required frontmatter, duplicate byte-exact,
+  rename/move with retargeting, move to the desktop trash, reveal the containing
+  directory, and copy absolute or project-relative paths.
+- **Navigation** — collection counts, breadcrumbs, draft filter, case-insensitive
+  title/filename filter, schema-aware sort modes, and a Content Finder that can
+  open entries or insert links.
+- **Writer** — lossless frontmatter/MDX-import projection over complete source,
+  native find/replace, go-to-line, focus and typewriter modes, Markdown
+  presentation, Copyedit highlighting, formatting commands, and word/character
+  counts.
+- **Frontmatter** — schema-driven typed controls, references, images, validated
+  raw-YAML fallback, lossless edits that preserve comments, unknown fields,
+  quoting and CRLF, and refresh when the schema changes.
+- **MDX components** — static discovery of Astro/React/Vue/Svelte components,
+  typed prop forms, tracked placeholders, Starlight scaffolds, and opt-in
+  import insertion with collision-safe planning.
+- **Safe persistence** — atomic conflict-aware saves, autosave (1/2/5/10 s,
+  default 2 s) with a 10 s continuous-typing checkpoint, dirty close/switch/quit
+  prompts, and in-app recovery of unsaved edits.
+- **Preview** — project-local Astro dev server with start/stop/restart/retry,
+  route tracking and external-browser presentation (the only Linux surface).
+- **Preferences** — global/project/collection overrides with one resolver,
+  advanced versions and scoped Reset All.
+- **Desktop integration** — application menus from one command registry,
+  keyboard shortcuts, command palette, IDE argv launch, `astrolith://open?path=`
+  scheme handling, MIME associations in packages, and single-instance launch.
+- **Privacy** — no telemetry. The only Astrolith network request is the signed
+  update manifest in builds configured with a manifest URL and public key.
+
+## Documentation
+
+- [User guide](docs/user/guide.md)
+- [Keyboard shortcuts](docs/user/keyboard-shortcuts.md)
+- [Privacy and local data](docs/user/privacy.md)
+- [Development and packaging](docs/technical/development.md)
+- [Packaging notes](packaging/linux/README.md)
+- [Astro Editor parity ledger and final audit](docs/technical/astro-editor-parity.md)
+- [Editor capability contract](docs/technical/editor-capabilities.md)
+
+The user guide, a shortcut reference generated from the live command registry,
+and the local-paths inventory are also available in the application's **Help**
+menu.
+
+## Build from source
+
+Mise owns the toolchain and task entry points.
 
 ```sh
 mise install
 mise run doctor
-mise run check
+mise run build
 mise run dev
 ```
 
-If Mise requests trust, review `mise.toml` and use `mise trust` in this directory. Tool installation needs network access. The exact project versions are Rust **1.99.1** (with `rust-analyzer`, `rust-src`, `clippy`, and `rustfmt`), Node.js **26.12.1**, and Bun **1.4.4**. `mise.toml` is authoritative; tools are scoped to this project. There is no competing Rust/Node version file. Mise **2026.10.19** is the tested task runner and the CI version.
+If Mise requests trust, review `mise.toml` and run `mise trust` in this
+directory. Installation needs network access. Pinned versions: Rust 1.99.1
+(with rust-analyzer, rust-src, clippy and rustfmt), Node.js 26.12.1 and Bun
+1.4.4. `Cargo.lock` is committed; Cargo tasks use `--locked`.
 
-`Cargo.lock` fixes the full Rust dependency graph. The UI depends on the pinned `gpui-kit = "=0.8.1"` facade; its default assets/components and matching GPUI 0.3.10 platform snapshot are enabled. The shell also uses Serde/JSON and Tempfile for application preferences. No JavaScript fixtures or package installation are needed yet. Future Astro fixtures must use project-local Bun tooling and committed lockfiles.
+### Linux prerequisites
 
-The shell owns one Tokio service runtime; GPUI retains native UI and background CPU execution. Filesystem jobs use a bounded blocking lane, and preference changes coalesce for 250 ms before writing. Selected editor/layout/parser dependencies are optimized in development builds while application code keeps debug information and normal development compilation. See [concurrency boundaries and performance evidence](docs/technical/concurrency-and-responsiveness.md).
+Mise does not install system development packages or GPU drivers. GPUI Kit
+needs a C/C++ linker, clang, cmake, pkg-config, fontconfig, Wayland/X11
+headers, OpenSSL, zstd and a Vulkan loader.
 
-Logging writes human-readable records to stderr and structured JSON to daily-rotated files, from a non-blocking writer. See [logging configuration and event levels](docs/technical/logging.md).
-
-### Native prerequisites
-
-Mise does not install operating system development packages or GPU drivers. GPUI Kit's [installation guide](https://gpui-kit.com/docs/installation) describes platform requirements; the bootstrap uses the following build dependencies.
-
-**Linux (Ubuntu 24.04):**
+Ubuntu 24.04:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y gcc g++ clang cmake pkg-config libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev libvulkan-dev mesa-vulkan-drivers
+sudo apt-get install -y gcc g++ clang cmake pkg-config libfontconfig-dev \
+  libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev \
+  libvulkan-dev mesa-vulkan-drivers
 ```
 
-On Arch/CachyOS, install the corresponding packages:
+Arch/CachyOS:
 
 ```sh
-sudo pacman -S --needed base-devel clang cmake pkgconf fontconfig wayland libxkbcommon libxkbcommon-x11 libx11 libxcb openssl zstd vulkan-headers vulkan-icd-loader
+sudo pacman -S --needed base-devel clang cmake pkgconf fontconfig wayland \
+  libxkbcommon libxkbcommon-x11 libx11 libxcb openssl zstd vulkan-headers \
+  vulkan-icd-loader
 ```
 
-Install the Vulkan driver for your GPU as well (for example `vulkan-radeon`, `vulkan-intel`, or the distribution's NVIDIA driver). Launch from a graphical Wayland or X11 session. A loader alone does not provide a working renderer. The default bootstrap does not enable a webview or speech; WebKitGTK and ALSA development packages are not required for this dependency graph. Add their native dependencies if those features are introduced. Normal Wayland preview will use an external browser.
+Install the Vulkan driver for your GPU (for example `vulkan-radeon`,
+`vulkan-intel`, or the distribution's NVIDIA driver) and launch from a
+graphical Wayland or X11 session. No WebKitGTK or ALSA development packages are
+required; preview uses your external browser.
 
-**macOS 15 or newer:** install Xcode Command Line Tools with `xcode-select --install`, then check `xcode-select -p`. GPUI Kit enables `font-kit` and runtime shaders for native text/rendering. No embedded preview is required.
+### Packages
 
-**Windows 10 or newer:** install Visual Studio 2022 Build Tools (or Community) with **Desktop development with C++**, MSVC, and a Windows SDK. Install CMake and make it available on `PATH`. Use the MSVC Rust toolchain. If Cargo cannot discover the compiler/linker, run Mise from a Visual Studio Developer PowerShell. Release builds also need the Windows SDK's `fxc.exe` shader compiler; the GPUI snapshot discovers it from the SDK or `GPUI_FXC_PATH`.
+AppImage, `.deb` and `.rpm` recipes exist:
 
-### Tasks and verification
+```sh
+mise run package:metadata
+mise run package:validate
+mise run package:deb       # or package:appimage / package:rpm
+```
 
-| Command | Purpose |
-| --- | --- |
-| `mise run doctor` | Check tool executables, lockfile metadata, and platform build prerequisites; a compilation is still required to prove compatibility. |
-| `mise run build` | Build `astrolith-desktop` with the lockfile. |
-| `mise run test:fixtures` | Run the frozen Astro 5/6/7 fixtures and compare real loader IDs/source paths with the Rust index. |
-| `mise run test` | Run headless workspace tests. Includes preference, command, readonly-source, and UI interaction tests. |
-| `mise run fmt` | Check formatting without changing files. |
-| `mise run lint` | Run Clippy for every workspace target with warnings denied. |
-| `mise run check` | Run doctor, fmt, lint, build, and test in order; later milestones extend this gate. |
-| `mise run ci` | Run the same check composition in CI. |
-| `mise run dev` | Open the native desktop window. |
-| `mise run test:shell-perf` | Measure readonly file read/validation, editor installation and first headless frame in the dev profile. |
-| `mise run test:shell-perf:release` | Measure the same shell workloads in release. |
-| `mise run test:editor-perf:dev` | Measure editor load/input/frame CPU work with dev dependency optimizations. |
-| `mise run test:editor-perf` | Measure the disposable editor workloads in release. |
+Artifacts land in `dist/`. No artifact has completed a clean-environment
+install, launch, association, protocol and uninstall run yet, and no signed
+release manifest exists. See [packaging notes](packaging/linux/README.md) and
+[development and packaging](docs/technical/development.md#5-packaging-and-update-signing).
 
-The CI workflow configures Linux, macOS, and Windows builds/tests with the same Mise pins. Hosted runner results are separate evidence from local verification. Headless checks do not establish native IME, visual layout, focus, theme, or display scaling acceptance; those remain explicit M00 spike checks.
-## Workspace shell
+## Development
 
-Run `mise run dev`. Use **Open project…** (`Ctrl+Shift+O`, `Cmd+Shift+O` on macOS) to select an Astro project. Select a collection entry to edit its source. Open-document tabs preserve text, selection and undo history. Dirty documents block project switching; closing them requires explicit discard. `Ctrl/Cmd+S` saves through an atomic write that refuses to overwrite a file changed on disk, and unsaved edits are captured to a recovery store. Start the project-local Astro dev server from the Preview panel or **Preview → Start preview server**, then open the active entry with the panel button, **Preview → Open preview in browser**, or `Ctrl/Cmd+Enter`. **Copy preview URL** copies exactly the URL that would open. Restart the server after changing Astro configuration or dependencies, and Retry a failed start with its captured stderr output. The panel reuses the server while the project root stays the same and stops it when the project changes or closes. On Linux Wayland, external-browser preview is the normal path; embedded preview is optional and capability-gated.
+`mise run check` composes doctor, formatting, lint, build, headless tests and
+Astro fixture verification; it is the commit gate. `mise run ci` runs the same
+composition in CI. Architecture boundaries, focused tasks, performance workloads,
+test strategy and the real-platform gate list are in
+[development and packaging](docs/technical/development.md).
 
-Static discovery supports any installed stable release in Astro majors **5, 6, and 7**, literal local `glob()` collections over Markdown, MDX and YAML/YML data sources. MDX patterns require the configured `@astrojs/mdx` integration whose declared `astro` peer range includes the installed Astro release. Non-MDX integrations and settings that cannot change content discovery, such as adapters and Markdown/Vite options, are ignored without evaluation. Content-affecting config (`root`, dynamic `srcDir`, legacy/experimental flags), custom IDs, MDX options and local/imported schema constants receive diagnostics. YAML data entries are indexed and editable as raw text, but do not expose the Markdown frontmatter form. Watcher refreshes the index and retains open buffers; close and reopen an unchanged document to load its disk version. See [M02 evidence and limits](docs/technical/m02-progress.md).
+Headless checks do not establish native IME, focus, display scaling, rendering,
+drag-and-drop, browser-launch or packaging behavior. Those remain explicit
+real-platform evidence and are tracked in the parity audit.
 
-Use **Open file…** to view a local UTF-8 source file (up to 8 MiB and 50,000 lines). The document is readonly: selection and copy work; edits and saving are unavailable. MDX bodies remain intact as source; MDX-aware highlighting is not promised. File errors and picker cancellation preserve the current document. Reads run off the UI thread.
+## License
 
-**Commands…** searches the shared registry, including panel toggles, document focus, theme selection, and reset layout. Arrow keys select a result; Enter invokes it. Escape first clears a nonempty search, then dismisses the palette and restores focus.
-
-| Command | Linux / Windows | macOS |
-| --- | --- | --- |
-| Open file | Ctrl+O | Command+O |
-| Open project | Ctrl+Shift+O | Command+Shift+O |
-| Save | Ctrl+S | Command+S |
-| Close document | Ctrl+W | Command+W |
-| Commands | Ctrl+Shift+P | Command+Shift+P |
-| Toggle files | Ctrl+1 | Command+1 |
-| Toggle inspector | Ctrl+2 | Command+2 |
-| Toggle preview region | Ctrl+Alt+P | Command+Option+P |
-| Open preview in browser | Ctrl+Enter | Command+Enter |
-| Focus document | Ctrl+0 | Command+0 |
-| Find / Replace | Ctrl+F / Ctrl+H | Command+F / Command+H |
-| Find next / previous | Ctrl+G / Ctrl+Shift+G | Command+G / Command+Shift+G |
-| Go to line | Ctrl+Alt+G | Command+Option+G |
-| Select next occurrence | Ctrl+D | Command+D |
-| Cursors at line ends | Ctrl+Shift+L | Command+Shift+L |
-
-Writer commands act on the focused document; every one is a single undo step.
-
-| Command | Linux / Windows | macOS |
-| --- | --- | --- |
-| Bold | Ctrl+B | Command+B |
-| Italic | Ctrl+I | Command+I |
-| Link | Ctrl+K | Command+K |
-| Heading 1–4 | Ctrl+Alt+1 … Ctrl+Alt+4 | Command+Option+1 … Command+Option+4 |
-| Paragraph | Ctrl+Alt+0 | Command+Option+0 |
-| Markdown comment | Ctrl+/ | Command+/ |
-| Focus mode | Ctrl+Shift+F | Command+Shift+F |
-| Typewriter mode | Ctrl+Shift+T | Command+Shift+T |
-
-The preview region starts, stops, restarts and retries the project-local Astro dev server, shows its `stopped`/`starting`/`ready`/`stopping`/`failed` state, and opens or copies the active entry's route in the external browser. Theme mode, side widths, and panel visibility restore at startup. Preferences are split into global, project-registry and per-project files under `astrolith/preferences/` in `$XDG_CONFIG_HOME` (or `~/.config`) on Linux, `~/Library/Application Support` on macOS, and `%APPDATA%` on Windows: `global.json`, `projects.json` and `projects/<project-id>.json`. The first launch migrates the former `astrolith/preferences.json` into the global file and retains the old file as `preferences.v1.migrated.json`; it is never read again. An absolute `ASTROLITH_SETTINGS_PATH` overrides the global file path, with the registry and project files placed beside it. Malformed files are moved to a `*.corrupt` sibling and reported, while unsupported versions and externally changed files are preserved and reported; fix those files and restart to enable persistence again.
-
-`mise run dev:editor` and `mise run dev:layout` retain the disposable M00 probes. Their manual acceptance does not automatically establish native acceptance for new M01 behavior. Local native evidence is Linux Wayland only; hosted CI and macOS/Windows native results require separate validation.
+This repository declares no license yet. The RPM metadata therefore says
+`UNLICENSED`, and the AppStream metadata omits a project license until one is
+chosen.
