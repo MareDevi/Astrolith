@@ -23,6 +23,7 @@ pub(crate) enum CommandId {
     FindPreviousMatch,
     CloseFind,
     GoToLine,
+    OpenContentFinder,
     SelectNextOccurrence,
     CursorsAtLineEnds,
     Bold,
@@ -77,6 +78,7 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::FindPreviousMatch,
     CommandId::CloseFind,
     CommandId::GoToLine,
+    CommandId::OpenContentFinder,
     CommandId::SelectNextOccurrence,
     CommandId::CursorsAtLineEnds,
     CommandId::Bold,
@@ -162,7 +164,7 @@ impl CommandId {
     /// Whether this command can run in the given application state.
     pub fn is_available(self, state: CommandAvailability) -> bool {
         match self {
-            Self::NewEntry => state.project_open && !state.busy,
+            Self::NewEntry | Self::OpenContentFinder => state.project_open && !state.busy,
             Self::DuplicateEntry
             | Self::RenameEntry
             | Self::DeleteEntry
@@ -214,6 +216,7 @@ impl CommandId {
             Self::FindPreviousMatch => "Find previous",
             Self::CloseFind => "Close find",
             Self::GoToLine => "Go to line…",
+            Self::OpenContentFinder => "Content Finder…",
             Self::SelectNextOccurrence => "Select next occurrence",
             Self::CursorsAtLineEnds => "Add cursors at line ends",
             Self::Bold => "Bold",
@@ -369,6 +372,13 @@ impl CommandId {
                     "ctrl-alt-g"
                 }
             }
+            Self::OpenContentFinder => {
+                if mac {
+                    "cmd-shift-k"
+                } else {
+                    "ctrl-shift-k"
+                }
+            }
             Self::SelectNextOccurrence => {
                 if mac {
                     "cmd-d"
@@ -478,7 +488,24 @@ pub(crate) fn bind_keys(cx: &mut App) {
             .shortcut()
             .map(|key| KeyBinding::new(key, *command, Some("Astrolith")))
     }));
+    // The Content Finder's secondary Enter inserts a link instead of opening
+    // the entry. It is scoped to the dialog, so ordinary Enter keeps working.
+    let insert = if cfg!(target_os = "macos") {
+        "cmd-enter"
+    } else {
+        "ctrl-enter"
+    };
+    cx.bind_keys([KeyBinding::new(
+        insert,
+        ContentFinderInsert,
+        Some("ContentFinder"),
+    )]);
 }
+
+/// Insert the selected Content Finder entry as a Markdown link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, gpui_kit::Action)]
+#[action(namespace = astrolith, no_json)]
+pub(crate) struct ContentFinderInsert;
 
 /// Install the application menu bar.
 ///
@@ -573,6 +600,7 @@ pub(crate) fn install_menus(cx: &mut App, copyedit: &CopyeditPreferences) {
                 CommandId::FindPreviousMatch,
                 CommandId::CloseFind,
                 CommandId::GoToLine,
+                CommandId::OpenContentFinder,
                 CommandId::SelectNextOccurrence,
                 CommandId::CursorsAtLineEnds,
                 CommandId::FocusSelectionToolbar,
@@ -675,6 +703,14 @@ mod tests {
         };
         assert!(!CommandId::NewEntry.is_available(empty));
         assert!(CommandId::NewEntry.is_available(ready));
+        assert!(!CommandId::OpenContentFinder.is_available(empty));
+        assert!(CommandId::OpenContentFinder.is_available(ready));
+        assert!(
+            !CommandId::OpenContentFinder.is_available(CommandAvailability {
+                busy: true,
+                ..ready
+            })
+        );
         for command in [
             CommandId::DuplicateEntry,
             CommandId::RenameEntry,

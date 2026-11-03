@@ -162,6 +162,7 @@ async fn wait_for(
     panel: &Entity<PreviewPanel>,
     mut predicate: impl FnMut(&PreviewPanel) -> bool,
 ) {
+    cx.executor().allow_parking();
     for _ in 0..300 {
         cx.run_until_parked();
         if panel.read_with(cx, |panel, _| predicate(panel)) {

@@ -734,6 +734,9 @@ async fn form_entity_renders_controls_and_applies_edits(cx: &mut gpui_kit::TestA
                         mappings: FieldMappings::default(),
                         references: Arc::new(ReferenceCatalog::new()),
                         root: None,
+                        source: None,
+                        assets: None,
+                        path_mode: astrolith_core::preferences::ImagePathMode::Relative,
                         text: "---\ntitle: Hi\ndraft: false\n---\n".to_owned(),
                     },
                     window,
@@ -819,6 +822,9 @@ async fn copy_as_slug_copies_without_touching_the_document(cx: &mut gpui_kit::Te
                         mappings: FieldMappings::default(),
                         references: Arc::new(ReferenceCatalog::new()),
                         root: None,
+                        source: None,
+                        assets: None,
+                        path_mode: astrolith_core::preferences::ImagePathMode::Relative,
                         text: text.to_owned(),
                     },
                     window,
@@ -958,6 +964,9 @@ async fn form_renders_the_typed_control_for_every_family(cx: &mut gpui_kit::Test
                         mappings: FieldMappings::default(),
                         references: Arc::new(catalog),
                         root: None,
+                        source: None,
+                        assets: None,
+                        path_mode: astrolith_core::preferences::ImagePathMode::Relative,
                         text: text.to_owned(),
                     },
                     window,
@@ -1061,4 +1070,123 @@ async fn form_renders_the_typed_control_for_every_family(cx: &mut gpui_kit::Test
         );
     })
     .unwrap();
+}
+
+#[test]
+fn image_picks_reference_in_project_files_and_copy_external_ones() {
+    let project = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("src/assets")).unwrap();
+    std::fs::write(project.path().join("src/assets/local.png"), b"png").unwrap();
+    std::fs::write(external.path().join("Outside Photo.PNG"), b"png").unwrap();
+    let assets = AssetLocation::resolve(project.path(), None).unwrap();
+
+    let local = resolve_image_pick(
+        Some(project.path().to_path_buf()),
+        Some("src/posts/a.md".into()),
+        Some(assets.clone()),
+        ImagePathMode::Relative,
+        project.path().join("src/assets/local.png"),
+    )
+    .unwrap();
+    assert_eq!(local, "../assets/local.png");
+
+    let absolute = resolve_image_pick(
+        Some(project.path().to_path_buf()),
+        Some("src/posts/a.md".into()),
+        Some(assets.clone()),
+        ImagePathMode::Absolute,
+        project.path().join("src/assets/local.png"),
+    )
+    .unwrap();
+    assert_eq!(absolute, "/src/assets/local.png");
+
+    let copied = resolve_image_pick(
+        Some(project.path().to_path_buf()),
+        Some("src/posts/a.md".into()),
+        Some(assets),
+        ImagePathMode::Relative,
+        external.path().join("Outside Photo.PNG"),
+    )
+    .unwrap();
+    assert!(copied.starts_with("../assets/") && copied.ends_with("-outside-photo.png"));
+    assert!(
+        copied.rsplit('/').next().is_some_and(|name| project
+            .path()
+            .join("src/assets")
+            .join(name)
+            .is_file())
+    );
+
+    assert!(
+        resolve_image_pick(
+            Some(project.path().to_path_buf()),
+            Some("src/posts/a.md".into()),
+            None,
+            ImagePathMode::Relative,
+            external.path().join("Outside Photo.PNG"),
+        )
+        .unwrap_err()
+        .contains("assets directory")
+    );
+}
+
+#[gpui_kit::test]
+fn image_value_uses_the_manual_path_verbatim_and_clears(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::{WindowOptions, base::Root, test::TestWindowExt};
+
+    struct Host {
+        form: Entity<FrontmatterForm>,
+    }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.form.clone()
+        }
+    }
+
+    let (handle, form) = cx.update(|cx| {
+        gpui_kit::init(cx);
+        let mut created = None;
+        let (handle, _host) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            let form = cx.new(FrontmatterForm::new);
+            form.update(cx, |form, cx| {
+                form.set_document(
+                    FrontmatterDocument {
+                        schema: Some(schema(vec![field("cover", false, FieldKind::Image)])),
+                        mappings: FieldMappings::default(),
+                        references: Arc::new(ReferenceCatalog::new()),
+                        root: None,
+                        source: None,
+                        assets: None,
+                        path_mode: ImagePathMode::Relative,
+                        text: "---\ncover: old.png\n---\n".to_owned(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+            created = Some(form.clone());
+            cx.new(|_| Host { form })
+        })
+        .unwrap();
+        (handle.downcast::<Root>().unwrap(), created.unwrap())
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+    })
+    .unwrap();
+
+    // A manually typed path is stored exactly as written, failures included.
+    form.update(cx, |form, cx| {
+        form.set_image_path("cover", "  ../weird path?.png  ".into(), cx)
+    });
+    assert!(
+        form.read_with(cx, |form, _| form.editor().unwrap().text().to_owned())
+            .contains("cover: '  ../weird path?.png  '")
+    );
+
+    form.update(cx, |form, cx| form.apply_remove_field("cover", cx));
+    assert!(!form.read_with(cx, |form, _| {
+        form.editor().unwrap().document.has_field("cover")
+    }));
 }

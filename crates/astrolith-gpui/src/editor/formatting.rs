@@ -19,10 +19,14 @@
 //! from the main selection, which is upstream's own definition.
 
 use std::ops::Range;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use astrolith_document::inline_links;
-use gpui_kit::{App, ClipboardItem, MouseButton, MouseDownEvent, WeakEntity, Window};
+use gpui_kit::{
+    App, ClipboardItem, ExternalPaths, MouseButton, MouseDownEvent, WeakEntity, Window,
+};
 
 use crate::editor::session::DocumentSession;
 
@@ -34,6 +38,8 @@ pub(crate) struct EditorWiring {
     pub hooks: DocumentHooks,
     /// The session the toolbar commands dispatch to.
     pub session: WeakEntity<DocumentSession>,
+    /// Canonical project root used to resolve document-relative previews.
+    pub preview_root: Option<Arc<PathBuf>>,
 }
 
 impl EditorWiring {
@@ -42,7 +48,23 @@ impl EditorWiring {
         Self {
             hooks: document_hooks(session.clone()),
             session,
+            preview_root: None,
         }
+    }
+
+    /// Install the project root the Alt-hover preview resolves against.
+    pub(crate) fn with_preview_root(mut self, root: PathBuf) -> Self {
+        self.preview_root = Some(Arc::new(root));
+        self
+    }
+
+    /// Install the editor file-drop handler.
+    ///
+    /// The handler owns asset copying and insertion; the element only forwards
+    /// the platform's dropped paths.
+    pub(crate) fn with_drop(mut self, drop: DropHook) -> Self {
+        self.hooks.drop = Some(drop);
+        self
     }
 }
 
@@ -51,6 +73,9 @@ type PasteHook = Rc<dyn Fn(&ClipboardItem, &mut Window, &mut App) -> bool>;
 /// Bubble-phase mouse-down handler.
 type MouseDownHook = Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
 
+/// Platform file-drop handler: one or more external paths.
+pub(crate) type DropHook = Rc<dyn Fn(&ExternalPaths, &mut Window, &mut App)>;
+
 /// Editor-element handlers owned by one document pane.
 #[derive(Clone)]
 pub(crate) struct DocumentHooks {
@@ -58,6 +83,8 @@ pub(crate) struct DocumentHooks {
     pub(crate) paste: PasteHook,
     /// Bubble-phase mouse down, for modified clicks on links.
     pub(crate) mouse_down: MouseDownHook,
+    /// Copy dropped files through the asset service.
+    pub(crate) drop: Option<DropHook>,
 }
 
 /// Build the editor hooks for one session.
@@ -92,7 +119,11 @@ pub(crate) fn document_hooks(session: WeakEntity<DocumentSession>) -> DocumentHo
             }
         },
     );
-    DocumentHooks { paste, mouse_down }
+    DocumentHooks {
+        paste,
+        mouse_down,
+        drop: None,
+    }
 }
 
 /// Whether a mouse-down activates the link under the pointer.

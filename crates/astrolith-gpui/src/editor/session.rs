@@ -469,6 +469,61 @@ impl DocumentSession {
         Some(url)
     }
 
+    /// The image destination under `position`, if the pointer is over one.
+    ///
+    /// Uses the same inverse `range_to_bounds` hit test as modified link
+    /// clicks; the facade exposes no pointer-to-caret mapping.
+    pub(crate) fn image_destination_at(&self, position: Point<Pixels>, cx: &App) -> Option<String> {
+        let links = crate::editor::image_preview::image_links(&self.projection.visible);
+        let editor = self.editor.read(cx);
+        links
+            .into_iter()
+            .find(|(range, _)| {
+                editor
+                    .range_to_bounds(range)
+                    .is_some_and(|bounds| bounds.contains(&position))
+            })
+            .map(|(_, destination)| destination)
+    }
+
+    /// Project-relative source this session edits.
+    pub(crate) fn canonical_source(&self) -> &str {
+        self.buffer.identity().canonical_source().as_str()
+    }
+
+    /// Insert literal text at the selection as one undo step.
+    ///
+    /// Drops use this for the complete image/link Markdown, so a multi-file
+    /// drop stays one undo transaction.
+    pub(crate) fn insert_snippet(
+        &mut self,
+        snippet: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.absorb(cx);
+        let selection = self.editor.read(cx).selected_range();
+        let caret = selection.start + snippet.len();
+        let outcome = FormatOutcome {
+            replacement: snippet,
+            range: selection,
+            selection: caret..caret,
+        };
+        if self.mapped_source(&outcome).is_err() {
+            cx.emit(SessionChanged);
+            cx.notify();
+            return false;
+        }
+        self.apply_outcome(&outcome, false, window, cx);
+        self.absorb(cx);
+        self.refresh_copyedit(cx);
+        self.refresh_writer(cx);
+        self.dirty = self.buffer.is_dirty();
+        cx.emit(SessionChanged);
+        cx.notify();
+        true
+    }
+
     /// Install the writing modes for this session.
     pub(crate) fn set_writing_modes(
         &mut self,

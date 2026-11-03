@@ -1,6 +1,11 @@
+use std::sync::Arc;
+use std::time::Instant;
+
 use crate::editor::formatting::EditorWiring;
+use crate::editor::image_preview::{self, ImagePreviewState, PreviewSource};
 use crate::editor::selection_toolbar;
 use crate::editor::writing_modes::{ProseTypography, prose_typography};
+use crate::runtime;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Icon, Sizable, StyledExt,
@@ -8,8 +13,9 @@ use gpui_kit::component::{
     input::{Editor, EditorState},
 };
 use gpui_kit::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    MouseButton, Render, SharedString, TestSupportExt, Window, div, prelude::*, px,
+    App, AppContext, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
+    IntoElement, ModifiersChangedEvent, MouseButton, MouseMoveEvent, ObjectFit, Render,
+    SharedString, Task, TestSupportExt, Window, div, img, prelude::*, px,
 };
 
 pub(crate) struct WorkspacePanel {
@@ -28,6 +34,20 @@ pub(crate) struct WorkspacePanel {
     pub(crate) toolbar_focus: FocusHandle,
     /// Base prose size from preferences and the document pane width.
     prose: Option<(f32, f32)>,
+    /// Alt-hover preview and its in-flight request.
+    preview: ImagePreviewState,
+    preview_source: Option<PreviewSource>,
+    preview_started: Option<Instant>,
+    preview_task: Option<Task<()>>,
+}
+
+/// Whether a hover over `source` needs a new load.
+///
+/// A failed load leaves the source recorded with no image, so repeating the
+/// same hover must not re-dispatch; moving to another source or dismissing
+/// resets it.
+fn needs_preview_request(current: Option<&PreviewSource>, source: &PreviewSource) -> bool {
+    current != Some(source)
 }
 
 impl WorkspacePanel {
@@ -152,7 +172,104 @@ impl WorkspacePanel {
             wiring: None,
             toolbar_focus,
             prose: None,
+            preview: ImagePreviewState::default(),
+            preview_source: None,
+            preview_started: None,
+            preview_task: None,
         }
+    }
+
+    /// Hide the preview and cancel its request.
+    fn dismiss_preview(&mut self, cx: &mut Context<Self>) {
+        let visible = self.preview.is_visible() || self.preview_source.is_some();
+        self.preview.dismiss();
+        self.preview_source = None;
+        self.preview_started = None;
+        self.preview_task = None;
+        if visible {
+            cx.notify();
+        }
+    }
+
+    /// Resolve the image under the pointer and start a bounded load.
+    fn hover_image(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !event.modifiers.alt {
+            self.dismiss_preview(cx);
+            return;
+        }
+        let Some(wiring) = self.wiring.as_ref() else {
+            return;
+        };
+        let Some(root) = wiring.preview_root.clone() else {
+            return;
+        };
+        let Some(session) = wiring.session.upgrade() else {
+            return;
+        };
+        let destination = {
+            let session = session.read(cx);
+            session.image_destination_at(event.position, cx)
+        };
+        let document = {
+            let session = session.read(cx);
+            root.join(session.canonical_source())
+        };
+        let source = destination
+            .as_deref()
+            .and_then(|destination| image_preview::resolve_preview(&root, &document, destination));
+        let Some(source) = source else {
+            self.dismiss_preview(cx);
+            return;
+        };
+        if !needs_preview_request(self.preview_source.as_ref(), &source) {
+            return;
+        }
+        let generation = self.preview.begin();
+        self.preview_source = Some(source.clone());
+        self.preview_started = Some(Instant::now());
+        let task = match source {
+            PreviewSource::Local(path) => {
+                let load = runtime::blocking(cx, move || image_preview::load_local(&root, &path));
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = load.await.ok().and_then(Result::ok);
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.finish_preview(generation, result, window, cx)
+                    });
+                })
+            }
+            PreviewSource::Remote(url) => {
+                let load = runtime::blocking(cx, move || image_preview::load_remote(&url));
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = load.await.ok().and_then(Result::ok);
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.finish_preview(generation, result, window, cx)
+                    });
+                })
+            }
+        };
+        self.preview_task = Some(task);
+        cx.notify();
+    }
+
+    fn finish_preview(
+        &mut self,
+        generation: u64,
+        result: Option<Arc<gpui_kit::RenderImage>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.preview.generation() != generation {
+            return;
+        }
+        self.preview_task = None;
+        let started = self.preview_started.take().unwrap_or_else(Instant::now);
+        let accepted = self
+            .preview
+            .accept(generation, started, Instant::now(), result);
+        if !accepted {
+            self.preview_source = None;
+        }
+        cx.notify();
     }
 }
 
@@ -216,6 +333,11 @@ impl Render for WorkspacePanel {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .focus_visible(|style| style.border_1().border_color(cx.theme().ring))
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                if !event.modifiers.alt {
+                    this.dismiss_preview(cx);
+                }
+            }))
             .when_some(self.header.as_ref(), |view, header| {
                 view.child(header.clone())
             })
@@ -238,6 +360,7 @@ impl Render for WorkspacePanel {
                         cx,
                     )
                 });
+                let preview_image = self.preview.image();
                 let mut element = Editor::new(&editor)
                     .readonly(self.readonly)
                     .bordered(false)
@@ -260,12 +383,43 @@ impl Render for WorkspacePanel {
                     let paste = wiring.hooks.paste.clone();
                     element = element.on_paste(move |item, window, cx| (paste)(item, window, cx));
                 }
-                let mut body = div().flex_1().min_h_0().child(element);
+                let mut body = div().flex_1().min_h_0().relative().child(element);
                 if let Some(hooks) = wiring.as_ref().map(|wiring| wiring.hooks.clone()) {
                     let mouse_down = hooks.mouse_down.clone();
                     body = body.on_mouse_down(MouseButton::Left, move |event, window, cx| {
                         (mouse_down)(event, window, cx)
                     });
+                    body = body.on_mouse_move(cx.listener(
+                        |this, event: &MouseMoveEvent, window, cx| {
+                            this.hover_image(event, window, cx)
+                        },
+                    ));
+                    body =
+                        body.on_mouse_exit(cx.listener(|this, _, _, cx| this.dismiss_preview(cx)));
+                    if let Some(drop) = hooks.drop.clone() {
+                        body = body.on_drop(move |paths: &ExternalPaths, window, cx| {
+                            (drop)(paths, window, cx)
+                        });
+                    }
+                }
+                if let Some(image) = preview_image {
+                    body = body.child(
+                        div()
+                            .absolute()
+                            .bottom(px(12.))
+                            .right(px(12.))
+                            .p_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(cx.theme().window_border)
+                            .bg(cx.theme().background)
+                            .child(
+                                img(image)
+                                    .max_w(px(360.))
+                                    .max_h(px(240.))
+                                    .object_fit(ObjectFit::Contain),
+                            ),
+                    );
                 }
                 view.child(body.when_some(overlay, |body, overlay| body.child(overlay)))
             })
@@ -281,5 +435,27 @@ impl Render for WorkspacePanel {
                         .child(self.content.clone()),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_preview_is_not_reloaded_for_the_same_source() {
+        let mut preview = ImagePreviewState::default();
+        let source = PreviewSource::Local(std::path::PathBuf::from("/project/src/assets/x.png"));
+        let generation = preview.begin();
+        let started = Instant::now();
+        // A failure is accepted with no image and keeps the source recorded.
+        assert!(preview.accept(generation, started, Instant::now(), None));
+        assert!(!preview.is_visible());
+        assert!(!needs_preview_request(Some(&source), &source));
+        assert!(needs_preview_request(
+            Some(&source),
+            &PreviewSource::Local("/project/src/assets/y.png".into())
+        ));
+        assert!(needs_preview_request(None, &source));
     }
 }

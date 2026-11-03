@@ -2,6 +2,8 @@
 use crate::{
     commands::{CommandAvailability, CommandId},
     editor::{
+        assets as asset_insertion,
+        content_finder::{self, FinderEntry},
         copyedit::CopyeditConfig,
         formatting::EditorWiring,
         save_coordinator::{
@@ -24,7 +26,8 @@ use astrolith_astro::{
 use astrolith_core::{
     CollectionId, ProjectId, SourcePath,
     preferences::{
-        FieldMappings, FileExtension, GlobalPreferencesV2, ProjectPreferencesV1, resolve,
+        FieldMappings, FileExtension, GlobalPreferencesV2, ImagePathMode, ProjectPreferencesV1,
+        resolve,
     },
 };
 use astrolith_document::{
@@ -34,7 +37,8 @@ use astrolith_document::{
 };
 use astrolith_preview::RouteMapping;
 use astrolith_workspace::{
-    CollectionEntry, CollectionWatcher, ReferenceOption,
+    CollectionEntry, CollectionWatcher, MetaValue, ReferenceOption,
+    assets::AssetLocation,
     list::{self, EntryFilter, EntrySort, SortDirection, SortMode},
     operations::{
         self, CopyPathRequest, CreateRequest, CreationField, CreationInput, CreationInputKind,
@@ -59,6 +63,7 @@ use gpui_kit::{
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
 };
 
@@ -588,6 +593,12 @@ pub struct ActiveFrontmatter {
     pub references: Arc<ReferenceCatalog>,
     /// Canonical project root, used to validate in-project image paths.
     pub root: PathBuf,
+    /// Project-relative source of the active document.
+    pub source: String,
+    /// Resolved assets directory, when the project allows one.
+    pub assets: Option<AssetLocation>,
+    /// Relative or project-root generated image paths.
+    pub path_mode: ImagePathMode,
     /// Live editor text, including unsaved changes.
     pub text: String,
 }
@@ -1549,13 +1560,220 @@ impl ProjectWorkspace {
         // The form parses complete-source text; the editor itself only shows the
         // writer projection, which has no frontmatter to build controls from.
         let text = session.read(cx).buffer.current_text().to_owned();
+        let resolved = self.resolved_for(Some(collection));
         Some(ActiveFrontmatter {
             schema: self.schemas.get(collection).cloned(),
-            mappings: self.resolved_for(Some(collection)).field_mappings,
+            mappings: resolved.field_mappings,
             references: self.references.clone(),
             root: self.project_root()?,
+            source: self.active_relative_source()?,
+            assets: self.asset_location(Some(collection)).ok(),
+            path_mode: resolved.image_path_mode,
             text,
         })
+    }
+
+    /// Resolve the effective assets directory for one collection scope.
+    fn asset_location(&self, collection: Option<&str>) -> Result<AssetLocation, String> {
+        let root = self
+            .project_root()
+            .ok_or_else(|| "Open a project before copying assets.".to_owned())?;
+        let resolved = self.resolved_for(collection);
+        AssetLocation::resolve(root, resolved.assets_directory.as_deref())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Every indexed entry as a Content Finder row.
+    ///
+    /// The configured title field decides the label and the Astro entry id is
+    /// always searchable; a missing or non-scalar title falls back to the id.
+    /// Index order is preserved so command rows map back to the same entry.
+    pub(crate) fn content_finder_entries(&self) -> Vec<FinderEntry> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let collection = entry.entry().id().collection().as_str().to_owned();
+                let resolved = self.resolved_for(Some(&collection));
+                let title_field = resolved
+                    .field_mappings
+                    .title
+                    .as_deref()
+                    .unwrap_or(list::DEFAULT_TITLE_FIELD);
+                let id = entry.entry().id().id().to_owned();
+                let title = entry
+                    .metadata()
+                    .field(title_field)
+                    .and_then(meta_scalar)
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| id.clone());
+                FinderEntry {
+                    index,
+                    title,
+                    id,
+                    collection,
+                    source: entry.entry().source().as_str().to_owned(),
+                    slug: entry.metadata().field("slug").and_then(meta_scalar),
+                }
+            })
+            .collect()
+    }
+
+    /// Open the entry a Content Finder row still represents.
+    ///
+    /// The index is revalidated against the source so a refresh between the
+    /// search and Enter can never open a different entry.
+    pub(crate) fn open_finder_entry(
+        &mut self,
+        index: usize,
+        source: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let position = self
+            .entries
+            .get(index)
+            .filter(|entry| entry.entry().source().as_str() == source)
+            .map(|_| index)
+            .or_else(|| {
+                self.entries
+                    .iter()
+                    .position(|entry| entry.entry().source().as_str() == source)
+            });
+        match position {
+            Some(position) => self.open_entry(position, window, cx),
+            None => {
+                self.status = "That entry is no longer in the project index.".into();
+                cx.notify();
+            }
+        }
+    }
+
+    /// Insert a Content Finder link into the active document.
+    pub(crate) fn insert_finder_link(
+        &mut self,
+        entry: &FinderEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(document) = self.active_relative_source() else {
+            self.status = "Open a document before inserting a link.".into();
+            cx.notify();
+            return false;
+        };
+        let Some(path) = self.active.clone() else {
+            return false;
+        };
+        let Some(session) = self.sessions.get(&path).cloned() else {
+            return false;
+        };
+        let pattern = self
+            .resolved_for(Some(&entry.collection))
+            .content_finder_url_pattern;
+        let markdown = content_finder::markdown_link(entry, &document, pattern.as_deref());
+        let inserted = session.update(cx, |session, cx| {
+            session.insert_snippet(markdown, window, cx)
+        });
+        self.status = if inserted {
+            format!("Inserted a link to {}.", entry.title)
+        } else {
+            "The link could not be inserted at the current selection.".into()
+        };
+        cx.notify();
+        inserted
+    }
+
+    /// Copy dropped files into assets and insert their Markdown.
+    ///
+    /// Copying runs on the blocking service lane; nothing here touches the disk
+    /// on the render path. Successful files still insert when another file in
+    /// the same drop fails, and failures are surfaced instead of inserting the
+    /// original host path.
+    pub(crate) fn drop_assets(
+        &mut self,
+        sources: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if sources.is_empty() {
+            return;
+        }
+        let Some(document) = self.active_relative_source() else {
+            self.status = "Open a Markdown or MDX document before dropping files.".into();
+            cx.notify();
+            return;
+        };
+        let Some(active) = self.active.clone() else {
+            return;
+        };
+        let Some(session) = self.sessions.get(&active) else {
+            return;
+        };
+        if session.read(cx).kind() == DocumentKind::Plain {
+            self.status = "Files can only be dropped on a Markdown or MDX document.".into();
+            cx.notify();
+            return;
+        }
+        let collection = self.session_collections.get(&active).cloned();
+        let resolved = self.resolved_for(collection.as_deref());
+        let location = match self.asset_location(collection.as_deref()) {
+            Ok(location) => location,
+            Err(error) => {
+                self.status = format!("Assets directory unavailable: {error}");
+                cx.notify();
+                return;
+            }
+        };
+        let mode = resolved.image_path_mode;
+        let date = asset_insertion::asset_date();
+        let work = runtime::blocking(cx, move || {
+            asset_insertion::copy_dropped(&location, &sources, &date, &document, mode)
+        });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = work.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.finish_drop(active, result, window, cx)
+            });
+        });
+        self.retain_command_task(task);
+    }
+
+    fn finish_drop(
+        &mut self,
+        path: PathBuf,
+        result: Result<asset_insertion::DropOutcome, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (assets, failures) = match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.status = format!("Assets were not copied: {error}");
+                cx.notify();
+                return;
+            }
+        };
+        let mut insert_failed = false;
+        if !assets.is_empty()
+            && let Some(session) = self.sessions.get(&path).cloned()
+        {
+            let markdown = asset_insertion::drop_markdown(&assets);
+            let inserted = session.update(cx, |session, cx| {
+                session.insert_snippet(markdown, window, cx)
+            });
+            if !inserted {
+                insert_failed = true;
+            }
+        }
+        if let Some(failure) = asset_insertion::drop_failure_status(&failures) {
+            self.status = failure;
+        } else if insert_failed {
+            self.status =
+                "The asset files were copied but their Markdown could not be inserted.".into();
+        } else if !assets.is_empty() {
+            self.status = asset_insertion::drop_success_status(&assets);
+        }
+        cx.notify();
     }
 
     /// Apply one frontmatter form edit to the active session's complete source.
@@ -2386,7 +2604,16 @@ impl ProjectWorkspace {
             .to_string_lossy()
             .into_owned();
         let editor = session.read(cx).editor.clone();
-        let wiring = EditorWiring::new(session.downgrade());
+        let owner = cx.weak_entity();
+        let wiring = EditorWiring::new(session.downgrade())
+            .with_preview_root(self.project_root().unwrap_or_default())
+            .with_drop(Rc::new(
+                move |paths: &gpui_kit::ExternalPaths, window, cx| {
+                    let sources = paths.paths().to_vec();
+                    let _ =
+                        owner.update(cx, |project, cx| project.drop_assets(sources, window, cx));
+                },
+            ));
         self.document.update(cx, |document, cx| {
             document.show_editor(title, editor, Some(wiring), cx)
         });
@@ -5005,6 +5232,16 @@ impl Render for ProjectWorkspace {
     }
 }
 
+/// Render one metadata scalar for Content Finder display.
+fn meta_scalar(value: &MetaValue) -> Option<String> {
+    match value {
+        MetaValue::String(text) => Some(text.clone()),
+        MetaValue::Boolean(flag) => Some(flag.to_string()),
+        MetaValue::Integer(number) => Some(number.to_string()),
+        MetaValue::Real(number) => Some(number.to_string()),
+    }
+}
+
 /// The initial-scan state, distinct from the empty and error states.
 fn project_loading_state(cx: &mut Context<ProjectWorkspace>) -> impl IntoElement {
     div()
@@ -5244,6 +5481,195 @@ mod tests {
     };
     use gpui_kit::{TestAppContext, WindowHandle, WindowOptions, base::Root, test::TestWindowExt};
     use std::sync::Mutex;
+    fn content_finder_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/astro")).unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/@astrojs/mdx")).unwrap();
+        std::fs::write(
+            dir.path().join("node_modules/@astrojs/mdx/package.json"),
+            r#"{"version":"4.3.14","peerDependencies":{"astro":"^5.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("astro.config.mjs"),"import {defineConfig} from 'astro/config'; import mdx from '@astrojs/mdx'; export default defineConfig({integrations:[mdx()]});").unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"dependencies":{"astro":"5.18.2"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("node_modules/astro/package.json"),
+            r#"{"version":"5.18.2"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("src/posts")).unwrap();
+        std::fs::write(dir.path().join("src/content.config.ts"),"import {defineCollection} from 'astro:content'; import {glob} from 'astro/loaders'; const blog=defineCollection({loader:glob({base:'src/posts',pattern:'**/*.{md,mdx}'})}); export const collections={blog};").unwrap();
+        std::fs::write(
+            dir.path().join("src/posts/alpha.md"),
+            "---\ntitle: Alpha Post\nslug: alpha space\n---\n# Alpha\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("src/posts/beta.mdx"),
+            "---\ntitle: Beta Note\n---\n# Beta\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[gpui_kit::test]
+    async fn dropped_files_copy_into_assets_and_insert_markdown(cx: &mut TestAppContext) {
+        let dir = content_finder_fixture();
+        let external = tempfile::tempdir().unwrap();
+        let image = external.path().join("Drop Photo.PNG");
+        let pdf = external.path().join("Paper.pdf");
+        std::fs::write(&image, b"not really a png").unwrap();
+        std::fs::write(&pdf, b"%PDF-1.7").unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        let (_, session) = open_entry_for(cx, handle, &view, "src/posts/alpha.md").await;
+        let baseline = session.read_with(cx, |session, _| session.buffer.current_text().to_owned());
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.drop_assets(vec![image.clone(), pdf.clone()], window, cx)
+            });
+        })
+        .unwrap();
+
+        let mut text = String::new();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            text = session.read_with(cx, |session, _| session.buffer.current_text().to_owned());
+            if text.contains("drop-photo.png)") && text.contains("paper.pdf)") {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert!(
+            text.contains("![drop-photo](../assets/") && text.contains("drop-photo.png)"),
+            "{text:?}"
+        );
+        assert!(
+            text.contains("[paper](../assets/") && text.contains("paper.pdf)"),
+            "{text:?}"
+        );
+        let assets = dir.path().join("src/assets");
+        let names: Vec<String> = std::fs::read_dir(&assets)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(
+            names.iter().any(|name| name.ends_with("-drop-photo.png")),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name.ends_with("-paper.pdf")),
+            "{names:?}"
+        );
+        assert_eq!(
+            std::fs::read(
+                assets.join(
+                    names
+                        .iter()
+                        .find(|name| name.ends_with("-paper.pdf"))
+                        .unwrap()
+                )
+            )
+            .unwrap(),
+            b"%PDF-1.7"
+        );
+
+        // The whole batch is one contiguous edit, so one undo removes it.
+        let editor = session.read_with(cx, |session, _| session.editor.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press(
+                if cfg!(target_os = "macos") {
+                    "cmd-z"
+                } else {
+                    "ctrl-z"
+                },
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.buffer.current_text(), baseline);
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn content_finder_searches_opens_and_inserts_title_links(cx: &mut TestAppContext) {
+        let dir = content_finder_fixture();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        let entries = view.read_with(cx, |view, _| view.content_finder_entries());
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Alpha Post", "Beta Note"]
+        );
+        assert_eq!(entries[0].slug.as_deref(), Some("alpha space"));
+        assert_eq!(entries[1].id, "beta");
+        let matched = content_finder::search(&entries, "BETA");
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].title, "Beta Note");
+
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                let mut preferences = ProjectPreferencesV1::default();
+                preferences.collections.insert(
+                    "blog".into(),
+                    astrolith_core::preferences::CollectionPreferencesV1 {
+                        content_finder_url_pattern: Some("/blog/{slug}/".into()),
+                        ..Default::default()
+                    },
+                );
+                view.set_preferences(GlobalPreferencesV2::default(), Some(preferences), cx);
+            });
+        });
+
+        let (alpha_path, alpha) = open_entry_for(cx, handle, &view, "src/posts/alpha.md").await;
+        assert_eq!(
+            view.read_with(cx, |view, _| view.active.clone()),
+            Some(alpha_path)
+        );
+        let beta = matched[0].clone();
+        let inserted = cx
+            .update_window(handle.into(), |_, window, cx| {
+                view.update(cx, |view, cx| view.insert_finder_link(&beta, window, cx))
+            })
+            .unwrap();
+        assert!(inserted);
+        let text = alpha.read_with(cx, |session, _| session.buffer.current_text().to_owned());
+        assert!(
+            text.contains("[Beta Note](/blog/beta/)"),
+            "link uses the id fallback: {text:?}"
+        );
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.open_finder_entry(beta.index, &beta.source, window, cx)
+            })
+        })
+        .unwrap();
+        let beta_path = dir.path().join("src/posts/beta.mdx");
+        wait_for_session(cx, &view, &beta_path).await;
+        assert_eq!(
+            view.read_with(cx, |view, _| view.active.clone()),
+            Some(beta_path)
+        );
+    }
+
     fn fixture() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/astro")).unwrap();

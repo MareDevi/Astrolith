@@ -18,9 +18,12 @@ use std::{path::PathBuf, sync::Arc};
 use astrolith_astro::schema::{
     CollectionSchema, FieldKind, ValidationDiagnostic, validate_frontmatter,
 };
-use astrolith_core::preferences::FieldMappings;
+use astrolith_core::preferences::{FieldMappings, ImagePathMode};
 use astrolith_document::{
     DocumentError, FieldShape, FrontmatterField, FrontmatterValue, ParsedDocument, parse_document,
+};
+use astrolith_workspace::assets::{
+    AssetCopyRequest, AssetLocation, asset_path, copy_asset, project_relative_path,
 };
 use chrono::NaiveDate;
 use gpui_kit::assets::IconName;
@@ -34,9 +37,12 @@ use gpui_kit::component::{
     menu::{DropdownMenu, PopupMenuItem},
 };
 use gpui_kit::{
-    AnyElement, App, AppContext, Context, Entity, EventEmitter, IntoElement, PathPromptOptions,
-    Render, SharedString, Subscription, Window, div, prelude::*, px,
+    AnyElement, App, AppContext, Context, Entity, EventEmitter, IntoElement, ObjectFit,
+    PathPromptOptions, Render, SharedString, Subscription, Window, div, img, prelude::*, px,
 };
+
+use crate::editor::image_preview::{self, PreviewSource};
+use crate::runtime;
 use serde_json::{Map, Value};
 
 pub use fields::{
@@ -362,6 +368,14 @@ struct RowEditor {
     _subscriptions: Vec<Subscription>,
 }
 
+/// Asset context shared by every image row in one render.
+struct RowImageContext {
+    root: Option<PathBuf>,
+    source: Option<String>,
+    assets: Option<AssetLocation>,
+    path_mode: ImagePathMode,
+}
+
 /// Everything the form needs to render one document.
 pub struct FrontmatterDocument {
     /// Generated collection schema, or `None` for a schema-less collection.
@@ -372,6 +386,12 @@ pub struct FrontmatterDocument {
     pub references: Arc<ReferenceCatalog>,
     /// Canonical project root used to validate in-project image paths.
     pub root: Option<PathBuf>,
+    /// Project-relative source of the document holding this frontmatter.
+    pub source: Option<String>,
+    /// Resolved assets directory for external image copies.
+    pub assets: Option<astrolith_workspace::assets::AssetLocation>,
+    /// Relative or project-root generated image paths.
+    pub path_mode: astrolith_core::preferences::ImagePathMode,
     /// Complete document text, including unsaved edits.
     pub text: String,
 }
@@ -382,6 +402,9 @@ pub struct FrontmatterForm {
     rows: Vec<RowEditor>,
     references: Arc<ReferenceCatalog>,
     root: Option<PathBuf>,
+    source: Option<String>,
+    assets: Option<astrolith_workspace::assets::AssetLocation>,
+    path_mode: astrolith_core::preferences::ImagePathMode,
     load_error: Option<SharedString>,
     notice: Option<SharedString>,
 }
@@ -396,6 +419,9 @@ impl FrontmatterForm {
             rows: Vec::new(),
             references: Arc::new(ReferenceCatalog::new()),
             root: None,
+            source: None,
+            assets: None,
+            path_mode: astrolith_core::preferences::ImagePathMode::Relative,
             load_error: None,
             notice: None,
         }
@@ -420,6 +446,9 @@ impl FrontmatterForm {
     ) {
         self.references = document.references;
         self.root = document.root;
+        self.source = document.source;
+        self.assets = document.assets;
+        self.path_mode = document.path_mode;
         self.notice = None;
         match FrontmatterEditor::new(document.schema, document.mappings, document.text) {
             Ok(editor) => {
@@ -873,9 +902,15 @@ impl Render for FrontmatterForm {
                 );
         };
         let notice = self.notice.clone();
+        let images = RowImageContext {
+            root: self.root.clone(),
+            source: self.source.clone(),
+            assets: self.assets.clone(),
+            path_mode: self.path_mode,
+        };
         let mut rows: Vec<AnyElement> = Vec::with_capacity(self.rows.len());
         for (index, row) in self.rows.iter().enumerate() {
-            rows.push(render_row(index, row, editor, cx, window).into_any_element());
+            rows.push(render_row(index, row, editor, &images, cx, window).into_any_element());
         }
         div()
             .id("frontmatter-form")
@@ -930,6 +965,7 @@ fn render_row(
     index: usize,
     row: &RowEditor,
     editor: &FrontmatterEditor,
+    images: &RowImageContext,
     cx: &mut Context<FrontmatterForm>,
     window: &Window,
 ) -> impl IntoElement {
@@ -1027,7 +1063,7 @@ fn render_row(
     } else if matches!(control.kind, ControlKind::Image) {
         // The image control owns its path input, so it must render before the
         // generic text input built for it.
-        row_view = row_view.child(image_control(index, row, cx));
+        row_view = row_view.child(image_control(index, row, images, cx));
     } else if matches!(
         control.kind,
         ControlKind::Reference {
@@ -1326,26 +1362,90 @@ fn tag_control(
     view
 }
 
+/// Resolve one image picker result into the frontmatter value.
+///
+/// A file already inside the project is referenced in place; an external file
+/// is copied through the asset service first. Both outcomes use the configured
+/// relative or project-root path mode, and the manual path input is never
+/// validated here.
+fn resolve_image_pick(
+    root: Option<PathBuf>,
+    source: Option<String>,
+    assets: Option<AssetLocation>,
+    path_mode: ImagePathMode,
+    selected: PathBuf,
+) -> Result<String, String> {
+    let root = root.ok_or_else(|| "The project root is unavailable.".to_owned())?;
+    let source = source.ok_or_else(|| "This document has no project source.".to_owned())?;
+    let canonical_root = std::fs::canonicalize(&root).map_err(|error| error.to_string())?;
+    let canonical = std::fs::canonicalize(&selected).map_err(|error| error.to_string())?;
+    if canonical.starts_with(&canonical_root) {
+        let relative = project_relative_path(&canonical_root, &canonical)
+            .map_err(|error| error.to_string())?;
+        return Ok(asset_path(path_mode, &source, &relative));
+    }
+    let location =
+        assets.ok_or_else(|| "External images need a resolved assets directory.".to_owned())?;
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let asset = copy_asset(
+        &location,
+        &AssetCopyRequest {
+            source: selected,
+            date,
+            document: source,
+            path_mode,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(asset.path().to_owned())
+}
+
 fn image_control(
     index: usize,
     row: &RowEditor,
+    images: &RowImageContext,
     cx: &mut Context<FrontmatterForm>,
 ) -> impl IntoElement {
+    let root = images.root.clone();
+    let source = images.source.clone();
+    let assets = images.assets.clone();
+    let path_mode = images.path_mode;
     let path = row.path.to_string();
+    let value = row
+        .input
+        .as_ref()
+        .map(|input| input.read(cx).value().to_string())
+        .unwrap_or_default();
+    // Lexical containment only: the pinned image loader reads the file off the
+    // render path, and a refused path simply has no thumbnail.
+    let thumbnail = match (root.as_ref(), source.as_deref()) {
+        (Some(root), Some(source)) if !value.is_empty() => {
+            let document = root.join(source);
+            match image_preview::resolve_preview(root, &document, &value) {
+                Some(PreviewSource::Local(path)) => Some(path),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
     let mut preview = div()
         .h_flex()
         .items_center()
         .justify_center()
         .size(px(56.))
         .rounded_md()
+        .overflow_hidden()
         .border_1()
         .border_color(cx.theme().window_border)
-        .bg(cx.theme().muted)
-        .child(
+        .bg(cx.theme().muted);
+    preview = match thumbnail {
+        Some(path) => preview.child(img(path).size(px(48.)).object_fit(ObjectFit::Contain)),
+        None => preview.child(
             Icon::new(IconName::Image)
                 .small()
                 .text_color(cx.theme().muted_foreground),
-        );
+        ),
+    };
     if let Some(input) = row.input.as_ref() {
         preview = div().h_flex().items_center().gap_2().child(preview).child(
             div().flex_1().child(
@@ -1357,6 +1457,9 @@ fn image_control(
     }
     let mut actions = div().h_flex().gap_2();
     let pick_path = path.clone();
+    let pick_root = root.clone();
+    let pick_source = source.clone();
+    let pick_assets = assets.clone();
     actions = actions.child(
         Button::new(("frontmatter-image-pick", index))
             .xsmall()
@@ -1365,12 +1468,15 @@ fn image_control(
             .on_click(cx.listener(move |this, _, window, cx| {
                 let _ = this;
                 let path = pick_path.clone();
-                let root = cx.entity().read(cx).root.clone();
+                let root = pick_root.clone();
+                let source = pick_source.clone();
+                let assets = pick_assets.clone();
+                let expected_source = source.clone();
                 let paths = cx.prompt_for_paths(PathPromptOptions {
                     files: true,
                     directories: false,
                     multiple: false,
-                    prompt: Some("Choose an image inside the project".into()),
+                    prompt: Some("Choose an image".into()),
                 });
                 cx.spawn_in(window, async move |this, cx| {
                     let Ok(Ok(Some(paths))) = paths.await else {
@@ -1379,18 +1485,32 @@ fn image_control(
                     let Some(selected) = paths.into_iter().next() else {
                         return;
                     };
-                    let relative = root
-                        .as_deref()
-                        .and_then(|root| selected.strip_prefix(root).ok())
-                        .map(|relative| relative.to_string_lossy().replace('\\', "/"));
-                    let _ = this.update(cx, |form, cx| match relative {
-                        Some(relative) => form.set_image_path(&path, relative, cx),
-                        None => {
-                            form.notice = Some(SharedString::from(
-                                "Choose an image inside the project; external copy arrives with the asset service.",
-                            ));
-                            cx.notify();
+                    let work = runtime::blocking(cx, move || {
+                        resolve_image_pick(
+                            root.clone(),
+                            source.clone(),
+                            assets.clone(),
+                            path_mode,
+                            selected,
+                        )
+                    });
+                    let result = work.await.and_then(|result| result);
+                    let _ = this.update(cx, |form, cx| {
+                        if form.source != expected_source {
+                            return;
                         }
+                        match result {
+                            Ok(value) => {
+                                form.set_image_path(&path, value, cx);
+                                form.notice = Some(SharedString::from("Image path updated"));
+                            }
+                            Err(error) => {
+                                form.notice = Some(SharedString::from(format!(
+                                    "Could not copy the image: {error}"
+                                )));
+                            }
+                        }
+                        cx.notify();
                     });
                 })
                 .detach();

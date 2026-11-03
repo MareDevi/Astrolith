@@ -1,6 +1,9 @@
+pub(crate) mod assets;
+pub(crate) mod content_finder;
 pub(crate) mod copyedit;
 pub(crate) mod formatting;
 pub(crate) mod header;
+pub(crate) mod image_preview;
 pub(crate) mod save_coordinator;
 pub(crate) mod save_failure;
 pub(crate) mod selection_toolbar;

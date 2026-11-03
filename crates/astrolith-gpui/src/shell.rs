@@ -7,6 +7,7 @@ use std::{
 use crate::{
     commands::{self, COMMANDS, CommandId},
     editor::{
+        content_finder::{self, FinderEntry},
         copyedit::CopyeditConfig,
         header::DocumentHeader,
         save_coordinator::SaveStatus,
@@ -133,6 +134,8 @@ pub(crate) struct Shell {
     preview: Entity<PreviewPanel>,
     palette: Entity<CommandState>,
     palette_focus: FocusHandle,
+    finder: Entity<CommandState>,
+    finder_hits: Arc<Mutex<Vec<FinderEntry>>>,
     opening: bool,
     opening_task: Option<Task<()>>,
     file_status: String,
@@ -270,6 +273,7 @@ impl Shell {
             );
         });
         let palette = cx.new(|cx| CommandState::new(window, cx));
+        let finder = cx.new(|cx| CommandState::new(window, cx));
         let latest = Arc::new(Mutex::new(LatestPreferences {
             global: (0, settings.clone()),
             project: None,
@@ -402,6 +406,8 @@ impl Shell {
             preview,
             palette,
             palette_focus: cx.focus_handle().tab_stop(true),
+            finder,
+            finder_hits: Arc::new(Mutex::new(Vec::new())),
             opening: false,
             opening_task: None,
             file_status: "Readonly · No file open".into(),
@@ -842,6 +848,7 @@ impl Shell {
                     .update(cx, |project, cx| project.prompt(window, cx));
             }
             CommandId::OpenPalette => self.open_palette(window, cx),
+            CommandId::OpenContentFinder => self.open_content_finder(window, cx),
             CommandId::ToggleSidebar => self.toggle_panel(PanelKind::Sidebar, window, cx),
             CommandId::ToggleInspector => self.toggle_panel(PanelKind::Inspector, window, cx),
             CommandId::TogglePreview => self.toggle_panel(PanelKind::Preview, window, cx),
@@ -1060,6 +1067,108 @@ impl Shell {
         self.palette.update(cx, |state, cx| state.focus(window, cx));
     }
 
+    /// Open the searchable index of every entry in the project.
+    fn open_content_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let entries = Arc::new(self.project.read(cx).content_finder_entries());
+        self.finder_hits = Arc::new(Mutex::new(content_finder::search(&entries, "")));
+        self.finder
+            .update(cx, |state, cx| state.set_query("", window, cx));
+        let palette = self.finder.clone();
+        let hits = self.finder_hits.clone();
+        let query_hits = self.finder_hits.clone();
+        let query_entries = entries.clone();
+        let owner = cx.weak_entity();
+        let insert_owner = owner.clone();
+        let insert_hits = self.finder_hits.clone();
+        let insert_palette = self.finder.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let rows = hits.lock().map(|hits| hits.clone()).unwrap_or_default();
+            let confirm_rows = rows.clone();
+            let confirm_owner = owner.clone();
+            let query_hits = query_hits.clone();
+            let query_entries = query_entries.clone();
+            let insert_owner = insert_owner.clone();
+            let insert_hits = insert_hits.clone();
+            let insert_palette = insert_palette.clone();
+            dialog.title("Content Finder").w_128().child(
+                div()
+                    .key_context("ContentFinder")
+                    .on_action(move |_: &commands::ContentFinderInsert, window, cx| {
+                        let Some(index) = insert_palette.read(cx).selected_index() else {
+                            return;
+                        };
+                        let hit = insert_hits
+                            .lock()
+                            .ok()
+                            .and_then(|hits| hits.get(index.row).cloned());
+                        if let Some(hit) = hit {
+                            window.close_dialog(cx);
+                            let _ = insert_owner
+                                .update(cx, |this, cx| this.finder_insert(hit, window, cx));
+                        }
+                    })
+                    .child(
+                        Command::new(&palette)
+                            .bordered(false)
+                            .placeholder("Search entries by title or ID…")
+                            .filterable(false)
+                            .on_query(move |query, window, _| {
+                                if let Ok(mut slot) = query_hits.lock() {
+                                    *slot = content_finder::search(&query_entries, query);
+                                }
+                                window.refresh();
+                            })
+                            .items(rows.into_iter().map(|entry| {
+                                let title: SharedString = entry.title.clone().into();
+                                CommandItem::new()
+                                    .label(title.clone())
+                                    .icon(IconName::FileText)
+                                    .child(move |_, _| {
+                                        div()
+                                            .h_flex()
+                                            .w_full()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(title.clone())
+                                    })
+                            }))
+                            .empty(|_, _, cx| {
+                                div()
+                                    .p_4()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("No matching entries")
+                            })
+                            .on_confirm(move |index, window, cx| {
+                                let Some(entry) = confirm_rows.get(index.row).cloned() else {
+                                    return;
+                                };
+                                window.close_dialog(cx);
+                                let _ = confirm_owner
+                                    .update(cx, |this, cx| this.finder_open(entry, window, cx));
+                            }),
+                    ),
+            )
+        });
+        self.finder.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    fn finder_open(&mut self, entry: FinderEntry, window: &mut Window, cx: &mut Context<Self>) {
+        self.project.update(cx, |project, cx| {
+            project.open_finder_entry(entry.index, &entry.source, window, cx)
+        });
+    }
+
+    fn finder_insert(&mut self, entry: FinderEntry, window: &mut Window, cx: &mut Context<Self>) {
+        self.project.update(cx, |project, cx| {
+            project.insert_finder_link(&entry, window, cx)
+        });
+        self.document.read(cx).focus_handle(cx).focus(window, cx);
+    }
+
     fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.opening {
             return;
@@ -1176,6 +1285,7 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::FindPreviousMatch => IconName::ChevronUp,
         CommandId::CloseFind => IconName::X,
         CommandId::GoToLine => IconName::ListOrdered,
+        CommandId::OpenContentFinder => IconName::FileSearch,
         CommandId::SelectNextOccurrence => IconName::TextCursor,
         CommandId::CursorsAtLineEnds => IconName::List,
         CommandId::Bold => IconName::Bold,
@@ -1220,6 +1330,9 @@ impl Render for Shell {
                                 mappings: active.mappings,
                                 references: active.references,
                                 root: Some(active.root),
+                                source: Some(active.source),
+                                assets: active.assets,
+                                path_mode: active.path_mode,
                                 text: active.text,
                             },
                             window,
@@ -1628,6 +1741,102 @@ mod tests {
                 .iter()
                 .all(|category| !view.settings.copyedit.enabled(*category))
         }));
+    }
+
+    #[gpui_kit::test]
+    async fn content_finder_opens_entries_and_inserts_links_with_undo(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let directory = project_fixture("site");
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        open_project(cx, handle, &view, directory.path().to_path_buf());
+        let project = view.read_with(cx, |view, _| view.project.clone());
+        cx.condition(&project, |project, _| !project.is_loading())
+            .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            project.update(cx, |project, cx| {
+                project.open_first_entry_for_tests(window, cx)
+            });
+        })
+        .unwrap();
+        let first = wait_for_active_session(cx, &project).await;
+        assert!(first.ends_with("first.md"));
+
+        // Enter opens the highlighted entry.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::OpenContentFinder, window, cx)
+            });
+            assert!(window.has_active_dialog(cx));
+            window.input("second", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let query = view.read(cx).finder.read(cx).query(cx);
+            let count = view.read(cx).finder.read(cx).matched_count();
+            assert_eq!(query, "second", "the finder owns the typed query");
+            assert_eq!(count, 1, "one entry matches the query");
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let second = wait_for_active_session(cx, &project).await;
+        assert!(second.ends_with("second.md"));
+
+        // Ctrl+Enter inserts a title-text link in the active document.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::OpenContentFinder, window, cx)
+            });
+            window.input("first", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.press("ctrl-enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let session = project
+            .read_with(cx, |project, cx| project.active_session(cx))
+            .unwrap();
+        assert!(session.read_with(cx, |session, _| {
+            session.buffer.current_text().contains("[first](first.md)")
+        }));
+
+        // The insertion is one undo step.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("ctrl-z", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(!session.read_with(cx, |session, _| {
+            session.buffer.current_text().contains("[first](first.md)")
+        }));
+    }
+
+    async fn wait_for_active_session(
+        cx: &mut TestAppContext,
+        project: &Entity<ProjectWorkspace>,
+    ) -> std::path::PathBuf {
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if let Some(path) = project.read_with(cx, |project, cx| {
+                project
+                    .active_path()
+                    .filter(|_| project.active_session(cx).is_some())
+            }) {
+                return path;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        panic!("no active session appeared");
     }
 
     #[gpui_kit::test]
