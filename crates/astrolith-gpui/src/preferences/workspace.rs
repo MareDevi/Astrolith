@@ -14,7 +14,6 @@ impl PreferencesSheet {
         let mode_weak = weak.clone();
         let mode_label = self.default_mode.label();
         let default_mode = Button::new("preferences-default-mode")
-            .small()
             .outline()
             .label(mode_label)
             .dropdown_caret(true)
@@ -35,7 +34,6 @@ impl PreferencesSheet {
 
         let extension_weak = weak.clone();
         let extension = Button::new("preferences-default-extension")
-            .small()
             .outline()
             .label(extension_label)
             .dropdown_caret(true)
@@ -60,7 +58,6 @@ impl PreferencesSheet {
         let focus_weak = weak.clone();
         let focus_label = if self.focus_mode { "On" } else { "Off" };
         let focus_mode = Button::new("preferences-focus-mode")
-            .small()
             .outline()
             .label(focus_label)
             .dropdown_caret(true)
@@ -82,7 +79,6 @@ impl PreferencesSheet {
         let typewriter_weak = weak.clone();
         let typewriter_label = if self.typewriter_mode { "On" } else { "Off" };
         let typewriter_mode = Button::new("preferences-typewriter-mode")
-            .small()
             .outline()
             .label(typewriter_label)
             .dropdown_caret(true)
@@ -103,7 +99,6 @@ impl PreferencesSheet {
 
         let autosave_weak = weak.clone();
         let autosave = Button::new("preferences-autosave")
-            .small()
             .outline()
             .label(autosave_label)
             .dropdown_caret(true)

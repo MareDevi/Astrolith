@@ -33,7 +33,6 @@ impl PreferencesSheet {
             .map(|entry| entry.name.clone())
             .collect();
         let selector = Button::new("preferences-collection-select")
-            .small()
             .outline()
             .label(current)
             .dropdown_caret(true)
@@ -65,7 +64,6 @@ impl PreferencesSheet {
 
         let image_weak = weak.clone();
         let image_mode = Button::new("preferences-collection-image-mode")
-            .small()
             .outline()
             .label(image_label)
             .dropdown_caret(true)
@@ -90,7 +88,6 @@ impl PreferencesSheet {
 
         let extension_weak = weak.clone();
         let extension = Button::new("preferences-collection-extension")
-            .small()
             .outline()
             .label(extension_label)
             .dropdown_caret(true)

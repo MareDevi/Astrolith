@@ -13,7 +13,6 @@ impl PreferencesSheet {
 
         let theme_weak = weak.clone();
         let theme = Button::new("preferences-theme")
-            .small()
             .outline()
             .label(theme_label)
             .dropdown_caret(true)
@@ -38,7 +37,7 @@ impl PreferencesSheet {
 
         let appearance = vec![self.field(
             "preferences-field-theme",
-            "Appearance",
+            "Colour mode",
             theme,
             FieldExtras {
                 field: None,
@@ -71,7 +70,7 @@ impl PreferencesSheet {
                 self.control(FieldId::UiFontSize),
                 FieldExtras {
                     field: Some(FieldId::UiFontSize),
-                    hint: Some("8–28 logical pixels; the default is 14."),
+                    hint: Some("8–28 logical pixels; the default is 18."),
                     trailing: Some(self.reset_button(
                         FieldId::UiFontSize,
                         "preferences-reset-ui-font-size",
@@ -184,7 +183,7 @@ impl PreferencesSheet {
             .w_full()
             .gap_4()
             .child(self.section(
-                "Appearance",
+                "Theme",
                 Some("Colour schemes shared by every project."),
                 appearance,
                 cx,

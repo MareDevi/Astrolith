@@ -687,7 +687,7 @@ impl Default for GlobalPreferencesV2 {
             window: None,
             heading_colors: HeadingColors::default(),
             ui_font_family: String::new(),
-            ui_font_size: 14.,
+            ui_font_size: 18.,
             prose_font_family: String::new(),
             editor_font_size: 16.,
             editor_line_height: 2.,
@@ -1526,7 +1526,7 @@ mod tests {
                 .unwrap();
         assert_eq!(retired.theme, ThemePreference::System);
         assert_eq!(retired.ui_font_family, "");
-        assert_eq!(retired.ui_font_size, 14.);
+        assert_eq!(retired.ui_font_size, 18.);
         assert_eq!(retired.prose_font_family, "");
         assert_eq!(retired.editor_font_size, 16.);
         assert_eq!(retired.editor_line_height, 2.);

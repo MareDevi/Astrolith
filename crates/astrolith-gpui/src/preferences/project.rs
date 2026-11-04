@@ -27,7 +27,6 @@ impl PreferencesSheet {
 
         let image_weak = weak.clone();
         let image_mode = Button::new("preferences-project-image-mode")
-            .small()
             .outline()
             .label(image_label)
             .dropdown_caret(true)
@@ -52,7 +51,6 @@ impl PreferencesSheet {
 
         let extension_weak = weak.clone();
         let extension = Button::new("preferences-project-extension")
-            .small()
             .outline()
             .label(extension_label)
             .dropdown_caret(true)
@@ -77,7 +75,6 @@ impl PreferencesSheet {
 
         let imports_weak = weak.clone();
         let imports = Button::new("preferences-project-imports")
-            .small()
             .outline()
             .label(imports_label)
             .dropdown_caret(true)

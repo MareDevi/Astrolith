@@ -2443,11 +2443,11 @@ impl Shell {
         let view = self.preferences_sheet.clone();
         let close = self.preferences_sheet.downgrade();
         let initial_focus = std::cell::Cell::new(true);
-        // The sheet must fit the minimum window and enlarged interface type:
-        // its width follows the viewport instead of a fixed 880 px.
+        // The sheet scales with the window instead of staying at a small fixed
+        // size; the minimum keeps the navigation and form columns readable.
         let viewport = window.viewport_size();
-        let dialog_width = px((f32::from(viewport.width) - 64.).clamp(560., 880.));
-        let dialog_height = px((f32::from(viewport.height) - 64.).clamp(420., 680.));
+        let dialog_width = px((f32::from(viewport.width) - 64.).clamp(720., 1040.));
+        let dialog_height = px((f32::from(viewport.height) - 64.).clamp(560., 1040.));
         window.open_dialog(cx, move |dialog, window, cx| {
             let close = close.clone();
             if initial_focus.replace(false) {

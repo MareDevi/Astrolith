@@ -124,7 +124,6 @@ impl PreferencesSheet {
             .unwrap_or_else(|| "Preferences folder unavailable".to_owned());
         let open = folder.clone();
         let open_button = Button::new("preferences-open-folder")
-            .small()
             .disabled(open.is_none())
             .label("Open preferences folder")
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -161,7 +160,6 @@ impl PreferencesSheet {
                 ),
                 vec![
                     Button::new("preferences-reset-all")
-                        .small()
                         .danger()
                         .label("Reset all preferences…")
                         .on_click(cx.listener(|this, _, window, cx| {

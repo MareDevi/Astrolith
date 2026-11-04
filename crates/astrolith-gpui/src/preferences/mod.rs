@@ -81,6 +81,18 @@ impl Pane {
         }
     }
 
+    /// One-line explanation shown above the pane body.
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::Appearance => "Theme, interface type and document typography.",
+            Self::Workspace => "Startup mode, per-mode layouts and writing behaviour.",
+            Self::Preview => "How the live site opens and which browser to use.",
+            Self::Project => "Defaults for this project's content workflow.",
+            Self::Collections => "Directories, field mappings and style per collection.",
+            Self::Advanced => "Paths, integrations and reset actions.",
+        }
+    }
+
     /// Stable element identifier, used by tests and accessibility clients.
     pub(crate) fn element_id(self) -> &'static str {
         match self {
@@ -1209,12 +1221,10 @@ impl PreferencesSheet {
             }
             FieldId::IdeExecutable => {
                 gpui_kit::component::input::Input::new(&self.inputs.ide_executable)
-                    .small()
                     .into_any_element()
             }
             FieldId::PreviewBrowserExecutable => {
                 gpui_kit::component::input::Input::new(&self.inputs.preview_browser_executable)
-                    .small()
                     .into_any_element()
             }
             FieldId::PreviewBrowserArguments => {
@@ -1224,106 +1234,83 @@ impl PreferencesSheet {
             }
             FieldId::HeadingLight => {
                 gpui_kit::component::input::Input::new(&self.inputs.heading_light)
-                    .small()
                     .into_any_element()
             }
             FieldId::HeadingDark => {
-                gpui_kit::component::input::Input::new(&self.inputs.heading_dark)
-                    .small()
-                    .into_any_element()
+                gpui_kit::component::input::Input::new(&self.inputs.heading_dark).into_any_element()
             }
             FieldId::UiFontFamily => {
                 gpui_kit::component::input::Input::new(&self.inputs.ui_font_family)
-                    .small()
                     .into_any_element()
             }
             FieldId::UiFontSize => {
-                gpui_kit::component::input::Input::new(&self.inputs.ui_font_size)
-                    .small()
-                    .into_any_element()
+                gpui_kit::component::input::Input::new(&self.inputs.ui_font_size).into_any_element()
             }
             FieldId::ProseFontFamily => {
                 gpui_kit::component::input::Input::new(&self.inputs.prose_font_family)
-                    .small()
                     .into_any_element()
             }
-            FieldId::FontSize => gpui_kit::component::input::Input::new(&self.inputs.font_size)
-                .small()
-                .into_any_element(),
-            FieldId::LineHeight => gpui_kit::component::input::Input::new(&self.inputs.line_height)
-                .small()
-                .into_any_element(),
+            FieldId::FontSize => {
+                gpui_kit::component::input::Input::new(&self.inputs.font_size).into_any_element()
+            }
+            FieldId::LineHeight => {
+                gpui_kit::component::input::Input::new(&self.inputs.line_height).into_any_element()
+            }
             FieldId::EditorWidth => {
-                gpui_kit::component::input::Input::new(&self.inputs.editor_width)
-                    .small()
-                    .into_any_element()
+                gpui_kit::component::input::Input::new(&self.inputs.editor_width).into_any_element()
             }
             FieldId::ProjectContent => {
                 gpui_kit::component::input::Input::new(&self.inputs.project_content)
-                    .small()
                     .into_any_element()
             }
             FieldId::ProjectAssets => {
                 gpui_kit::component::input::Input::new(&self.inputs.project_assets)
-                    .small()
                     .into_any_element()
             }
-            FieldId::ProjectMdx => gpui_kit::component::input::Input::new(&self.inputs.project_mdx)
-                .small()
-                .into_any_element(),
+            FieldId::ProjectMdx => {
+                gpui_kit::component::input::Input::new(&self.inputs.project_mdx).into_any_element()
+            }
             FieldId::ProjectTitle => {
                 gpui_kit::component::input::Input::new(&self.inputs.project_title)
-                    .small()
                     .into_any_element()
             }
             FieldId::ProjectDate => {
-                gpui_kit::component::input::Input::new(&self.inputs.project_date)
-                    .small()
-                    .into_any_element()
+                gpui_kit::component::input::Input::new(&self.inputs.project_date).into_any_element()
             }
             FieldId::ProjectDescription => {
                 gpui_kit::component::input::Input::new(&self.inputs.project_description)
-                    .small()
                     .into_any_element()
             }
             FieldId::ProjectDraft => {
                 gpui_kit::component::input::Input::new(&self.inputs.project_draft)
-                    .small()
                     .into_any_element()
             }
             FieldId::CollectionContent => {
                 gpui_kit::component::input::Input::new(&self.inputs.collection_content)
-                    .small()
                     .into_any_element()
             }
             FieldId::CollectionAssets => {
                 gpui_kit::component::input::Input::new(&self.inputs.collection_assets)
-                    .small()
                     .into_any_element()
             }
             FieldId::CollectionTitle => {
                 gpui_kit::component::input::Input::new(&self.inputs.collection_title)
-                    .small()
                     .into_any_element()
             }
             FieldId::CollectionDate => {
                 gpui_kit::component::input::Input::new(&self.inputs.collection_date)
-                    .small()
                     .into_any_element()
             }
             FieldId::CollectionDescription => {
                 gpui_kit::component::input::Input::new(&self.inputs.collection_description)
-                    .small()
                     .into_any_element()
             }
             FieldId::CollectionDraft => {
                 gpui_kit::component::input::Input::new(&self.inputs.collection_draft)
-                    .small()
                     .into_any_element()
             }
             FieldId::CollectionUrlPattern => {
                 gpui_kit::component::input::Input::new(&self.inputs.collection_url_pattern)
-                    .small()
                     .into_any_element()
             }
         }
@@ -1364,7 +1351,7 @@ impl PreferencesSheet {
             .test_support()
             .v_flex()
             .w_full()
-            .gap_1()
+            .gap_2()
             .child(
                 div()
                     .h_flex()
@@ -1372,20 +1359,26 @@ impl PreferencesSheet {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .child(div().min_w_0().text_sm().child(label))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_base()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .child(label),
+                    )
                     .children(trailing),
             )
             .child(control)
             .when_some(hint, |column, hint| {
                 column.child(
                     div()
-                        .text_xs()
+                        .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(hint),
                 )
             })
             .when_some(error, |column, error| {
-                column.child(div().text_xs().text_color(cx.theme().danger).child(error))
+                column.child(div().text_sm().text_color(cx.theme().danger).child(error))
             })
             .into_any_element()
     }
@@ -1402,24 +1395,26 @@ impl PreferencesSheet {
             .v_flex()
             .w_full()
             .gap_4()
-            .py_4()
-            .border_b_1()
-            .border_color(cx.theme().border.opacity(0.5))
+            .p_4()
+            .rounded_lg()
+            .bg(cx.theme().group_box)
+            .border_1()
+            .border_color(cx.theme().border.opacity(0.55))
             .child(
                 div()
                     .v_flex()
-                    .gap_0p5()
+                    .gap_1()
                     .child(
                         div()
                             .font_family(crate::theme::display_font(cx))
-                            .text_sm()
+                            .text_base()
                             .font_semibold()
                             .child(title),
                     )
                     .when_some(hint, |column, hint| {
                         column.child(
                             div()
-                                .text_xs()
+                                .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(hint),
                         )
@@ -1443,31 +1438,30 @@ impl Render for PreferencesSheet {
             .v_flex()
             .size_full()
             .min_h_0()
-            .track_focus(&self.focus)
-            .gap_3();
+            .track_focus(&self.focus);
         if let Some(notice) = self.notice.clone() {
-            root = root.child(div().text_xs().text_color(cx.theme().warning).child(notice));
+            root = root.child(
+                div()
+                    .px_6()
+                    .pt_4()
+                    .text_sm()
+                    .text_color(cx.theme().warning)
+                    .child(notice),
+            );
         }
-        // Large interface type must not truncate the pane names or actions:
-        // the navigation grows with the configured base size while the body
-        // keeps a scrollable, minimum width.
+        // The dialog title already names the sheet; the navigation starts
+        // directly with the pane list so it cannot appear twice.
         let navigation_width =
-            px((184. * (f32::from(cx.theme().font_size) / 14.)).clamp(160., 280.));
+            px((190. * (f32::from(cx.theme().font_size) / 14.)).clamp(180., 300.));
         let navigation = div()
             .v_flex()
             .w(navigation_width)
             .flex_shrink_0()
             .gap_1()
+            .p_4()
             .pr_3()
-            .child(
-                div()
-                    .px_2()
-                    .pb_3()
-                    .font_family(crate::theme::display_font(cx))
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child("Preferences"),
-            )
+            .border_r_1()
+            .border_color(cx.theme().border.opacity(0.6))
             .children(
                 Pane::ALL
                     .into_iter()
@@ -1475,8 +1469,9 @@ impl Render for PreferencesSheet {
                     .map(|pane| {
                         let selected = self.pane == pane;
                         Button::new(pane.element_id())
-                            .small()
                             .ghost()
+                            .w_full()
+                            .justify_start()
                             .selected(selected)
                             .label(pane.label())
                             .tab_index(0)
@@ -1485,26 +1480,40 @@ impl Render for PreferencesSheet {
                             }))
                     }),
             )
-            .child(div().h(px(20.)))
             .child(
-                Button::new("preferences-user-guide")
-                    .small()
-                    .ghost()
-                    .label("User guide")
-                    .tab_index(0)
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.emit(PreferencesEvent::OpenUserGuide);
-                    })),
-            )
-            .child(
-                Button::new("preferences-shortcuts")
-                    .small()
-                    .ghost()
-                    .label("Keyboard shortcuts")
-                    .tab_index(0)
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.emit(PreferencesEvent::OpenKeyboardShortcuts);
-                    })),
+                div()
+                    .v_flex()
+                    .w_full()
+                    .gap_1()
+                    .pt_4()
+                    .child(
+                        div()
+                            .w_full()
+                            .border_t_1()
+                            .border_color(cx.theme().border.opacity(0.6)),
+                    )
+                    .child(
+                        Button::new("preferences-user-guide")
+                            .ghost()
+                            .w_full()
+                            .justify_start()
+                            .label("User guide")
+                            .tab_index(0)
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(PreferencesEvent::OpenUserGuide);
+                            })),
+                    )
+                    .child(
+                        Button::new("preferences-shortcuts")
+                            .ghost()
+                            .w_full()
+                            .justify_start()
+                            .label("Keyboard shortcuts")
+                            .tab_index(0)
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(PreferencesEvent::OpenKeyboardShortcuts);
+                            })),
+                    ),
             );
         let body = match self.pane {
             Pane::Appearance => self.appearance_pane(cx).into_any_element(),
@@ -1515,27 +1524,47 @@ impl Render for PreferencesSheet {
             Pane::Advanced => self.advanced_pane(cx).into_any_element(),
         };
         let apply_disabled = self.has_errors();
-        let actions = div()
+        let pane = self.pane;
+        let header = div()
             .h_flex()
-            .flex_shrink_0()
             .w_full()
-            .items_center()
+            .items_start()
             .justify_between()
-            .gap_2()
-            .pb_2()
+            .gap_4()
+            .px_6()
+            .pt_5()
+            .pb_4()
             .border_b_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().border.opacity(0.6))
             .child(
                 div()
+                    .v_flex()
                     .flex_1()
                     .min_w_0()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(if apply_disabled {
-                        "Fix the highlighted values before applying."
-                    } else {
-                        "Changes apply immediately and persist atomically."
-                    }),
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_family(crate::theme::display_font(cx))
+                            .text_lg()
+                            .font_semibold()
+                            .child(pane.label()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(pane.description()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if apply_disabled {
+                                "Fix the highlighted values before applying."
+                            } else {
+                                "Changes apply immediately and persist atomically."
+                            }),
+                    ),
             )
             .child(
                 div()
@@ -1567,15 +1596,13 @@ impl Render for PreferencesSheet {
                                 window.close_dialog(cx);
                             })),
                     ),
-            )
-            .into_any_element();
+            );
         root.child(
             div()
                 .h_flex()
                 .flex_1()
                 .min_h_0()
-                .items_start()
-                .gap_4()
+                .items_stretch()
                 .child(navigation)
                 .child(
                     div()
@@ -1583,8 +1610,7 @@ impl Render for PreferencesSheet {
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
-                        .gap_3()
-                        .child(actions)
+                        .child(header)
                         .child(
                             div()
                                 .id("preferences-body")
@@ -1592,7 +1618,9 @@ impl Render for PreferencesSheet {
                                 .v_flex()
                                 .flex_1()
                                 .min_h_0()
-                                .gap_3()
+                                .gap_4()
+                                .px_6()
+                                .py_5()
                                 .overflow_y_scrollbar()
                                 .child(body),
                         ),

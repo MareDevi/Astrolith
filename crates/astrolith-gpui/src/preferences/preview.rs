@@ -22,7 +22,6 @@ impl PreferencesSheet {
 
         let presentation_weak = weak.clone();
         let presentation = Button::new("preferences-preview-presentation")
-            .small()
             .outline()
             .label(presentation_label)
             .dropdown_caret(true)
@@ -59,7 +58,6 @@ impl PreferencesSheet {
             "Off"
         };
         let open_on_enter = Button::new("preferences-preview-open-on-enter")
-            .small()
             .outline()
             .label(enter_label)
             .dropdown_caret(true)
@@ -151,6 +149,6 @@ impl PreferencesSheet {
                     .into_any_element(),
             );
         }
-        self.section("Preview", None, children, cx)
+        self.section("Browser", None, children, cx)
     }
 }

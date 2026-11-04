@@ -315,6 +315,74 @@ impl Stored<GlobalPreferencesV2> {
         }
     }
 
+    /// Raise the retired 14/16 px interface defaults to the larger base once.
+    ///
+    /// Earlier builds used 14 px, and M6-era files commonly stored the
+    /// hand-tuned 16 px default. Both are the old visual scale rather than a
+    /// deliberate choice of the current density, so they move to the new
+    /// 18 px default. Any other value is preserved, and the exact previous
+    /// file is kept beside the new one.
+    fn migrate_interface_scale(&mut self) -> Option<String> {
+        let envelope = self.envelope.as_mut()?;
+        if envelope.contains_key("interface_scale") {
+            return None;
+        }
+        let previous = self.value.ui_font_size;
+        let retired_default =
+            (previous - 14.).abs() < f32::EPSILON || (previous - 16.).abs() < f32::EPSILON;
+        if !retired_default {
+            return None;
+        }
+        if !self.writable {
+            return Some(format!(
+                "The smaller interface scale remains in {} because the file is read-only.",
+                self.path.display()
+            ));
+        }
+        let baseline = self.baseline.as_deref()?;
+        let backup = unique_destination(
+            &self
+                .path
+                .with_file_name("global.json.pre-interface-scale.json"),
+        );
+        if let Err(error) = fs::write(&backup, baseline) {
+            return Some(format!(
+                "Could not back up the smaller interface scale to {}: {error}. The settings file is preserved.",
+                backup.display()
+            ));
+        }
+        let defaults = GlobalPreferencesV2::default();
+        self.value.ui_font_size = defaults.ui_font_size;
+        envelope.insert(
+            "ui_font_size".to_owned(),
+            serde_json::json!(self.value.ui_font_size),
+        );
+        envelope.insert("interface_scale".to_owned(), serde_json::json!(1));
+        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Some(format!(
+                    "Could not encode the larger interface scale: {error}"
+                ));
+            }
+        };
+        match write_atomic(&self.path, &bytes) {
+            Ok(()) => {
+                self.baseline = Some(bytes);
+                tracing::info!(
+                    path = %self.path.display(),
+                    backup = %backup.display(),
+                    "applied the larger interface scale"
+                );
+                None
+            }
+            Err(error) => Some(format!(
+                "Could not apply the larger interface scale in {}: {error}. The file is preserved.",
+                self.path.display()
+            )),
+        }
+    }
+
     /// Replace the pre-mode split layout with the per-mode defaults once.
     ///
     /// The previous composition is backed up beside the file and never
@@ -463,6 +531,7 @@ impl PreferencesStore {
             Stored::<GlobalPreferencesV2>::load(global_path, GLOBAL_PREFERENCES_VERSION);
         let palette_migration_warning = global.retire_legacy_palettes();
         let mode_migration_warning = global.migrate_mode_layouts();
+        let interface_migration_warning = global.migrate_interface_scale();
         let writing_migration_warning = global.migrate_writing_defaults();
         let registry =
             Stored::<ProjectRegistry>::load(root.join("projects.json"), PROJECT_REGISTRY_VERSION);
@@ -470,6 +539,7 @@ impl PreferencesStore {
             migration_warning,
             palette_migration_warning,
             mode_migration_warning,
+            interface_migration_warning,
             writing_migration_warning,
             global.warning.clone(),
             registry.warning.clone(),
@@ -951,6 +1021,47 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(preferences.editor_font_size, 20.);
         assert_eq!(preferences.editor_width, 768.);
+    }
+
+    #[test]
+    fn retired_interface_scale_upgrades_once_and_preserves_other_sizes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"{"version":2,"ui_font_size":16.0,"future_field":{"keep":true}}"#;
+        fs::write(&path, original).unwrap();
+
+        let (_, preferences, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(preferences.ui_font_size, 18.);
+        let backup = path.with_file_name("global.json.pre-interface-scale.json");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
+        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(envelope["ui_font_size"], 18.0);
+        assert_eq!(envelope["interface_scale"], 1);
+        assert_eq!(envelope["future_field"]["keep"], true);
+
+        let (_, restored, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(restored.ui_font_size, 18.);
+        assert!(
+            !path
+                .with_file_name("global.json.pre-interface-scale-2.json")
+                .exists()
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"version":2,"ui_font_size":20.0}"#).unwrap();
+        let (_, preferences, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(preferences.ui_font_size, 20.);
+        assert!(
+            !path
+                .with_file_name("global.json.pre-interface-scale.json")
+                .exists()
+        );
     }
 
     #[test]

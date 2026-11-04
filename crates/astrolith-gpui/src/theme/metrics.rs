@@ -121,7 +121,7 @@ pub(crate) const METRICS: ThemeMetrics = ThemeMetrics {
     },
     type_scale: TypeScale {
         caption: 12.,
-        ui: 14.,
+        ui: 18.,
         body: 16.,
         body_line: 32.,
         heading: 24.,
