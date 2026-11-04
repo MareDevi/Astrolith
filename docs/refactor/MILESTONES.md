@@ -16,6 +16,7 @@
 | --- | --- | --- |
 | M0 | 已完成 | 审计文档与检查基线见 [ACCEPTANCE.md](ACCEPTANCE.md) §5 |
 | M1 | 已完成（视觉分区域迁移继续） | 中性 light/dark 主题、OKLCH 边界、Token/尺度快照、旧 palette 配置备份迁移；记录见 ACCEPTANCE §6 |
+| M2a | 已完成 | WorkspaceMode、每模式布局、模式切换保留 session/编辑历史、旧布局备份迁移；记录见 ACCEPTANCE §7 |
 
 M1 的退出只覆盖主题与共享控件本身；mock 的模式切换器、Build 标签条等区域属于 M2 及后续里程碑，未在 M1 提前实现。
 

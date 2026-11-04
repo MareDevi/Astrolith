@@ -41,9 +41,10 @@ use crate::{
     update,
     url_scheme::{self, StartupRequest, StartupTarget},
 };
+use astrolith_core::preferences::{ModeLayouts, WorkspaceMode};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, Sizable, StyledExt, TitleBar, WindowExt,
+    ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
     button::{Button, ButtonVariants},
     command::{Command, CommandGroup, CommandItem, CommandState},
     dock::{BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
@@ -231,8 +232,10 @@ pub(crate) struct Shell {
     last_viewport: gpui_kit::Size<gpui_kit::Pixels>,
     _skin: Rc<DockSkin>,
     settings: GlobalPreferencesV2,
-    /// Layout last written to (or loaded from) the global scope.
-    global_layout: LayoutState,
+    /// Per-mode layouts last written to (or loaded from) the global scope.
+    global_layouts: ModeLayouts,
+    /// Active workspace mode; state and services are independent of it.
+    mode: WorkspaceMode,
     /// Project scope currently open, if any; absorbs layout and last-entry writes.
     project_scope: Option<ProjectScope>,
     /// A project is opening: its scope is not installed yet, so layout writes
@@ -279,9 +282,11 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Self {
         settings
-            .layout
+            .layouts
             .clamp(f32::from(window.viewport_size().width));
-        let global_layout = settings.layout.clone();
+        let global_layouts = settings.layouts.clone();
+        let mode = settings.default_mode;
+        let layout = settings.layouts.get(mode).clone();
         theme::apply(&settings, window.appearance(), cx);
         let navigator = cx.new(|cx| {
             WorkspacePanel::new(
@@ -336,12 +341,12 @@ impl Shell {
                 (
                     DockPlacement::Left,
                     panel_handle(navigator.clone()),
-                    settings.layout.sidebar_visible,
+                    layout.sidebar_visible,
                 ),
                 (
                     DockPlacement::Right,
                     panel_handle(inspector),
-                    settings.layout.inspector_visible,
+                    layout.inspector_visible,
                 ),
             ] {
                 area.set_dock(
@@ -355,26 +360,16 @@ impl Shell {
                 }
             }
             // Dock sizes are measured logical pixels, not application spacing.
-            area.set_dock_size(
-                DockPlacement::Left,
-                px(settings.layout.sidebar_width),
-                window,
-                cx,
-            );
-            area.set_dock_size(
-                DockPlacement::Right,
-                px(settings.layout.inspector_width),
-                window,
-                cx,
-            );
+            area.set_dock_size(DockPlacement::Left, px(layout.sidebar_width), window, cx);
+            area.set_dock_size(DockPlacement::Right, px(layout.inspector_width), window, cx);
             // The reading view exists only while it is visible: a closed bottom
             // dock would otherwise keep a collapsed strip that can be dragged
             // back out.
-            if settings.layout.preview_visible {
+            if layout.preview_visible {
                 attach_preview_dock(
                     area,
                     panel_handle(preview_panel.clone()),
-                    settings.layout.preview_height,
+                    layout.preview_height,
                     window,
                     cx,
                 );
@@ -590,7 +585,8 @@ impl Shell {
             last_viewport: window.viewport_size(),
             _skin: skin,
             settings,
-            global_layout,
+            global_layouts,
+            mode,
             project_scope: None,
             scope_loading: None,
             applying_layout: false,
@@ -804,6 +800,7 @@ impl Shell {
         availability.preview_running = preview.is_running();
         availability.preview_ready = preview.is_ready();
         availability.updates_configured = self.updates.is_enabled();
+        availability.workspace_mode = self.mode;
         availability
     }
 
@@ -1297,8 +1294,8 @@ impl Shell {
             preview_height: dock
                 .dock_size(DockPlacement::Bottom)
                 .map(f32::from)
-                .filter(|_| self.settings.layout.preview_visible)
-                .unwrap_or(self.settings.layout.preview_height),
+                .filter(|_| self.settings.layouts.get(self.mode).preview_visible)
+                .unwrap_or(self.settings.layouts.get(self.mode).preview_height),
         }
     }
 
@@ -1308,18 +1305,25 @@ impl Shell {
         if self.scope_loading.is_some() || self.applying_layout {
             return;
         }
-        let layout = self.read_dock_layout(cx);
-        let visibility_changed = layout.sidebar_visible != self.settings.layout.sidebar_visible
-            || layout.inspector_visible != self.settings.layout.inspector_visible
-            || layout.preview_visible != self.settings.layout.preview_visible;
-        if layout == self.settings.layout {
+        let mut layout = self.read_dock_layout(cx);
+        // Inspector visibility is transient: closing it on a mode switch is
+        // not a saved layout change, and it never reopens with the project.
+        layout.inspector_visible = false;
+        let current = self.settings.layouts.get(self.mode).clone();
+        let visibility_changed = layout.sidebar_visible != current.sidebar_visible
+            || layout.inspector_visible != current.inspector_visible
+            || layout.preview_visible != current.preview_visible;
+        if layout == current {
             return;
         }
-        self.settings.layout = layout.clone();
+        self.settings.layouts.set(self.mode, layout.clone());
         // With a project open the dock belongs to that project's scope; a
         // project file records both visibility and the live widths.
         if let Some(scope) = self.project_scope.as_mut() {
-            scope.preferences.layout = Some(layout);
+            scope
+                .preferences
+                .layout_overrides
+                .set(self.mode, Some(layout));
             self.persist_project(cx);
         } else {
             self.persist_global(cx);
@@ -1360,9 +1364,9 @@ impl Shell {
         let revision = self.revision;
         let mut settings = self.settings.clone();
         if self.project_scope.is_some() || self.scope_loading.is_some() {
-            settings.layout = self.global_layout.clone();
+            settings.layouts = self.global_layouts.clone();
         } else {
-            self.global_layout = settings.layout.clone();
+            self.global_layouts = settings.layouts.clone();
         }
         self.record_latest(|latest| latest.global = (revision, settings.clone()));
         let Some(store) = self.store.clone() else {
@@ -1475,7 +1479,7 @@ impl Shell {
                 self.warning = Some(format!("Could not load project preferences: {error}"));
                 // The scope is global again; make the visible layout match it
                 // so later changes are persisted where they belong.
-                let layout = self.global_layout.clone();
+                let layout = self.global_layouts.get(self.mode).clone();
                 self.apply_layout(layout, window, cx);
                 cx.notify();
                 return;
@@ -1486,7 +1490,7 @@ impl Shell {
             self.warning = Some(warning);
         }
         let global = GlobalPreferencesV2 {
-            layout: self.global_layout.clone(),
+            layouts: self.global_layouts.clone(),
             ..self.settings.clone()
         };
         let resolved = resolve(&global, Some(&preferences), None);
@@ -1496,7 +1500,10 @@ impl Shell {
             revision,
         });
         self.sync_project_preferences(cx);
-        self.apply_layout(resolved.layout, window, cx);
+        self.mode = resolved.last_mode.unwrap_or(resolved.default_mode);
+        self.settings.layouts = resolved.layouts;
+        let layout = self.settings.layouts.get(self.mode).clone();
+        self.apply_layout(layout, window, cx);
         self.project.update(cx, |project, cx| {
             project.reopen_last_entry(resolved.last_entry.as_deref(), window, cx)
         });
@@ -1526,7 +1533,7 @@ impl Shell {
         layout.clamp(f32::from(window.viewport_size().width));
         // Set the model first: dock events arrive afterwards and must not look
         // like a user change.
-        self.settings.layout = layout.clone();
+        self.settings.layouts.set(self.mode, layout.clone());
         self.applying_layout = true;
         self.dock.update(cx, |dock, cx| {
             for (placement, visible) in [
@@ -1583,12 +1590,64 @@ impl Shell {
         self.persist_project(cx);
     }
 
+    /// The centered three-way mode switch.
+    fn mode_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.mode;
+        let owner = cx.weak_entity();
+        div()
+            .h_flex()
+            .items_center()
+            .gap_0p5()
+            .p(px(2.))
+            .rounded_full()
+            .bg(cx.theme().tab_bar_segmented)
+            .children(WorkspaceMode::ALL.map(|mode| {
+                let owner = owner.clone();
+                Button::new(mode.label())
+                    .small()
+                    .ghost()
+                    .label(mode.label())
+                    .selected(mode == current)
+                    .tooltip(mode.label())
+                    .on_click(move |_, window, cx| {
+                        let _ = owner.update(cx, |this, cx| this.set_mode(mode, window, cx));
+                    })
+            }))
+    }
+
+    /// Switch the workspace mode without touching the open document.
+    ///
+    /// Layouts are per mode, the inspector is transient, and no mode change
+    /// reopens the project or a document.
+    fn set_mode(&mut self, mode: WorkspaceMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == mode {
+            return;
+        }
+        // Fold any pending splitter movement into the outgoing mode first.
+        self.capture_layout(cx);
+        let inspector_open = self.dock.read(cx).is_dock_open(DockPlacement::Right);
+        self.mode = mode;
+        let layout = self.settings.layouts.get(mode).clone();
+        self.apply_layout(layout, window, cx);
+        if let Some(scope) = self.project_scope.as_mut()
+            && scope.preferences.last_mode != Some(mode)
+        {
+            scope.preferences.last_mode = Some(mode);
+            self.persist_project(cx);
+        }
+        if inspector_open {
+            self.document.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        self.refresh_menus(window, cx);
+        cx.notify();
+    }
+
     fn toggle_panel(&mut self, kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(kind, PanelKind::Preview) {
             // Presence, not open state: a closed bottom dock would leave its
             // collapsed strip on screen.
             let visible = !self.dock.read(cx).has_dock(DockPlacement::Bottom);
-            let height = self.settings.layout.preview_height;
+            let height = self.settings.layouts.get(self.mode).preview_height;
             self.set_preview_visible(visible, height, window, cx);
             // LayoutChanged also captures the new visibility.
             cx.notify();
@@ -1670,7 +1729,8 @@ impl Shell {
                     // project about to open. Mirror the dock so the deferred
                     // layout event compares equal, but never persist it into
                     // the outgoing project's or the global scope.
-                    self.settings.layout = self.read_dock_layout(cx);
+                    let layout = self.read_dock_layout(cx);
+                    self.settings.layouts.set(self.mode, layout);
                 }
                 self.project
                     .update(cx, |project, cx| project.prompt(window, cx));
@@ -1698,6 +1758,13 @@ impl Shell {
             }
             CommandId::OpenContentFinder => self.open_content_finder(window, cx),
             CommandId::OpenComponentBuilder => self.open_component_builder(window, cx),
+            CommandId::WorkspaceWriting => self.set_mode(WorkspaceMode::Writing, window, cx),
+            CommandId::WorkspaceBuild => self.set_mode(WorkspaceMode::Build, window, cx),
+            CommandId::WorkspacePreview => self.set_mode(WorkspaceMode::Preview, window, cx),
+            CommandId::CycleWorkspaceMode => {
+                let next = self.mode.next();
+                self.set_mode(next, window, cx)
+            }
             CommandId::ToggleSidebar => self.toggle_panel(PanelKind::Sidebar, window, cx),
             CommandId::ToggleInspector => self.toggle_panel(PanelKind::Inspector, window, cx),
             CommandId::TogglePreview => self.toggle_panel(PanelKind::Preview, window, cx),
@@ -1810,25 +1877,18 @@ impl Shell {
                 self.persist_global(cx);
             }
             CommandId::ResetLayout => {
-                let mut layout = LayoutState::default();
+                let mut layout = ModeLayouts::default().get(self.mode).clone();
                 layout.clamp(f32::from(window.viewport_size().width));
-                self.dock.update(cx, |area, cx| {
-                    for (placement, visible) in
-                        [(DockPlacement::Left, true), (DockPlacement::Right, true)]
-                    {
-                        if area.is_dock_open(placement) != visible {
-                            area.toggle_dock(placement, window, cx);
-                        }
-                    }
-                    area.set_dock_size(DockPlacement::Left, px(layout.sidebar_width), window, cx);
-                    area.set_dock_size(
-                        DockPlacement::Right,
-                        px(layout.inspector_width),
-                        window,
-                        cx,
-                    );
-                });
-                self.set_preview_visible(layout.preview_visible, layout.preview_height, window, cx);
+                self.apply_layout(layout.clone(), window, cx);
+                if let Some(scope) = self.project_scope.as_mut() {
+                    scope
+                        .preferences
+                        .layout_overrides
+                        .set(self.mode, Some(layout));
+                    self.persist_project(cx);
+                } else {
+                    self.persist_global(cx);
+                }
             }
         }
         cx.notify();
@@ -2075,15 +2135,22 @@ impl Shell {
         }
         let mut global = edits.global;
         // The dock may have been resized while the sheet was open; the live
-        // layout stays authoritative, like every other layout write.
-        global.layout = self.settings.layout.clone();
+        // global layouts stay authoritative, like every other layout write.
+        global.layouts = self.global_layouts.clone();
         global.window = self.settings.window;
+        self.global_layouts = global.layouts.clone();
         self.settings = global;
         if let Some(preferences) = edits.project
             && let Some(scope) = self.project_scope.as_mut()
         {
             scope.preferences = preferences;
         }
+        self.settings.layouts = match self.project_scope.as_ref() {
+            Some(scope) => self
+                .global_layouts
+                .resolve_with(&scope.preferences.layout_overrides),
+            None => self.global_layouts.clone(),
+        };
         theme::apply(&self.settings, window.appearance(), cx);
         self.sync_project_preferences(cx);
         self.persist_global(cx);
@@ -2406,6 +2473,10 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::CloseDocument => IconName::X,
         CommandId::RecoverUnsaved => IconName::RotateCcw,
         CommandId::OpenPalette => IconName::Command,
+        CommandId::WorkspaceWriting => IconName::Feather,
+        CommandId::WorkspaceBuild => IconName::SquarePen,
+        CommandId::WorkspacePreview => IconName::Eye,
+        CommandId::CycleWorkspaceMode => IconName::RefreshCw,
         CommandId::ToggleSidebar => IconName::PanelLeft,
         CommandId::ToggleInspector => IconName::PanelRight,
         CommandId::TogglePreview => IconName::PanelBottom,
@@ -2490,7 +2561,7 @@ impl Render for Shell {
                 }
             }
         }
-        let layout = &self.settings.layout;
+        let layout = self.settings.layouts.get(self.mode);
         // Responsive prose typography follows the document pane's width, which
         // the shell owns: no layout feedback loop, no geometry guesswork.
         let pane_width = (f32::from(window.viewport_size().width)
@@ -2581,53 +2652,74 @@ impl Render for Shell {
                                     .items_center()
                                     .gap_2()
                                     .pr_2()
-                                    .child(crate::ui::wordmark(cx))
-                                    .when_some(project_name.clone(), |row, name| {
-                                        row.child(
-                                            div()
-                                                .max_w(px(220.))
-                                                .truncate()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(name),
-                                        )
-                                    })
-                                    .when_some(self.warning.clone(), |row, warning| {
-                                        row.child(crate::ui::v_divider(cx)).child(
-                                            div()
-                                                .max_w(px(320.))
-                                                .truncate()
-                                                .text_xs()
-                                                .text_color(cx.theme().warning)
-                                                .child(warning),
-                                        )
-                                    })
-                                    .child(div().flex_1())
                                     .child(
-                                        Button::new("command-palette")
-                                            .small()
-                                            .ghost()
-                                            .icon(IconName::Search)
-                                            .tooltip(CommandId::OpenPalette.label())
-                                            .track_focus(&self.palette_focus)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.palette_focus.focus(window, cx);
-                                                this.execute(CommandId::OpenPalette, window, cx);
-                                            })),
+                                        div()
+                                            .h_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(crate::ui::wordmark(cx))
+                                            .when_some(project_name.clone(), |row, name| {
+                                                row.child(
+                                                    div()
+                                                        .max_w(px(220.))
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(name),
+                                                )
+                                            })
+                                            .when_some(self.warning.clone(), |row, warning| {
+                                                row.child(crate::ui::v_divider(cx)).child(
+                                                    div()
+                                                        .max_w(px(320.))
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .text_color(cx.theme().warning)
+                                                        .child(warning),
+                                                )
+                                            }),
                                     )
-                                    .child({
-                                        let owner = cx.weak_entity();
-                                        let sidebar = layout.sidebar_visible;
-                                        let preview = layout.preview_visible;
-                                        let inspector = layout.inspector_visible;
-                                        let modes = self.project.read(cx).writing_modes();
-                                        Button::new("view-menu")
-                                            .small()
-                                            .ghost()
-                                            .icon(IconName::PanelsTopLeft)
-                                            .tooltip("Panels")
-                                            .dropdown_menu(move |menu, _, _| {
-                                                let item = |label: &'static str,
+                                    .child(self.mode_switch(cx))
+                                    .child(
+                                        div()
+                                            .h_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .flex_1()
+                                            .justify_end()
+                                            .child(
+                                                Button::new("command-palette")
+                                                    .small()
+                                                    .ghost()
+                                                    .icon(IconName::Search)
+                                                    .tooltip(CommandId::OpenPalette.label())
+                                                    .track_focus(&self.palette_focus)
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.palette_focus.focus(window, cx);
+                                                            this.execute(
+                                                                CommandId::OpenPalette,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            )
+                                            .child({
+                                                let owner = cx.weak_entity();
+                                                let sidebar = layout.sidebar_visible;
+                                                let preview = layout.preview_visible;
+                                                let inspector = layout.inspector_visible;
+                                                let modes = self.project.read(cx).writing_modes();
+                                                Button::new("view-menu")
+                                                    .small()
+                                                    .ghost()
+                                                    .icon(IconName::PanelsTopLeft)
+                                                    .tooltip("Panels")
+                                                    .dropdown_menu(move |menu, _, _| {
+                                                        let item = |label: &'static str,
                                                             kind: CommandId,
                                                             checked: bool| {
                                                     let owner = owner.clone();
@@ -2642,47 +2734,50 @@ impl Render for Shell {
                                                             );
                                                         })
                                                 };
-                                                menu.item(item(
-                                                    "Focus mode",
-                                                    CommandId::ToggleFocusMode,
-                                                    modes.focus,
-                                                ))
-                                                .item(item(
-                                                    "Typewriter mode",
-                                                    CommandId::ToggleTypewriterMode,
-                                                    modes.typewriter,
-                                                ))
-                                                .separator()
-                                                .item(item(
-                                                    "Library",
-                                                    CommandId::ToggleSidebar,
-                                                    sidebar,
-                                                ))
-                                                .item(item(
-                                                    "Reading view",
-                                                    CommandId::TogglePreview,
-                                                    preview,
-                                                ))
-                                                .item(item(
-                                                    "Details",
-                                                    CommandId::ToggleInspector,
-                                                    inspector,
-                                                ))
+                                                        menu.item(item(
+                                                            "Focus mode",
+                                                            CommandId::ToggleFocusMode,
+                                                            modes.focus,
+                                                        ))
+                                                        .item(item(
+                                                            "Typewriter mode",
+                                                            CommandId::ToggleTypewriterMode,
+                                                            modes.typewriter,
+                                                        ))
+                                                        .separator()
+                                                        .item(item(
+                                                            "Library",
+                                                            CommandId::ToggleSidebar,
+                                                            sidebar,
+                                                        ))
+                                                        .item(item(
+                                                            "Reading view",
+                                                            CommandId::TogglePreview,
+                                                            preview,
+                                                        ))
+                                                        .item(item(
+                                                            "Details",
+                                                            CommandId::ToggleInspector,
+                                                            inspector,
+                                                        ))
+                                                    })
                                             })
-                                    })
-                                    .child(
-                                        Button::new("open-preferences")
-                                            .small()
-                                            .ghost()
-                                            .icon(IconName::Settings)
-                                            .tooltip(CommandId::OpenPreferences.label())
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.execute(
-                                                    CommandId::OpenPreferences,
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
+                                            .child(
+                                                Button::new("open-preferences")
+                                                    .small()
+                                                    .ghost()
+                                                    .icon(IconName::Settings)
+                                                    .tooltip(CommandId::OpenPreferences.label())
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.execute(
+                                                                CommandId::OpenPreferences,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            ),
                                     ),
                             ),
                     )
@@ -2964,9 +3059,12 @@ mod tests {
     #[gpui_kit::test]
     async fn opening_project_reveals_hidden_navigator(cx: &mut TestAppContext) {
         let settings = GlobalPreferencesV2 {
-            layout: LayoutState {
-                sidebar_visible: false,
-                ..LayoutState::default()
+            layouts: ModeLayouts {
+                writing: LayoutState {
+                    sidebar_visible: false,
+                    ..LayoutState::default()
+                },
+                ..ModeLayouts::default()
             },
             ..GlobalPreferencesV2::default()
         };
@@ -2984,13 +3082,276 @@ mod tests {
         cx.run_until_parked();
     }
     #[gpui_kit::test]
+    async fn switching_workspace_modes_keeps_one_session_text_selection_and_history(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_path = workspace.path().join("preferences/global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let project = project_fixture("mode-site");
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        cx.update_window(handle.into(), |_, _, cx| {
+            assert_eq!(view.read(cx).mode, WorkspaceMode::Writing);
+            assert!(
+                !view
+                    .read(cx)
+                    .dock
+                    .read(cx)
+                    .is_dock_open(DockPlacement::Left)
+            );
+            assert!(
+                !view
+                    .read(cx)
+                    .dock
+                    .read(cx)
+                    .is_dock_open(DockPlacement::Right)
+            );
+            assert!(!view.read(cx).dock.read(cx).has_dock(DockPlacement::Bottom));
+        })
+        .unwrap();
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == canonical)
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.project.update(cx, |project, cx| {
+                    project.open_first_entry_for_tests(window, cx)
+                })
+            });
+        })
+        .unwrap();
+        let project_entity = view.read_with(cx, |shell, _| shell.project.clone());
+        let _session = wait_for_active_session(cx, &project_entity).await;
+        let (session, editor, original) = view.read_with(cx, |shell, cx| {
+            let session = shell
+                .project
+                .read(cx)
+                .active_session(cx)
+                .expect("the first entry opened");
+            let editor = session.read(cx).editor.clone();
+            (
+                session.entity_id(),
+                editor.clone(),
+                editor.read(cx).value().to_string(),
+            )
+        });
+        assert!(!original.is_empty());
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.input("x", cx);
+            editor.update(cx, |editor, cx| editor.set_selected_range(0..3, cx));
+        })
+        .unwrap();
+        let typed = editor.read_with(cx, |editor, _| editor.value().to_string());
+        assert_ne!(typed, original);
+        let entity = editor.entity_id();
+
+        for mode in [
+            WorkspaceMode::Build,
+            WorkspaceMode::Preview,
+            WorkspaceMode::Writing,
+        ] {
+            cx.update_window(handle.into(), |_, window, cx| {
+                view.update(cx, |view, cx| view.set_mode(mode, window, cx));
+            })
+            .unwrap();
+            cx.run_until_parked();
+            view.read_with(cx, |shell, cx| {
+                assert_eq!(shell.mode, mode);
+                let current = shell
+                    .project
+                    .read(cx)
+                    .active_session(cx)
+                    .expect("the session stays open");
+                let current_editor = current.read(cx).editor.clone();
+                assert_eq!(
+                    current_editor.entity_id(),
+                    entity,
+                    "mode switch must not rebuild the editor"
+                );
+                assert_eq!(current_editor.read(cx).value(), typed);
+                assert_eq!(current_editor.read(cx).selected_range(), 0..3);
+            });
+        }
+
+        // Typed text and its undo history survived every mode change.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click(("input", editor.entity_id()), cx);
+            window.press("ctrl-z", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.value().to_string()),
+            original
+        );
+        assert_eq!(
+            view.read_with(cx, |shell, cx| shell
+                .project
+                .read(cx)
+                .active_session(cx)
+                .expect("the session is still open")
+                .entity_id()),
+            session
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn mode_layouts_persist_per_mode_and_a_project_restores_its_last_mode(
+        cx: &mut TestAppContext,
+    ) {
+        use std::time::Duration;
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let preferences_root = workspace.path().join("preferences");
+        let global_path = preferences_root.join("global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path.clone());
+        let project = project_fixture("mode-layout-site");
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == canonical)
+        })
+        .await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_mode(WorkspaceMode::Build, window, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(
+                view.read(cx)
+                    .dock
+                    .read(cx)
+                    .is_dock_open(DockPlacement::Left)
+            );
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::ToggleSidebar, window, cx);
+                view.execute(CommandId::ToggleInspector, window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(
+                view.read(cx)
+                    .dock
+                    .read(cx)
+                    .is_dock_open(DockPlacement::Right)
+            );
+            view.update(cx, |view, cx| {
+                view.set_mode(WorkspaceMode::Preview, window, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(shell.mode, WorkspaceMode::Preview);
+            assert!(
+                !shell.dock.read(cx).is_dock_open(DockPlacement::Right),
+                "the transient inspector closes when the mode changes"
+            );
+            assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
+        });
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_mode(WorkspaceMode::Build, window, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |shell, cx| {
+            assert!(
+                !shell.dock.read(cx).is_dock_open(DockPlacement::Left),
+                "Build keeps its own saved sidebar state"
+            );
+            assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Right));
+            let scope = shell.project_scope.as_ref().unwrap();
+            assert_eq!(scope.preferences.last_mode, Some(WorkspaceMode::Build));
+            assert_eq!(
+                scope
+                    .preferences
+                    .layout_overrides
+                    .build
+                    .as_ref()
+                    .map(|layout| layout.sidebar_visible),
+                Some(false)
+            );
+        });
+
+        let id = view.read_with(cx, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .unwrap()
+                .preferences
+                .project_id
+                .clone()
+        });
+        let saved_path = preferences_root.join("projects").join(format!("{id}.json"));
+        cx.executor().advance_clock(Duration::from_millis(400));
+        cx.run_until_parked();
+        let persisted = saved_path.clone();
+        cx.condition(&view, move |_, _| {
+            std::fs::read(&persisted)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value["last_mode"].as_str().map(str::to_owned))
+                .as_deref()
+                == Some("build")
+        })
+        .await;
+        let saved = project_file(&preferences_root, &id);
+        assert_eq!(saved["last_mode"], "build");
+        assert_eq!(saved["layout_overrides"]["build"]["sidebar_visible"], false);
+
+        // A fresh process restores the project's last mode, not the global default.
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == canonical)
+        })
+        .await;
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(shell.mode, WorkspaceMode::Build);
+            assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
+        });
+    }
+
+    #[gpui_kit::test]
     fn toolbar_and_native_collapse_share_live_visibility_and_restore_document_space(
         cx: &mut TestAppContext,
     ) {
         let settings = GlobalPreferencesV2 {
-            layout: LayoutState {
-                inspector_visible: true,
-                ..LayoutState::default()
+            layouts: ModeLayouts {
+                writing: LayoutState {
+                    inspector_visible: true,
+                    ..LayoutState::default()
+                },
+                ..ModeLayouts::default()
             },
             ..GlobalPreferencesV2::default()
         };
@@ -3007,7 +3368,7 @@ mod tests {
             .unwrap();
         // GPUI delivers emitted DockEvent effects after the window update returns.
         cx.update_window(handle.into(), |_, window, cx| {
-            assert!(!view.read(cx).settings.layout.sidebar_visible);
+            assert!(!view.read(cx).settings.layouts.writing.sidebar_visible);
             window.render_frame(cx);
             assert!(window.find("document-panel").bounds().size.width > initial.size.width);
             view.update(cx, |view, cx| {
@@ -3024,7 +3385,7 @@ mod tests {
         })
         .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
-            assert!(!view.read(cx).settings.layout.inspector_visible);
+            assert!(!view.read(cx).settings.layouts.writing.inspector_visible);
             window.render_frame(cx);
             view.update(cx, |view, cx| {
                 view.execute(CommandId::TogglePreview, window, cx)
@@ -3032,13 +3393,13 @@ mod tests {
         })
         .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
-            assert!(view.read(cx).settings.layout.preview_visible);
+            assert!(view.read(cx).settings.layouts.writing.preview_visible);
             window.render_frame(cx);
             window.render_frame(cx);
             assert!(window.find("preview-panel").visible());
         })
         .unwrap();
-        let stored_height = cx.update(|cx| view.read(cx).settings.layout.preview_height);
+        let stored_height = cx.update(|cx| view.read(cx).settings.layouts.writing.preview_height);
         let opened = cx
             .update_window(handle.into(), |_, window, cx| {
                 window.render_frame(cx);
@@ -3050,7 +3411,7 @@ mod tests {
             })
             .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
-            assert!(!view.read(cx).settings.layout.preview_visible);
+            assert!(!view.read(cx).settings.layouts.writing.preview_visible);
             assert!(
                 !view.read(cx).dock.read(cx).has_dock(DockPlacement::Bottom),
                 "hiding the reading view must remove the dock, not leave a \
@@ -3073,7 +3434,7 @@ mod tests {
         })
         .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
-            assert!(view.read(cx).settings.layout.preview_visible);
+            assert!(view.read(cx).settings.layouts.writing.preview_visible);
             window.render_frame(cx);
             assert!(view.read(cx).dock.read(cx).has_dock(DockPlacement::Bottom));
             assert_eq!(
@@ -3207,7 +3568,9 @@ mod tests {
     #[gpui_kit::test]
     fn splitter_drag_updates_geometry_without_repainting_the_shell(cx: &mut TestAppContext) {
         use std::rc::Rc;
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let mut settings = GlobalPreferencesV2::default();
+        settings.layouts.writing.sidebar_visible = true;
+        let (handle, view) = mount(cx, settings);
         let notifications = Rc::new(std::cell::Cell::new(0usize));
         let count = notifications.clone();
         cx.update(|cx| {
@@ -3222,7 +3585,7 @@ mod tests {
         .unwrap();
         cx.update(|cx| {
             assert!(
-                view.read(cx).settings.layout.sidebar_width > 250.,
+                view.read(cx).settings.layouts.writing.sidebar_width > 250.,
                 "the drag must still be captured"
             );
             assert_eq!(
@@ -3246,9 +3609,12 @@ mod tests {
     #[gpui_kit::test]
     fn native_drag_is_captured_and_preferences_restore_in_a_new_window(cx: &mut TestAppContext) {
         let settings = GlobalPreferencesV2 {
-            layout: LayoutState {
-                inspector_visible: true,
-                ..LayoutState::default()
+            layouts: ModeLayouts {
+                writing: LayoutState {
+                    inspector_visible: true,
+                    ..LayoutState::default()
+                },
+                ..ModeLayouts::default()
             },
             ..GlobalPreferencesV2::default()
         };
@@ -3263,7 +3629,7 @@ mod tests {
         })
         .unwrap();
         let settings = cx.update(|cx| {
-            assert!(view.read(cx).settings.layout.sidebar_width > 250.);
+            assert!(view.read(cx).settings.layouts.writing.sidebar_width > 250.);
             view.read(cx).settings.clone()
         });
         let (restored, _) = mount(cx, settings);
@@ -3284,9 +3650,12 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let settings = GlobalPreferencesV2 {
-            layout: LayoutState {
-                inspector_visible: true,
-                ..LayoutState::default()
+            layouts: ModeLayouts {
+                writing: LayoutState {
+                    inspector_visible: true,
+                    ..LayoutState::default()
+                },
+                ..ModeLayouts::default()
             },
             ..GlobalPreferencesV2::default()
         };
@@ -3316,7 +3685,7 @@ mod tests {
                 assert!(bounds.left() >= px(0.) && bounds.right() <= px(800.));
                 assert!(bounds.top() >= px(0.) && bounds.bottom() <= px(600.));
             }
-            assert!(view.read(cx).settings.layout.sidebar_width <= 240.);
+            assert!(view.read(cx).settings.layouts.writing.sidebar_width <= 240.);
         })
         .unwrap();
     }
@@ -3326,9 +3695,12 @@ mod tests {
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
             let settings = GlobalPreferencesV2 {
                 theme: mode,
-                layout: LayoutState {
-                    inspector_visible: true,
-                    ..LayoutState::default()
+                layouts: ModeLayouts {
+                    writing: LayoutState {
+                        inspector_visible: true,
+                        ..LayoutState::default()
+                    },
+                    ..ModeLayouts::default()
                 },
                 ..GlobalPreferencesV2::default()
             };
@@ -3387,7 +3759,9 @@ mod tests {
     fn shortcuts_work_from_document_focus_and_palette_cancel_returns_there(
         cx: &mut TestAppContext,
     ) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let mut settings = GlobalPreferencesV2::default();
+        settings.layouts.writing.sidebar_visible = true;
+        let (handle, view) = mount(cx, settings);
         cx.update_window(handle.into(), |_, window, cx| {
             let editor = cx.new(|cx| {
                 gpui_kit::component::input::EditorState::new(window, cx)
@@ -3410,7 +3784,7 @@ mod tests {
         .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             use gpui_kit::{Focusable, component::WindowExt};
-            assert!(!view.read(cx).settings.layout.sidebar_visible);
+            assert!(!view.read(cx).settings.layouts.writing.sidebar_visible);
             window.press(
                 crate::commands::CommandId::OpenPalette.shortcut().unwrap(),
                 cx,
@@ -3486,7 +3860,7 @@ mod tests {
         let (_, view) = mount(cx, settings);
         view.update(cx, |shell, cx| {
             shell.store = Some(Arc::new(store));
-            shell.settings.layout.sidebar_width = 230.;
+            shell.settings.layouts.writing.sidebar_width = 230.;
             shell.persist_global(cx);
         });
         cx.run_until_parked();
@@ -3496,7 +3870,7 @@ mod tests {
             "dragging must not sync every intermediate width"
         );
         view.update(cx, |shell, cx| {
-            shell.settings.layout.sidebar_width = 275.;
+            shell.settings.layouts.writing.sidebar_width = 275.;
             shell.persist_global(cx);
         });
         cx.run_until_parked();
@@ -3507,7 +3881,7 @@ mod tests {
         cx.condition(&view, |_, _| path.exists()).await;
         let (_, restored, warning) = PreferencesStore::load(path);
         assert!(warning.is_none());
-        assert_eq!(restored.layout.sidebar_width, 275.);
+        assert_eq!(restored.layouts.writing.sidebar_width, 275.);
     }
 
     /// Minimal Astro project with one `blog` collection holding two entries.
@@ -3595,7 +3969,9 @@ mod tests {
         {
             let saved = saved.clone();
             seed_project(&store, project.path(), |preferences| {
-                preferences.layout = Some(saved);
+                preferences
+                    .layout_overrides
+                    .set(WorkspaceMode::Writing, Some(saved));
             });
         }
         let (handle, view) = mount(cx, settings);
@@ -3612,7 +3988,7 @@ mod tests {
         .await;
 
         view.read_with(cx, |shell, cx| {
-            assert_eq!(shell.settings.layout, saved);
+            assert_eq!(shell.settings.layouts.writing, saved);
             let dock = shell.dock.read(cx);
             assert!(dock.is_dock_open(DockPlacement::Left));
             assert!(!dock.is_dock_open(DockPlacement::Right));
@@ -3621,8 +3997,8 @@ mod tests {
             assert_eq!(dock.dock_size(DockPlacement::Right), Some(px(320.)));
             assert_eq!(dock.dock_size(DockPlacement::Bottom), Some(px(220.)));
             assert_eq!(
-                shell.global_layout,
-                LayoutState::default(),
+                shell.global_layouts.writing,
+                ModeLayouts::default().writing,
                 "restoring a project layout must not rewrite the global layout"
             );
         });
@@ -3670,7 +4046,7 @@ mod tests {
         let second = project_fixture("second-site");
         let first_layout = LayoutState {
             sidebar_visible: false,
-            inspector_visible: true,
+            inspector_visible: false,
             preview_visible: false,
             sidebar_width: 190.,
             inspector_width: 280.,
@@ -3687,13 +4063,17 @@ mod tests {
         {
             let layout = first_layout.clone();
             seed_project(&store, first.path(), |preferences| {
-                preferences.layout = Some(layout);
+                preferences
+                    .layout_overrides
+                    .set(WorkspaceMode::Writing, Some(layout));
             });
         }
         {
             let layout = second_layout.clone();
             seed_project(&store, second.path(), |preferences| {
-                preferences.layout = Some(layout);
+                preferences
+                    .layout_overrides
+                    .set(WorkspaceMode::Writing, Some(layout));
             });
         }
         let (handle, view) = mount(cx, settings);
@@ -3710,7 +4090,7 @@ mod tests {
         })
         .await;
         view.read_with(cx, |shell, cx| {
-            assert_eq!(shell.settings.layout, first_layout);
+            assert_eq!(shell.settings.layouts.writing, first_layout);
             assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
         });
 
@@ -3723,7 +4103,7 @@ mod tests {
         })
         .await;
         view.read_with(cx, |shell, cx| {
-            assert_eq!(shell.settings.layout, second_layout);
+            assert_eq!(shell.settings.layouts.writing, second_layout);
             assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Left));
             assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Right));
             assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
@@ -3742,7 +4122,7 @@ mod tests {
         })
         .await;
         view.read_with(cx, |shell, cx| {
-            assert_eq!(shell.settings.layout, first_layout);
+            assert_eq!(shell.settings.layouts.writing, first_layout);
             assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
         });
     }
@@ -3756,7 +4136,7 @@ mod tests {
         let project = project_fixture("moving-site");
         let saved = LayoutState {
             sidebar_visible: false,
-            inspector_visible: true,
+            inspector_visible: false,
             preview_visible: true,
             sidebar_width: 210.,
             inspector_width: 300.,
@@ -3765,7 +4145,9 @@ mod tests {
         let id = {
             let layout = saved.clone();
             seed_project(&store, project.path(), |preferences| {
-                preferences.layout = Some(layout);
+                preferences
+                    .layout_overrides
+                    .set(WorkspaceMode::Writing, Some(layout));
             })
         };
         let (handle, view) = mount(cx, settings);
@@ -3800,7 +4182,7 @@ mod tests {
                 scope.preferences.project_id, id,
                 "a moved project keeps its registry identity and preferences"
             );
-            assert_eq!(shell.settings.layout, saved);
+            assert_eq!(shell.settings.layouts.writing, saved);
             assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
             assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
         });
@@ -3813,7 +4195,8 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let preferences_root = workspace.path().join("preferences");
         let global_path = preferences_root.join("global.json");
-        let (store, settings, _) = PreferencesStore::load(global_path.clone());
+        let (store, mut settings, _) = PreferencesStore::load(global_path.clone());
+        settings.layouts.writing.sidebar_visible = true;
         store.save_global(1, &settings).unwrap();
         let project = project_fixture("width-site");
         let (handle, view) = mount(cx, settings);
@@ -3829,7 +4212,7 @@ mod tests {
         .await;
         view.read_with(cx, |shell, _| {
             assert_eq!(
-                shell.settings.layout, shell.global_layout,
+                shell.settings.layouts.writing, shell.global_layouts.writing,
                 "a project without a saved layout inherits the global layout"
             );
             assert!(
@@ -3838,7 +4221,8 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .preferences
-                    .layout
+                    .layout_overrides
+                    .writing
                     .is_none()
             );
         });
@@ -3861,7 +4245,7 @@ mod tests {
             std::fs::read(path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| value["layout"]["sidebar_width"].as_f64())
+                .and_then(|value| value["layout_overrides"]["writing"]["sidebar_width"].as_f64())
                 .is_some_and(|width| width > 250.)
         })
         .await;
@@ -3877,13 +4261,13 @@ mod tests {
         });
         let project_preferences = project_file(&preferences_root, &id);
         assert_eq!(
-            project_preferences["layout"]["sidebar_visible"], true,
+            project_preferences["layout_overrides"]["writing"]["sidebar_visible"], true,
             "the project file must record the captured layout"
         );
         let (_, global, warning) = PreferencesStore::load(global_path);
         assert!(warning.is_none());
         assert_eq!(
-            global.layout.sidebar_width, 240.,
+            global.layouts.writing.sidebar_width, 224.,
             "a project width must never be written to the global file"
         );
     }
@@ -3899,10 +4283,13 @@ mod tests {
         {
             let (store, _, _) = PreferencesStore::load(global_path.clone());
             seed_project(&store, project.path(), |preferences| {
-                preferences.layout = Some(LayoutState {
-                    preview_visible: true,
-                    ..LayoutState::default()
-                });
+                preferences.layout_overrides.set(
+                    WorkspaceMode::Writing,
+                    Some(LayoutState {
+                        preview_visible: true,
+                        ..LayoutState::default()
+                    }),
+                );
             });
         }
         let (store, settings, _) = PreferencesStore::load(global_path);
@@ -3946,12 +4333,15 @@ mod tests {
             std::fs::read(path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| value["layout"]["preview_height"].as_f64())
+                .and_then(|value| value["layout_overrides"]["writing"]["preview_height"].as_f64())
                 .is_some_and(|height| height > 190.)
         })
         .await;
         let preferences = project_file(&preferences_root, &id);
-        assert_eq!(preferences["layout"]["preview_visible"], true);
+        assert_eq!(
+            preferences["layout_overrides"]["writing"]["preview_visible"],
+            true
+        );
     }
 
     #[gpui_kit::test]
@@ -3963,7 +4353,8 @@ mod tests {
         let global_path = preferences_root.join("global.json");
         let first = project_fixture("pending-first");
         let second = project_fixture("pending-second");
-        let (store, settings, _) = PreferencesStore::load(global_path);
+        let (store, mut settings, _) = PreferencesStore::load(global_path);
+        settings.layouts.writing.sidebar_visible = true;
         let (handle, view) = mount(cx, settings);
         view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
         let first_root = std::fs::canonicalize(first.path()).unwrap();
@@ -4021,7 +4412,7 @@ mod tests {
             std::fs::read(&path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| value["layout"]["sidebar_width"].as_f64())
+                .and_then(|value| value["layout_overrides"]["writing"]["sidebar_width"].as_f64())
                 .is_some_and(|width| width > 250.)
         })
         .await;
@@ -4124,7 +4515,8 @@ mod tests {
         cx.executor().allow_parking();
         let workspace = tempfile::tempdir().unwrap();
         let global_path = workspace.path().join("preferences/global.json");
-        let (store, settings, _) = PreferencesStore::load(global_path.clone());
+        let (store, mut settings, _) = PreferencesStore::load(global_path.clone());
+        settings.layouts.writing.sidebar_visible = true;
         let (handle, view) = mount(cx, settings);
         view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
 
@@ -4140,14 +4532,14 @@ mod tests {
             let persisted = std::fs::read(&global_path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| value["layout"]["sidebar_width"].as_f64());
-            shell.global_layout.sidebar_width > 250. && persisted.is_some_and(|w| w > 250.)
+                .and_then(|value| value["layouts"]["writing"]["sidebar_width"].as_f64());
+            shell.global_layouts.writing.sidebar_width > 250. && persisted.is_some_and(|w| w > 250.)
         })
         .await;
         let (_, global, warning) = PreferencesStore::load(global_path);
         assert!(warning.is_none());
         assert!(
-            global.layout.sidebar_width > 250.,
+            global.layouts.writing.sidebar_width > 250.,
             "without a project the live layout keeps persisting globally"
         );
         assert!(!workspace.path().join("preferences/projects").exists());

@@ -14,7 +14,7 @@ use super::{
     model::{GLOBAL_PREFERENCES_VERSION, GlobalPreferencesV2},
     store::{unique_destination, write_atomic},
 };
-use astrolith_core::preferences::{PanelLayout, ThemePreference};
+use astrolith_core::preferences::{ModeLayouts, PanelLayout, ThemePreference, WorkspaceMode};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,7 +22,9 @@ struct LegacyPreferencesV1 {
     version: u32,
     #[serde(default)]
     theme: ThemePreference,
+    /// Retained only so old files parse; the old composition is never restored.
     #[serde(default)]
+    #[allow(dead_code)]
     layout: PanelLayout,
 }
 
@@ -81,7 +83,8 @@ pub(super) fn migrate_legacy(global_path: &Path, legacy_path: Option<&Path>) -> 
     let global = GlobalPreferencesV2 {
         version: GLOBAL_PREFERENCES_VERSION,
         theme: legacy_preferences.theme,
-        layout: legacy_preferences.layout,
+        default_mode: WorkspaceMode::default(),
+        layouts: ModeLayouts::default(),
         ..GlobalPreferencesV2::default()
     };
     let encoded = match serde_json::to_vec_pretty(&global) {

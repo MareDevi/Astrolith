@@ -234,6 +234,129 @@ impl Stored<GlobalPreferencesV2> {
     }
 }
 
+impl Stored<GlobalPreferencesV2> {
+    /// Replace the pre-mode split layout with the per-mode defaults once.
+    ///
+    /// The previous composition is backed up beside the file and never
+    /// restored; upgrading users get the mock's mode layouts instead of the
+    /// old three-column dock.
+    fn migrate_mode_layouts(&mut self) -> Option<String> {
+        let envelope = self.envelope.as_mut()?;
+        if !envelope.contains_key("layout") {
+            return None;
+        }
+        if !self.writable {
+            return Some(format!(
+                "The pre-mode layout remains in {} because the file is read-only.",
+                self.path.display()
+            ));
+        }
+        let baseline = self.baseline.as_deref()?;
+        let backup = unique_destination(&self.path.with_file_name("global.json.pre-mode.json"));
+        if let Err(error) = fs::write(&backup, baseline) {
+            return Some(format!(
+                "Could not back up the pre-mode layout to {}: {error}. The settings file is preserved.",
+                backup.display()
+            ));
+        }
+        envelope.remove("layout");
+        for (key, value) in [
+            (
+                "default_mode",
+                serde_json::to_value(self.value.default_mode),
+            ),
+            ("layouts", serde_json::to_value(&self.value.layouts)),
+        ] {
+            match value {
+                Ok(value) => {
+                    envelope.insert(key.to_owned(), value);
+                }
+                Err(error) => {
+                    return Some(format!("Could not encode migrated mode layouts: {error}"));
+                }
+            }
+        }
+        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Some(format!("Could not encode migrated mode layouts: {error}"));
+            }
+        };
+        match write_atomic(&self.path, &bytes) {
+            Ok(()) => {
+                self.baseline = Some(bytes);
+                tracing::info!(
+                    path = %self.path.display(),
+                    backup = %backup.display(),
+                    "replaced the pre-mode layout with per-mode defaults"
+                );
+                None
+            }
+            Err(error) => Some(format!(
+                "Could not replace the pre-mode layout in {}: {error}. The file is preserved.",
+                self.path.display()
+            )),
+        }
+    }
+}
+
+impl Stored<ProjectPreferencesV1> {
+    /// Drop a project's pre-mode dock composition.
+    ///
+    /// The old layout is preserved in a backup; the project inherits the new
+    /// global mode layouts unless the user changes one again.
+    fn migrate_mode_layouts(&mut self) -> Option<String> {
+        let envelope = self.envelope.as_mut()?;
+        if !envelope.contains_key("layout") {
+            return None;
+        }
+        if !self.writable {
+            return Some(format!(
+                "The pre-mode layout remains in {} because the file is read-only.",
+                self.path.display()
+            ));
+        }
+        let baseline = self.baseline.as_deref()?;
+        let backup = unique_destination(&self.path.with_file_name(format!(
+            "{}.pre-mode.json",
+            self.path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".into())
+        )));
+        if let Err(error) = fs::write(&backup, baseline) {
+            return Some(format!(
+                "Could not back up the pre-mode project layout to {}: {error}. The file is preserved.",
+                backup.display()
+            ));
+        }
+        envelope.remove("layout");
+        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Some(format!(
+                    "Could not encode migrated project settings: {error}"
+                ));
+            }
+        };
+        match write_atomic(&self.path, &bytes) {
+            Ok(()) => {
+                self.baseline = Some(bytes);
+                tracing::info!(
+                    path = %self.path.display(),
+                    backup = %backup.display(),
+                    "dropped the pre-mode project layout"
+                );
+                None
+            }
+            Err(error) => Some(format!(
+                "Could not drop the pre-mode layout in {}: {error}. The file is preserved.",
+                self.path.display()
+            )),
+        }
+    }
+}
+
 /// Project scopes and the open-project registry share one store so a project
 /// open updates both files under one lock and one atomic write.
 pub(crate) struct PreferencesStore {
@@ -259,11 +382,13 @@ impl PreferencesStore {
         let mut global =
             Stored::<GlobalPreferencesV2>::load(global_path, GLOBAL_PREFERENCES_VERSION);
         let palette_migration_warning = global.retire_legacy_palettes();
+        let mode_migration_warning = global.migrate_mode_layouts();
         let registry =
             Stored::<ProjectRegistry>::load(root.join("projects.json"), PROJECT_REGISTRY_VERSION);
         let warning = combine_warnings([
             migration_warning,
             palette_migration_warning,
+            mode_migration_warning,
             global.warning.clone(),
             registry.warning.clone(),
         ]);
@@ -341,6 +466,13 @@ impl PreferencesStore {
             Entry::Vacant(entry) => {
                 let mut stored: Stored<ProjectPreferencesV1> =
                     Stored::load(path, PROJECT_PREFERENCES_VERSION);
+                let mode_warning = stored.migrate_mode_layouts();
+                if let Some(warning) = mode_warning {
+                    stored.warning = Some(match stored.warning.take() {
+                        Some(existing) => format!("{existing} {warning}"),
+                        None => warning,
+                    });
+                }
                 if stored.value.project_id.is_empty() {
                     stored.value.project_id = id.to_owned();
                 }
@@ -581,7 +713,9 @@ pub(crate) fn recovery_dir() -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use astrolith_core::preferences::{PanelLayout, ThemePreference};
+    use astrolith_core::preferences::{
+        ModeLayoutOverrides, ModeLayouts, PanelLayout, ThemePreference, WorkspaceMode,
+    };
     use std::fs;
 
     fn global_path(directory: &Path) -> PathBuf {
@@ -601,20 +735,24 @@ mod tests {
         let (store, mut preferences, warning) = PreferencesStore::load(path.clone());
         assert!(warning.is_none());
         preferences.theme = ThemePreference::Dark;
-        preferences.layout.sidebar_visible = false;
-        preferences.layout.preview_visible = true;
-        preferences.layout.inspector_width = 275.;
+        preferences.layouts.writing.sidebar_visible = false;
+        preferences.layouts.writing.preview_visible = true;
+        preferences.layouts.writing.inspector_width = 275.;
         store.save_global(1, &preferences).unwrap();
 
         let (_, restored, warning) = PreferencesStore::load(path.clone());
         assert!(warning.is_none());
         assert_eq!(restored.theme, ThemePreference::Dark);
-        assert!(!restored.layout.sidebar_visible);
-        assert!(restored.layout.preview_visible);
-        assert_eq!(restored.layout.inspector_width, 275.);
+        assert!(!restored.layouts.writing.sidebar_visible);
+        assert!(restored.layouts.writing.preview_visible);
+        assert_eq!(restored.layouts.writing.inspector_width, 275.);
 
         let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(envelope["future_field"]["keep"], true);
+        assert!(envelope.get("layout").is_none());
+        assert!(envelope.get("mode_layouts").is_none());
+        assert!(envelope.get("layouts").is_some());
+        assert!(path.with_file_name("global.json.pre-mode.json").exists());
     }
 
     #[test]
@@ -668,9 +806,8 @@ mod tests {
         let (_, migrated, warning) = PreferencesStore::load(path.clone());
         assert!(warning.is_none());
         assert_eq!(migrated.theme, ThemePreference::Dark);
-        assert!(!migrated.layout.sidebar_visible);
-        assert!(migrated.layout.preview_visible);
-        assert_eq!(migrated.layout.inspector_width, 300.);
+        assert_eq!(migrated.default_mode, WorkspaceMode::Writing);
+        assert_eq!(migrated.layouts, ModeLayouts::default());
         assert!(path.exists());
         assert!(!legacy.exists());
         assert!(
@@ -683,7 +820,7 @@ mod tests {
         fs::remove_file(&path).unwrap();
         let (_, defaults, _) = PreferencesStore::load(path);
         assert_eq!(defaults.theme, ThemePreference::System);
-        assert_eq!(defaults.layout, PanelLayout::default());
+        assert_eq!(defaults.layouts, ModeLayouts::default());
     }
 
     #[test]
@@ -797,6 +934,32 @@ mod tests {
     }
 
     #[test]
+    fn pre_mode_project_layout_is_backed_up_and_dropped() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        let projects = path.parent().unwrap().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        let original = r#"{"version":1,"project_id":"site","path":"/tmp/site","layout":{"sidebar_visible":false,"inspector_visible":true,"preview_visible":true,"sidebar_width":200.0,"inspector_width":300.0},"future_field":{"keep":true}}"#;
+        fs::write(projects.join("site.json"), original).unwrap();
+
+        let (store, _, warning) = PreferencesStore::load(path);
+        assert!(warning.is_none());
+        let (preferences, _, warning) = store.project("site").unwrap();
+        assert!(warning.is_none());
+        assert_eq!(
+            preferences.layout_overrides,
+            ModeLayoutOverrides::default(),
+            "the old dock composition is never restored"
+        );
+        let backup = projects.join("site.pre-mode.json");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
+        let envelope: Value =
+            serde_json::from_slice(&fs::read(projects.join("site.json")).unwrap()).unwrap();
+        assert!(envelope.get("layout").is_none());
+        assert_eq!(envelope["future_field"]["keep"], true);
+    }
+
+    #[test]
     fn registry_rebinds_a_moved_project_and_persists_its_scope() {
         let directory = tempfile::tempdir().unwrap();
         let path = global_path(directory.path());
@@ -823,11 +986,15 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(preferences.path, moved.path);
         preferences.last_entry = Some("blog/first.md".into());
-        preferences.layout = Some(PanelLayout {
-            sidebar_visible: false,
-            preview_visible: true,
-            ..PanelLayout::default()
-        });
+        preferences.last_mode = Some(WorkspaceMode::Build);
+        preferences.layout_overrides = ModeLayoutOverrides {
+            build: Some(PanelLayout {
+                sidebar_visible: false,
+                preview_visible: true,
+                ..PanelLayout::default()
+            }),
+            ..ModeLayoutOverrides::default()
+        };
         assert!(store.save_project(revision + 1, &preferences).unwrap());
 
         let (restored, _, warning) = PreferencesStore::load(path.clone())
@@ -836,9 +1003,11 @@ mod tests {
             .unwrap();
         assert!(warning.is_none());
         assert_eq!(restored.last_entry.as_deref(), Some("blog/first.md"));
-        assert!(!restored.layout.as_ref().unwrap().sidebar_visible);
-        assert!(restored.layout.as_ref().unwrap().preview_visible);
-        assert_eq!(restored.layout.as_ref().unwrap().preview_height, 160.);
+        assert_eq!(restored.last_mode, Some(WorkspaceMode::Build));
+        let build = restored.layout_overrides.build.as_ref().unwrap();
+        assert!(!build.sidebar_visible);
+        assert!(build.preview_visible);
+        assert_eq!(build.preview_height, 160.);
 
         let registry_path = path.parent().unwrap().join("projects.json");
         let registry: serde_json::Value =

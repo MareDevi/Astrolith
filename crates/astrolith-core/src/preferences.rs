@@ -32,6 +32,47 @@ pub enum ThemePreference {
     System,
 }
 
+/// Workspace presentation mode.
+///
+/// The mode changes layout policy and chrome only; document identity, editor
+/// state, history and services stay with the open project.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Hash, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMode {
+    /// Writing: centered prose with chrome hidden by default.
+    #[default]
+    Writing,
+    /// Build: source, navigation and development tools.
+    Build,
+    /// Preview: the project's real page through its presentation backend.
+    Preview,
+}
+
+impl WorkspaceMode {
+    /// Every mode in cycling order.
+    pub const ALL: [Self; 3] = [Self::Writing, Self::Build, Self::Preview];
+
+    /// Short label used by the toolbar, menus and command palette.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Writing => "Writing",
+            Self::Build => "Build",
+            Self::Preview => "Preview",
+        }
+    }
+
+    /// The next mode in the writing → build → preview cycle.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Writing => Self::Build,
+            Self::Build => Self::Preview,
+            Self::Preview => Self::Writing,
+        }
+    }
+}
+
 /// Default extension for newly created content entries.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Hash, PartialOrd, Ord,
@@ -174,6 +215,143 @@ impl PanelLayout {
             self.preview_height = 160.;
         }
         self.preview_height = self.preview_height.clamp(120., 400.);
+    }
+
+    /// Writing starts as a blank page: every tool is closed.
+    fn writing() -> Self {
+        Self {
+            sidebar_visible: false,
+            inspector_visible: false,
+            preview_visible: false,
+            sidebar_width: 224.,
+            inspector_width: 260.,
+            preview_height: 160.,
+        }
+    }
+
+    /// Build starts with the project library open and tools closed.
+    fn build() -> Self {
+        Self {
+            sidebar_visible: true,
+            inspector_visible: false,
+            preview_visible: false,
+            sidebar_width: 224.,
+            inspector_width: 260.,
+            preview_height: 160.,
+        }
+    }
+
+    /// Preview keeps the document editable under the compact server status.
+    fn preview() -> Self {
+        Self {
+            sidebar_visible: false,
+            inspector_visible: false,
+            preview_visible: true,
+            sidebar_width: 224.,
+            inspector_width: 260.,
+            preview_height: 160.,
+        }
+    }
+}
+
+/// Layout policy for each workspace mode.
+///
+/// Modes own separate geometry and visibility so switching never reuses the
+/// previous mode's composition. Inspector visibility is transient and is
+/// never persisted through this type.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModeLayouts {
+    /// Writing layout.
+    pub writing: PanelLayout,
+    /// Build layout.
+    pub build: PanelLayout,
+    /// Preview layout.
+    pub preview: PanelLayout,
+}
+
+impl Default for ModeLayouts {
+    fn default() -> Self {
+        Self {
+            writing: PanelLayout::writing(),
+            build: PanelLayout::build(),
+            preview: PanelLayout::preview(),
+        }
+    }
+}
+
+impl ModeLayouts {
+    /// Layout for one mode.
+    pub fn get(&self, mode: WorkspaceMode) -> &PanelLayout {
+        match mode {
+            WorkspaceMode::Writing => &self.writing,
+            WorkspaceMode::Build => &self.build,
+            WorkspaceMode::Preview => &self.preview,
+        }
+    }
+
+    /// Mutable layout for one mode.
+    pub fn get_mut(&mut self, mode: WorkspaceMode) -> &mut PanelLayout {
+        match mode {
+            WorkspaceMode::Writing => &mut self.writing,
+            WorkspaceMode::Build => &mut self.build,
+            WorkspaceMode::Preview => &mut self.preview,
+        }
+    }
+
+    /// Replace one mode's layout.
+    pub fn set(&mut self, mode: WorkspaceMode, layout: PanelLayout) {
+        *self.get_mut(mode) = layout;
+    }
+
+    /// Clamp every mode against one viewport width.
+    pub fn clamp(&mut self, viewport_width: f32) {
+        for mode in WorkspaceMode::ALL {
+            self.get_mut(mode).clamp(viewport_width);
+        }
+    }
+
+    /// Overlay the fields a project explicitly configured.
+    pub fn resolve_with(&self, overrides: &ModeLayoutOverrides) -> Self {
+        let mut resolved = self.clone();
+        for mode in WorkspaceMode::ALL {
+            if let Some(layout) = overrides.get(mode) {
+                resolved.set(mode, layout.clone());
+            }
+        }
+        resolved
+    }
+}
+
+/// Per-mode layout overrides stored in a project scope.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModeLayoutOverrides {
+    /// Writing override, when the project recorded one.
+    pub writing: Option<PanelLayout>,
+    /// Build override, when the project recorded one.
+    pub build: Option<PanelLayout>,
+    /// Preview override, when the project recorded one.
+    pub preview: Option<PanelLayout>,
+}
+
+impl ModeLayoutOverrides {
+    /// The override for one mode.
+    pub fn get(&self, mode: WorkspaceMode) -> Option<&PanelLayout> {
+        match mode {
+            WorkspaceMode::Writing => self.writing.as_ref(),
+            WorkspaceMode::Build => self.build.as_ref(),
+            WorkspaceMode::Preview => self.preview.as_ref(),
+        }
+    }
+
+    /// Replace one mode's override.
+    pub fn set(&mut self, mode: WorkspaceMode, layout: Option<PanelLayout>) {
+        match mode {
+            WorkspaceMode::Writing => self.writing = layout,
+            WorkspaceMode::Build => self.build = layout,
+            WorkspaceMode::Preview => self.preview = layout,
+        }
     }
 }
 
@@ -397,8 +575,10 @@ pub struct GlobalPreferencesV2 {
     pub version: u32,
     /// Light, dark or system appearance.
     pub theme: ThemePreference,
-    /// Global dock layout; a project layout overrides it when present.
-    pub layout: PanelLayout,
+    /// Mode restored when no project records a last mode.
+    pub default_mode: WorkspaceMode,
+    /// Global per-mode layout defaults; project overrides win per mode.
+    pub layouts: ModeLayouts,
     /// Last main-window geometry; absent opens the platform default.
     pub window: Option<WindowGeometry>,
     /// Optional light and dark heading colors.
@@ -430,7 +610,8 @@ impl Default for GlobalPreferencesV2 {
         Self {
             version: GLOBAL_PREFERENCES_VERSION,
             theme: ThemePreference::System,
-            layout: PanelLayout::default(),
+            default_mode: WorkspaceMode::default(),
+            layouts: ModeLayouts::default(),
             window: None,
             heading_colors: HeadingColors::default(),
             ui_font_family: String::new(),
@@ -475,8 +656,10 @@ pub struct ProjectPreferencesV1 {
     pub display_name: String,
     /// Unix timestamp in seconds of the last open.
     pub last_opened_at: Option<u64>,
-    /// Dock layout for this project; absent inherits the global layout.
-    pub layout: Option<PanelLayout>,
+    /// Mode restored for this project before the global default.
+    pub last_mode: Option<WorkspaceMode>,
+    /// Layout overrides for this project; absent modes inherit global values.
+    pub layout_overrides: ModeLayoutOverrides,
     /// Project-relative source of the entry reopened on launch.
     pub last_entry: Option<String>,
     /// Content directory override.
@@ -505,7 +688,8 @@ impl Default for ProjectPreferencesV1 {
             path: String::new(),
             display_name: String::new(),
             last_opened_at: None,
-            layout: None,
+            last_mode: None,
+            layout_overrides: ModeLayoutOverrides::default(),
             last_entry: None,
             content_directory: None,
             assets_directory: None,
@@ -581,8 +765,12 @@ impl Default for CollectionPreferencesV1 {
 pub struct ResolvedPreferences {
     /// Appearance preference.
     pub theme: ThemePreference,
-    /// Effective dock layout.
-    pub layout: PanelLayout,
+    /// Mode used when this project has no recorded last mode.
+    pub default_mode: WorkspaceMode,
+    /// Mode restored for the open project, if it recorded one.
+    pub last_mode: Option<WorkspaceMode>,
+    /// Effective layout for every mode.
+    pub layouts: ModeLayouts,
     /// Heading colors.
     pub heading_colors: HeadingColors,
     /// Interface font family; empty uses the platform UI font.
@@ -635,9 +823,11 @@ pub fn resolve(
     };
     ResolvedPreferences {
         theme: global.theme,
-        layout: project
-            .and_then(|project| project.layout.clone())
-            .unwrap_or_else(|| global.layout.clone()),
+        default_mode: global.default_mode,
+        last_mode: project.and_then(|project| project.last_mode),
+        layouts: project
+            .map(|project| global.layouts.resolve_with(&project.layout_overrides))
+            .unwrap_or_else(|| global.layouts.clone()),
         heading_colors: global.heading_colors.clone(),
         ui_font_family: global.ui_font_family.clone(),
         ui_font_size: global.ui_font_size,
@@ -1008,18 +1198,60 @@ mod tests {
         let project = ProjectPreferencesV1 {
             insert_mdx_imports: Some(false),
             last_entry: Some("blog/first.md".into()),
-            layout: Some(PanelLayout {
-                sidebar_width: 0.,
-                preview_visible: true,
-                ..PanelLayout::default()
-            }),
+            layout_overrides: ModeLayoutOverrides {
+                writing: Some(PanelLayout {
+                    sidebar_width: 0.,
+                    preview_visible: true,
+                    ..PanelLayout::default()
+                }),
+                ..ModeLayoutOverrides::default()
+            },
             ..ProjectPreferencesV1::default()
         };
         let resolved = resolve(&global, Some(&project), None);
         assert_eq!(resolved.insert_mdx_imports, Some(false));
-        assert_eq!(resolved.layout.sidebar_width, 0.);
-        assert!(resolved.layout.preview_visible);
+        assert_eq!(resolved.layouts.writing.sidebar_width, 0.);
+        assert!(resolved.layouts.writing.preview_visible);
+        assert_eq!(resolved.layouts.build, ModeLayouts::default().build);
         assert_eq!(resolved.last_entry.as_deref(), Some("blog/first.md"));
+    }
+
+    #[test]
+    fn workspace_modes_default_to_a_blank_page_and_resolve_one_mode_at_a_time() {
+        let defaults = GlobalPreferencesV2::default();
+        assert_eq!(defaults.default_mode, WorkspaceMode::Writing);
+        assert!(!defaults.layouts.writing.sidebar_visible);
+        assert!(!defaults.layouts.writing.inspector_visible);
+        assert!(!defaults.layouts.writing.preview_visible);
+        assert!(defaults.layouts.build.sidebar_visible);
+        assert!(defaults.layouts.preview.preview_visible);
+
+        let global = GlobalPreferencesV2 {
+            default_mode: WorkspaceMode::Preview,
+            ..GlobalPreferencesV2::default()
+        };
+        let project = ProjectPreferencesV1 {
+            last_mode: Some(WorkspaceMode::Build),
+            layout_overrides: ModeLayoutOverrides {
+                build: Some(PanelLayout {
+                    sidebar_visible: false,
+                    sidebar_width: 310.,
+                    ..PanelLayout::default()
+                }),
+                ..ModeLayoutOverrides::default()
+            },
+            ..ProjectPreferencesV1::default()
+        };
+        let resolved = resolve(&global, Some(&project), None);
+        assert_eq!(resolved.default_mode, WorkspaceMode::Preview);
+        assert_eq!(resolved.last_mode, Some(WorkspaceMode::Build));
+        assert_eq!(resolved.layouts.build.sidebar_width, 310.);
+        assert!(!resolved.layouts.build.sidebar_visible);
+        assert_eq!(
+            resolved.layouts.writing,
+            ModeLayouts::default().writing,
+            "unoverridden modes still inherit the global layout"
+        );
     }
 
     #[test]

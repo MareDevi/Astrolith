@@ -112,3 +112,14 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - 未在 macOS/Windows 或 150%/200% 显示缩放下验收。
 
 
+
+## 7. M2a 执行记录
+
+- 范围：core `preferences.rs`、GPUI `settings/{store,migrate}.rs`、`shell.rs`、`commands.rs`、`project_discovery.rs` 的视图状态、模式切换与项目布局持久化。
+- 新增 `WorkspaceMode`（Writing/Build/Preview）、`ModeLayouts` 与 `ModeLayoutOverrides`。Writing 默认隐藏导航、Inspector 与底部工具；Build 默认导航开启、工具关闭；Preview 默认保留可编辑正文并显示紧凑预览状态条。每个模式独立保存几何与可见性。
+- 模式切换复用同一 `ProjectWorkspace`、`DocumentSession` 与 EditorState；测试验证 Build→Preview→Writing 后 editor/session 身份、文本、选区与 undo 历史不变。Inspector 视为临时状态：进入其他模式关闭并不写回布局。
+- 三模式命令 `Writing workspace`、`Build workspace`、`Preview workspace`、`Cycle workspace mode` 加入统一 registry，快捷键为 Ctrl+Shift+1/2/3 与 Ctrl+Shift+M，未覆盖 Ctrl+B/I、Ctrl+Enter 或编辑器 context；菜单、palette 与快捷键文档由同一 registry 派生。
+- 旧 `layout` 字段仅用于识别升级：全局文件备份为 `global.json.pre-mode.json` 并写入新每模式默认；项目文件备份为 `<id>.pre-mode.json` 并删除旧构图。未知顶层字段继续保留。
+- 项目 `last_mode` 优先于 global `default_mode` 恢复；布局解析按模式叠加项目覆盖。模式命令与可见性状态并入共享 `CommandAvailability`。
+- 验证：`mise run check` 退出码 0；Rust workspace 测试通过（GPUI 346 passed、4 ignored），fixture 单元 6 passed，Astro fixture compatibility PASS。
+- 未完成：A01/A26 的原生窗口、真实模式下 screenshot/bounds 对照与最小窗口视觉检查尚未执行；Inspector 的浮动 Popover 属于 M4b。M2b/M2c（Build 源码、终端）未在本记录中声明完成。

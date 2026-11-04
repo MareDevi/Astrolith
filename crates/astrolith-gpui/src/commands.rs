@@ -1,4 +1,4 @@
-use astrolith_core::preferences::{CopyeditCategory, CopyeditPreferences};
+use astrolith_core::preferences::{CopyeditCategory, CopyeditPreferences, WorkspaceMode};
 use gpui_kit::{App, KeyBinding};
 
 use crate::recent_projects::RecentEntry;
@@ -51,6 +51,10 @@ pub(crate) enum CommandId {
     ToggleCopyeditAdverbs,
     ToggleCopyeditConjunctions,
     ToggleAllCopyedit,
+    WorkspaceWriting,
+    WorkspaceBuild,
+    WorkspacePreview,
+    CycleWorkspaceMode,
     OpenPalette,
     OpenPreferences,
     ToggleSidebar,
@@ -121,6 +125,10 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::ToggleCopyeditAdverbs,
     CommandId::ToggleCopyeditConjunctions,
     CommandId::ToggleAllCopyedit,
+    CommandId::WorkspaceWriting,
+    CommandId::WorkspaceBuild,
+    CommandId::WorkspacePreview,
+    CommandId::CycleWorkspaceMode,
     CommandId::OpenPalette,
     CommandId::OpenPreferences,
     CommandId::ToggleSidebar,
@@ -187,6 +195,8 @@ pub(crate) struct CommandAvailability {
     pub typewriter_mode: bool,
     /// The window is fullscreen.
     pub fullscreen: bool,
+    /// Active workspace mode, used for checked menu and palette state.
+    pub workspace_mode: WorkspaceMode,
     /// This build carries a manifest URL and public key for update checks.
     pub updates_configured: bool,
 }
@@ -364,6 +374,10 @@ impl CommandId {
                 CopyeditPreferences::default().toggle_label(CopyeditCategory::Conjunction)
             }
             Self::ToggleAllCopyedit => CopyeditPreferences::default().all_toggle_label(),
+            Self::WorkspaceWriting => "Writing workspace",
+            Self::WorkspaceBuild => "Build workspace",
+            Self::WorkspacePreview => "Preview workspace",
+            Self::CycleWorkspaceMode => "Cycle workspace mode",
             Self::OpenPalette => "Commands…",
             Self::OpenPreferences => "Preferences…",
             Self::ToggleSidebar => "Toggle files",
@@ -428,6 +442,10 @@ impl CommandId {
                     "ctrl-w"
                 }
             }
+            Self::WorkspaceWriting => "ctrl-shift-1",
+            Self::WorkspaceBuild => "ctrl-shift-2",
+            Self::WorkspacePreview => "ctrl-shift-3",
+            Self::CycleWorkspaceMode => "ctrl-shift-m",
             Self::OpenPalette => {
                 if mac {
                     "cmd-p"
@@ -754,6 +772,10 @@ pub(crate) fn install_menus(
     let view = gpui_kit::Menu::new("View").items({
         let mut items = items_for(
             &[
+                CommandId::WorkspaceWriting,
+                CommandId::WorkspaceBuild,
+                CommandId::WorkspacePreview,
+                CommandId::CycleWorkspaceMode,
                 CommandId::OpenPalette,
                 CommandId::OpenPreferences,
                 CommandId::ToggleSidebar,
@@ -934,7 +956,11 @@ pub(crate) fn command_group(command: CommandId) -> &'static str {
         | CommandId::OpenProjectInIde
         | CommandId::OpenCollectionInIde
         | CommandId::OpenEntryInIde => "File",
-        CommandId::OpenPalette
+        CommandId::WorkspaceWriting
+        | CommandId::WorkspaceBuild
+        | CommandId::WorkspacePreview
+        | CommandId::CycleWorkspaceMode
+        | CommandId::OpenPalette
         | CommandId::OpenPreferences
         | CommandId::ToggleSidebar
         | CommandId::ToggleInspector
@@ -1010,6 +1036,9 @@ fn menu_item(
     availability: CommandAvailability,
 ) -> gpui_kit::MenuItem {
     let checked = match command {
+        CommandId::WorkspaceWriting => availability.workspace_mode == WorkspaceMode::Writing,
+        CommandId::WorkspaceBuild => availability.workspace_mode == WorkspaceMode::Build,
+        CommandId::WorkspacePreview => availability.workspace_mode == WorkspaceMode::Preview,
         CommandId::ToggleSidebar => availability.sidebar_visible,
         CommandId::ToggleInspector => availability.inspector_visible,
         CommandId::TogglePreview => availability.preview_visible,

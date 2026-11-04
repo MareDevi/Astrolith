@@ -4438,6 +4438,7 @@ impl ProjectWorkspace {
             ide_configured: self.global_preferences.ide.is_configured(),
             sidebar_visible: self.view_sidebar,
             inspector_visible: self.view_inspector,
+            workspace_mode: Default::default(),
             preview_visible: self.view_preview,
             preview_attached: false,
             preview_running: false,

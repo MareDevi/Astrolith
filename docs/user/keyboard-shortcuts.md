@@ -19,6 +19,17 @@ yet.
 | Preferences… | Ctrl+, |
 | Quit Astrolith | Ctrl+Q |
 
+## Workspace modes
+
+| Command | Shortcut |
+| --- | --- |
+| Writing workspace | Ctrl+Shift+1 |
+| Build workspace | Ctrl+Shift+2 |
+| Preview workspace | Ctrl+Shift+3 |
+| Cycle workspace mode | Ctrl+Shift+M |
+
+Switching modes keeps the open document, its caret, selection and history.
+
 ## View
 
 | Command | Shortcut |
