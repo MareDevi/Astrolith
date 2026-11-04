@@ -18,6 +18,7 @@ use crate::{
         session::{DocumentSession, HistoryChanged, SaveOnBlur, SessionChanged},
         writing_modes::WritingModes,
     },
+    file_browser::{FileBrowser, FileBrowserEvent},
     frontmatter::{FrontmatterEdit, ReferenceCatalog},
     layout::panels::WorkspacePanel,
     runtime, settings, ui,
@@ -817,6 +818,8 @@ pub(crate) struct ProjectWorkspace {
     /// Imports seen in indexed entries, for corroborating component specifiers.
     component_imports: Arc<Vec<CorroboratedImport>>,
     component_task: Option<Task<()>>,
+    /// Build's project file explorer; Writing and Preview keep the library list.
+    file_browser: Entity<FileBrowser>,
 }
 
 /// What to do after a dirty session has been saved through the guarded path.
@@ -932,6 +935,16 @@ pub(crate) struct ProjectOpened {
     pub root: PathBuf,
 }
 impl EventEmitter<ProjectOpened> for ProjectWorkspace {}
+
+/// A project file without an editable session was chosen in the Build explorer.
+///
+/// The shell owns readonly snapshots, so it reads and presents this file instead
+/// of the workspace creating a writable session for it.
+pub(crate) struct ReadonlyFileRequested {
+    /// Canonical path inside the open project.
+    pub path: PathBuf,
+}
+impl EventEmitter<ReadonlyFileRequested> for ProjectWorkspace {}
 impl ProjectWorkspace {
     pub fn new(
         document: Entity<WorkspacePanel>,
@@ -966,6 +979,14 @@ impl ProjectWorkspace {
                 cx.notify();
             }
         });
+        let file_browser = cx.new(|cx| FileBrowser::new(window, cx));
+        let file_browser_subscription = cx.subscribe_in(
+            &file_browser,
+            window,
+            |this, _, event: &FileBrowserEvent, window, cx| match event {
+                FileBrowserEvent::Open(path) => this.open_browser_path(path.clone(), window, cx),
+            },
+        );
         Self {
             document,
             manifest: None,
@@ -995,7 +1016,7 @@ impl ProjectWorkspace {
             session_collections: BTreeMap::new(),
             schemas: BTreeMap::new(),
             active: None,
-            _subscriptions: vec![subscription, query_observer],
+            _subscriptions: vec![subscription, query_observer, file_browser_subscription],
             session_subscriptions: HashMap::new(),
             recovery: settings::recovery_dir().ok().map(RecoveryStore::new),
             pending_recovery: Vec::new(),
@@ -1043,6 +1064,7 @@ impl ProjectWorkspace {
             component_loading: false,
             component_imports: Arc::new(Vec::new()),
             component_task: None,
+            file_browser,
         }
     }
     /// Save status of the active document, for the tab strip status text.
@@ -1071,6 +1093,15 @@ impl ProjectWorkspace {
         self.manifest
             .as_ref()
             .map(|manifest| manifest.root().to_path_buf())
+    }
+
+    /// Point the Build explorer at the open project; Build rescans on every
+    /// published index so external file changes appear without a manual refresh.
+    fn sync_file_browser_root(&mut self, cx: &mut Context<Self>) {
+        let root = self.project_root();
+        let refresh = self.source_view;
+        self.file_browser
+            .update(cx, |browser, cx| browser.sync_root(root, refresh, cx));
     }
 
     /// Collection identities and their generated schemas for the preferences pane.
@@ -2607,6 +2638,53 @@ impl ProjectWorkspace {
         Ok(())
     }
 
+    /// Open a Build explorer selection.
+    ///
+    /// Content entries and project `.astro` sources keep their retained,
+    /// editable sessions; every other project file is a readonly snapshot that
+    /// the shell reads and presents.
+    pub(crate) fn open_browser_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.project_root() else {
+            self.status = "Open a project before browsing its files.".into();
+            cx.notify();
+            return;
+        };
+        let canonical = match path.canonicalize() {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                self.status = format!("Could not open {}: {error}", path.display());
+                cx.notify();
+                return;
+            }
+        };
+        if !canonical.starts_with(&root) {
+            self.status = format!("{} is outside the open project.", path.display());
+            cx.notify();
+            return;
+        }
+        if self.is_editable_project_source(&canonical) {
+            if let Err(error) = self.open_project_source(canonical, window, cx) {
+                self.status = error;
+                cx.notify();
+            }
+            return;
+        }
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.absolute_source() == canonical)
+        {
+            self.open_entry(index, window, cx);
+            return;
+        }
+        cx.emit(ReadonlyFileRequested { path: canonical });
+    }
+
     /// Whether `path` is a project-owned `.astro` source this workspace may edit.
     pub(crate) fn is_editable_project_source(&self, path: &std::path::Path) -> bool {
         let Some(root) = self.project_root() else {
@@ -2915,6 +2993,8 @@ impl ProjectWorkspace {
         self.pending_recovery.clear();
         self.manifest = None;
         self.active = None;
+        self.file_browser
+            .update(cx, |browser, cx| browser.sync_root(None, false, cx));
         self.publish_entries(Vec::new(), cx);
         self.document
             .update(cx, |document, cx| document.clear_editor(cx));
@@ -3576,6 +3656,9 @@ impl ProjectWorkspace {
             ));
         self.document.update(cx, |document, cx| {
             document.show_editor(title, editor, Some(wiring), cx)
+        });
+        self.file_browser.update(cx, |browser, cx| {
+            browser.set_active(Some(path.to_path_buf()), cx)
         });
         self.status = if session.read(cx).externally_changed {
             "Document changed on disk. This buffer is retained; close and reopen to reload."
@@ -4337,6 +4420,7 @@ impl ProjectWorkspace {
         }
         let diagnostics: Vec<String> = manifest.diagnostics().to_vec();
         self.manifest = Some(Arc::new(manifest));
+        self.sync_file_browser_root(cx);
         self.index_error = None;
         self.publish_entries(entries, cx);
         self.reconcile_sessions(cx);
@@ -4675,6 +4759,12 @@ impl ProjectWorkspace {
         cx: &mut Context<Self>,
     ) {
         self.source_view = source;
+        let root = self.project_root();
+        let active = self.active.clone();
+        self.file_browser.update(cx, |browser, cx| {
+            browser.sync_root(root, source, cx);
+            browser.set_active(active, cx);
+        });
         let Some(path) = self.active.clone() else {
             return;
         };
@@ -6105,6 +6195,11 @@ impl Render for ProjectWorkspace {
                     project_empty_state(loading, cx).into_any_element()
                 })
                 .into_any_element();
+        }
+        // Build navigates the real project files; Writing and Preview keep the
+        // collection library. The explorer owns its own scan and expansion state.
+        if self.source_view {
+            return view.child(self.file_browser.clone()).into_any_element();
         }
 
         let more_owner = cx.weak_entity();
@@ -9641,6 +9736,129 @@ export const collections = {blog, dataAuthors};
             .unwrap();
         }
         assert_eq!(std::fs::read_to_string(&canonical).unwrap(), edited);
+    }
+
+    #[gpui_kit::test]
+    async fn build_swaps_the_library_for_a_project_file_explorer(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let astro = dir.path().join("index.astro");
+        std::fs::write(&astro, "---\n---\n<h1>Home</h1>\n").unwrap();
+        let notes = dir.path().join("notes.astro");
+        std::fs::write(&notes, "---\n---\n<p>Notes</p>\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("src/pages")).unwrap();
+        std::fs::write(
+            dir.path().join("src/pages/about.astro"),
+            "---\n---\n<h1>About</h1>\n",
+        )
+        .unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+
+        // Writing keeps the collection library the writer already knows.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("project-collections").is_some());
+            assert!(window.try_find("file-browser").is_none());
+        })
+        .unwrap();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.set_source_view(true, window, cx));
+            window.render_frame(cx);
+            assert!(window.try_find("file-browser").is_some());
+            assert!(window.try_find("project-collections").is_none());
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if !view.read_with(cx, |view, cx| view.file_browser.read(cx).is_scanning()) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        let ids = view.read_with(cx, |view, cx| view.file_browser.read(cx).visible_ids(cx));
+        assert!(ids.contains(&"src".to_owned()), "{ids:?}");
+        assert!(ids.contains(&"index.astro".to_owned()), "{ids:?}");
+        assert!(ids.contains(&"package.json".to_owned()), "{ids:?}");
+        assert!(
+            !ids.iter().any(|id| id.starts_with("node_modules")),
+            "{ids:?}"
+        );
+
+        // Clicking a directory expands exactly that subtree.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("src", cx);
+        })
+        .unwrap();
+        let ids = view.read_with(cx, |view, cx| view.file_browser.read(cx).visible_ids(cx));
+        assert!(ids.contains(&"src/pages".to_owned()), "{ids:?}");
+        assert!(
+            !ids.contains(&"src/pages/about.astro".to_owned()),
+            "{ids:?}"
+        );
+
+        // Clicking a tree row opens the project .astro source in a real session.
+        let canonical = std::fs::canonicalize(&astro).unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("index.astro", cx);
+        })
+        .unwrap();
+        wait_for_session(cx, &view, &canonical).await;
+
+        // The list keeps a keyboard path: Enter confirms the selected file.
+        let notes_canonical = std::fs::canonicalize(&notes).unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.file_browser.update(cx, |browser, cx| {
+                    browser.select_row("notes.astro", window, cx)
+                });
+            });
+            window.render_frame(cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        wait_for_session(cx, &view, &notes_canonical).await;
+
+        // A content entry opens through the existing entry path.
+        let entry = std::fs::canonicalize(dir.path().join("src/posts/a.md")).unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.open_browser_path(entry.clone(), window, cx)
+            });
+        })
+        .unwrap();
+        wait_for_session(cx, &view, &entry).await;
+
+        // Everything else is requested as a readonly snapshot from the shell.
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = seen.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &ReadonlyFileRequested, _| {
+                recorded.borrow_mut().push(event.path.clone());
+            })
+        });
+        let config = std::fs::canonicalize(dir.path().join("astro.config.mjs")).unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.open_browser_path(config.clone(), window, cx)
+            });
+        })
+        .unwrap();
+        assert_eq!(*seen.borrow(), vec![config]);
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.set_source_view(false, window, cx));
+            window.render_frame(cx);
+            assert!(window.try_find("entry-new").is_some());
+            assert!(window.try_find("file-browser").is_none());
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

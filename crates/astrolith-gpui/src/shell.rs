@@ -33,8 +33,8 @@ use crate::{
         embedded::{EmbeddedPreview, EmbeddedPreviewEvent},
     },
     project_discovery::{
-        FrontmatterKey, HistoryChangedEvent, ProjectOpened, ProjectWorkspace, now_secs,
-        scan_project_astro_sources,
+        FrontmatterKey, HistoryChangedEvent, ProjectOpened, ProjectWorkspace,
+        ReadonlyFileRequested, now_secs, scan_project_astro_sources,
     },
     recent_projects::{self, RecentEntry},
     runtime,
@@ -491,6 +491,15 @@ impl Shell {
                 this.terminal
                     .update(cx, |terminal, cx| terminal.attach(&root, cx));
                 this.finish_pending_entry(window, cx);
+            },
+        ));
+        // Build's file explorer resolves non-editable project files here, so the
+        // shell owns their readonly load and status copy.
+        subscriptions.push(cx.subscribe_in(
+            &project,
+            window,
+            |this, _, event: &ReadonlyFileRequested, window, cx| {
+                this.open_readonly_path(event.path.clone(), window, cx);
             },
         ));
         // Project load, entry activation and watcher refreshes notify the
@@ -2891,6 +2900,31 @@ impl Shell {
         self.document
             .update(cx, |panel, cx| panel.show_source(source, window, cx));
         self.document.read(cx).focus_handle(cx).focus(window, cx);
+    }
+
+    /// Read one project file selected in Build's explorer as a readonly snapshot.
+    fn open_readonly_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.opening {
+            return;
+        }
+        self.opening = true;
+        let read = runtime::blocking(cx, move || read_document(path));
+        self.opening_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = read
+                .await
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.opening = false;
+                match result {
+                    Ok(source) => this.show_document(source, window, cx),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not open a project file");
+                        this.file_status = format!("Could not open file: {error}");
+                        cx.notify();
+                    }
+                }
+            });
+        }));
     }
 }
 

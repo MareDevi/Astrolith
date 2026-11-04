@@ -4,6 +4,8 @@
 
 /// Asset copying, Markdown links and Content Finder targets.
 pub mod assets;
+/// Bounded project file tree for the Build navigator.
+pub mod files;
 /// Collection entry scanning and source coalescing.
 pub mod index;
 /// Deterministic file-list filtering and ordering.

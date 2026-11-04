@@ -4,6 +4,7 @@ mod desktop_actions;
 mod drag_drop;
 mod editor;
 mod file;
+mod file_browser;
 pub mod frontmatter;
 mod help;
 mod layout;
