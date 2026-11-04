@@ -20,6 +20,7 @@
 | M2c | 已完成（用户原生验收） | 项目绑定 PTY、ANSI 屏幕/回看、输入/复制、resize、退出与项目切换清理；证据见 ACCEPTANCE §8、§11 |
 | M4a | 核心完成，真机/表单路径待验收 | 单一完整源事务栈覆盖正文与隐藏 FM，Ctrl+Z/Redo 走同一顺序；记录见 ACCEPTANCE §9 |
 | M2b | 已完成（用户原生验收；Astro 高亮未启用） | Build complete-source、真实标签条、项目 `.astro` 扫描/编辑/保存、无 frontmatter 路径；记录见 ACCEPTANCE §10、§11 |
+| M4b | 实现完成；内层浮层原生验收待补 | FrontmatterForm 迁入 controlled Popover，默认关闭、Ctrl+2/按钮打开、outside/Esc/close 关闭与焦点恢复；右 Dock 与 inspector layout 字段移除；记录见 ACCEPTANCE §13 |
 | M3 | 已完成（用户原生验收） | 可持久化文档字体/字号/行高/measure 与 Focus/Typewriter；mock 16/32、768 默认；排版变更不触碰文档状态；记录见 ACCEPTANCE §12 |
 
 M1 的退出只覆盖主题与共享控件本身；mock 的模式切换器、Build 标签条等区域属于 M2 及后续里程碑，未在 M1 提前实现。

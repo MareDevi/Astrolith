@@ -190,3 +190,21 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 - 未完成/未验证：
   - 150%/200% 显示缩放、最小窗口下的设置页新字段布局未截图验收。
   - paragraph focus 不在本次范围。
+
+## 13. M4b 执行记录
+
+- 范围：`shell.rs` 的 transient inspector 状态与命令、`editor/header.rs` 的触发按钮和浮层宿主、`frontmatter/mod.rs` 的 body-only 渲染、core `PanelLayout` 的右栏字段清理、`commands.rs` 的 frontmatter availability。
+- 永久 right Dock 已移除；`inspector_visible`/`inspector_width` 不再属于 `PanelLayout`。旧配置中的这些键由 serde 忽略，未知顶层字段继续保留。Inspector 不写入任何模式布局。
+- `FrontmatterForm` 保留 entity、字段 row entities、reference catalog、图片/引用控件和 `FrontmatterEdit` subscription；移除了表单自带的 “Details” header，浮层提供 “Frontmatter / Entry details · collection” 与关闭按钮。表单 body 是唯一滚动区域，header/close 不随滚动。
+- 使用 pinned controlled `Popover`：默认关闭，`Ctrl+2` 或文档 rail 的 Details 按钮打开；outside、Esc、关闭按钮关闭；Esc 后焦点回到正文编辑器；模式切换关闭浮层。无 frontmatter 的文档禁用按钮与命令。
+- 布局：TopRight 锚定触发按钮，6 px 偏移，宽度 `min(416, viewport−32)`，高度 `viewport−144`（下限 240）；pinned Positioner 负责窗口 margin、翻转与 clamp。浮层覆盖正文但不改变 `document-panel` bounds。
+- 回归测试：
+  - `frontmatter_inspector_is_an_overlay_with_unchanged_document_bounds`：默认关闭、按钮打开、真实 form 可见、正文 bounds 不变、outside 关闭、关闭按钮关闭。
+  - `inspector_escape_restores_editor_focus_and_mode_switch_closes_it`：`Ctrl+2` 快捷键打开、Esc 关闭并恢复编辑器焦点、模式切换关闭。
+  - 现有 frontmatter 字段/校验/patch、模式布局、project layout、resize 与 shell 测试全部继续通过。
+- 自动检查：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；Rust workspace 846 passed、0 failed、8 ignored；fixture 单元 6 passed，Astro fixture compatibility PASS。
+- 原生证据：Linux Wayland（Hyprland），dark/System，窗口 1263×1384，fixture `fixtures/parity-project/src/content/blog/markdown-showcase.md`。截图确认默认关闭、`Ctrl+2` 打开真实 schema 字段（title/description/slug/date/updated/draft/featured/order/rating/tags/category/status/author/related）、右侧 16 px inset、正文与保存状态仍可见、Esc 关闭。截图临时保存于 `/tmp/astrolith-m4b-closed.png`、`/tmp/astrolith-m4b-open.png`、`/tmp/astrolith-m4b-escaped.png`。
+- 未完成/未验证：
+  - 内层 Select/DatePicker 的“先关子层、再关父层”只由 pinned popover 语义和代码审查保证，未在本机用真实鼠标/键盘实际展开验证；A10 仍待原生补证。
+  - 最小窗口、150%/200% 缩放、原生 IME 焦点与长表单滚动未截图验收。
+  - Schema 刷新时已提交字段编辑依赖完整源重建；未新增专门的 schema-refresh 表单集成测试。

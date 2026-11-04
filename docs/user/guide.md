@@ -179,12 +179,20 @@ settings and restored on the next launch.
 The workspace is a writing desk: the **Library** opens on the project's
 collection index, and selecting a collection shows only that collection's
 entries (the back arrow returns to the index). The page sits in the middle,
-**Details** holds frontmatter on the right, and the **Reading view** (the Astro
-preview controls) sits below when it is open. Both stay closed by default so
-the page remains the primary surface. The title bar carries the project,
-search and one view menu. The document rail carries the active document, its
-collection, save state and save action; closing and switching other open
-documents remain in its overflow menu.
+the frontmatter **Details** inspector floats above it, and the **Reading view**
+(the Astro preview controls) sits below when it is open. Both stay closed by
+default so the page remains the primary surface. The title bar carries the
+project, search and one view menu. The document rail carries the active
+document, its collection, save state and save action; closing and switching
+other open documents remain in its overflow menu.
+
+Open **Details** with the sliders button at the right of the document rail or
+`Ctrl+2` (`Cmd+2` on macOS). It is a non-modal popover: it never changes the
+document's width or position. **Escape**, a click outside, or its close button
+dismisses it and returns focus to the document. When a select or date picker
+inside the inspector is open, the first Escape closes that control and the
+next closes the inspector. The inspector is closed by default, is not part of
+a saved layout, and closes when you switch workspace mode.
 
 **New entry** creates a file in the collection you are viewing. Opening an
 entry from another collection switches the Library to that collection, so the
@@ -211,13 +219,15 @@ Writer commands:
   sentence.
 - **Typewriter mode** (`Ctrl+Shift+T`) keeps the cursor line vertically
   centred while typing, navigating and clicking.
-- The window chrome auto-hides after typing when both sidebars are closed and
-  returns on a top-edge hover. The selection toolbar appears for a non-empty
-  selection and is keyboard reachable.
-- The page is set in a serif at a comfortable measure, without line numbers,
-  indent guides, folding or automatic brackets. Markdown presentation includes
-  dimmed syntax markers, tinted code spans and blocks, muted italic blockquotes,
-  and uniform bold headings; type size and line height adapt to the pane width.
+- The window chrome auto-hides after typing when the Library and Details are
+  closed and returns on a top-edge hover. The selection toolbar appears for a
+  non-empty selection and is keyboard reachable.
+- The page is set in the neutral sans face at 16 px with 32 px lines and a
+  768 px measure by default, without line numbers, indent guides, folding or
+  automatic brackets. Font family, size, line height and page width are
+  preferences, and the writing column no longer rescales with the pane.
+  Markdown presentation includes dimmed syntax markers, tinted code spans and
+  blocks, muted italic blockquotes, and uniform bold headings.
 - Copyedit (`Writer` menu) highlights nouns, verbs, adjectives, adverbs or
   conjunctions using a deterministic offline English classifier. Code, link
   destinations, HTML/MDX tags, frontmatter and hidden imports are excluded.

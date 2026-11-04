@@ -145,3 +145,12 @@ M1 首先校对 Theme adapter；随后逐区域迁移 chrome、表单、菜单�
 - Focus/Typewriter 作为全局偏好持久化；启动、切换命令和 Apply 都走同一 `WritingModes` 状态。sentence focus 保持既有语义，未新增 paragraph focus。
 - 旧配置若没有 `editor_line_height`，一次性备份为 `global.json.pre-writing.json`，把未改动的旧默认 18/720 升为 16/768 并写入新字段；用户显式改过的字号或宽度保留。
 - 原生 Wayland dark/System 截图核对了默认排版与持久化后的 22 px/2.4/900 + Focus；150%/200% 缩放与 IME 组合仍未验收。
+
+## 11. M4b 实施记录
+
+- 永久 right Dock 及其 `inspector_visible`/`inspector_width` 布局字段已删除。旧配置中的未知字段由 serde 忽略，不会恢复旧右栏。
+- `FrontmatterForm` 保留 entity、字段 rows 与 `FrontmatterEdit` subscription，但只渲染表单 body，是浮层内唯一滚动区域；浮层本身提供 “Frontmatter / Entry details · collection”、关闭按钮与边界。
+- 浮层由 pinned controlled `Popover` 承载，锚定文档 rail 的 Details 按钮（TopRight，6 px 偏移），宽度 `min(416, viewport−32)`，高度 `viewport−144` 并设下限；Positioner 负责 window margin、翻转与 clamp。
+- 默认关闭；按钮和 `Ctrl+2` 打开，outside/Esc/关闭按钮关闭。Escape 与焦点恢复由 pinned popover 拥有；关闭后回到正文编辑器。模式切换关闭它但不写入布局。
+- Form 在 `active_frontmatter_key` 变化时从完整源重建；schema 刷新使用最新 buffer 文本，因此已提交的字段编辑不会回退。无 frontmatter 的文档禁用按钮与命令。
+- GPUI 测试覆盖：默认关闭、按钮打开、outside/close/Esc 关闭、正文 bounds 不变、Esc 后编辑器焦点恢复、模式切换关闭。原生 Wayland 以 `Ctrl+2` 打开真实字段并 Esc 关闭。
