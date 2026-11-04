@@ -32,128 +32,6 @@ pub enum ThemePreference {
     System,
 }
 
-/// Concrete palette used when the resolved appearance is light.
-///
-/// Light and dark palettes are chosen independently so a scheme family can
-/// pair its own variants (for example Catppuccin Latte with Mocha) and System
-/// mode can switch between them without losing the user's choice.
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Hash, PartialOrd, Ord,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum LightColorScheme {
-    /// Warm paper, iron-gall ink and a burnt-sienna accent.
-    #[default]
-    Manuscript,
-    /// Astrolith's One Light palette.
-    OneLight,
-    /// Catppuccin Latte.
-    CatppuccinLatte,
-    /// Nord's snow-storm light variant.
-    NordLight,
-    /// Gruvbox Light.
-    GruvboxLight,
-    /// Tokyo Night Day.
-    TokyoNightDay,
-    /// Solarized Light.
-    SolarizedLight,
-    /// Rosé Pine Dawn.
-    RosePineDawn,
-}
-
-impl LightColorScheme {
-    /// Every light palette, in menu order.
-    pub const ALL: [Self; 8] = [
-        Self::Manuscript,
-        Self::OneLight,
-        Self::CatppuccinLatte,
-        Self::NordLight,
-        Self::GruvboxLight,
-        Self::TokyoNightDay,
-        Self::SolarizedLight,
-        Self::RosePineDawn,
-    ];
-
-    /// User-facing palette name.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Manuscript => "Manuscript",
-            Self::OneLight => "One Light",
-            Self::CatppuccinLatte => "Catppuccin Latte",
-            Self::NordLight => "Nord Light",
-            Self::GruvboxLight => "Gruvbox Light",
-            Self::TokyoNightDay => "Tokyo Night Day",
-            Self::SolarizedLight => "Solarized Light",
-            Self::RosePineDawn => "Rosé Pine Dawn",
-        }
-    }
-}
-
-/// Concrete palette used when the resolved appearance is dark.
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Hash, PartialOrd, Ord,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum DarkColorScheme {
-    /// Warm ink, parchment text and a lamp-lit accent.
-    #[default]
-    Ink,
-    /// Astrolith's One Dark palette.
-    OneDark,
-    /// Catppuccin Mocha.
-    CatppuccinMocha,
-    /// Catppuccin Macchiato.
-    CatppuccinMacchiato,
-    /// Catppuccin Frappé.
-    CatppuccinFrappe,
-    /// Nord Polar Night.
-    Nord,
-    /// Gruvbox Dark.
-    GruvboxDark,
-    /// Tokyo Night.
-    TokyoNight,
-    /// Solarized Dark.
-    SolarizedDark,
-    /// Rosé Pine.
-    RosePine,
-    /// Rosé Pine Moon.
-    RosePineMoon,
-}
-
-impl DarkColorScheme {
-    /// Every dark palette, in menu order.
-    pub const ALL: [Self; 11] = [
-        Self::Ink,
-        Self::OneDark,
-        Self::CatppuccinMocha,
-        Self::CatppuccinMacchiato,
-        Self::CatppuccinFrappe,
-        Self::Nord,
-        Self::GruvboxDark,
-        Self::TokyoNight,
-        Self::SolarizedDark,
-        Self::RosePine,
-        Self::RosePineMoon,
-    ];
-
-    /// User-facing palette name.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Ink => "Ink",
-            Self::OneDark => "One Dark",
-            Self::CatppuccinMocha => "Catppuccin Mocha",
-            Self::CatppuccinMacchiato => "Catppuccin Macchiato",
-            Self::CatppuccinFrappe => "Catppuccin Frappé",
-            Self::Nord => "Nord",
-            Self::GruvboxDark => "Gruvbox Dark",
-            Self::TokyoNight => "Tokyo Night",
-            Self::SolarizedDark => "Solarized Dark",
-            Self::RosePine => "Rosé Pine",
-            Self::RosePineMoon => "Rosé Pine Moon",
-        }
-    }
-}
-
 /// Default extension for newly created content entries.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Hash, PartialOrd, Ord,
@@ -519,10 +397,6 @@ pub struct GlobalPreferencesV2 {
     pub version: u32,
     /// Light, dark or system appearance.
     pub theme: ThemePreference,
-    /// Palette used when the resolved appearance is light.
-    pub light_theme: LightColorScheme,
-    /// Palette used when the resolved appearance is dark.
-    pub dark_theme: DarkColorScheme,
     /// Global dock layout; a project layout overrides it when present.
     pub layout: PanelLayout,
     /// Last main-window geometry; absent opens the platform default.
@@ -556,8 +430,6 @@ impl Default for GlobalPreferencesV2 {
         Self {
             version: GLOBAL_PREFERENCES_VERSION,
             theme: ThemePreference::System,
-            light_theme: LightColorScheme::default(),
-            dark_theme: DarkColorScheme::default(),
             layout: PanelLayout::default(),
             window: None,
             heading_colors: HeadingColors::default(),
@@ -709,10 +581,6 @@ impl Default for CollectionPreferencesV1 {
 pub struct ResolvedPreferences {
     /// Appearance preference.
     pub theme: ThemePreference,
-    /// Palette used when the resolved appearance is light.
-    pub light_theme: LightColorScheme,
-    /// Palette used when the resolved appearance is dark.
-    pub dark_theme: DarkColorScheme,
     /// Effective dock layout.
     pub layout: PanelLayout,
     /// Heading colors.
@@ -767,8 +635,6 @@ pub fn resolve(
     };
     ResolvedPreferences {
         theme: global.theme,
-        light_theme: global.light_theme,
-        dark_theme: global.dark_theme,
         layout: project
             .and_then(|project| project.layout.clone())
             .unwrap_or_else(|| global.layout.clone()),
@@ -1298,23 +1164,22 @@ mod tests {
     }
 
     #[test]
-    fn color_schemes_round_trip_and_absent_fields_default_to_the_literary_pair() {
+    fn theme_round_trips_and_retired_palette_fields_are_ignored() {
         let global = GlobalPreferencesV2 {
-            light_theme: LightColorScheme::NordLight,
-            dark_theme: DarkColorScheme::GruvboxDark,
+            theme: ThemePreference::Dark,
             ..GlobalPreferencesV2::default()
         };
         let encoded = serde_json::to_value(&global).unwrap();
         let decoded: GlobalPreferencesV2 = serde_json::from_value(encoded).unwrap();
-        assert_eq!(decoded.light_theme, LightColorScheme::NordLight);
-        assert_eq!(decoded.dark_theme, DarkColorScheme::GruvboxDark);
+        assert_eq!(decoded.theme, ThemePreference::Dark);
 
-        let bare: GlobalPreferencesV2 = serde_json::from_str("{\"version\":2}").unwrap();
-        assert_eq!(bare.light_theme, LightColorScheme::Manuscript);
-        assert_eq!(bare.dark_theme, DarkColorScheme::Ink);
-        assert_eq!(bare.ui_font_family, "");
-        assert_eq!(bare.ui_font_size, 14.);
-        assert_eq!(bare.editor_width, 720.);
+        let retired: GlobalPreferencesV2 =
+            serde_json::from_str(r#"{"version":2,"light_theme":"nord_light","dark_theme":"ink"}"#)
+                .unwrap();
+        assert_eq!(retired.theme, ThemePreference::System);
+        assert_eq!(retired.ui_font_family, "");
+        assert_eq!(retired.ui_font_size, 14.);
+        assert_eq!(retired.editor_width, 720.);
     }
 
     #[test]

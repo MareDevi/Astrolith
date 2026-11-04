@@ -291,6 +291,7 @@ impl Shell {
                 window,
                 cx,
             )
+            .with_surface()
         });
         let document = cx.new(|cx| {
             WorkspacePanel::new(
@@ -5072,44 +5073,30 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn palette_selection_applies_live_and_persists(cx: &mut TestAppContext) {
-        use astrolith_core::preferences::{DarkColorScheme, LightColorScheme};
+    fn appearance_commands_apply_the_neutral_palette_and_persist(cx: &mut TestAppContext) {
+        use crate::theme::ResolveTheme;
 
         let (handle, view) = mount(cx, GlobalPreferencesV2::default());
-        cx.update_window(handle.into(), |_, window, cx| {
-            view.update(cx, |shell, cx| {
-                shell.execute(CommandId::LightTheme, window, cx)
+        for (command, mode) in [
+            (CommandId::LightTheme, ThemeMode::Light),
+            (CommandId::DarkTheme, ThemeMode::Dark),
+            (CommandId::SystemTheme, ThemeMode::System),
+        ] {
+            cx.update_window(handle.into(), |_, window, cx| {
+                view.update(cx, |shell, cx| shell.execute(command, window, cx))
+            })
+            .unwrap();
+            let (settings_theme, resolved) = view.read_with(cx, |shell, cx| {
+                (shell.settings.theme, mode.resolve(cx.window_appearance()))
             });
-        })
-        .unwrap();
-        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
-        open_preferences_sheet(cx, handle, &view);
-        cx.update_window(handle.into(), |_, window, cx| {
-            sheet.update(cx, |sheet, cx| {
-                sheet.set_palettes_for_tests(
-                    LightColorScheme::NordLight,
-                    DarkColorScheme::TokyoNight,
-                    cx,
-                )
+            assert_eq!(settings_theme, mode);
+            let tokens = theme::palette(resolved);
+            cx.update(|cx| {
+                assert_eq!(cx.theme().background, tokens.background);
+                assert_eq!(cx.theme().primary, tokens.primary);
+                assert_eq!(cx.theme().ring, tokens.focus);
             });
-            window.render_frame(cx);
-            window.click("preferences-apply", cx);
-        })
-        .unwrap();
-        let (light, dark) = view.read_with(cx, |shell, _| {
-            (shell.settings.light_theme, shell.settings.dark_theme)
-        });
-        assert_eq!(light, LightColorScheme::NordLight);
-        assert_eq!(dark, DarkColorScheme::TokyoNight);
-        let expected = theme::palette(
-            ThemeMode::Light,
-            LightColorScheme::NordLight,
-            DarkColorScheme::TokyoNight,
-        );
-        assert_eq!(
-            view.read_with(cx, |_, cx| cx.theme().background),
-            expected.background
-        );
+        }
     }
 
     #[gpui_kit::test]

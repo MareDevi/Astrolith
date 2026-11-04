@@ -17,9 +17,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use astrolith_astro::schema::{CollectionSchema, FieldKind};
 use astrolith_core::preferences::{
-    AutosaveDelay, CollectionPreferencesV1, DarkColorScheme, FieldMappings, FileExtension,
-    GlobalPreferencesV2, HeadingColors, IdeCommand, ImagePathMode, LightColorScheme,
-    ProjectPreferencesV1, ThemePreference,
+    AutosaveDelay, CollectionPreferencesV1, FieldMappings, FileExtension, GlobalPreferencesV2,
+    HeadingColors, IdeCommand, ImagePathMode, ProjectPreferencesV1, ThemePreference,
 };
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt, WindowExt,
@@ -189,8 +188,6 @@ pub(crate) struct PreferencesSheet {
     context: Option<PreferencesContext>,
     pane: Pane,
     theme: ThemePreference,
-    light_theme: LightColorScheme,
-    dark_theme: DarkColorScheme,
     global_extension: FileExtension,
     autosave: AutosaveDelay,
     project_image_mode: Option<ImagePathMode>,
@@ -233,8 +230,6 @@ impl PreferencesSheet {
             context: None,
             pane: Pane::General,
             theme: ThemePreference::default(),
-            light_theme: LightColorScheme::default(),
-            dark_theme: DarkColorScheme::default(),
             global_extension: FileExtension::default(),
             autosave: AutosaveDelay::default(),
             project_image_mode: None,
@@ -284,8 +279,6 @@ impl PreferencesSheet {
         let project = context.project.clone();
         let global = context.global.clone();
         self.theme = global.theme;
-        self.light_theme = global.light_theme;
-        self.dark_theme = global.dark_theme;
         self.global_extension = global.default_extension;
         self.autosave = global.autosave_delay;
         self.set_text(FieldId::IdeExecutable, &global.ide.executable, window, cx);
@@ -411,8 +404,6 @@ impl PreferencesSheet {
         let context = self.context.as_ref()?;
         let mut global = context.global.clone();
         global.theme = self.theme;
-        global.light_theme = self.light_theme;
-        global.dark_theme = self.dark_theme;
         global.default_extension = self.global_extension;
         global.autosave_delay = self.autosave;
         global.heading_colors = HeadingColors {
@@ -569,18 +560,6 @@ impl PreferencesSheet {
     ) {
         self.set_text(field, value, window, cx);
         self.refresh_errors(cx);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_palettes_for_tests(
-        &mut self,
-        light: LightColorScheme,
-        dark: DarkColorScheme,
-        cx: &mut Context<Self>,
-    ) {
-        self.light_theme = light;
-        self.dark_theme = dark;
-        cx.notify();
     }
 
     #[cfg(test)]

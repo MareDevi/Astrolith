@@ -1,10 +1,10 @@
 //! Application-owned typography for the writing desk.
 //!
-//! The shell keeps a quiet humanist interface voice; the document itself is set
-//! in a serif so prose reads as a page, not as source code. One family is
-//! chosen from installed fonts per process, because GPUI falls back to the
-//! system UI face when a requested family is absent — which would silently undo
-//! the whole design.
+//! The mock sets the interface and the document in Inter. One family is
+//! resolved per process from installed fonts, because GPUI silently falls back
+//! to the system UI face when a requested family is absent. Without Inter the
+//! platform UI family is the closest measured fallback; CJK coverage comes from
+//! GPUI's per-script fallback.
 
 use std::sync::OnceLock;
 
@@ -14,43 +14,35 @@ use gpui_kit::{App, SharedString, component::ActiveTheme};
 pub(crate) const PROSE_MEASURE: f32 = 720.;
 
 /// Horizontal inset inside the prose column.
-pub(crate) const PROSE_INSET: f32 = 24.;
+pub(crate) const PROSE_INSET: f32 = 32.;
 
 /// Vertical breathing room above the first line and below the last.
 pub(crate) const PROSE_TOP: f32 = 64.;
 
-/// Serif families tried in order, per platform.
-const SERIF_ALTERNATES: &[&str] = if cfg!(target_os = "macos") {
-    &[
-        "New York",
-        "Iowan Old Style",
-        "Palatino",
-        "Georgia",
-        "Times New Roman",
-    ]
-} else if cfg!(target_os = "windows") {
-    &["Georgia", "Cambria", "Constantia", "Times New Roman"]
-} else {
-    &[
-        "Noto Serif",
-        "Source Serif 4",
-        "Source Serif Pro",
-        "Liberation Serif",
-        "DejaVu Serif",
-        "Nimbus Roman",
-        "Bitstream Vera Serif",
-    ]
-};
+/// The mock's interface and prose face, under the names font managers use.
+const UI_ALTERNATES: &[&str] = &["Inter Variable", "Inter", "Inter Display"];
 
 /// The virtual family GPUI resolves on every platform.
 const SYSTEM_UI_FONT: &str = ".SystemUIFont";
 
-/// The book face for the document.
-pub(crate) fn prose_font(cx: &App) -> SharedString {
+/// The mock's measured sans face, or the platform UI face when Inter is absent.
+pub(crate) fn preferred_ui_font(cx: &App) -> SharedString {
     static RESOLVED: OnceLock<SharedString> = OnceLock::new();
     RESOLVED
-        .get_or_init(|| first_installed(SERIF_ALTERNATES, installed_font_names(cx)))
+        .get_or_init(|| {
+            let candidate = first_installed(UI_ALTERNATES, installed_font_names(cx));
+            if candidate == SYSTEM_UI_FONT {
+                system_ui_font(cx)
+            } else {
+                candidate
+            }
+        })
         .clone()
+}
+
+/// The document face. Prose shares the interface family in the neutral design.
+pub(crate) fn prose_font(cx: &App) -> SharedString {
+    preferred_ui_font(cx)
 }
 
 /// The platform's resolved UI family, captured before a preference overrides it.
@@ -63,9 +55,8 @@ pub(crate) fn system_ui_font(cx: &App) -> SharedString {
 
 /// The face for interface headings.
 ///
-/// The literary default pairs the book serif with a sans interface. An explicit
-/// interface family is used everywhere, including these headings, so the
-/// setting means what it says.
+/// An explicit interface family is used everywhere, including these headings,
+/// so the setting means what it says.
 pub(crate) fn display_font(cx: &App) -> SharedString {
     let family = cx.theme().font_family.clone();
     if family == system_ui_font(cx) {
@@ -123,15 +114,15 @@ mod tests {
     }
 
     #[test]
-    fn picks_the_first_installed_serif() {
-        let installed = names(&["DejaVu Serif", "Noto Serif", ".SystemUIFont"]);
+    fn picks_the_first_installed_ui_face() {
+        let installed = names(&["DejaVu Sans", "Inter", ".SystemUIFont"]);
         assert_eq!(
-            first_installed(&["Noto Serif", "DejaVu Serif"], &installed),
-            SharedString::from("Noto Serif")
+            first_installed(&["Inter Variable", "Inter"], &installed),
+            SharedString::from("Inter")
         );
         assert_eq!(
-            first_installed(&["Source Serif 4", "DejaVu Serif"], &installed),
-            SharedString::from("DejaVu Serif")
+            first_installed(&["Inter Variable", "Noto Sans"], &installed),
+            SharedString::from(".SystemUIFont")
         );
     }
 
@@ -145,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_the_system_face_without_a_serif() {
+    fn falls_back_to_the_system_face_without_the_mock_font() {
         let installed = names(&["Noto Sans"]);
         assert_eq!(
             first_installed(&["Noto Serif"], &installed),

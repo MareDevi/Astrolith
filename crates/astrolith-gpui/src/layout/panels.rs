@@ -34,6 +34,8 @@ pub(crate) struct WorkspacePanel {
     pub(crate) toolbar_focus: FocusHandle,
     /// Base prose size, the document pane width and the configured measure.
     prose: Option<(f32, f32, f32)>,
+    /// Whether this panel is navigation chrome and uses the sidebar surface.
+    surface: bool,
     /// Alt-hover preview and its in-flight request.
     preview: ImagePreviewState,
     preview_source: Option<PreviewSource>,
@@ -173,11 +175,18 @@ impl WorkspacePanel {
             wiring: None,
             toolbar_focus,
             prose: None,
+            surface: false,
             preview: ImagePreviewState::default(),
             preview_source: None,
             preview_started: None,
             preview_task: None,
         }
+    }
+
+    /// Paint this panel with the navigation surface instead of the canvas.
+    pub(crate) fn with_surface(mut self) -> Self {
+        self.surface = true;
+        self
     }
 
     /// Hide the preview and cancel its request.
@@ -320,7 +329,11 @@ impl Render for WorkspacePanel {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .bg(cx.theme().background)
+            .bg(if self.surface {
+                cx.theme().sidebar
+            } else {
+                cx.theme().background
+            })
             .text_color(cx.theme().foreground)
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                 if !event.modifiers.alt {

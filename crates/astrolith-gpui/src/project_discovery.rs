@@ -524,7 +524,7 @@ impl ListDelegate for EntryList {
                             .when(active, |title| {
                                 title
                                     .font_weight(gpui_kit::FontWeight::MEDIUM)
-                                    .text_color(cx.theme().accent)
+                                    .text_color(cx.theme().foreground)
                             })
                             .child(title),
                     )
@@ -6088,7 +6088,7 @@ impl Render for ProjectWorkspace {
                                             div()
                                                 .id("filter-indicator")
                                                 .test_support()
-                                                .text_color(cx.theme().accent)
+                                                .text_color(cx.theme().foreground)
                                                 .child(SharedString::from(filter_label(
                                                     drafts_only,
                                                     &query,

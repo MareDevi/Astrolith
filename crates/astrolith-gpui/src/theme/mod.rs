@@ -1,14 +1,16 @@
 //! Application appearance policy and the pinned Kit adapter.
+mod metrics;
 mod palettes;
 mod tokens;
 mod typography;
 
+pub(crate) use metrics::METRICS;
 pub(crate) use typography::{
-    PROSE_INSET, PROSE_MEASURE, PROSE_TOP, display_font, font_family_available, prose_font,
-    system_ui_font,
+    PROSE_INSET, PROSE_MEASURE, PROSE_TOP, display_font, font_family_available, preferred_ui_font,
+    prose_font, system_ui_font,
 };
 
-use astrolith_core::preferences::{DarkColorScheme, GlobalPreferencesV2, LightColorScheme};
+use astrolith_core::preferences::GlobalPreferencesV2;
 use gpui_kit::{
     App, Global, Hsla, WindowAppearance,
     component::{ActiveTheme, Theme},
@@ -68,11 +70,12 @@ impl ResolveTheme for ThemeMode {
     }
 }
 
-/// Return a complete application palette. Callers resolve System first.
-pub fn palette(mode: ThemeMode, light: LightColorScheme, dark: DarkColorScheme) -> ThemeTokens {
+/// Return the neutral palette for a resolved appearance. Callers resolve
+/// System first.
+pub fn palette(mode: ThemeMode) -> ThemeTokens {
     match mode {
-        ThemeMode::Dark => palettes::dark(dark),
-        ThemeMode::Light | ThemeMode::System => palettes::light(light),
+        ThemeMode::Dark => palettes::dark(),
+        ThemeMode::Light | ThemeMode::System => palettes::light(),
     }
 }
 
@@ -82,27 +85,26 @@ pub fn palette(mode: ThemeMode, light: LightColorScheme, dark: DarkColorScheme) 
 /// heading is refreshed in the same pass that refreshes every window.
 pub fn apply(settings: &GlobalPreferencesV2, appearance: WindowAppearance, cx: &mut App) {
     let mode = settings.theme.resolve(appearance);
-    let system_family = system_ui_font(cx);
+    let fallback_font = system_ui_font(cx);
     let requested_font = settings.ui_font_family.trim();
-    let ui_font =
-        if requested_font.is_empty() || !typography::font_family_available(cx, requested_font) {
-            if !requested_font.is_empty() {
-                tracing::warn!(
-                    family = requested_font,
-                    "interface font is not installed; using the system UI font"
-                );
-            }
-            system_family
-        } else {
-            requested_font.to_owned().into()
-        };
+    let ui_font = if requested_font.is_empty() {
+        preferred_ui_font(cx)
+    } else if !typography::font_family_available(cx, requested_font) {
+        tracing::warn!(
+            family = requested_font,
+            "interface font is not installed; using the system UI font"
+        );
+        fallback_font
+    } else {
+        requested_font.to_owned().into()
+    };
     let ui_font_size = gpui_kit::px(settings.ui_font_size.clamp(8., 28.));
     let kit_mode = match mode {
         ThemeMode::Dark => gpui_kit::component::ThemeMode::Dark,
         ThemeMode::Light | ThemeMode::System => gpui_kit::component::ThemeMode::Light,
     };
     Theme::change(kit_mode, None, cx);
-    let tokens = palette(mode, settings.light_theme, settings.dark_theme);
+    let tokens = palette(mode);
     Theme::update(cx, |theme| {
         let colors = &mut theme.colors;
         colors.background = tokens.background;
@@ -111,8 +113,11 @@ pub fn apply(settings: &GlobalPreferencesV2, appearance: WindowAppearance, cx: &
         colors.window_border = tokens.border_variant;
         colors.selection = tokens.selection;
         colors.caret = tokens.caret;
-        colors.ring = tokens.accent;
-        colors.input = tokens.input;
+        colors.ring = tokens.focus;
+        colors.input = match mode {
+            ThemeMode::Dark => tokens.control,
+            ThemeMode::Light | ThemeMode::System => tokens.border,
+        };
 
         colors.sidebar = tokens.surface;
         colors.sidebar_foreground = tokens.foreground;
@@ -134,22 +139,22 @@ pub fn apply(settings: &GlobalPreferencesV2, appearance: WindowAppearance, cx: &
         colors.list = tokens.background;
         colors.list_hover = tokens.hover;
         colors.list_active = tokens.selection;
-        colors.list_active_border = tokens.accent;
+        colors.list_active_border = tokens.focus;
         colors.list_head = tokens.surface;
         colors.list_even = tokens.background;
 
         colors.muted = tokens.hover;
         colors.muted_foreground = tokens.muted;
-        colors.accent = tokens.accent;
-        colors.accent_foreground = tokens.accent_foreground;
+        colors.accent = tokens.hover;
+        colors.accent_foreground = tokens.foreground;
         colors.popover = tokens.popover;
         colors.popover_foreground = tokens.popover_foreground;
 
-        colors.primary = tokens.accent;
-        colors.primary_foreground = tokens.accent_foreground;
-        colors.primary_hover = tokens.accent;
-        colors.primary_active = tokens.accent;
-        colors.button = tokens.elevated;
+        colors.primary = tokens.primary;
+        colors.primary_foreground = tokens.primary_foreground;
+        colors.primary_hover = tokens.primary.opacity(0.8);
+        colors.primary_active = tokens.primary.opacity(0.7);
+        colors.button = tokens.control;
         colors.button_hover = tokens.hover;
         colors.button_active = tokens.active;
         colors.button_foreground = tokens.foreground;
@@ -177,32 +182,32 @@ pub fn apply(settings: &GlobalPreferencesV2, appearance: WindowAppearance, cx: &
         colors.info_active = tokens.info;
         colors.info_foreground = tokens.background;
 
-        colors.secondary = tokens.elevated;
-        colors.secondary_hover = tokens.hover;
+        colors.secondary = tokens.control;
+        colors.secondary_hover = tokens.foreground.opacity(0.05).blend(tokens.control);
         colors.secondary_active = tokens.active;
         colors.secondary_foreground = tokens.foreground;
-        colors.link_hover = tokens.accent;
-        colors.link_active = tokens.accent;
-        colors.overlay = Hsla::black().opacity(0.28);
-        colors.progress_bar = tokens.accent;
-        colors.switch = tokens.accent;
+        colors.link_hover = tokens.primary.opacity(0.8);
+        colors.link_active = tokens.primary.opacity(0.7);
+        colors.overlay = tokens.overlay;
+        colors.progress_bar = tokens.primary;
+        colors.switch = tokens.primary;
         colors.switch_thumb = tokens.background;
         colors.skeleton = tokens.hover;
         colors.slider_bar = tokens.border;
-        colors.slider_thumb = tokens.accent;
+        colors.slider_thumb = tokens.primary;
         colors.accordion = tokens.background;
-        colors.drag_border = tokens.accent;
+        colors.drag_border = tokens.focus;
         colors.drop_target = tokens.selection;
         colors.description_list_label = tokens.surface;
         colors.description_list_label_foreground = tokens.muted;
-        colors.tab_bar_segmented = tokens.surface;
+        colors.tab_bar_segmented = tokens.control;
 
         colors.table = tokens.background;
         colors.table_head = tokens.surface;
         colors.table_head_foreground = tokens.muted;
         colors.table_hover = tokens.hover;
         colors.table_active = tokens.selection;
-        colors.table_active_border = tokens.accent;
+        colors.table_active_border = tokens.focus;
         colors.table_even = tokens.background;
         colors.table_row_border = tokens.border_variant;
         colors.table_foot = tokens.surface;
@@ -215,14 +220,13 @@ pub fn apply(settings: &GlobalPreferencesV2, appearance: WindowAppearance, cx: &
         highlight.style.editor_active_line = Some(tokens.background);
         highlight.style.editor_gutter_background = Some(tokens.background);
 
-        // A calm desktop scale: controls stay compact, while paper, panels and
-        // overlays share one restrained, lightly rounded silhouette. The base
-        // size is the user's interface size and therefore the window's rem.
+        // The mock's two stored radii: controls use `--radius` (10 px), while
+        // popovers and dialogs use the larger surface tier (14 px).
         theme.font_family = ui_font;
         theme.font_size = ui_font_size;
-        theme.mono_font_size = gpui_kit::px(13.);
-        theme.radius = gpui_kit::px(6.);
-        theme.radius_lg = gpui_kit::px(10.);
+        theme.mono_font_size = gpui_kit::px(METRICS.type_scale.mono);
+        theme.radius = gpui_kit::px(METRICS.radius.control);
+        theme.radius_lg = gpui_kit::px(METRICS.radius.surface);
         theme.shadow = true;
     });
     let configured = match mode {

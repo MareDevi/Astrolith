@@ -2,7 +2,7 @@
 //!
 //! These helpers keep the small, repeated pieces of the shell on one visual
 //! system: a quiet wordmark, compact toolbar buttons with readable icons, a
-//! serif voice for document names, and the section and empty-state rhythm
+//! sans voice for document names, and the section and empty-state rhythm
 //! shared by every panel.
 
 use gpui_kit::assets::IconName;
@@ -12,11 +12,11 @@ use gpui_kit::component::{
 };
 use gpui_kit::{App, ElementId, IntoElement, SharedString, TestSupportExt, div, prelude::*, px};
 
-/// The application mark, tinted with the accent role.
+/// The application mark, set in the neutral foreground.
 pub(crate) fn mark(cx: &App) -> impl IntoElement {
     Icon::new(IconName::Feather)
         .small()
-        .text_color(cx.theme().accent)
+        .text_color(cx.theme().foreground)
 }
 
 /// The wordmark shown in the window chrome.
@@ -49,7 +49,7 @@ pub(crate) fn icon_button(
     Button::new(id).small().ghost().icon(icon).tooltip(tooltip)
 }
 
-/// A document title, set in the book face.
+/// A document title, set in the interface face.
 pub(crate) fn document_title(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
     div()
         .min_w_0()

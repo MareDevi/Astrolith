@@ -1,389 +1,169 @@
-//! Concrete palettes for every selectable colour scheme.
+//! The two neutral palettes and the OKLCH boundary.
 //!
-//! A palette names its base surfaces and status colours once; [`Base::tokens`]
-//! derives the interaction roles so every scheme keeps the same relationships
-//! between rest, hover, active and selection. Raw colour literals live only in
-//! this audited module.
+//! Values come from the web mock's `index.css` and are the only raw colour
+//! literals in the application. CSS speaks OKLCH; GPUI components speak HSLA,
+//! so conversion happens here, once, at the theme boundary. Alpha survives the
+//! conversion and is composited by the renderer exactly like CSS.
 
-use astrolith_core::preferences::{DarkColorScheme, LightColorScheme};
-use gpui_kit::{Hsla, rgb};
+use gpui_kit::{Hsla, Rgba};
 
 use super::ThemeTokens;
 
-fn color(value: u32) -> Hsla {
-    rgb(value).into()
+/// Convert a CSS `oklch(L C H / alpha)` colour to sRGB-backed HSLA.
+///
+/// `lightness` is CSS's 0…1 perceptual lightness (not the 0…100 percentage),
+/// `chroma` is its 0…0.4-ish chroma, `hue` is degrees, and `alpha` is 0…1.
+/// Out-of-gamut channels are clipped to sRGB, matching browser behaviour.
+pub(super) fn oklch(lightness: f32, chroma: f32, hue: f32, alpha: f32) -> Hsla {
+    let hue = hue.to_radians();
+    let a = chroma * hue.cos();
+    let b = chroma * hue.sin();
+
+    let l_ = lightness + 0.396_337_78 * a + 0.215_803_76 * b;
+    let m_ = lightness - 0.105_561_346 * a - 0.063_854_17 * b;
+    let s_ = lightness - 0.089_484_18 * a - 1.291_485_5 * b;
+
+    let l = l_ * l_ * l_;
+    let m = m_ * m_ * m_;
+    let s = s_ * s_ * s_;
+
+    let red = 4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s;
+    let green = -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s;
+    let blue = -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s;
+
+    Rgba {
+        r: encode_srgb(red),
+        g: encode_srgb(green),
+        b: encode_srgb(blue),
+        a: alpha.clamp(0., 1.),
+    }
+    .into()
 }
 
-/// Core colours shared by every palette of one scheme.
+fn encode_srgb(linear: f32) -> f32 {
+    let linear = linear.clamp(0., 1.);
+    if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1. / 2.4) - 0.055
+    }
+}
+
+/// One scheme's semantic relationships before they become concrete roles.
 struct Base {
-    background: u32,
-    foreground: u32,
-    surface: u32,
-    elevated: u32,
-    muted: u32,
-    border: u32,
-    border_variant: u32,
-    accent: u32,
-    accent_foreground: u32,
-    selection: u32,
-    danger: u32,
-    warning: u32,
-    success: u32,
-    info: u32,
+    background: Hsla,
+    foreground: Hsla,
+    surface: Hsla,
+    elevated: Hsla,
+    control: Hsla,
+    muted: Hsla,
+    border: Hsla,
+    border_variant: Hsla,
+    primary: Hsla,
+    primary_foreground: Hsla,
+    focus: Hsla,
+    selection: Hsla,
+    hover: Hsla,
+    active: Hsla,
+    tab_bar: Hsla,
+    tab_active: Hsla,
+    danger: Hsla,
+    warning: Hsla,
+    success: Hsla,
+    info: Hsla,
+    overlay: Hsla,
 }
 
 impl Base {
     fn tokens(self) -> ThemeTokens {
-        let background = color(self.background);
-        let foreground = color(self.foreground);
-        let elevated = color(self.elevated);
+        let popover = self.elevated;
         ThemeTokens {
-            background,
-            foreground,
-            surface: color(self.surface),
-            elevated,
-            muted: color(self.muted),
-            border: color(self.border),
-            border_variant: color(self.border_variant),
-            accent: color(self.accent),
-            accent_foreground: color(self.accent_foreground),
-            selection: color(self.selection),
-            hover: color(self.elevated),
-            active: foreground.opacity(0.08).blend(elevated),
-            status_bar: color(self.surface),
-            tab_bar: color(self.surface),
-            tab_active: background,
-            tab_active_foreground: foreground,
-            tab_foreground: color(self.muted),
-            popover: elevated,
-            popover_foreground: foreground,
-            input: elevated,
-            caret: color(self.accent),
-            scrollbar: background,
-            scrollbar_thumb: color(self.border),
-            danger: color(self.danger),
-            warning: color(self.warning),
-            success: color(self.success),
-            info: color(self.info),
-            link: color(self.accent),
+            background: self.background,
+            foreground: self.foreground,
+            surface: self.surface,
+            elevated: self.elevated,
+            control: self.control,
+            muted: self.muted,
+            border: self.border,
+            border_variant: self.border_variant,
+            primary: self.primary,
+            primary_foreground: self.primary_foreground,
+            focus: self.focus,
+            selection: self.selection,
+            hover: self.hover,
+            active: self.active,
+            status_bar: self.surface,
+            tab_bar: self.tab_bar,
+            tab_active: self.tab_active,
+            tab_active_foreground: self.foreground,
+            tab_foreground: self.muted,
+            popover,
+            popover_foreground: self.foreground,
+            caret: self.foreground,
+            scrollbar: self.background,
+            scrollbar_thumb: self.border,
+            overlay: self.overlay,
+            danger: self.danger,
+            warning: self.warning,
+            success: self.success,
+            info: self.info,
+            link: self.primary,
         }
     }
 }
 
-/// Tokens for one light palette.
-pub(super) fn light(scheme: LightColorScheme) -> ThemeTokens {
-    let base = match scheme {
-        LightColorScheme::Manuscript => Base {
-            background: 0xf7f3ea,
-            foreground: 0x2c2925,
-            surface: 0xf1ece1,
-            elevated: 0xe9e2d4,
-            muted: 0x6f675c,
-            border: 0xd9d0c0,
-            border_variant: 0xe7dfd0,
-            accent: 0x8a4b32,
-            accent_foreground: 0xf7f3ea,
-            selection: 0xeadfcc,
-            danger: 0xa33b32,
-            warning: 0xa06b1f,
-            success: 0x5f7048,
-            info: 0x4c6b74,
-        },
-        LightColorScheme::OneLight => Base {
-            background: 0xfafafa,
-            foreground: 0x383a42,
-            surface: 0xf0f0f0,
-            elevated: 0xe5e5e6,
-            muted: 0xa0a1a7,
-            border: 0xdbdbdc,
-            border_variant: 0xe5e5e6,
-            accent: 0x4078f2,
-            accent_foreground: 0xffffff,
-            selection: 0xd7e4ff,
-            danger: 0xe45649,
-            warning: 0xc18401,
-            success: 0x50a14f,
-            info: 0x0184bc,
-        },
-        LightColorScheme::CatppuccinLatte => Base {
-            background: 0xeff1f5,
-            foreground: 0x4c4f69,
-            surface: 0xe6e9ef,
-            elevated: 0xccd0da,
-            muted: 0x8c8fa1,
-            border: 0xbcc0cc,
-            border_variant: 0xdce0e8,
-            accent: 0x1e66f5,
-            accent_foreground: 0xeff1f5,
-            selection: 0xd0daf7,
-            danger: 0xd20f39,
-            warning: 0xdf8e1d,
-            success: 0x40a02b,
-            info: 0x179299,
-        },
-        LightColorScheme::NordLight => Base {
-            background: 0xeceff4,
-            foreground: 0x2e3440,
-            surface: 0xe5e9f0,
-            elevated: 0xd8dee9,
-            muted: 0x6d7b91,
-            border: 0xd0d6e3,
-            border_variant: 0xe5e9f0,
-            accent: 0x5e81ac,
-            accent_foreground: 0xeceff4,
-            selection: 0xd8dee9,
-            danger: 0xbf616a,
-            warning: 0x9a6b16,
-            success: 0x5c7a3f,
-            info: 0x5e81ac,
-        },
-        LightColorScheme::GruvboxLight => Base {
-            background: 0xfbf1c7,
-            foreground: 0x3c3836,
-            surface: 0xf2e5bc,
-            elevated: 0xebdbb2,
-            muted: 0x928374,
-            border: 0xd5c4a1,
-            border_variant: 0xebdbb2,
-            accent: 0xaf3a03,
-            accent_foreground: 0xfbf1c7,
-            selection: 0xd5c4a1,
-            danger: 0x9d0006,
-            warning: 0xb57614,
-            success: 0x79740e,
-            info: 0x076678,
-        },
-        LightColorScheme::TokyoNightDay => Base {
-            background: 0xe1e2e7,
-            foreground: 0x3760bf,
-            surface: 0xd0d5e3,
-            elevated: 0xc4c8da,
-            muted: 0x848cb5,
-            border: 0xc4c8da,
-            border_variant: 0xd0d5e3,
-            accent: 0x2e7de9,
-            accent_foreground: 0xe1e2e7,
-            selection: 0xc4c8da,
-            danger: 0xf52a65,
-            warning: 0x8c6c3e,
-            success: 0x587539,
-            info: 0x007197,
-        },
-        LightColorScheme::SolarizedLight => Base {
-            background: 0xfdf6e3,
-            foreground: 0x657b83,
-            surface: 0xeee8d5,
-            elevated: 0xe4ddc8,
-            muted: 0x93a1a1,
-            border: 0xd9d2bd,
-            border_variant: 0xeee8d5,
-            accent: 0x268bd2,
-            accent_foreground: 0xfdf6e3,
-            selection: 0xd7d1bc,
-            danger: 0xdc322f,
-            warning: 0xb58900,
-            success: 0x859900,
-            info: 0x2aa198,
-        },
-        LightColorScheme::RosePineDawn => Base {
-            background: 0xfaf4ed,
-            foreground: 0x575279,
-            surface: 0xfffaf3,
-            elevated: 0xf2e9e1,
-            muted: 0x9893a5,
-            border: 0xe9dfd7,
-            border_variant: 0xf2e9e1,
-            accent: 0x907aa9,
-            accent_foreground: 0xfaf4ed,
-            selection: 0xf2e9e1,
-            danger: 0xb4637a,
-            warning: 0xea9d34,
-            success: 0x56949f,
-            info: 0x286983,
-        },
-    };
-    base.tokens()
+/// Neutral light: white canvas, near-black text, one quiet fill ladder.
+pub(super) fn light() -> ThemeTokens {
+    Base {
+        background: oklch(1., 0., 0., 1.),
+        foreground: oklch(0.145, 0., 0., 1.),
+        surface: oklch(0.985, 0., 0., 1.),
+        elevated: oklch(1., 0., 0., 1.),
+        control: oklch(0.961, 0., 0., 1.),
+        muted: oklch(0.556, 0., 0., 1.),
+        border: oklch(0.922, 0., 0., 1.),
+        border_variant: oklch(0.96, 0., 0., 1.),
+        primary: oklch(0.205, 0., 0., 1.),
+        primary_foreground: oklch(0.985, 0., 0., 1.),
+        focus: oklch(0.65, 0., 0., 1.),
+        selection: oklch(0.94, 0., 0., 1.),
+        hover: oklch(0.97, 0., 0., 1.),
+        active: oklch(0.93, 0., 0., 1.),
+        tab_bar: oklch(1., 0., 0., 1.),
+        tab_active: oklch(0.985, 0., 0., 1.),
+        danger: oklch(0.577, 0.245, 27.325, 1.),
+        warning: oklch(0.7, 0.15, 75., 1.),
+        success: oklch(0.6, 0.13, 150., 1.),
+        info: oklch(0.55, 0.12, 250., 1.),
+        overlay: oklch(0., 0., 0., 0.32),
+    }
+    .tokens()
 }
 
-/// Tokens for one dark palette.
-pub(super) fn dark(scheme: DarkColorScheme) -> ThemeTokens {
-    let base = match scheme {
-        DarkColorScheme::Ink => Base {
-            background: 0x1b1916,
-            foreground: 0xded7c8,
-            surface: 0x161411,
-            elevated: 0x282521,
-            muted: 0x9a9283,
-            border: 0x37332c,
-            border_variant: 0x12110f,
-            accent: 0xc6926a,
-            accent_foreground: 0x1b1916,
-            selection: 0x38332b,
-            danger: 0xc56b62,
-            warning: 0xc79a5b,
-            success: 0x8a9a6b,
-            info: 0x7d9aa3,
-        },
-        DarkColorScheme::OneDark => Base {
-            background: 0x282c34,
-            foreground: 0xabb2bf,
-            surface: 0x21252b,
-            elevated: 0x2c313a,
-            muted: 0x5c6370,
-            border: 0x3b4048,
-            border_variant: 0x181a1f,
-            accent: 0x61afef,
-            accent_foreground: 0x1e2127,
-            selection: 0x3e4451,
-            danger: 0xe06c75,
-            warning: 0xe5c07b,
-            success: 0x98c379,
-            info: 0x56b6c2,
-        },
-        DarkColorScheme::CatppuccinMocha => Base {
-            background: 0x1e1e2e,
-            foreground: 0xcdd6f4,
-            surface: 0x181825,
-            elevated: 0x313244,
-            muted: 0x7f849c,
-            border: 0x45475a,
-            border_variant: 0x11111b,
-            accent: 0x89b4fa,
-            accent_foreground: 0x11111b,
-            selection: 0x45475a,
-            danger: 0xf38ba8,
-            warning: 0xf9e2af,
-            success: 0xa6e3a1,
-            info: 0x94e2d5,
-        },
-        DarkColorScheme::CatppuccinMacchiato => Base {
-            background: 0x24273a,
-            foreground: 0xcad3f5,
-            surface: 0x1e2030,
-            elevated: 0x363a4f,
-            muted: 0x8087a2,
-            border: 0x494d64,
-            border_variant: 0x181926,
-            accent: 0x8aadf4,
-            accent_foreground: 0x181926,
-            selection: 0x494d64,
-            danger: 0xed8796,
-            warning: 0xeed49f,
-            success: 0xa6da95,
-            info: 0x8bd5ca,
-        },
-        DarkColorScheme::CatppuccinFrappe => Base {
-            background: 0x303446,
-            foreground: 0xc6d0f5,
-            surface: 0x292c3c,
-            elevated: 0x414559,
-            muted: 0x838ba7,
-            border: 0x51576d,
-            border_variant: 0x232634,
-            accent: 0x8caaee,
-            accent_foreground: 0x232634,
-            selection: 0x51576d,
-            danger: 0xe78284,
-            warning: 0xe5c890,
-            success: 0xa6d189,
-            info: 0x81c8be,
-        },
-        DarkColorScheme::Nord => Base {
-            background: 0x2e3440,
-            foreground: 0xeceff4,
-            surface: 0x272c36,
-            elevated: 0x3b4252,
-            muted: 0x7b88a1,
-            border: 0x434c5e,
-            border_variant: 0x242933,
-            accent: 0x88c0d0,
-            accent_foreground: 0x2e3440,
-            selection: 0x434c5e,
-            danger: 0xbf616a,
-            warning: 0xebcb8b,
-            success: 0xa3be8c,
-            info: 0x81a1c1,
-        },
-        DarkColorScheme::GruvboxDark => Base {
-            background: 0x282828,
-            foreground: 0xebdbb2,
-            surface: 0x1d2021,
-            elevated: 0x3c3836,
-            muted: 0x928374,
-            border: 0x504945,
-            border_variant: 0x1d2021,
-            accent: 0xfabd2f,
-            accent_foreground: 0x282828,
-            selection: 0x504945,
-            danger: 0xfb4934,
-            warning: 0xfe8019,
-            success: 0xb8bb26,
-            info: 0x83a598,
-        },
-        DarkColorScheme::TokyoNight => Base {
-            background: 0x1a1b26,
-            foreground: 0xc0caf5,
-            surface: 0x16161e,
-            elevated: 0x292e42,
-            muted: 0x565f89,
-            border: 0x292e42,
-            border_variant: 0x16161e,
-            accent: 0x7aa2f7,
-            accent_foreground: 0x16161e,
-            selection: 0x33467c,
-            danger: 0xf7768e,
-            warning: 0xe0af68,
-            success: 0x9ece6a,
-            info: 0x7dcfff,
-        },
-        DarkColorScheme::SolarizedDark => Base {
-            background: 0x002b36,
-            foreground: 0x93a1a1,
-            surface: 0x001e26,
-            elevated: 0x073642,
-            muted: 0x586e75,
-            border: 0x073642,
-            border_variant: 0x001e26,
-            accent: 0x268bd2,
-            accent_foreground: 0x002b36,
-            selection: 0x0a4250,
-            danger: 0xdc322f,
-            warning: 0xb58900,
-            success: 0x859900,
-            info: 0x2aa198,
-        },
-        DarkColorScheme::RosePine => Base {
-            background: 0x191724,
-            foreground: 0xe0def4,
-            surface: 0x1f1d2e,
-            elevated: 0x26233a,
-            muted: 0x6e6a86,
-            border: 0x393552,
-            border_variant: 0x16141f,
-            accent: 0xc4a7e7,
-            accent_foreground: 0x191724,
-            selection: 0x393552,
-            danger: 0xeb6f92,
-            warning: 0xf6c177,
-            success: 0x9ccfd8,
-            info: 0x9ccfd8,
-        },
-        DarkColorScheme::RosePineMoon => Base {
-            background: 0x232136,
-            foreground: 0xe0def4,
-            surface: 0x2a273f,
-            elevated: 0x393552,
-            muted: 0x817c9c,
-            border: 0x44415a,
-            border_variant: 0x1f1d2e,
-            accent: 0xc4a7e7,
-            accent_foreground: 0x232136,
-            selection: 0x44415a,
-            danger: 0xeb6f92,
-            warning: 0xf6c177,
-            success: 0x9ccfd8,
-            info: 0x9ccfd8,
-        },
-    };
-    base.tokens()
+/// Neutral dark: near-black canvas, near-white text, translucent hairlines.
+pub(super) fn dark() -> ThemeTokens {
+    Base {
+        background: oklch(0.145, 0., 0., 1.),
+        foreground: oklch(0.985, 0., 0., 1.),
+        surface: oklch(0.205, 0., 0., 1.),
+        elevated: oklch(0.205, 0., 0., 1.),
+        control: oklch(1., 0., 0., 0.15),
+        muted: oklch(0.708, 0., 0., 1.),
+        border: oklch(1., 0., 0., 0.1),
+        border_variant: oklch(1., 0., 0., 0.06),
+        primary: oklch(0.922, 0., 0., 1.),
+        primary_foreground: oklch(0.205, 0., 0., 1.),
+        focus: oklch(0.556, 0., 0., 1.),
+        selection: oklch(0.269, 0., 0., 1.),
+        hover: oklch(1., 0., 0., 0.06),
+        active: oklch(1., 0., 0., 0.1),
+        tab_bar: oklch(0.145, 0., 0., 1.),
+        tab_active: oklch(0.205, 0., 0., 1.),
+        danger: oklch(0.704, 0.191, 22.216, 1.),
+        warning: oklch(0.79, 0.13, 80., 1.),
+        success: oklch(0.76, 0.13, 150., 1.),
+        info: oklch(0.72, 0.1, 250., 1.),
+        overlay: oklch(0., 0., 0., 0.55),
+    }
+    .tokens()
 }

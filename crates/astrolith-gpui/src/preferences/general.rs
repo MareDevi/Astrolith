@@ -10,60 +10,6 @@ impl PreferencesSheet {
             ThemePreference::Dark => "Dark",
             ThemePreference::System => "Follow system",
         };
-        let light_theme_weak = weak.clone();
-        let current_light = self.light_theme;
-        let light_theme = Button::new("preferences-light-theme")
-            .small()
-            .outline()
-            .label(self.light_theme.label())
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for scheme in LightColorScheme::ALL {
-                    let weak = light_theme_weak.clone();
-                    let selected = scheme == current_light;
-                    menu = menu.item(
-                        PopupMenuItem::new(scheme.label())
-                            .checked(selected)
-                            .on_click(move |_, _, cx| {
-                                let _ = weak.update(cx, |sheet, cx| {
-                                    sheet.light_theme = scheme;
-                                    cx.notify();
-                                });
-                            }),
-                    );
-                }
-                menu
-            })
-            .into_any_element();
-
-        let dark_theme_weak = weak.clone();
-        let current_dark = self.dark_theme;
-        let dark_theme = Button::new("preferences-dark-theme")
-            .small()
-            .outline()
-            .label(self.dark_theme.label())
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for scheme in DarkColorScheme::ALL {
-                    let weak = dark_theme_weak.clone();
-                    let selected = scheme == current_dark;
-                    menu = menu.item(
-                        PopupMenuItem::new(scheme.label())
-                            .checked(selected)
-                            .on_click(move |_, _, cx| {
-                                let _ = weak.update(cx, |sheet, cx| {
-                                    sheet.dark_theme = scheme;
-                                    cx.notify();
-                                });
-                            }),
-                    );
-                }
-                menu
-            })
-            .into_any_element();
-
         let extension_label = match self.global_extension {
             FileExtension::Md => "Markdown (.md)",
             FileExtension::Mdx => "MDX (.mdx)",
@@ -153,30 +99,8 @@ impl PreferencesSheet {
                 FieldExtras {
                     field: None,
                     hint: Some(
-                        "Follow system keeps the light and dark palettes in sync with the desktop.",
+                        "Astrolith uses one neutral light and dark palette; Follow system chooses between them from the desktop appearance.",
                     ),
-                    trailing: None,
-                },
-                cx,
-            ),
-            self.field(
-                "preferences-field-light-theme",
-                "Light palette",
-                light_theme,
-                FieldExtras {
-                    field: None,
-                    hint: Some("Used when the appearance resolves to light."),
-                    trailing: None,
-                },
-                cx,
-            ),
-            self.field(
-                "preferences-field-dark-theme",
-                "Dark palette",
-                dark_theme,
-                FieldExtras {
-                    field: None,
-                    hint: Some("Used when the appearance resolves to dark."),
                     trailing: None,
                 },
                 cx,

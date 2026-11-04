@@ -178,6 +178,62 @@ where
     }
 }
 
+impl Stored<GlobalPreferencesV2> {
+    /// Retire the pre-neutral light/dark palette selectors from `global.json`.
+    ///
+    /// The exact file is copied beside itself before the two keys are removed,
+    /// so a user can always inspect what the previous build persisted. The
+    /// neutral appearance is now the only one, and selection has moved out of
+    /// the user's configuration. Unknown top-level fields are still preserved.
+    fn retire_legacy_palettes(&mut self) -> Option<String> {
+        const RETIRED: [&str; 2] = ["light_theme", "dark_theme"];
+        let envelope = self.envelope.as_mut()?;
+        if !RETIRED.iter().any(|key| envelope.contains_key(*key)) {
+            return None;
+        }
+        if !self.writable {
+            return Some(format!(
+                "Retired appearance palettes remain in {} because the file is read-only.",
+                self.path.display()
+            ));
+        }
+        let baseline = self.baseline.as_deref()?;
+        let backup = unique_destination(&self.path.with_file_name("global.json.pre-neutral.json"));
+        if let Err(error) = fs::write(&backup, baseline) {
+            return Some(format!(
+                "Could not back up retired appearance palettes to {}: {error}. The settings file is preserved.",
+                backup.display()
+            ));
+        }
+        for key in RETIRED {
+            envelope.remove(key);
+        }
+        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Some(format!(
+                    "Could not encode migrated appearance settings: {error}."
+                ));
+            }
+        };
+        match write_atomic(&self.path, &bytes) {
+            Ok(()) => {
+                self.baseline = Some(bytes);
+                tracing::info!(
+                    path = %self.path.display(),
+                    backup = %backup.display(),
+                    "retired legacy appearance palettes"
+                );
+                None
+            }
+            Err(error) => Some(format!(
+                "Could not retire legacy appearance palettes in {}: {error}. The file is preserved.",
+                self.path.display()
+            )),
+        }
+    }
+}
+
 /// Project scopes and the open-project registry share one store so a project
 /// open updates both files under one lock and one atomic write.
 pub(crate) struct PreferencesStore {
@@ -200,11 +256,14 @@ impl PreferencesStore {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        let global = Stored::<GlobalPreferencesV2>::load(global_path, GLOBAL_PREFERENCES_VERSION);
+        let mut global =
+            Stored::<GlobalPreferencesV2>::load(global_path, GLOBAL_PREFERENCES_VERSION);
+        let palette_migration_warning = global.retire_legacy_palettes();
         let registry =
             Stored::<ProjectRegistry>::load(root.join("projects.json"), PROJECT_REGISTRY_VERSION);
         let warning = combine_warnings([
             migration_warning,
+            palette_migration_warning,
             global.warning.clone(),
             registry.warning.clone(),
         ]);
@@ -556,6 +615,43 @@ mod tests {
 
         let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(envelope["future_field"]["keep"], true);
+    }
+
+    #[test]
+    fn retired_palettes_are_backed_up_and_removed_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"{"version":2,"theme":"dark","light_theme":"nord_light","dark_theme":"ink","future_field":{"keep":true}}"#;
+        fs::write(&path, original).unwrap();
+
+        let (store, mut preferences, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(preferences.theme, ThemePreference::Dark);
+
+        let backup = path.with_file_name("global.json.pre-neutral.json");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
+        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(envelope.get("light_theme").is_none());
+        assert!(envelope.get("dark_theme").is_none());
+        assert_eq!(envelope["future_field"]["keep"], true);
+        assert_eq!(envelope["theme"], "dark");
+
+        preferences.theme = ThemePreference::Light;
+        store.save_global(1, &preferences).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("light_theme"));
+        assert!(!saved.contains("dark_theme"));
+
+        let (_, restored, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(restored.theme, ThemePreference::Light);
+        assert!(
+            !path
+                .with_file_name("global.json.pre-neutral-2.json")
+                .exists(),
+            "the migration is a one-time backup"
+        );
     }
 
     #[test]
