@@ -131,7 +131,7 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 - 生命周期：隐藏 Dock 与切换模式不销毁 session；切换项目先终止旧子进程再启动新 shell；窗口/实体销毁时 `TerminalSession::drop` 终止并回收 reader。Terminal 与 Astro dev server 完全分离。
 - 新增 `Toggle terminal` 命令（Ctrl+`）与 View 菜单项；快捷键文档由命令 registry 校验。
 - 验证：`astrolith-terminal` 4 个服务测试通过（ANSI 红色与退出码 7、交互输入/resize、Ctrl-D 退出码 3、kill 长进程、revision 增长）；GPUI 集成测试验证真实 shell 输出进入屏幕、Dock/模式隐藏后 session 与 pid 不变、切项目后旧 pid 终止且新 root 启动。`cargo test --workspace --locked` 全部通过（GPUI 347 passed、4 ignored）。
-- 未完成：A24/A25 的真实原生窗口录屏、IME/焦点隔离、ANSI 视觉与 150%/200% 缩放验收尚未执行；headless 与 service 测试不能替代真机证据。
+- 原生验收：用户于 2026-11-04 确认 A24/A25 通过（见 §11）；headless 与 service 测试仍作为自动回归证据保留。
 
 ## 9. M4a 执行记录
 
@@ -150,4 +150,19 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 - 新增 `Open project source…` 命令与有界 `.astro` 扫描（深度、目录、结果数上限，跳过依赖/构建目录，不跟随符号链接），供 Build 文件导航使用。Open file 对项目内 `.astro` 进入可编辑 session，项目外文件仍保持原有 readonly 入口。
 - MDX 导入 patch 的既有语义保持不变：撤销组件标签仍保留 import。ProjectWorkspace 在 source view 切换和激活时应用当前模式；进入 Build 不改文件、不重读磁盘、不重启服务。
 - 回归：新增 `.astro` 扫描排序/跳过依赖、`.astro` 打开/编辑/保存/无 frontmatter、Build 完整源与标签条、source-view 编辑与 Undo/映射回 Writer 测试；`cargo test --workspace --locked` 通过（GPUI 353 passed、4 ignored），clippy `-D warnings` 通过。
-- 未完成：未启用 `tree-sitter-astro` 高亮（没有真实高亮证据，不让空 feature 冒充），未新增 Problems 面板或 LSP；原生窗口的源码浏览、焦点、标签条与 `.astro` 保存尚未做真机验收；`.astro` 导航为命令/对话框入口，侧栏项目树未扩展。
+- 未启用 `tree-sitter-astro` 高亮（没有真实高亮证据，不让空 feature 冒充），未新增 Problems 面板或 LSP；`.astro` 导航为命令/对话框入口，侧栏项目树未扩展。
+- 用户于 2026-11-04 确认 A14 通过（见 §11）；原生源码浏览、焦点、标签条与 `.astro` 保存不再列为待验收。
+
+## 11. 用户原生验收确认（2026-11-04）
+
+用户确认以下项目在当前原生窗口中验收通过：
+
+| ID | 范围 | 状态 |
+| --- | --- | --- |
+| A01 | Writing 默认布局、工具隐藏、正文居中 | 用户验收通过 |
+| A14 | Build 导航、真实标签、`.astro` 与内容条目的编辑保存 | 用户验收通过 |
+| A24 | 交互终端、ANSI、Ctrl+C、resize、滚动回看、选择复制 | 用户验收通过 |
+| A25 | 隐藏 Dock/切模式保留会话，切项目/退出清理进程 | 用户验收通过 |
+| A26 | 新布局与 mock 的分区域视觉对照 | 用户验收通过 |
+
+本次回复未附带截图路径、显示缩放和主题组合明细；后续如归档需要，应补齐这些附件元数据。A19/M5b（真实 Embedded WebView）不在本次确认范围。
