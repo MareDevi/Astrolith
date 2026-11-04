@@ -152,7 +152,7 @@ pub(crate) fn resolve_preview(root: &Path, document: &Path, raw: &str) -> Option
     Some(PreviewSource::Local(normalized))
 }
 
-fn normalize_lexical(path: &Path) -> Option<PathBuf> {
+pub(crate) fn normalize_lexical(path: &Path) -> Option<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {

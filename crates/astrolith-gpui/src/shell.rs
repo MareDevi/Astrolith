@@ -15,6 +15,7 @@ use crate::{
         content_finder::{self, FinderEntry},
         copyedit::CopyeditConfig,
         header::DocumentHeader,
+        rendered::RenderedDocument,
         session::SessionChanged,
         writer_chrome::{ChromeVisibility, TypedCharacters},
     },
@@ -226,10 +227,13 @@ pub(crate) struct Shell {
     /// Floating frontmatter inspector visibility; never persisted.
     inspector_open: bool,
     preview: Entity<PreviewPanel>,
+    /// Rendered Markdown/MDX reading pane shown in Preview mode.
+    rendered: Entity<RenderedDocument>,
+    rendered_panel: Entity<WorkspacePanel>,
     /// The reading-view panel; kept here because the bottom dock is removed
     /// entirely while the view is hidden.
     preview_panel: Entity<WorkspacePanel>,
-    /// Retained embedded WebView surface for Preview mode.
+    /// Retained embedded WebView surface for the Astro preview dock.
     embedded: Entity<EmbeddedPreview>,
     embedded_panel: Entity<WorkspacePanel>,
     /// The centre split currently contains the embedded preview.
@@ -363,8 +367,12 @@ impl Shell {
         let preview_unavailable_reason =
             host.embedded_unavailable().map(|reason| reason.to_string());
         let preview = cx.new(PreviewPanel::new);
-        let preview_panel = cx.new(|cx| WorkspacePanel::new("preview-panel", "Preview", "No preview running\n\nStart the Astro dev server, then open the active entry in your browser.", window, cx));
+        let preview_panel = cx.new(|cx| WorkspacePanel::new("preview-panel", "Astro preview", "No preview running\n\nStart the Astro dev server, then open the active entry in your browser.", window, cx));
         preview_panel.update(cx, |panel, cx| panel.set_view(preview.clone().into(), cx));
+        let rendered = cx.new(RenderedDocument::new);
+        let rendered_panel =
+            cx.new(|cx| WorkspacePanel::new("rendered-preview-panel", "Preview", "", window, cx));
+        rendered_panel.update(cx, |panel, cx| panel.set_view(rendered.clone().into(), cx));
         let embedded = cx.new(EmbeddedPreview::new);
         let embedded_panel = cx.new(|cx| {
             WorkspacePanel::new(
@@ -385,8 +393,7 @@ impl Shell {
         preview.update(cx, |preview, cx| {
             preview.set_preferences(&initial_preview, cx)
         });
-        let embedded_center_active = mode == WorkspaceMode::Preview
-            && initial_preview.presentation == PreviewPresentation::Embedded;
+        let embedded_center_active = false;
         let terminal = cx.new(|cx| TerminalPanel::new(window, cx));
         let terminal_panel = cx.new(|cx| {
             WorkspacePanel::new(
@@ -401,7 +408,9 @@ impl Shell {
         let (dock, skin) = DockSkin::dock_area("astrolith-workspace", Some(1), window, cx);
         let initial_center = center_layout_for(
             &document,
+            &rendered_panel,
             &embedded_panel,
+            mode,
             embedded_center_active,
             window,
             cx,
@@ -671,6 +680,8 @@ impl Shell {
             frontmatter_key: None,
             inspector_open: false,
             preview,
+            rendered,
+            rendered_panel,
             preview_panel,
             embedded,
             embedded_panel,
@@ -732,7 +743,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.listen_for_instances(listener, window, cx);
-        if self.mode == WorkspaceMode::Preview {
+        if self.astro_preview_visible() {
             self.preview
                 .update(cx, |preview, cx| preview.enter_preview(cx));
         }
@@ -1324,7 +1335,8 @@ impl Shell {
     /// refuses to hide while a sidebar is open.
     fn note_typing(&mut self, cx: &mut Context<Self>) {
         let layout = self.read_dock_layout(cx);
-        let both_closed = !layout.sidebar_visible && !self.inspector_open;
+        let both_closed =
+            self.mode == WorkspaceMode::Writing && !layout.sidebar_visible && !self.inspector_open;
         let typed = {
             let project = self.project.read(cx);
             match (project.active_path(), project.active_session(cx)) {
@@ -1618,6 +1630,7 @@ impl Shell {
         });
         let layout = self.settings.layouts.get(self.mode).clone();
         self.apply_layout(layout, window, cx);
+        self.sync_center(window, cx);
         self.project.update(cx, |project, cx| {
             project.reopen_last_entry(resolved.last_entry.as_deref(), window, cx)
         });
@@ -1687,6 +1700,20 @@ impl Shell {
             }
             false => dock.remove_dock(DockPlacement::Bottom, window, cx),
         });
+        // The Astro preview is a dock capability, not a reading-mode flag:
+        // showing it is what arms Open-on-Enter and the embedded split.
+        let astro_visible = visible && self.mode != WorkspaceMode::Build;
+        self.preview.update(cx, |preview, cx| {
+            if astro_visible {
+                preview.enter_preview(cx);
+            } else {
+                preview.leave_preview(cx);
+            }
+        });
+        if astro_visible {
+            self.note_preview_fallback(cx);
+        }
+        self.sync_embedded(window, cx);
     }
 
     /// Record the active document as the open project's last entry.
@@ -1825,6 +1852,7 @@ impl Shell {
         }
         // Fold any pending splitter movement into the outgoing mode first.
         self.capture_layout(cx);
+        let previous = self.mode;
         let inspector_open = self.inspector_open;
         self.set_inspector_open(false, cx);
         self.mode = mode;
@@ -1840,19 +1868,22 @@ impl Shell {
             scope.preferences.last_mode = Some(mode);
             self.persist_project(cx);
         }
-        self.preview.update(cx, |preview, cx| {
-            if mode == WorkspaceMode::Preview {
-                preview.enter_preview(cx);
-            } else {
-                preview.leave_preview(cx);
-            }
-        });
-        if mode == WorkspaceMode::Preview {
-            self.note_preview_fallback(cx);
-        }
+        self.sync_center(window, cx);
         self.sync_embedded(window, cx);
         if inspector_open {
             self.document.read(cx).focus_handle(cx).focus(window, cx);
+        } else if mode == WorkspaceMode::Preview {
+            let focus = self.rendered.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+        } else if previous == WorkspaceMode::Preview
+            && let Some(session) = self.project.read(cx).active_session(cx)
+        {
+            session
+                .read(cx)
+                .editor
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx);
         }
         self.refresh_menus(window, cx);
         cx.notify();
@@ -1860,7 +1891,10 @@ impl Shell {
 
     fn toggle_panel(&mut self, kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(kind, PanelKind::Inspector) {
-            if !self.inspector_open && self.project.read(cx).active_frontmatter_key().is_none() {
+            if self.mode != WorkspaceMode::Writing
+                || (!self.inspector_open
+                    && self.project.read(cx).active_frontmatter_key().is_none())
+            {
                 return;
             }
             self.set_inspector_open(!self.inspector_open, cx);
@@ -1921,7 +1955,7 @@ impl Shell {
         self.preview_sync_key = Some(key);
         let context = self.project.read(cx).preview_context();
         let entry = self.project.read(cx).active_entry_id();
-        let in_preview = self.mode == WorkspaceMode::Preview;
+        let in_preview = self.astro_preview_visible();
         self.preview.update(cx, |preview, cx| {
             match context {
                 Some((project, root, mapping)) => {
@@ -1976,9 +2010,33 @@ impl Shell {
         });
     }
 
+    /// Whether the Astro preview panel is on screen for the current mode.
+    ///
+    /// Build reserves the bottom dock for the terminal, so the Astro preview is
+    /// a Writing/Preview capability; Preview mode itself only decides that the
+    /// centre shows the rendered document.
+    fn astro_preview_visible(&self) -> bool {
+        self.mode != WorkspaceMode::Build && self.settings.layouts.get(self.mode).preview_visible
+    }
+
+    /// Put the panel the current mode reads into the centre.
+    fn sync_center(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = center_layout_for(
+            &self.document,
+            &self.rendered_panel,
+            &self.embedded_panel,
+            self.mode,
+            self.embedded_center_active,
+            window,
+            cx,
+        );
+        self.dock
+            .update(cx, |dock, cx| dock.set_center(layout, window, cx));
+    }
+
     /// Mount, retarget or remove the embedded surface for the current mode.
     fn sync_embedded(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let wanted = self.mode == WorkspaceMode::Preview
+        let wanted = self.astro_preview_visible()
             && self.effective_preview_presentation() == PreviewPresentation::Embedded;
         tracing::debug!(
             mode = ?self.mode,
@@ -2024,10 +2082,8 @@ impl Shell {
     }
 
     fn set_embedded_center(&mut self, embedded: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let layout = center_layout_for(&self.document, &self.embedded_panel, embedded, window, cx);
-        self.dock
-            .update(cx, |dock, cx| dock.set_center(layout, window, cx));
         self.embedded_center_active = embedded;
+        self.sync_center(window, cx);
     }
 
     fn execute(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) {
@@ -3078,10 +3134,32 @@ impl Render for Shell {
             self.settings.editor_line_height,
             self.settings.page_width_percent,
         );
-        self.document
-            .update(cx, |panel, cx| panel.set_prose_style(style, cx));
-        self.chrome
-            .set_sidebars(!layout.sidebar_visible && !self.inspector_open);
+        let code_mode = self.mode == WorkspaceMode::Build;
+        self.document.update(cx, |panel, cx| {
+            panel.set_prose_style(style.clone(), cx);
+            panel.set_code(code_mode, cx);
+        });
+        self.rendered
+            .update(cx, |rendered, cx| rendered.set_prose_style(style, cx));
+        if self.mode == WorkspaceMode::Preview {
+            let root = self.project.read(cx).project_root();
+            let path = self.project.read(cx).active_path();
+            let body = self.project.read(cx).active_session(cx).map(|session| {
+                let session = session.read(cx);
+                (session.kind(), session.projection.visible.clone())
+            });
+            self.rendered.update(cx, |rendered, cx| {
+                rendered.set_document(
+                    root.as_deref(),
+                    path.as_deref(),
+                    body.as_ref().map(|(kind, text)| (*kind, text.as_str())),
+                    cx,
+                )
+            });
+        }
+        self.chrome.set_sidebars(
+            self.mode == WorkspaceMode::Writing && !layout.sidebar_visible && !self.inspector_open,
+        );
         let chrome_hidden = self.chrome.is_hidden() && self.warning.is_none();
         let project_name = self.project.read(cx).project_name();
 
@@ -3216,6 +3294,8 @@ impl Render for Shell {
                                                 let preview = layout.preview_visible;
                                                 let inspector = self.inspector_open;
                                                 let modes = self.project.read(cx).writing_modes();
+                                                let writing = self.mode == WorkspaceMode::Writing;
+                                                let build = self.mode == WorkspaceMode::Build;
                                                 Button::new("view-menu")
                                                     .small()
                                                     .ghost()
@@ -3238,32 +3318,40 @@ impl Render for Shell {
                                                             );
                                                         })
                                                 };
-                                                        menu.item(item(
-                                                            "Focus mode",
-                                                            CommandId::ToggleFocusMode,
-                                                            modes.focus,
-                                                        ))
-                                                        .item(item(
-                                                            "Typewriter mode",
-                                                            CommandId::ToggleTypewriterMode,
-                                                            modes.typewriter,
-                                                        ))
-                                                        .separator()
-                                                        .item(item(
-                                                            "Library",
-                                                            CommandId::ToggleSidebar,
-                                                            sidebar,
-                                                        ))
-                                                        .item(item(
-                                                            "Reading view",
-                                                            CommandId::TogglePreview,
-                                                            preview,
-                                                        ))
-                                                        .item(item(
-                                                            "Details",
-                                                            CommandId::ToggleInspector,
-                                                            inspector,
-                                                        ))
+                                                        let mut menu = menu
+                                                            .item(item(
+                                                                "Focus mode",
+                                                                CommandId::ToggleFocusMode,
+                                                                modes.focus,
+                                                            ))
+                                                            .item(item(
+                                                                "Typewriter mode",
+                                                                CommandId::ToggleTypewriterMode,
+                                                                modes.typewriter,
+                                                            ))
+                                                            .separator()
+                                                            .item(item(
+                                                                "Library",
+                                                                CommandId::ToggleSidebar,
+                                                                sidebar,
+                                                            ))
+                                                            .item(item(
+                                                                if build {
+                                                                    "Terminal"
+                                                                } else {
+                                                                    "Astro preview"
+                                                                },
+                                                                CommandId::TogglePreview,
+                                                                preview,
+                                                            ));
+                                                        if writing {
+                                                            menu = menu.item(item(
+                                                                "Details",
+                                                                CommandId::ToggleInspector,
+                                                                inspector,
+                                                            ));
+                                                        }
+                                                        menu
                                                     })
                                             })
                                             .child(
@@ -3315,23 +3403,31 @@ fn document_empty_copy(mode: WorkspaceMode, has_project: bool) -> &'static str {
     }
 }
 
-/// The centre layout: the document alone, or the document beside the embedded
-/// preview with a draggable splitter. The embedded slot keeps roughly the mock's
-/// inverse ratio (source 42%, preview 58%).
+/// The centre layout: the mode's reading surface, or that surface beside the
+/// embedded Astro preview with a draggable splitter. The embedded slot keeps
+/// roughly the mock's inverse ratio (source 42%, preview 58%).
 fn center_layout_for(
     document: &Entity<WorkspacePanel>,
+    rendered: &Entity<WorkspacePanel>,
     embedded: &Entity<WorkspacePanel>,
+    mode: WorkspaceMode,
     embedded_active: bool,
     window: &Window,
     cx: &App,
 ) -> DockLayout {
+    // Preview reads the document; Writing and Build edit it.
+    let main = if mode == WorkspaceMode::Preview {
+        rendered
+    } else {
+        document
+    };
     if !embedded_active {
-        return DockLayout::tabs().panel_view(panel_handle(document.clone()), cx);
+        return DockLayout::tabs().panel_view(panel_handle(main.clone()), cx);
     }
     let source_width = (f32::from(window.viewport_size().width) * 0.42).max(360.);
     DockLayout::h_split()
         .child(
-            DockLayout::tabs().panel_view(panel_handle(document.clone()), cx),
+            DockLayout::tabs().panel_view(panel_handle(main.clone()), cx),
             Some(px(source_width)),
         )
         .child(
@@ -3954,6 +4050,105 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn modes_show_writing_build_and_rendered_preview_surfaces(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let directory = project_fixture("mode-surfaces-site");
+        std::fs::write(
+            directory.path().join("src/content/first.md"),
+            "---\ntitle: First\n---\n# First body\n\nText *here*.\n",
+        )
+        .unwrap();
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (project, _) =
+            open_first_entry(cx, handle, &view, directory.path().to_path_buf()).await;
+        let (session, projection) = project.read_with(cx, |project, cx| {
+            let session = project.active_session(cx).expect("the entry opened");
+            let projection = session.read(cx).projection.visible.clone();
+            (session, projection)
+        });
+        assert_eq!(projection, "# First body\n\nText *here*.\n");
+
+        // Writing: writer page with the document rail and its inspector trigger.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("document-panel").visible());
+            assert!(window.find("document-header").visible());
+            assert!(window.try_find("toggle-inspector").is_some());
+            assert!(window.try_find("rendered-preview-panel").is_none());
+        })
+        .unwrap();
+
+        // Preview: the rendered body replaces the editor, and the frontmatter
+        // inspector is unavailable outside Writing.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.set_mode(WorkspaceMode::Preview, window, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("rendered-preview-panel").visible());
+            assert!(window.try_find("document-panel").is_none());
+            assert!(window.try_find("document-header").is_none());
+            assert!(
+                window.try_find("preview-panel").is_none(),
+                "the Astro preview dock stays closed until requested"
+            );
+            assert_eq!(view.read(cx).rendered.read(cx).text(), projection);
+            view.update(cx, |shell, cx| {
+                shell.execute(CommandId::ToggleInspector, window, cx)
+            });
+            assert!(!view.read(cx).inspector_open);
+            assert!(window.try_find("frontmatter-inspector-surface").is_none());
+            // The reading pane owns focus, so typing cannot reach the session.
+            window.input("zzz", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(
+                session.buffer.current_text(),
+                "---\ntitle: First\n---\n# First body\n\nText *here*.\n"
+            );
+        });
+
+        // Build: complete source as an IDE surface, no writer header.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.set_mode(WorkspaceMode::Build, window, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("document-panel").visible());
+            assert!(window.try_find("document-header").is_none());
+            assert_eq!(
+                session.read(cx).editor.read(cx).value(),
+                "---\ntitle: First\n---\n# First body\n\nText *here*.\n"
+            );
+            view.update(cx, |shell, cx| {
+                shell.execute(CommandId::ToggleInspector, window, cx)
+            });
+            assert!(!view.read(cx).inspector_open);
+        })
+        .unwrap();
+
+        // Returning to Writing restores the writer rail.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.set_mode(WorkspaceMode::Writing, window, cx)
+            });
+            window.render_frame(cx);
+            assert!(window.find("document-header").visible());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     async fn mode_layouts_persist_per_mode_and_a_project_restores_its_last_mode(
         cx: &mut TestAppContext,
     ) {
@@ -4006,7 +4201,10 @@ mod tests {
         cx.run_until_parked();
         view.read_with(cx, |shell, cx| {
             assert_eq!(shell.mode, WorkspaceMode::Preview);
-            assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
+            assert!(
+                !shell.dock.read(cx).is_dock_open(DockPlacement::Bottom),
+                "Preview reads the document; the Astro preview dock starts closed"
+            );
         });
 
         cx.update_window(handle.into(), |_, window, cx| {

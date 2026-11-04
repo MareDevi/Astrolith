@@ -12,7 +12,7 @@ embedded-webview = ["astrolith-gpui/embedded-webview"]
 [dependencies]
 astrolith-gpui = { path = "../../crates/astrolith-gpui" }
 astrolith-observability = { path = "../../crates/astrolith-observability" }
-gpui-kit = { workspace = true, features = ["tree-sitter-markdown", "tree-sitter-markdown-inline"] }
+gpui-kit.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

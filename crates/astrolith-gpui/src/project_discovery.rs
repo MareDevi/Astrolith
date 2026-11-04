@@ -9875,6 +9875,11 @@ export const collections = {blog, dataAuthors};
         session.read_with(cx, |session, cx| {
             assert_eq!(session.editor.read(cx).value(), source);
             assert_eq!(session.projection.visible, "# Body\n");
+            assert_eq!(
+                session.editor.read(cx).language_name(),
+                "markdown",
+                "Build highlights the complete source"
+            );
         });
         let edited = "---\ntitle: New\n---\n\n# Body edited\n";
         replace_visible(cx, handle, &session, edited);
@@ -9899,6 +9904,11 @@ export const collections = {blog, dataAuthors};
         session.read_with(cx, |session, cx| {
             assert_eq!(session.editor.read(cx).value(), "# Body\n");
             assert_eq!(session.buffer.current_text(), source);
+            assert_eq!(
+                session.editor.read(cx).language_name(),
+                "text",
+                "the writer paints prose decorations, not code syntax"
+            );
         });
     }
 

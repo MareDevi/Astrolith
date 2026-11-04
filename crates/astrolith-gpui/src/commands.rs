@@ -321,7 +321,9 @@ impl CommandId {
             Self::ToggleComment => state.editor_focused && state.markdown_document,
             Self::OpenComponentBuilder => state.editor_focused && state.mdx_document,
             Self::CheckForUpdates => state.updates_configured,
-            Self::ToggleInspector => state.frontmatter_available,
+            Self::ToggleInspector => {
+                state.frontmatter_available && state.workspace_mode == WorkspaceMode::Writing
+            }
             _ => true,
         }
     }

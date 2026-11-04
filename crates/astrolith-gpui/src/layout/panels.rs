@@ -34,6 +34,8 @@ pub(crate) struct WorkspacePanel {
     pub(crate) toolbar_focus: FocusHandle,
     /// Configured document face, size, line height and measure.
     prose: Option<ProseStyle>,
+    /// The panel paints a source-code editor instead of the writer page.
+    code: bool,
     /// Whether this panel is navigation chrome and uses the sidebar surface.
     surface: bool,
     /// Alt-hover preview and its in-flight request.
@@ -94,6 +96,7 @@ impl WorkspacePanel {
         if let Some(editor) = self.editor.as_ref() {
             crate::editor::hide_scrollbar(editor, cx);
         }
+        self.apply_editor_chrome(cx);
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
     }
@@ -116,11 +119,11 @@ impl WorkspacePanel {
         wiring: Option<EditorWiring>,
         cx: &mut Context<Self>,
     ) {
-        crate::editor::hide_scrollbar(&editor, cx);
         self.title = title.into();
         self.editor = Some(editor);
         self.readonly = false;
         self.wiring = wiring;
+        self.apply_editor_chrome(cx);
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
     }
@@ -135,6 +138,32 @@ impl WorkspacePanel {
         }
         self.prose = Some(style);
         cx.notify();
+    }
+
+    /// Paint this panel as an IDE source editor instead of the writer page.
+    ///
+    /// The editor entity is shared with the writer, so this switches only what
+    /// the panel contributes: the full-width code surface, the visible
+    /// scrollbar, and the absence of writer chrome.
+    pub fn set_code(&mut self, code: bool, cx: &mut Context<Self>) {
+        if self.code == code {
+            return;
+        }
+        self.code = code;
+        self.apply_editor_chrome(cx);
+        cx.notify();
+    }
+
+    /// Match the editor's scrollbar policy to the panel presentation.
+    fn apply_editor_chrome(&self, cx: &mut App) {
+        let Some(editor) = self.editor.as_ref() else {
+            return;
+        };
+        if self.code {
+            editor.update(cx, |editor, _| editor.set_scrollbar_renderer(None));
+        } else {
+            crate::editor::hide_scrollbar(editor, cx);
+        }
     }
 
     pub fn clear_editor(&mut self, cx: &mut Context<Self>) {
@@ -174,6 +203,7 @@ impl WorkspacePanel {
             wiring: None,
             toolbar_focus,
             prose: None,
+            code: false,
             surface: false,
             preview: ImagePreviewState::default(),
             preview_source: None,
@@ -339,12 +369,14 @@ impl Render for WorkspacePanel {
                     this.dismiss_preview(cx);
                 }
             }))
-            .when_some(self.header.as_ref(), |view, header| {
-                view.child(header.clone())
-            })
+            .when_some(
+                self.header.as_ref().filter(|_| !self.code),
+                |view, header| view.child(header.clone()),
+            )
             .when_some(self.editor.as_ref(), |view, editor| {
                 let editor = editor.clone();
                 let style = self.prose.clone();
+                let code = self.code;
                 let page_width_percent = style
                     .as_ref()
                     .map(|style| style.page_width_percent)
@@ -353,6 +385,9 @@ impl Render for WorkspacePanel {
                 let overlay = wiring.as_ref().and_then(|wiring| {
                     // Focus on the document, the toolbar or one of its buttons
                     // keeps the popover mounted, so Tab can walk its controls.
+                    if code {
+                        return None;
+                    }
                     let focused = editor.read(cx).focus_handle(cx).is_focused(window)
                         || self.toolbar_focus.contains_focused(window, cx);
                     selection_toolbar::overlay(
@@ -365,64 +400,77 @@ impl Render for WorkspacePanel {
                 });
                 let preview_image = self.preview.image();
                 let mut element = Editor::new(&editor)
-                    .font_family(
-                        style
-                            .as_ref()
-                            .map(|style| style.font_family.clone())
-                            .unwrap_or_else(|| crate::theme::prose_font(cx)),
-                    )
                     .readonly(self.readonly)
                     .bordered(false)
-                    .aria_label(if self.readonly {
+                    .aria_label(if code {
+                        "Source file, editable"
+                    } else if self.readonly {
                         "Document source, readonly"
                     } else {
                         "Document source, editable"
                     })
                     .size_full();
-                if let Some(style) = style.as_ref() {
-                    element = element
-                        .text_size(px(style.font_size))
-                        .line_height(gpui_kit::relative(style.line_height));
+                if code {
+                    // The editor supplies its own mono face, gutter and code
+                    // metrics; the panel only gives it the full pane.
+                } else {
+                    element = element.font_family(
+                        style
+                            .as_ref()
+                            .map(|style| style.font_family.clone())
+                            .unwrap_or_else(|| crate::theme::prose_font(cx)),
+                    );
+                    if let Some(style) = style.as_ref() {
+                        element = element
+                            .text_size(px(style.font_size))
+                            .line_height(gpui_kit::relative(style.line_height));
+                    }
                 }
                 if let Some(wiring) = wiring.as_ref() {
                     let paste = wiring.hooks.paste.clone();
                     element = element.on_paste(move |item, window, cx| (paste)(item, window, cx));
                 }
-                let mut body = div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .h_flex()
-                    .justify_center()
-                    .child(
-                        div()
-                            .h_full()
-                            .w(gpui_kit::relative(page_width_percent / 100.))
-                            .min_w(px(320.))
-                            .max_w(px(1200.))
-                            .px(px(crate::theme::PROSE_INSET))
-                            .pt(px(crate::theme::PROSE_TOP))
-                            .child(element),
-                    );
+                let mut body = if code {
+                    div().flex_1().min_h_0().relative().child(element)
+                } else {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .h_flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .h_full()
+                                .w(gpui_kit::relative(page_width_percent / 100.))
+                                .min_w(px(320.))
+                                .max_w(px(1200.))
+                                .px(px(crate::theme::PROSE_INSET))
+                                .pt(px(crate::theme::PROSE_TOP))
+                                .child(element),
+                        )
+                };
                 if let Some(hooks) = wiring.as_ref().map(|wiring| wiring.hooks.clone()) {
                     let mouse_down = hooks.mouse_down.clone();
                     body = body.on_mouse_down(MouseButton::Left, move |event, window, cx| {
                         (mouse_down)(event, window, cx)
                     });
-                    body = body.on_mouse_move(cx.listener(
-                        |this, event: &MouseMoveEvent, window, cx| {
-                            this.hover_image(event, window, cx)
-                        },
-                    ));
-                    body =
-                        body.on_mouse_exit(cx.listener(|this, _, _, cx| this.dismiss_preview(cx)));
+                    if !code {
+                        body = body.on_mouse_move(cx.listener(
+                            |this, event: &MouseMoveEvent, window, cx| {
+                                this.hover_image(event, window, cx)
+                            },
+                        ));
+                        body = body
+                            .on_mouse_exit(cx.listener(|this, _, _, cx| this.dismiss_preview(cx)));
+                    }
                     if let Some(drop) = hooks.drop.clone() {
                         body = body.on_drop(move |paths: &ExternalPaths, window, cx| {
                             (drop)(paths, window, cx)
                         });
                     }
                 }
-                if let Some(image) = preview_image {
+                if let Some(image) = preview_image.filter(|_| !code) {
                     body = body.child(
                         div()
                             .absolute()

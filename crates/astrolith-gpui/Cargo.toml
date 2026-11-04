@@ -19,7 +19,12 @@ astrolith-document = { path = "../astrolith-document" }
 astrolith-preview = { path = "../astrolith-preview" }
 astrolith-terminal = { path = "../astrolith-terminal" }
 astrolith-observability = { path = "../astrolith-observability" }
-gpui-kit.workspace = true
+gpui-kit = { workspace = true, features = [
+    "tree-sitter-markdown",
+    "tree-sitter-markdown-inline",
+    "tree-sitter-astro",
+    "tree-sitter-yaml",
+] }
 gpui-webview = { version = "=0.8.1", optional = true }
 wry = { version = "=0.53.3", package = "lb-wry", optional = true }
 tokio.workspace = true

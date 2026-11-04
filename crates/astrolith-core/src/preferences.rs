@@ -229,11 +229,11 @@ impl PanelLayout {
         }
     }
 
-    /// Preview keeps the document editable under the compact server status.
+    /// Preview reads the document; the Astro preview dock starts closed.
     fn preview() -> Self {
         Self {
             sidebar_visible: false,
-            preview_visible: true,
+            preview_visible: false,
             sidebar_width: 224.,
             preview_height: 160.,
         }
@@ -1318,7 +1318,10 @@ mod tests {
         assert!(!defaults.layouts.writing.sidebar_visible);
         assert!(!defaults.layouts.writing.preview_visible);
         assert!(defaults.layouts.build.sidebar_visible);
-        assert!(defaults.layouts.preview.preview_visible);
+        assert!(
+            !defaults.layouts.preview.preview_visible,
+            "Preview opens on the rendered document, not the Astro preview dock"
+        );
 
         let global = GlobalPreferencesV2 {
             default_mode: WorkspaceMode::Preview,

@@ -47,6 +47,8 @@ pub(crate) struct DocumentSession {
     last_selection: Range<usize>,
     /// Build shows the complete source in the same editor; Writer shows the projection.
     source_view: bool,
+    /// Syntax language the complete-source view highlights.
+    language: SharedString,
     /// The active selection and the end of the occurrence `select_next_occurrence`
     /// added last, so a repeated press continues instead of finding it again.
     next_occurrence: Option<(Range<usize>, usize)>,
@@ -138,6 +140,7 @@ impl DocumentSession {
     ) -> Self {
         let disk_fingerprint = fingerprint(&original);
         let kind = kind_for(identity.canonical_source().as_str());
+        let language = editor_language(identity.canonical_source().as_str());
         let (projection, notice) = project_or_complete(&current, kind);
         let buffer = DocumentBuffer::from_unsaved(identity, original, current);
         let dirty = buffer.is_dirty();
@@ -282,6 +285,7 @@ impl DocumentSession {
             history: SourceHistory::default(),
             last_selection: 0..0,
             source_view: false,
+            language,
             next_occurrence: None,
             refused: false,
             notice,
@@ -1288,7 +1292,21 @@ impl DocumentSession {
             let selection = self.source_range_to_projection(&source_selection);
             (self.projection.visible.clone(), selection)
         };
+        let language = if source {
+            self.language.clone()
+        } else {
+            SharedString::from("text")
+        };
         self.editor.update(cx, |editor, cx| {
+            // One retained editor, two presentations: the writer has no gutter,
+            // folding or code indentation; Build reads as a source editor.
+            editor.set_line_number(source, window, cx);
+            editor.set_indent_guides(source, window, cx);
+            editor.set_folding(source, window, cx);
+            editor.set_auto_close(source, window, cx);
+            editor.set_smart_indent(source, window, cx);
+            editor.set_soft_wrap(!source, window, cx);
+            editor.set_highlighter(language, cx);
             editor.set_value(text, window, cx);
             editor.set_selected_range(selection.clone(), cx);
         });
@@ -1625,6 +1643,25 @@ fn kind_for(path: &str) -> DocumentKind {
         .and_then(std::ffi::OsStr::to_str)
         .and_then(DocumentKind::from_extension)
         .unwrap_or(DocumentKind::Plain)
+}
+
+/// Syntax language for the complete-source view, by file extension.
+///
+/// Unknown extensions use `text`, which the pinned highlighter installs
+/// without a grammar, so unsupported files stay readable instead of failing.
+fn editor_language(path: &str) -> SharedString {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "md" | "mdx" => "markdown",
+        "astro" => "astro",
+        "yaml" | "yml" => "yaml",
+        _ => "text",
+    }
+    .into()
 }
 
 /// Project `source`, showing everything (and saying why) when the metadata
