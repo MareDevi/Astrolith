@@ -1787,6 +1787,7 @@ impl Shell {
                 let owner = owner.clone();
                 Button::new(mode.label())
                     .ghost()
+                    .rounded_full()
                     .label(mode.label())
                     .selected(mode == current)
                     .tooltip(mode.label())

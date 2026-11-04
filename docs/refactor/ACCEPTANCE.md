@@ -309,6 +309,7 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - Preferences 出现两遍 “Preferences”：dialog 标题与导航内标题重复。导航内标题已删除；dialog 标题保留一次，内容区改为 pane 标题（如 Appearance）+ 一句说明。
   - 界面整体偏小：默认 `ui_font_size` 从 14 提升到 18，`type_scale.ui` 同步。正文仍使用独立的 16/32，不受界面字号控制。
   - 顶部导航偏矮：TitleBar 高度改为 `rems(3.5)`（18 px 基准约 63 px），模式切换按钮取消 `small` 并增加内边距。
+  - 模式切换外框与选中 pill 半径不一致：外层与每个模式按钮统一使用 `rounded_full`，选中态与容器同心。
   - 页面宽度改为百分比：`page_width_percent` 默认 64%，可调 30–100%，按编辑器 pane 宽度渲染并 clamp 到 320–1200 px；旧 `editor_width` px 值一次性转换为百分比（768→64、900→75），备份为 `global.json.pre-page-width.json`，旧键删除。
   - 旧配置 14/16 px 被视为旧视觉比例，一次性迁移到 18；其他显式字号保留。迁移前备份为 `global.json.pre-interface-scale.json`，写入 `interface_scale: 1` 防止重复迁移。用户仍可在 Appearance 面板调整 8–28。
 - Preferences 重设计：

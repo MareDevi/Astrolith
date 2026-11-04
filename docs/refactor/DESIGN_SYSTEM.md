@@ -167,7 +167,7 @@ M1 首先校对 Theme adapter；随后逐区域迁移 chrome、表单、菜单�
 - 默认界面字号从 14 提升到 18，正文仍为独立的 16/32；页面宽度改为编辑器 pane 的百分比（默认 64%，30–100%，渲染 clamp 320–1200 px），不再以固定 768 px 为唯一宽度。`type_scale.ui` 同步为 18。旧配置中 14/16 px 的默认值一次性迁移到 18，其他显式字号保留，迁移前备份为 `global.json.pre-interface-scale.json`；写入 `interface_scale` 防止重复迁移。
 - Preferences 去掉导航内重复的 “Preferences” 标题，只保留 dialog 标题；pane 标题改为内容区 header（标题 + 说明），并根据 pane 提供一句用途说明。
 - dialog 尺寸从 560–880 × 420–680 放大到 720–1040 × 560–1040，随窗口变化；左侧导航加宽并随界面字号增长，User guide / Keyboard shortcuts 固定在 pane 列表下方。
-- 顶部导航改为 `rems(3.5)` 高度（18 px 基准约 63 px），模式切换按钮取消 `small` 并增加内边距；Build 文档 rail 与主内容随之获得更多垂直呼吸空间。
+- 顶部导航改为 `rems(3.5)` 高度（18 px 基准约 63 px），模式切换按钮取消 `small` 并增加内边距；Build 文档 rail 与主内容随之获得更多垂直呼吸空间。模式切换容器和每个按钮都使用 `rounded_full`，选中态与外部轮廓保持同心，不再出现外圆内方。
 - 表单改为圆角分组卡片：`Theme`、`Interface`、`Document` 等 section 使用 `group_box` 表面、内边距和细边界；字段标签提升到 `text_base`，提示提升到 `text_sm`，文本控件与下拉按钮取消 `small` 尺寸。
 - Apply/Cancel 固定在 header 右侧，说明文案放在标题下方，避免长表单滚动后丢失动作；`preferences-body` 仍是唯一滚动区。
 - 原生验证：1000×700 与 1440×900、light 主题、`ui_font_size=18` 截图确认单一标题、卡片层级、导航链接与 Apply/Cancel 可见；Build 主界面同字号下导航两行条目不重叠。
