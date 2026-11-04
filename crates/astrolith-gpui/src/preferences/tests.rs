@@ -39,11 +39,15 @@ fn project_and_collection_panes_follow_the_open_project() {
             .map(Pane::label)
             .collect::<Vec<_>>()
     };
-    assert_eq!(panes(false), ["General", "Preview", "Advanced"]);
+    assert_eq!(
+        panes(false),
+        ["Appearance", "Workspace", "Preview", "Advanced"]
+    );
     assert_eq!(
         panes(true),
         [
-            "General",
+            "Appearance",
+            "Workspace",
             "Preview",
             "Project Settings",
             "Collections",

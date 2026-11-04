@@ -7,20 +7,25 @@
 //! the live preferences.
 
 pub(crate) mod advanced;
+pub(crate) mod appearance;
 pub(crate) mod collection;
-pub(crate) mod general;
 pub(crate) mod preview;
 pub(crate) mod project;
 #[cfg(test)]
 mod tests;
+pub(crate) mod workspace;
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use astrolith_astro::schema::{CollectionSchema, FieldKind};
 use astrolith_core::preferences::{
     AutosaveDelay, BrowserCommand, CollectionPreferencesV1, FieldMappings, FileExtension,
-    GlobalPreferencesV2, HeadingColors, IdeCommand, ImagePathMode, PreviewPreferences,
-    PreviewPresentation, ProjectPreferencesV1, ThemePreference,
+    GlobalPreferencesV2, HeadingColors, IdeCommand, ImagePathMode, ModeLayouts, PreviewPreferences,
+    PreviewPresentation, ProjectPreferencesV1, ThemePreference, WorkspaceMode,
 };
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt, WindowExt,
@@ -39,8 +44,10 @@ use crate::theme;
 /// One preferences pane; the set matches the upstream scopes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Pane {
-    /// Global application and editor settings.
-    General,
+    /// Theme, interface and document typography.
+    Appearance,
+    /// Default workspace mode, per-mode layouts and workspace behaviour.
+    Workspace,
     /// Preview presentation, browser argv and entry behaviour.
     Preview,
     /// Preferences of the open project.
@@ -53,8 +60,9 @@ pub(crate) enum Pane {
 
 impl Pane {
     /// Display order in the sheet's navigation.
-    pub(crate) const ALL: [Self; 5] = [
-        Self::General,
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Appearance,
+        Self::Workspace,
         Self::Preview,
         Self::Project,
         Self::Collections,
@@ -64,7 +72,8 @@ impl Pane {
     /// Navigation label.
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::General => "General",
+            Self::Appearance => "Appearance",
+            Self::Workspace => "Workspace",
             Self::Preview => "Preview",
             Self::Project => "Project Settings",
             Self::Collections => "Collections",
@@ -72,9 +81,25 @@ impl Pane {
         }
     }
 
+    /// Stable element identifier, used by tests and accessibility clients.
+    pub(crate) fn element_id(self) -> &'static str {
+        match self {
+            Self::Appearance => "preferences-pane-appearance",
+            Self::Workspace => "preferences-pane-workspace",
+            Self::Preview => "preferences-pane-preview",
+            Self::Project => "preferences-pane-project",
+            Self::Collections => "preferences-pane-collections",
+            Self::Advanced => "preferences-pane-advanced",
+        }
+    }
+
     /// Project-scoped panes exist only while a project is open.
     pub(crate) fn available(self, has_project: bool) -> bool {
-        has_project || matches!(self, Self::General | Self::Preview | Self::Advanced)
+        has_project
+            || matches!(
+                self,
+                Self::Appearance | Self::Workspace | Self::Preview | Self::Advanced
+            )
     }
 }
 
@@ -92,6 +117,8 @@ pub(crate) struct CollectionEntry {
 pub(crate) struct PreferencesContext {
     /// Global scope as persisted.
     pub global: GlobalPreferencesV2,
+    /// Global layout defaults, including changes made while the sheet is open.
+    pub global_layouts: ModeLayouts,
     /// Open project scope; `None` hides the project and collection panes.
     pub project: Option<ProjectPreferencesV1>,
     /// Project collections with their schemas.
@@ -106,6 +133,19 @@ pub(crate) struct PreferencesContext {
     pub embedded_unavailable_reason: Option<String>,
 }
 
+/// Per-mode layout resets requested by the draft.
+///
+/// Layouts are edited directly in the workspace, so the sheet never carries a
+/// stale copy of the live geometry. Apply folds only these explicit resets into
+/// the authoritative global defaults and the open project's overrides.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct LayoutResets {
+    /// Modes whose global default returns to the design default.
+    pub global: BTreeSet<WorkspaceMode>,
+    /// Drop every layout override recorded by the open project.
+    pub project: bool,
+}
+
 /// One validated Apply: both scopes are replaced together or not at all.
 #[derive(Clone)]
 pub(crate) struct PreferenceEdits {
@@ -113,6 +153,8 @@ pub(crate) struct PreferenceEdits {
     pub global: GlobalPreferencesV2,
     /// Project scope and its collection overrides, when a project is open.
     pub project: Option<ProjectPreferencesV1>,
+    /// Layout resets the draft recorded.
+    pub layout_resets: LayoutResets,
 }
 
 /// What the sheet asks the shell to do.
@@ -204,6 +246,8 @@ pub(crate) struct PreferencesSheet {
     context: Option<PreferencesContext>,
     pane: Pane,
     theme: ThemePreference,
+    default_mode: WorkspaceMode,
+    layout_resets: LayoutResets,
     global_extension: FileExtension,
     autosave: AutosaveDelay,
     focus_mode: bool,
@@ -248,8 +292,10 @@ impl PreferencesSheet {
         );
         Self {
             context: None,
-            pane: Pane::General,
+            pane: Pane::Appearance,
             theme: ThemePreference::default(),
+            default_mode: WorkspaceMode::default(),
+            layout_resets: LayoutResets::default(),
             global_extension: FileExtension::default(),
             autosave: AutosaveDelay::default(),
             focus_mode: false,
@@ -315,6 +361,8 @@ impl PreferencesSheet {
         let project = context.project.clone();
         let global = context.global.clone();
         self.theme = global.theme;
+        self.default_mode = global.default_mode;
+        self.layout_resets = LayoutResets::default();
         self.global_extension = global.default_extension;
         self.autosave = global.autosave_delay;
         self.focus_mode = global.focus_mode;
@@ -441,7 +489,7 @@ impl PreferencesSheet {
         self.project_insert_imports = project_preferences.insert_mdx_imports;
         let first_collection = (!context.collections.is_empty()).then_some(0);
         self.collection_index = first_collection;
-        self.pane = Pane::General;
+        self.pane = Pane::Appearance;
         self.notice = context.warning.clone().map(SharedString::from);
         self.context = Some(context);
         self.select_collection(first_collection, window, cx);
@@ -468,6 +516,7 @@ impl PreferencesSheet {
         let context = self.context.as_ref()?;
         let mut global = context.global.clone();
         global.theme = self.theme;
+        global.default_mode = self.default_mode;
         global.default_extension = self.global_extension;
         global.autosave_delay = self.autosave;
         global.heading_colors = HeadingColors {
@@ -547,7 +596,11 @@ impl PreferencesSheet {
             }
             preferences
         });
-        Some(PreferenceEdits { global, project })
+        Some(PreferenceEdits {
+            global,
+            project,
+            layout_resets: self.layout_resets.clone(),
+        })
     }
 
     /// Reset one control to its absent/default value, leaving every sibling alone.
@@ -665,6 +718,38 @@ impl PreferencesSheet {
         self.context
             .as_ref()
             .is_some_and(|context| context.auto_import)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_default_mode_for_tests(
+        &mut self,
+        mode: WorkspaceMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.default_mode = mode;
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn toggle_layout_reset_for_tests(
+        &mut self,
+        mode: WorkspaceMode,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.layout_resets.global.remove(&mode) {
+            self.layout_resets.global.insert(mode);
+        }
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_project_layout_reset_for_tests(
+        &mut self,
+        reset: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.layout_resets.project = reset;
+        cx.notify();
     }
 
     fn collection_entry(&self) -> Option<CollectionEntry> {
@@ -1287,7 +1372,7 @@ impl PreferencesSheet {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .child(div().text_sm().child(label))
+                    .child(div().min_w_0().text_sm().child(label))
                     .children(trailing),
             )
             .child(control)
@@ -1352,7 +1437,7 @@ impl Render for PreferencesSheet {
             .as_ref()
             .is_some_and(|context| context.project.is_some());
         if !self.pane.available(has_project) {
-            self.pane = Pane::General;
+            self.pane = Pane::Appearance;
         }
         let mut root = div()
             .v_flex()
@@ -1363,9 +1448,14 @@ impl Render for PreferencesSheet {
         if let Some(notice) = self.notice.clone() {
             root = root.child(div().text_xs().text_color(cx.theme().warning).child(notice));
         }
+        // Large interface type must not truncate the pane names or actions:
+        // the navigation grows with the configured base size while the body
+        // keeps a scrollable, minimum width.
+        let navigation_width =
+            px((184. * (f32::from(cx.theme().font_size) / 14.)).clamp(160., 280.));
         let navigation = div()
             .v_flex()
-            .w(px(184.))
+            .w(navigation_width)
             .flex_shrink_0()
             .gap_1()
             .pr_3()
@@ -1382,14 +1472,14 @@ impl Render for PreferencesSheet {
                 Pane::ALL
                     .into_iter()
                     .filter(|pane| pane.available(has_project))
-                    .enumerate()
-                    .map(|(index, pane)| {
+                    .map(|pane| {
                         let selected = self.pane == pane;
-                        Button::new(("preferences-pane", index))
+                        Button::new(pane.element_id())
                             .small()
                             .ghost()
                             .selected(selected)
                             .label(pane.label())
+                            .tab_index(0)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set_pane(pane, cx);
                             }))
@@ -1401,6 +1491,7 @@ impl Render for PreferencesSheet {
                     .small()
                     .ghost()
                     .label("User guide")
+                    .tab_index(0)
                     .on_click(cx.listener(|_, _, _, cx| {
                         cx.emit(PreferencesEvent::OpenUserGuide);
                     })),
@@ -1410,66 +1501,74 @@ impl Render for PreferencesSheet {
                     .small()
                     .ghost()
                     .label("Keyboard shortcuts")
+                    .tab_index(0)
                     .on_click(cx.listener(|_, _, _, cx| {
                         cx.emit(PreferencesEvent::OpenKeyboardShortcuts);
                     })),
             );
         let body = match self.pane {
-            Pane::General => self.general_pane(cx).into_any_element(),
+            Pane::Appearance => self.appearance_pane(cx).into_any_element(),
+            Pane::Workspace => self.workspace_pane(cx).into_any_element(),
             Pane::Preview => self.preview_pane(cx).into_any_element(),
             Pane::Project => self.project_pane(cx).into_any_element(),
             Pane::Collections => self.collection_pane(cx).into_any_element(),
             Pane::Advanced => self.advanced_pane(cx).into_any_element(),
         };
         let apply_disabled = self.has_errors();
-        let actions =
-            div()
-                .h_flex()
-                .flex_shrink_0()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .pb_2()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(if apply_disabled {
-                            "Fix the highlighted values before applying."
-                        } else {
-                            "Changes apply immediately and persist atomically."
-                        }),
-                )
-                .child(
-                    div()
-                        .h_flex()
-                        .gap_2()
-                        .child(Button::new("preferences-cancel").label("Cancel").on_click(
-                            cx.listener(|this, _, window, cx| {
+        let actions = div()
+            .h_flex()
+            .flex_shrink_0()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .pb_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if apply_disabled {
+                        "Fix the highlighted values before applying."
+                    } else {
+                        "Changes apply immediately and persist atomically."
+                    }),
+            )
+            .child(
+                div()
+                    .h_flex()
+                    .flex_shrink_0()
+                    .gap_2()
+                    .child(
+                        Button::new("preferences-cancel")
+                            .label("Cancel")
+                            .tab_index(1)
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 cx.emit(PreferencesEvent::Cancel);
                                 this.cancel(cx);
                                 window.close_dialog(cx);
-                            }),
-                        ))
-                        .child(
-                            Button::new("preferences-apply")
-                                .primary()
-                                .label("Apply")
-                                .disabled(apply_disabled)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let Some(edits) = this.edits(cx) else {
-                                        this.refresh_errors(cx);
-                                        return;
-                                    };
-                                    cx.emit(PreferencesEvent::Apply(Box::new(edits)));
-                                    window.close_dialog(cx);
-                                })),
-                        ),
-                )
-                .into_any_element();
+                            })),
+                    )
+                    .child(
+                        Button::new("preferences-apply")
+                            .primary()
+                            .label("Apply")
+                            .tab_index(1)
+                            .disabled(apply_disabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let Some(edits) = this.edits(cx) else {
+                                    this.refresh_errors(cx);
+                                    return;
+                                };
+                                cx.emit(PreferencesEvent::Apply(Box::new(edits)));
+                                window.close_dialog(cx);
+                            })),
+                    ),
+            )
+            .into_any_element();
         root.child(
             div()
                 .h_flex()

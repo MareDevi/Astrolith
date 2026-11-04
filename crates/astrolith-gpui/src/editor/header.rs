@@ -192,6 +192,7 @@ impl Render for DocumentHeader {
                             .ghost()
                             .icon(IconName::Ellipsis)
                             .tooltip("Document actions")
+                            .accessibility_label("Document actions")
                             .dropdown_menu(move |menu, _, _| {
                                 let mut menu = menu;
                                 if let Some(path) = menu_active.clone() {
@@ -242,6 +243,7 @@ impl DocumentHeader {
                 .ghost()
                 .icon(IconName::SlidersHorizontal)
                 .tooltip("No frontmatter for the active document")
+                .accessibility_label("Frontmatter unavailable for the active document")
                 .disabled(true)
                 .into_any_element();
         }
@@ -264,6 +266,7 @@ impl DocumentHeader {
                     .ghost()
                     .icon(IconName::SlidersHorizontal)
                     .tooltip("Edit frontmatter")
+                    .accessibility_label("Edit frontmatter")
                     .selected(self.inspector_open),
             )
             .content(move |_, window, cx| {
@@ -314,6 +317,7 @@ impl DocumentHeader {
                                     .ghost()
                                     .icon(IconName::X)
                                     .tooltip("Close frontmatter")
+                                    .accessibility_label("Close frontmatter")
                                     .on_click(move |_, window, cx| {
                                         state.update(cx, |state, cx| state.dismiss(window, cx));
                                     }),

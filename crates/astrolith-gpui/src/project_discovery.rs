@@ -6124,6 +6124,11 @@ impl Render for ProjectWorkspace {
                 } else {
                     "Up one folder"
                 })
+                .accessibility_label(if back_directory.is_empty() {
+                    "All collections"
+                } else {
+                    "Up one folder"
+                })
                 .on_click(move |_, window, cx| {
                     let _ = back_owner.update(cx, |project, cx| {
                         project.library_back(window, cx);
@@ -6272,6 +6277,7 @@ impl Render for ProjectWorkspace {
                                     .ghost()
                                     .icon(IconName::Ellipsis)
                                     .tooltip("Library actions")
+                                    .accessibility_label("Library actions")
                                     .dropdown_menu(move |menu, _, _| {
                                         let mut menu = menu;
                                         for command in [

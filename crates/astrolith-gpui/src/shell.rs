@@ -1598,6 +1598,9 @@ impl Shell {
         self.sync_project_preferences(cx);
         self.mode = resolved.last_mode.unwrap_or(resolved.default_mode);
         self.settings.layouts = resolved.layouts;
+        self.settings
+            .layouts
+            .clamp(f32::from(window.viewport_size().width));
         let source_view = self.mode == WorkspaceMode::Build;
         self.project.update(cx, |project, cx| {
             project.set_source_view(source_view, window, cx)
@@ -1756,6 +1759,7 @@ impl Shell {
                             .ghost()
                             .icon(IconName::X)
                             .tooltip("Close file")
+                            .accessibility_label(format!("Close {}", tab.label))
                             .on_click(move |_, window, cx| {
                                 let _ = close_owner.update(cx, |_, cx| {
                                     close_project.update(cx, |project, cx| {
@@ -2420,6 +2424,7 @@ impl Shell {
             .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
         let context = PreferencesContext {
             global: self.settings.clone(),
+            global_layouts: self.global_layouts.clone(),
             project: self
                 .project_scope
                 .as_ref()
@@ -2438,6 +2443,11 @@ impl Shell {
         let view = self.preferences_sheet.clone();
         let close = self.preferences_sheet.downgrade();
         let initial_focus = std::cell::Cell::new(true);
+        // The sheet must fit the minimum window and enlarged interface type:
+        // its width follows the viewport instead of a fixed 880 px.
+        let viewport = window.viewport_size();
+        let dialog_width = px((f32::from(viewport.width) - 64.).clamp(560., 880.));
+        let dialog_height = px((f32::from(viewport.height) - 64.).clamp(420., 680.));
         window.open_dialog(cx, move |dialog, window, cx| {
             let close = close.clone();
             if initial_focus.replace(false) {
@@ -2445,8 +2455,8 @@ impl Shell {
             }
             dialog
                 .title("Preferences")
-                .w(px(880.))
-                .max_h(px(680.))
+                .w(dialog_width)
+                .max_h(dialog_height)
                 .on_close(move |_, _, cx| {
                     let _ = close.update(cx, |sheet, cx| sheet.cancel(cx));
                 })
@@ -2466,8 +2476,16 @@ impl Shell {
         }
         let mut global = edits.global;
         // The dock may have been resized while the sheet was open; the live
-        // global layouts stay authoritative, like every other layout write.
+        // global layouts stay authoritative unless the draft requested an
+        // explicit per-mode reset.
         global.layouts = self.global_layouts.clone();
+        let defaults = ModeLayouts::default();
+        for mode in &edits.layout_resets.global {
+            global.layouts.set(*mode, defaults.get(*mode).clone());
+        }
+        global
+            .layouts
+            .clamp(f32::from(window.viewport_size().width));
         global.window = self.settings.window;
         self.global_layouts = global.layouts.clone();
         self.settings = global;
@@ -2475,6 +2493,9 @@ impl Shell {
             && let Some(scope) = self.project_scope.as_mut()
         {
             scope.preferences = preferences;
+            if edits.layout_resets.project {
+                scope.preferences.layout_overrides = Default::default();
+            }
         }
         self.settings.layouts = match self.project_scope.as_ref() {
             Some(scope) => self
@@ -2482,6 +2503,9 @@ impl Shell {
                 .resolve_with(&scope.preferences.layout_overrides),
             None => self.global_layouts.clone(),
         };
+        self.settings
+            .layouts
+            .clamp(f32::from(window.viewport_size().width));
         theme::apply(&self.settings, window.appearance(), cx);
         self.sync_project_preferences(cx);
         let (focus, typewriter) = (self.settings.focus_mode, self.settings.typewriter_mode);
@@ -2493,6 +2517,12 @@ impl Shell {
         self.preview
             .update(cx, |preview, cx| preview.resume_visit(cx));
         self.sync_embedded(window, cx);
+        // Only an explicit reset changes the authoritative layout; a plain
+        // Apply leaves the live dock (and its retained bottom panel) untouched.
+        if !edits.layout_resets.global.is_empty() || edits.layout_resets.project {
+            let layout = self.settings.layouts.get(self.mode).clone();
+            self.apply_layout(layout, window, cx);
+        }
         self.persist_global(cx);
         self.persist_project(cx);
         cx.notify();
@@ -3119,6 +3149,9 @@ impl Render for Shell {
                                                     .ghost()
                                                     .icon(IconName::Search)
                                                     .tooltip(CommandId::OpenPalette.label())
+                                                    .accessibility_label(
+                                                        CommandId::OpenPalette.label(),
+                                                    )
                                                     .track_focus(&self.palette_focus)
                                                     .on_click(cx.listener(
                                                         |this, _, window, cx| {
@@ -3142,6 +3175,7 @@ impl Render for Shell {
                                                     .ghost()
                                                     .icon(IconName::PanelsTopLeft)
                                                     .tooltip("Panels")
+                                                    .accessibility_label("Panels and writing modes")
                                                     .dropdown_menu(move |menu, _, _| {
                                                         let item = |label: &'static str,
                                                             kind: CommandId,
@@ -3192,6 +3226,9 @@ impl Render for Shell {
                                                     .ghost()
                                                     .icon(IconName::Settings)
                                                     .tooltip(CommandId::OpenPreferences.label())
+                                                    .accessibility_label(
+                                                        CommandId::OpenPreferences.label(),
+                                                    )
                                                     .on_click(cx.listener(
                                                         |this, _, window, cx| {
                                                             this.execute(
@@ -3344,7 +3381,7 @@ mod tests {
         preferences::{FieldId, Pane as PreferencesPane},
     };
     use astrolith_astro::components::ComponentIndex;
-    use astrolith_core::preferences::FileExtension;
+    use astrolith_core::preferences::{FileExtension, PanelLayout};
     use gpui_kit::{
         Bounds, Point, TestAppContext, WindowBounds, WindowHandle, WindowOptions, base::Root,
         point, px, size, test::TestWindowExt,
@@ -3354,6 +3391,15 @@ mod tests {
         cx: &mut TestAppContext,
         settings: GlobalPreferencesV2,
     ) -> (WindowHandle<Root>, Entity<Shell>) {
+        mount_sized(cx, settings, 1100., 720.)
+    }
+
+    fn mount_sized(
+        cx: &mut TestAppContext,
+        settings: GlobalPreferencesV2,
+        width: f32,
+        height: f32,
+    ) -> (WindowHandle<Root>, Entity<Shell>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             runtime::init(cx).unwrap();
@@ -3362,8 +3408,9 @@ mod tests {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                         Point::default(),
-                        size(px(1100.), px(720.)),
+                        size(px(width), px(height)),
                     ))),
+                    window_min_size: Some(size(px(1000.), px(700.))),
                     ..Default::default()
                 },
                 cx,
@@ -6041,14 +6088,15 @@ mod tests {
         assert_eq!(
             sheet.read_with(cx, |sheet, _| sheet.visible_panes()),
             [
-                PreferencesPane::General,
+                PreferencesPane::Appearance,
+                PreferencesPane::Workspace,
                 PreferencesPane::Preview,
                 PreferencesPane::Advanced
             ]
         );
         assert_eq!(
             sheet.read_with(cx, |sheet, _| sheet.active_pane()),
-            PreferencesPane::General
+            PreferencesPane::Appearance
         );
 
         // Escape dismisses the sheet without applying anything.
@@ -6065,7 +6113,8 @@ mod tests {
         assert_eq!(
             sheet.read_with(cx, |sheet, _| sheet.visible_panes()),
             [
-                PreferencesPane::General,
+                PreferencesPane::Appearance,
+                PreferencesPane::Workspace,
                 PreferencesPane::Preview,
                 PreferencesPane::Project,
                 PreferencesPane::Collections,
@@ -6076,6 +6125,291 @@ mod tests {
             window.press("escape", cx);
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn startup_restores_the_default_mode_layout_typography_and_writing_modes(
+        cx: &mut TestAppContext,
+    ) {
+        use astrolith_core::preferences::ThemePreference;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let global_path = workspace.path().join("preferences/global.json");
+        std::fs::create_dir_all(global_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &global_path,
+            r#"{
+                "version": 2,
+                "theme": "dark",
+                "default_mode": "build",
+                "layouts": {
+                    "writing": {"sidebar_visible": true, "preview_visible": false, "sidebar_width": 10000.0, "preview_height": 10000.0},
+                    "build": {"sidebar_visible": false, "preview_visible": true, "sidebar_width": 10000.0, "preview_height": 10000.0},
+                    "preview": {"sidebar_visible": false, "preview_visible": true, "sidebar_width": 224.0, "preview_height": 160.0}
+                },
+                "editor_font_size": 20.0,
+                "editor_line_height": 2.4,
+                "editor_width": 900.0,
+                "focus_mode": true,
+                "typewriter_mode": true,
+                "preview": {
+                    "presentation": "external",
+                    "browser": {"executable": "", "arguments": []},
+                    "open_on_enter": false
+                }
+            }"#,
+        )
+        .unwrap();
+        let (_store, settings, warning) = PreferencesStore::load(global_path);
+        assert!(warning.is_none());
+        let (handle, view) = mount(cx, settings);
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(shell.mode, WorkspaceMode::Build);
+            assert_eq!(shell.settings.theme, ThemePreference::Dark);
+            assert_eq!(shell.settings.editor_font_size, 20.);
+            assert_eq!(shell.settings.editor_line_height, 2.4);
+            assert_eq!(shell.settings.editor_width, 900.);
+            assert!(!shell.settings.preview.open_on_enter);
+            assert!(!shell.settings.preview.browser.is_configured());
+            // Stored sizes larger than the window can host are clamped on load.
+            assert_eq!(shell.settings.layouts.build.sidebar_width, 390.);
+            assert_eq!(shell.settings.layouts.build.preview_height, 400.);
+            assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
+            assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
+            assert_eq!(
+                shell.dock.read(cx).dock_size(DockPlacement::Bottom),
+                Some(px(400.))
+            );
+            let modes = shell.project.read(cx).writing_modes();
+            assert!(modes.focus);
+            assert!(modes.typewriter);
+            assert!(
+                !shell.inspector_open,
+                "the transient inspector never restores"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn workspace_settings_apply_the_default_mode_and_reset_one_layout_scope(
+        cx: &mut TestAppContext,
+    ) {
+        use std::time::Duration;
+
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_path = workspace.path().join("preferences/global.json");
+        let (store, mut settings, _) = PreferencesStore::load(global_path.clone());
+        settings.layouts.writing = PanelLayout {
+            sidebar_visible: true,
+            preview_visible: false,
+            sidebar_width: 300.,
+            preview_height: 160.,
+        };
+        store.save_global(1, &settings).unwrap();
+        // Reload so the shell starts from the stored revision, like a restart.
+        let (store, settings, _) = PreferencesStore::load(global_path.clone());
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        assert!(view.read_with(cx, |shell, cx| {
+            shell.dock.read(cx).is_dock_open(DockPlacement::Left)
+        }));
+
+        open_preferences_sheet(cx, handle, &view);
+        cx.update_window(handle.into(), |_, window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.set_pane_for_tests(PreferencesPane::Workspace, cx);
+                sheet.set_default_mode_for_tests(WorkspaceMode::Build, cx);
+                sheet.toggle_layout_reset_for_tests(WorkspaceMode::Writing, cx);
+            });
+            window.render_frame(cx);
+            assert!(window.find("preferences-field-layout-writing").visible());
+            window.click("preferences-apply", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(400));
+        cx.condition(&view, |shell, _| {
+            shell.settings.default_mode == WorkspaceMode::Build
+                && shell.global_layouts.writing == ModeLayouts::default().writing
+        })
+        .await;
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.settings.layouts.writing,
+                ModeLayouts::default().writing,
+                "the resolved Writing layout follows the reset global default"
+            );
+            assert!(
+                !shell.dock.read(cx).is_dock_open(DockPlacement::Left),
+                "the reset layout is applied to the live dock"
+            );
+        });
+        let written = global_path.clone();
+        cx.condition(&view, move |_, _| {
+            std::fs::read(&written)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|value| {
+                    value["default_mode"] == "build"
+                        && value["layouts"]["writing"]["sidebar_width"] == 224.0
+                })
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn project_layout_reset_clears_overrides_while_global_defaults_stay(
+        cx: &mut TestAppContext,
+    ) {
+        use std::time::Duration;
+
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let preferences_root = workspace.path().join("preferences");
+        let global_path = preferences_root.join("global.json");
+        let project = project_fixture("layout-reset-site");
+        let override_layout = LayoutState {
+            sidebar_visible: false,
+            preview_visible: true,
+            sidebar_width: 200.,
+            preview_height: 220.,
+        };
+        let id = {
+            let (store, settings, _) = PreferencesStore::load(global_path.clone());
+            store.save_global(1, &settings).unwrap();
+            let layout = override_layout.clone();
+            seed_project(&store, project.path(), |preferences| {
+                preferences
+                    .layout_overrides
+                    .set(WorkspaceMode::Writing, Some(layout));
+            })
+        };
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        wait_for_project_scope(cx, &view, project.path()).await;
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(shell.settings.layouts.writing, override_layout);
+            assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
+        });
+
+        open_preferences_sheet(cx, handle, &view);
+        cx.update_window(handle.into(), |_, window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.set_pane_for_tests(PreferencesPane::Workspace, cx);
+                sheet.set_project_layout_reset_for_tests(true, cx);
+            });
+            window.render_frame(cx);
+            window.click("preferences-apply", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(400));
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.preferences.layout_overrides == Default::default())
+        })
+        .await;
+        view.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.settings.layouts.writing, shell.global_layouts.writing,
+                "the project now inherits every global layout"
+            );
+        });
+        let written = preferences_root.join("projects").join(format!("{id}.json"));
+        cx.condition(&view, move |_, _| {
+            std::fs::read(&written)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|value| {
+                    value["layout_overrides"]["writing"].is_null()
+                        && value["layout_overrides"]["build"].is_null()
+                })
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn preferences_sheet_names_controls_and_fits_the_minimum_window(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let settings = GlobalPreferencesV2 {
+            ui_font_size: 28.,
+            ..GlobalPreferencesV2::default()
+        };
+        let (handle, view) = mount_sized(cx, settings, 1000., 700.);
+        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("open-preferences").label(),
+                Some(CommandId::OpenPreferences.label())
+            );
+            assert_eq!(
+                window.find("command-palette").label(),
+                Some(CommandId::OpenPalette.label())
+            );
+            assert_eq!(
+                window.find("view-menu").label(),
+                Some("Panels and writing modes")
+            );
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(cx, |shell, _| shell.settings.ui_font_size),
+            28.
+        );
+        open_preferences_sheet(cx, handle, &view);
+        cx.update_window(handle.into(), |_, window, _cx| {
+            let viewport = window.viewport_size();
+            for id in ["preferences-apply", "preferences-cancel"] {
+                let bounds = window.find(id).bounds();
+                assert!(
+                    bounds.origin.x >= px(0.)
+                        && bounds.origin.y >= px(0.)
+                        && bounds.origin.x + bounds.size.width <= viewport.width
+                        && bounds.origin.y + bounds.size.height <= viewport.height,
+                    "{id} is clipped at {:?} in {:?}",
+                    bounds,
+                    viewport
+                );
+            }
+            for pane in PreferencesPane::ALL {
+                if !pane.available(false) {
+                    continue;
+                }
+                let snapshot = window.find(pane.element_id());
+                assert_eq!(snapshot.label(), Some(pane.label()));
+                assert!(snapshot.visible(), "{} is not visible", pane.label());
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            sheet.read_with(cx, |sheet, _| sheet.active_pane()),
+            PreferencesPane::Appearance
+        );
+
+        // Tab order is navigation → body → actions, not the visual order of
+        // the action row.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("tab", cx);
+            assert_eq!(
+                window.find("preferences-pane-appearance").focused(),
+                Some(true)
+            );
+        })
+        .unwrap();
+        let _ = view;
     }
 
     #[gpui_kit::test]
