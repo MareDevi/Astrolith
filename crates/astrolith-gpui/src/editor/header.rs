@@ -9,31 +9,55 @@
 //! documents stay one click away in the overflow menu.
 
 use crate::editor::save_coordinator::SaveStatus;
+use crate::frontmatter::FrontmatterForm;
 use crate::project_discovery::ProjectWorkspace;
 use crate::ui;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, Sizable, StyledExt,
+    ActiveTheme, Disableable, Selectable, Sizable, StyledExt,
     button::{Button, ButtonVariants},
     menu::{DropdownMenu, PopupMenuItem},
+    popover::Popover,
 };
 use gpui_kit::{
-    Context, Entity, IntoElement, Render, SharedString, Subscription, TestSupportExt, Window, div,
-    prelude::*, px,
+    Anchor, AnyElement, Context, Entity, IntoElement, Render, SharedString, Subscription,
+    TestSupportExt, Window, div, prelude::*, px,
 };
 
 pub(crate) struct DocumentHeader {
     project: Entity<ProjectWorkspace>,
+    frontmatter: Entity<FrontmatterForm>,
+    inspector_open: bool,
     _subscription: Subscription,
 }
 
 impl DocumentHeader {
-    pub(crate) fn new(project: Entity<ProjectWorkspace>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        project: Entity<ProjectWorkspace>,
+        frontmatter: Entity<FrontmatterForm>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscription = cx.observe(&project, |_, _, cx| cx.notify());
         Self {
             project,
+            frontmatter,
+            inspector_open: false,
             _subscription: subscription,
         }
+    }
+
+    /// Mirror the shell's transient inspector state.
+    pub(crate) fn set_inspector_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.inspector_open == open {
+            return;
+        }
+        self.inspector_open = open;
+        cx.notify();
+    }
+
+    /// Whether the floating inspector is open.
+    pub(crate) fn inspector_open(&self) -> bool {
+        self.inspector_open
     }
 }
 
@@ -123,7 +147,7 @@ impl Render for DocumentHeader {
                             .gap_2()
                             .min_w_0()
                             .child(crate::ui::document_title(title, cx))
-                            .when_some(collection, |row, collection| {
+                            .when_some(collection.clone(), |row, collection| {
                                 row.child(crate::ui::v_divider(cx)).child(
                                     div()
                                         .text_xs()
@@ -161,6 +185,7 @@ impl Render for DocumentHeader {
                             }),
                         ),
                     )
+                    .child(self.inspector_control(collection, cx))
                     .child(
                         Button::new("document-more")
                             .small()
@@ -199,6 +224,103 @@ impl Render for DocumentHeader {
                             }),
                     ),
             )
+            .into_any_element()
+    }
+}
+
+impl DocumentHeader {
+    /// The inspector trigger and its floating form.
+    fn inspector_control(
+        &self,
+        collection: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let available = self.project.read(cx).active_frontmatter_key().is_some();
+        if !available {
+            return Button::new("toggle-inspector")
+                .small()
+                .ghost()
+                .icon(IconName::SlidersHorizontal)
+                .tooltip("No frontmatter for the active document")
+                .disabled(true)
+                .into_any_element();
+        }
+        let form = self.frontmatter.clone();
+        let subtitle = match collection {
+            Some(collection) => SharedString::from(format!("Entry details · {collection}")),
+            None => SharedString::from("Entry details"),
+        };
+        Popover::new("frontmatter-inspector")
+            .anchor(Anchor::TopRight)
+            .offset(px(6.))
+            .open(self.inspector_open)
+            .on_open_change(cx.listener(|this, open, _, cx| {
+                this.inspector_open = *open;
+                cx.notify();
+            }))
+            .trigger(
+                Button::new("toggle-inspector")
+                    .small()
+                    .ghost()
+                    .icon(IconName::SlidersHorizontal)
+                    .tooltip("Edit frontmatter")
+                    .selected(self.inspector_open),
+            )
+            .content(move |_, window, cx| {
+                let viewport = window.viewport_size();
+                let width = (f32::from(viewport.width) - 32.).clamp(280., 416.);
+                let height = (f32::from(viewport.height) - 144.).max(240.);
+                let body = form.clone();
+                let state = cx.entity();
+                let subtitle = subtitle.clone();
+                div()
+                    .id("frontmatter-inspector-surface")
+                    .test_support()
+                    .v_flex()
+                    .w(px(width))
+                    .h(px(height))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h_flex()
+                            .items_start()
+                            .justify_between()
+                            .gap_3()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(cx.theme().border.opacity(0.55))
+                            .child(
+                                div()
+                                    .v_flex()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .font_family(crate::theme::display_font(cx))
+                                            .text_sm()
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .child("Frontmatter"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(subtitle),
+                                    ),
+                            )
+                            .child(
+                                Button::new("inspector-close")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::X)
+                                    .tooltip("Close frontmatter")
+                                    .on_click(move |_, window, cx| {
+                                        state.update(cx, |state, cx| state.dismiss(window, cx));
+                                    }),
+                            ),
+                    )
+                    .child(div().flex_1().min_h_0().child(body))
+            })
             .into_any_element()
     }
 }

@@ -16,16 +16,13 @@ mod tests {
     fn restored_widths_leave_room_for_document_and_reject_nonfinite_values() {
         let mut layout = LayoutState {
             sidebar_width: f32::INFINITY,
-            inspector_width: -20.,
             ..Default::default()
         };
         layout.clamp(800.);
         assert_eq!(layout.sidebar_width, 240.);
-        assert_eq!(layout.inspector_width, 160.);
         layout.sidebar_width = 10000.;
-        layout.inspector_width = 10000.;
         layout.clamp(800.);
-        assert!(layout.sidebar_width + layout.inspector_width <= 480.);
+        assert_eq!(layout.sidebar_width, 240.);
         layout.preview_height = f32::NAN;
         layout.clamp(800.);
         assert_eq!(layout.preview_height, 160.);
@@ -41,12 +38,12 @@ mod tests {
             ..LayoutState::default()
         };
         assert!(!layout.sidebar_visible);
-        assert!(!layout.inspector_visible);
         assert!(!layout.preview_visible);
         assert_eq!(layout.sidebar_width, 240.);
         layout.preview_visible = true;
-        layout.inspector_visible = false;
+        layout.sidebar_visible = true;
         assert!(layout.preview_visible);
-        assert!(!layout.inspector_visible);
+        assert!(layout.sidebar_visible);
+        assert_eq!(layout.sidebar_width, 240.);
     }
 }

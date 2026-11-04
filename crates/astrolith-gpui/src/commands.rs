@@ -183,8 +183,10 @@ pub(crate) struct CommandAvailability {
     pub ide_configured: bool,
     /// The left dock is open.
     pub sidebar_visible: bool,
-    /// The right dock is open.
+    /// The floating frontmatter inspector is open.
     pub inspector_visible: bool,
+    /// The active document has frontmatter the inspector can edit.
+    pub frontmatter_available: bool,
     /// The bottom preview dock is open.
     pub preview_visible: bool,
     /// A preview backend is attached to an open project.
@@ -319,6 +321,7 @@ impl CommandId {
             Self::ToggleComment => state.editor_focused && state.markdown_document,
             Self::OpenComponentBuilder => state.editor_focused && state.mdx_document,
             Self::CheckForUpdates => state.updates_configured,
+            Self::ToggleInspector => state.frontmatter_available,
             _ => true,
         }
     }

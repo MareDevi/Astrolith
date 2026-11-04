@@ -176,14 +176,10 @@ impl TryFrom<u64> for AutosaveDelay {
 pub struct PanelLayout {
     /// Whether the left sidebar is open.
     pub sidebar_visible: bool,
-    /// Whether the right inspector is open.
-    pub inspector_visible: bool,
     /// Whether the bottom preview dock is open.
     pub preview_visible: bool,
     /// Left sidebar width in logical pixels.
     pub sidebar_width: f32,
-    /// Right inspector width in logical pixels.
-    pub inspector_width: f32,
     /// Bottom preview height in logical pixels.
     pub preview_height: f32,
 }
@@ -192,10 +188,8 @@ impl Default for PanelLayout {
     fn default() -> Self {
         Self {
             sidebar_visible: true,
-            inspector_visible: false,
             preview_visible: false,
             sidebar_width: 240.,
-            inspector_width: 260.,
             preview_height: 160.,
         }
     }
@@ -205,12 +199,10 @@ impl PanelLayout {
     /// Clamp stored logical sizes so the document keeps usable space.
     pub fn clamp(&mut self, viewport_width: f32) {
         let maximum = ((viewport_width - 320.) / 2.).clamp(160., 400.);
-        for width in [&mut self.sidebar_width, &mut self.inspector_width] {
-            if !width.is_finite() {
-                *width = 240.;
-            }
-            *width = width.clamp(160., maximum);
+        if !self.sidebar_width.is_finite() {
+            self.sidebar_width = 240.;
         }
+        self.sidebar_width = self.sidebar_width.clamp(160., maximum);
         if !self.preview_height.is_finite() {
             self.preview_height = 160.;
         }
@@ -221,10 +213,8 @@ impl PanelLayout {
     fn writing() -> Self {
         Self {
             sidebar_visible: false,
-            inspector_visible: false,
             preview_visible: false,
             sidebar_width: 224.,
-            inspector_width: 260.,
             preview_height: 160.,
         }
     }
@@ -233,10 +223,8 @@ impl PanelLayout {
     fn build() -> Self {
         Self {
             sidebar_visible: true,
-            inspector_visible: false,
             preview_visible: false,
             sidebar_width: 224.,
-            inspector_width: 260.,
             preview_height: 160.,
         }
     }
@@ -245,10 +233,8 @@ impl PanelLayout {
     fn preview() -> Self {
         Self {
             sidebar_visible: false,
-            inspector_visible: false,
             preview_visible: true,
             sidebar_width: 224.,
-            inspector_width: 260.,
             preview_height: 160.,
         }
     }
@@ -1248,7 +1234,6 @@ mod tests {
         let defaults = GlobalPreferencesV2::default();
         assert_eq!(defaults.default_mode, WorkspaceMode::Writing);
         assert!(!defaults.layouts.writing.sidebar_visible);
-        assert!(!defaults.layouts.writing.inspector_visible);
         assert!(!defaults.layouts.writing.preview_visible);
         assert!(defaults.layouts.build.sidebar_visible);
         assert!(defaults.layouts.preview.preview_visible);

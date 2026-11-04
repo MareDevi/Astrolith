@@ -819,7 +819,7 @@ mod tests {
         preferences.theme = ThemePreference::Dark;
         preferences.layouts.writing.sidebar_visible = false;
         preferences.layouts.writing.preview_visible = true;
-        preferences.layouts.writing.inspector_width = 275.;
+        preferences.layouts.writing.sidebar_width = 275.;
         store.save_global(1, &preferences).unwrap();
 
         let (_, restored, warning) = PreferencesStore::load(path.clone());
@@ -827,7 +827,7 @@ mod tests {
         assert_eq!(restored.theme, ThemePreference::Dark);
         assert!(!restored.layouts.writing.sidebar_visible);
         assert!(restored.layouts.writing.preview_visible);
-        assert_eq!(restored.layouts.writing.inspector_width, 275.);
+        assert_eq!(restored.layouts.writing.sidebar_width, 275.);
 
         let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(envelope["future_field"]["keep"], true);

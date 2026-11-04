@@ -213,10 +213,13 @@ struct PaletteEntry {
 pub(crate) struct Shell {
     dock: Entity<DockArea>,
     document: Entity<WorkspacePanel>,
+    document_header: Entity<crate::editor::header::DocumentHeader>,
     project: Entity<ProjectWorkspace>,
     navigator: Entity<WorkspacePanel>,
     frontmatter: Entity<FrontmatterForm>,
     frontmatter_key: Option<FrontmatterKey>,
+    /// Floating frontmatter inspector visibility; never persisted.
+    inspector_open: bool,
     preview: Entity<PreviewPanel>,
     /// The reading-view panel; kept here because the bottom dock is removed
     /// entirely while the view is hidden.
@@ -328,18 +331,16 @@ impl Shell {
         navigator.update(cx, |navigator, cx| {
             navigator.set_view(project.clone().into(), cx)
         });
-        let header = cx.new(|cx| DocumentHeader::new(project.clone(), cx));
-        document.update(cx, |document, cx| document.set_header(header.into(), cx));
+        let frontmatter = cx.new(FrontmatterForm::new);
+        let header = cx.new(|cx| DocumentHeader::new(project.clone(), frontmatter.clone(), cx));
+        document.update(cx, |document, cx| {
+            document.set_header(header.clone().into(), cx)
+        });
         let project_owner = project.downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             project_owner
                 .update(cx, |project, cx| project.guard_window_close(window, cx))
                 .unwrap_or(true)
-        });
-        let frontmatter = cx.new(FrontmatterForm::new);
-        let inspector = cx.new(|cx| WorkspacePanel::new("inspector-panel", "Properties", "No collection selected\n\nCollection metadata becomes available when an Astro workspace is open.", window, cx));
-        inspector.update(cx, |panel, cx| {
-            panel.set_view(frontmatter.clone().into(), cx)
         });
         let preview = cx.new(PreviewPanel::new);
         let preview_panel = cx.new(|cx| WorkspacePanel::new("preview-panel", "Preview", "No preview running\n\nStart the Astro dev server, then open the active entry in your browser.", window, cx));
@@ -362,31 +363,17 @@ impl Shell {
                 window,
                 cx,
             );
-            for (placement, panel, visible) in [
-                (
-                    DockPlacement::Left,
-                    panel_handle(navigator.clone()),
-                    layout.sidebar_visible,
-                ),
-                (
-                    DockPlacement::Right,
-                    panel_handle(inspector),
-                    layout.inspector_visible,
-                ),
-            ] {
-                area.set_dock(
-                    placement,
-                    DockLayout::tabs().panel_view(panel, cx),
-                    window,
-                    cx,
-                );
-                if !visible {
-                    area.toggle_dock(placement, window, cx);
-                }
+            area.set_dock(
+                DockPlacement::Left,
+                DockLayout::tabs().panel_view(panel_handle(navigator.clone()), cx),
+                window,
+                cx,
+            );
+            if !layout.sidebar_visible {
+                area.toggle_dock(DockPlacement::Left, window, cx);
             }
             // Dock sizes are measured logical pixels, not application spacing.
             area.set_dock_size(DockPlacement::Left, px(layout.sidebar_width), window, cx);
-            area.set_dock_size(DockPlacement::Right, px(layout.inspector_width), window, cx);
             // The reading view exists only while it is visible: a closed bottom
             // dock would otherwise keep a collapsed strip that can be dragged
             // back out.
@@ -433,6 +420,13 @@ impl Shell {
                 }
             }),
         ];
+        subscriptions.push(cx.observe(&header, |this, header, cx| {
+            let open = header.read(cx).inspector_open();
+            if this.inspector_open != open {
+                this.inspector_open = open;
+                cx.notify();
+            }
+        }));
         subscriptions.push(cx.subscribe_in(
             &project,
             window,
@@ -601,10 +595,12 @@ impl Shell {
         Self {
             dock,
             document,
+            document_header: header,
             project,
             navigator,
             frontmatter,
             frontmatter_key: None,
+            inspector_open: false,
             preview,
             preview_panel,
             terminal,
@@ -828,7 +824,7 @@ impl Shell {
         self.project.update(cx, |project, _| {
             project.set_view_state(
                 layout.sidebar_visible,
-                layout.inspector_visible,
+                self.inspector_open,
                 layout.preview_visible,
                 fullscreen,
             )
@@ -1248,7 +1244,7 @@ impl Shell {
     /// refuses to hide while a sidebar is open.
     fn note_typing(&mut self, cx: &mut Context<Self>) {
         let layout = self.read_dock_layout(cx);
-        let both_closed = !layout.sidebar_visible && !layout.inspector_visible;
+        let both_closed = !layout.sidebar_visible && !self.inspector_open;
         let typed = {
             let project = self.project.read(cx);
             match (project.active_path(), project.active_session(cx)) {
@@ -1319,16 +1315,11 @@ impl Shell {
         let dock = self.dock.read(cx);
         LayoutState {
             sidebar_visible: dock.is_dock_open(DockPlacement::Left),
-            inspector_visible: dock.is_dock_open(DockPlacement::Right),
             preview_visible: dock.is_dock_open(DockPlacement::Bottom),
             sidebar_width: dock
                 .dock_size(DockPlacement::Left)
                 .map(f32::from)
                 .unwrap_or(240.),
-            inspector_width: dock
-                .dock_size(DockPlacement::Right)
-                .map(f32::from)
-                .unwrap_or(260.),
             // A closed bottom dock has no settled size; keep the stored value.
             preview_height: dock
                 .dock_size(DockPlacement::Bottom)
@@ -1344,13 +1335,9 @@ impl Shell {
         if self.scope_loading.is_some() || self.applying_layout {
             return;
         }
-        let mut layout = self.read_dock_layout(cx);
-        // Inspector visibility is transient: closing it on a mode switch is
-        // not a saved layout change, and it never reopens with the project.
-        layout.inspector_visible = false;
+        let layout = self.read_dock_layout(cx);
         let current = self.settings.layouts.get(self.mode).clone();
         let visibility_changed = layout.sidebar_visible != current.sidebar_visible
-            || layout.inspector_visible != current.inspector_visible
             || layout.preview_visible != current.preview_visible;
         if layout == current {
             return;
@@ -1579,16 +1566,10 @@ impl Shell {
         self.settings.layouts.set(self.mode, layout.clone());
         self.applying_layout = true;
         self.dock.update(cx, |dock, cx| {
-            for (placement, visible) in [
-                (DockPlacement::Left, layout.sidebar_visible),
-                (DockPlacement::Right, layout.inspector_visible),
-            ] {
-                if dock.is_dock_open(placement) != visible {
-                    dock.toggle_dock(placement, window, cx);
-                }
+            if dock.is_dock_open(DockPlacement::Left) != layout.sidebar_visible {
+                dock.toggle_dock(DockPlacement::Left, window, cx);
             }
             dock.set_dock_size(DockPlacement::Left, px(layout.sidebar_width), window, cx);
-            dock.set_dock_size(DockPlacement::Right, px(layout.inspector_width), window, cx);
         });
         self.set_preview_visible(layout.preview_visible, layout.preview_height, window, cx);
         self.applying_layout = false;
@@ -1743,15 +1724,16 @@ impl Shell {
 
     /// Switch the workspace mode without touching the open document.
     ///
-    /// Layouts are per mode, the inspector is transient, and no mode change
-    /// reopens the project or a document.
+    /// Layouts are per mode, the floating inspector is transient, and no mode
+    /// change reopens the project or a document.
     fn set_mode(&mut self, mode: WorkspaceMode, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode == mode {
             return;
         }
         // Fold any pending splitter movement into the outgoing mode first.
         self.capture_layout(cx);
-        let inspector_open = self.dock.read(cx).is_dock_open(DockPlacement::Right);
+        let inspector_open = self.inspector_open;
+        self.set_inspector_open(false, cx);
         self.mode = mode;
         self.project.update(cx, |project, cx| {
             project.set_source_view(mode == WorkspaceMode::Build, window, cx)
@@ -1772,6 +1754,13 @@ impl Shell {
     }
 
     fn toggle_panel(&mut self, kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(kind, PanelKind::Inspector) {
+            if !self.inspector_open && self.project.read(cx).active_frontmatter_key().is_none() {
+                return;
+            }
+            self.set_inspector_open(!self.inspector_open, cx);
+            return;
+        }
         if matches!(kind, PanelKind::Preview) {
             // Presence, not open state: a closed bottom dock would leave its
             // collapsed strip on screen.
@@ -1784,12 +1773,25 @@ impl Shell {
         }
         let placement = match kind {
             PanelKind::Sidebar => DockPlacement::Left,
-            PanelKind::Inspector => DockPlacement::Right,
-            PanelKind::Preview => unreachable!("handled above"),
+            PanelKind::Inspector | PanelKind::Preview => unreachable!("handled above"),
         };
         self.dock
             .update(cx, |area, cx| area.toggle_dock(placement, window, cx));
         // LayoutChanged also captures native collapse/resize controls.
+        cx.notify();
+    }
+
+    /// Open or close the floating frontmatter inspector.
+    ///
+    /// The popover owns focus capture and restoration; this only flips the
+    /// transient state both the shell and the document rail render from.
+    pub(crate) fn set_inspector_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.inspector_open == open {
+            return;
+        }
+        self.inspector_open = open;
+        self.document_header
+            .update(cx, |header, cx| header.set_inspector_open(open, cx));
         cx.notify();
     }
 }
@@ -2767,6 +2769,9 @@ fn command_icon(command: CommandId) -> IconName {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The document rail owns the trigger click and the popover dismissal;
+        // mirror its state before menus and availability read it.
+        self.inspector_open = self.document_header.read(cx).inspector_open();
         self.refresh_menus(window, cx);
         // Activate the frontmatter form whenever the active document, its schema
         // revision or its mapped fields change. Editing the form does not change
@@ -2798,6 +2803,9 @@ impl Render for Shell {
                 }
             }
         }
+        if self.inspector_open && self.frontmatter_key.is_none() {
+            self.set_inspector_open(false, cx);
+        }
         let layout = self.settings.layouts.get(self.mode);
         // The document face, size, line height and measure are explicit
         // preferences; the pane width no longer rescales the prose.
@@ -2810,7 +2818,7 @@ impl Render for Shell {
         self.document
             .update(cx, |panel, cx| panel.set_prose_style(style, cx));
         self.chrome
-            .set_sidebars(!layout.sidebar_visible && !layout.inspector_visible);
+            .set_sidebars(!layout.sidebar_visible && !self.inspector_open);
         let chrome_hidden = self.chrome.is_hidden() && self.warning.is_none();
         let project_name = self.project.read(cx).project_name();
 
@@ -2939,7 +2947,7 @@ impl Render for Shell {
                                                 let owner = cx.weak_entity();
                                                 let sidebar = layout.sidebar_visible;
                                                 let preview = layout.preview_visible;
-                                                let inspector = layout.inspector_visible;
+                                                let inspector = self.inspector_open;
                                                 let modes = self.project.read(cx).writing_modes();
                                                 Button::new("view-menu")
                                                     .small()
@@ -3242,6 +3250,147 @@ mod tests {
         .unwrap();
     }
 
+    async fn open_first_entry(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+        view: &Entity<Shell>,
+        root: std::path::PathBuf,
+    ) -> (Entity<ProjectWorkspace>, std::path::PathBuf) {
+        open_project(cx, handle, view, root);
+        let project = view.read_with(cx, |shell, _| shell.project.clone());
+        cx.condition(&project, |project, _| !project.is_loading())
+            .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            project.update(cx, |project, cx| {
+                project.open_first_entry_for_tests(window, cx)
+            });
+        })
+        .unwrap();
+        let path = wait_for_active_session(cx, &project).await;
+        (project, path)
+    }
+
+    #[gpui_kit::test]
+    async fn frontmatter_inspector_is_an_overlay_with_unchanged_document_bounds(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let directory = project_fixture("inspector-site");
+        std::fs::write(
+            directory.path().join("src/content/first.md"),
+            "---\ntitle: First\n---\n# First\n",
+        )
+        .unwrap();
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (project, _) =
+            open_first_entry(cx, handle, &view, directory.path().to_path_buf()).await;
+        assert!(view.read_with(cx, |shell, cx| {
+            !shell.inspector_open && shell.project.read(cx).active_frontmatter_key().is_some()
+        }));
+        let before = cx
+            .update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                assert!(window.try_find("frontmatter-inspector-surface").is_none());
+                window.find("document-panel").bounds()
+            })
+            .unwrap();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(
+                window.try_find("toggle-inspector").is_some(),
+                "inspector trigger must render"
+            );
+            window.click("toggle-inspector", cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("frontmatter-inspector-surface").is_some(),
+                "open={} trigger_open={:?}",
+                view.read(cx).inspector_open,
+                window
+                    .try_find("toggle-inspector")
+                    .map(|snapshot| snapshot.visible())
+            );
+            assert!(window.find("frontmatter-form").visible());
+            assert_eq!(window.find("document-panel").bounds(), before);
+            assert!(view.read(cx).inspector_open);
+        })
+        .unwrap();
+
+        // Outside dismissal leaves the document at the same geometry.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click_at("document-panel", point(px(40.), px(400.)), cx);
+            window.render_frame(cx);
+            assert!(window.try_find("frontmatter-inspector-surface").is_none());
+            assert_eq!(window.find("document-panel").bounds(), before);
+        })
+        .unwrap();
+        assert!(cx.update(|cx| !view.read(cx).inspector_open));
+
+        // The header close button dismisses without touching the document.
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("toggle-inspector", cx);
+            window.render_frame(cx);
+            window.click("inspector-close", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("frontmatter-inspector-surface").is_none());
+            assert_eq!(window.find("document-panel").bounds(), before);
+        })
+        .unwrap();
+        assert!(cx.update(|cx| !view.read(cx).inspector_open));
+        assert!(project.read_with(cx, |_, _| true));
+    }
+
+    #[gpui_kit::test]
+    async fn inspector_escape_restores_editor_focus_and_mode_switch_closes_it(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let directory = project_fixture("inspector-focus-site");
+        std::fs::write(
+            directory.path().join("src/content/first.md"),
+            "---\ntitle: First\n---\n# First\n",
+        )
+        .unwrap();
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (project, _) =
+            open_first_entry(cx, handle, &view, directory.path().to_path_buf()).await;
+        let editor = project
+            .read_with(cx, |project, cx| project.active_session(cx))
+            .unwrap()
+            .read_with(cx, |session, _| session.editor.clone());
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("input", editor.entity_id()), cx);
+            window.press("ctrl-2", cx);
+            window.render_frame(cx);
+            assert!(window.find("frontmatter-inspector-surface").visible());
+            assert!(!editor.read(cx).focus_handle(cx).is_focused(window));
+            window.press("escape", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("frontmatter-inspector-surface").is_none());
+            assert!(
+                editor.read(cx).focus_handle(cx).is_focused(window),
+                "Escape returns focus to the document"
+            );
+        })
+        .unwrap();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.execute(CommandId::ToggleInspector, window, cx)
+            });
+            window.render_frame(cx);
+            assert!(window.find("frontmatter-inspector-surface").visible());
+            view.update(cx, |shell, cx| {
+                shell.set_mode(WorkspaceMode::Preview, window, cx)
+            });
+            window.render_frame(cx);
+            assert!(!view.read(cx).inspector_open);
+        })
+        .unwrap();
+    }
+
     #[gpui_kit::test]
     async fn content_finder_opens_entries_and_inserts_links_with_undo(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
@@ -3526,18 +3675,12 @@ mod tests {
             );
             view.update(cx, |view, cx| {
                 view.execute(CommandId::ToggleSidebar, window, cx);
-                view.execute(CommandId::ToggleInspector, window, cx);
             });
         })
         .unwrap();
         cx.run_until_parked();
         cx.update_window(handle.into(), |_, window, cx| {
-            assert!(
-                view.read(cx)
-                    .dock
-                    .read(cx)
-                    .is_dock_open(DockPlacement::Right)
-            );
+            assert!(!view.read(cx).inspector_open);
             view.update(cx, |view, cx| {
                 view.set_mode(WorkspaceMode::Preview, window, cx)
             });
@@ -3546,10 +3689,6 @@ mod tests {
         cx.run_until_parked();
         view.read_with(cx, |shell, cx| {
             assert_eq!(shell.mode, WorkspaceMode::Preview);
-            assert!(
-                !shell.dock.read(cx).is_dock_open(DockPlacement::Right),
-                "the transient inspector closes when the mode changes"
-            );
             assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
         });
 
@@ -3565,7 +3704,6 @@ mod tests {
                 !shell.dock.read(cx).is_dock_open(DockPlacement::Left),
                 "Build keeps its own saved sidebar state"
             );
-            assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Right));
             let scope = shell.project_scope.as_ref().unwrap();
             assert_eq!(scope.preferences.last_mode, Some(WorkspaceMode::Build));
             assert_eq!(
@@ -3829,7 +3967,6 @@ mod tests {
         let settings = GlobalPreferencesV2 {
             layouts: ModeLayouts {
                 writing: LayoutState {
-                    inspector_visible: true,
                     ..LayoutState::default()
                 },
                 ..ModeLayouts::default()
@@ -3860,14 +3997,6 @@ mod tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(window.find("document-panel").bounds(), initial);
-            view.update(cx, |view, cx| {
-                view.execute(CommandId::ToggleInspector, window, cx)
-            });
-        })
-        .unwrap();
-        cx.update_window(handle.into(), |_, window, cx| {
-            assert!(!view.read(cx).settings.layouts.writing.inspector_visible);
-            window.render_frame(cx);
             view.update(cx, |view, cx| {
                 view.execute(CommandId::TogglePreview, window, cx)
             });
@@ -4092,7 +4221,6 @@ mod tests {
         let settings = GlobalPreferencesV2 {
             layouts: ModeLayouts {
                 writing: LayoutState {
-                    inspector_visible: true,
                     ..LayoutState::default()
                 },
                 ..ModeLayouts::default()
@@ -4104,9 +4232,6 @@ mod tests {
             window.render_frame(cx);
             let start = window.find("resize-handle-left").bounds().center();
             window.drag(start, point(start.x + px(45.), start.y), cx);
-            view.update(cx, |view, cx| {
-                view.execute(CommandId::ToggleInspector, window, cx)
-            });
         })
         .unwrap();
         let settings = cx.update(|cx| {
@@ -4119,8 +4244,8 @@ mod tests {
             assert!(window.find("navigator-panel").bounds().size.width > px(250.));
             assert!(
                 window
-                    .try_find("inspector-panel")
-                    .is_none_or(|panel| !panel.visible())
+                    .try_find("frontmatter-inspector-surface")
+                    .is_none_or(|surface| !surface.visible())
             );
         })
         .unwrap();
@@ -4133,7 +4258,6 @@ mod tests {
         let settings = GlobalPreferencesV2 {
             layouts: ModeLayouts {
                 writing: LayoutState {
-                    inspector_visible: true,
                     ..LayoutState::default()
                 },
                 ..ModeLayouts::default()
@@ -4148,9 +4272,7 @@ mod tests {
                 view.execute(CommandId::TogglePreview, window, cx)
             });
             view.read(cx).dock.clone().update(cx, |dock, cx| {
-                for placement in [DockPlacement::Left, DockPlacement::Right] {
-                    dock.set_dock_size(placement, px(650.), window, cx);
-                }
+                dock.set_dock_size(DockPlacement::Left, px(650.), window, cx);
                 dock.set_dock_size(DockPlacement::Bottom, px(650.), window, cx);
             });
         })
@@ -4161,7 +4283,7 @@ mod tests {
             let document = window.find("document-panel").bounds();
             assert!(document.size.width >= px(280.));
             assert!(document.size.height >= px(150.));
-            for id in ["navigator-panel", "inspector-panel", "preview-panel"] {
+            for id in ["navigator-panel", "preview-panel"] {
                 let bounds = window.find(id).bounds();
                 assert!(bounds.left() >= px(0.) && bounds.right() <= px(800.));
                 assert!(bounds.top() >= px(0.) && bounds.bottom() <= px(600.));
@@ -4178,7 +4300,6 @@ mod tests {
                 theme: mode,
                 layouts: ModeLayouts {
                     writing: LayoutState {
-                        inspector_visible: true,
                         ..LayoutState::default()
                     },
                     ..ModeLayouts::default()
@@ -4191,7 +4312,7 @@ mod tests {
                 window.render_frame(cx);
                 assert!(window.find("title-bar").visible());
                 assert!(window.find("document-header").visible());
-                for id in ["navigator-panel", "document-panel", "inspector-panel"] {
+                for id in ["navigator-panel", "document-panel"] {
                     let bounds = window.find(id).bounds();
                     assert!(bounds.size.width > px(50.) && bounds.size.height > px(100.));
                     assert!(bounds.left() >= px(0.) && bounds.right() <= px(800.));
@@ -4441,10 +4562,8 @@ mod tests {
         let project = project_fixture("layout-site");
         let saved = LayoutState {
             sidebar_visible: true,
-            inspector_visible: false,
             preview_visible: true,
             sidebar_width: 200.,
-            inspector_width: 320.,
             preview_height: 220.,
         };
         {
@@ -4472,10 +4591,8 @@ mod tests {
             assert_eq!(shell.settings.layouts.writing, saved);
             let dock = shell.dock.read(cx);
             assert!(dock.is_dock_open(DockPlacement::Left));
-            assert!(!dock.is_dock_open(DockPlacement::Right));
             assert!(dock.is_dock_open(DockPlacement::Bottom));
             assert_eq!(dock.dock_size(DockPlacement::Left), Some(px(200.)));
-            assert_eq!(dock.dock_size(DockPlacement::Right), Some(px(320.)));
             assert_eq!(dock.dock_size(DockPlacement::Bottom), Some(px(220.)));
             assert_eq!(
                 shell.global_layouts.writing,
@@ -4488,8 +4605,8 @@ mod tests {
             assert_eq!(window.find("navigator-panel").bounds().size.width, px(200.));
             assert!(
                 window
-                    .try_find("inspector-panel")
-                    .is_none_or(|panel| !panel.visible())
+                    .try_find("frontmatter-inspector-surface")
+                    .is_none_or(|surface| !surface.visible())
             );
             assert!(window.find("preview-panel").visible());
         })
@@ -4527,18 +4644,14 @@ mod tests {
         let second = project_fixture("second-site");
         let first_layout = LayoutState {
             sidebar_visible: false,
-            inspector_visible: false,
             preview_visible: false,
             sidebar_width: 190.,
-            inspector_width: 280.,
             preview_height: 160.,
         };
         let second_layout = LayoutState {
             sidebar_visible: true,
-            inspector_visible: false,
             preview_visible: true,
             sidebar_width: 230.,
-            inspector_width: 320.,
             preview_height: 240.,
         };
         {
@@ -4586,7 +4699,6 @@ mod tests {
         view.read_with(cx, |shell, cx| {
             assert_eq!(shell.settings.layouts.writing, second_layout);
             assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Left));
-            assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Right));
             assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
             assert_eq!(
                 shell.dock.read(cx).dock_size(DockPlacement::Bottom),
@@ -4617,10 +4729,8 @@ mod tests {
         let project = project_fixture("moving-site");
         let saved = LayoutState {
             sidebar_visible: false,
-            inspector_visible: false,
             preview_visible: true,
             sidebar_width: 210.,
-            inspector_width: 300.,
             preview_height: 180.,
         };
         let id = {

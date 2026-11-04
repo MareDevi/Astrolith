@@ -4565,6 +4565,7 @@ impl ProjectWorkspace {
             ide_configured: self.global_preferences.ide.is_configured(),
             sidebar_visible: self.view_sidebar,
             inspector_visible: self.view_inspector,
+            frontmatter_available: self.active_frontmatter_key().is_some(),
             workspace_mode: Default::default(),
             preview_visible: self.view_preview,
             preview_attached: false,

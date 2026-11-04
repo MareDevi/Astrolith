@@ -38,7 +38,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, App, AppContext, Context, Entity, EventEmitter, IntoElement, ObjectFit,
-    PathPromptOptions, Render, SharedString, Subscription, Window, div, img, prelude::*, px,
+    PathPromptOptions, Render, SharedString, Subscription, TestSupportExt, Window, div, img,
+    prelude::*, px,
 };
 
 use crate::editor::image_preview::{self, PreviewSource};
@@ -898,7 +899,9 @@ impl Render for FrontmatterForm {
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child("Edit the raw source instead; the document is never rewritten."),
-                );
+                )
+                .test_support()
+                .into_any_element();
         }
         let Some(editor) = self.editor.as_ref() else {
             return div()
@@ -920,7 +923,9 @@ impl Render for FrontmatterForm {
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child("Choose an entry to see its details."),
-                );
+                )
+                .test_support()
+                .into_any_element();
         };
         let notice = self.notice.clone();
         let images = RowImageContext {
@@ -933,44 +938,14 @@ impl Render for FrontmatterForm {
         for (index, row) in self.rows.iter().enumerate() {
             rows.push(render_row(index, row, editor, &images, cx, window).into_any_element());
         }
+        // The form is the popover body: its host owns the header and close
+        // affordance, and this root is the single scrolling region.
         div()
             .id("frontmatter-form")
             .v_flex()
             .size_full()
             .overflow_y_scroll()
             .bg(cx.theme().background)
-            .child(
-                div()
-                    .h_flex()
-                    .items_center()
-                    .justify_between()
-                    .px_4()
-                    .pt_4()
-                    .pb_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border.opacity(0.55))
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .font_family(crate::theme::display_font(cx))
-                                    .text_base()
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .child("Details"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(SharedString::from(format!(
-                                        "{} fields",
-                                        editor.controls().len()
-                                    ))),
-                            ),
-                    ),
-            )
             .when_some(notice, |form, notice| {
                 form.child(
                     div()
@@ -982,6 +957,8 @@ impl Render for FrontmatterForm {
                 )
             })
             .child(div().v_flex().gap_5().p_4().children(rows))
+            .test_support()
+            .into_any_element()
     }
 }
 
