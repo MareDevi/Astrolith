@@ -1,6 +1,5 @@
 # Astrolith development
 
-- Read the current task in `docs/superpowers/plans/2026-10-28-astrolith-implementation.md` and its review before implementation. The referenced design specification is currently missing; M00 uses the plan provisionally. Do not invent the specification or begin product architecture before the M00 gate is resolved.
 - `mise.toml` owns project tool versions and task entry points. Use `mise install` and `mise run …`; never install project tool versions globally or add competing version files.
 - Commit `Cargo.lock`. Build and test with `--locked`. Commit Bun lockfiles when Astro fixtures are introduced; no fixture exists at bootstrap.
 - Depend on the pinned `gpui-kit` facade. Verify APIs in the matching registry source before using examples from newer documentation. Read the GPUI Kit design and coding guides before changing the UI.

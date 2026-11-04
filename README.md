@@ -51,14 +51,6 @@ exist but are neither delivered nor supported.
 
 ## Documentation
 
-- [User guide](docs/user/guide.md)
-- [Keyboard shortcuts](docs/user/keyboard-shortcuts.md)
-- [Privacy and local data](docs/user/privacy.md)
-- [Development and packaging](docs/technical/development.md)
-- [Packaging notes](packaging/linux/README.md)
-- [Astro Editor parity ledger and final audit](docs/technical/astro-editor-parity.md)
-- [Editor capability contract](docs/technical/editor-capabilities.md)
-
 The user guide, a shortcut reference generated from the live command registry,
 and the local-paths inventory are also available in the application's **Help**
 menu.
