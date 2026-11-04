@@ -66,7 +66,7 @@ use gpui_kit::component::{
 use gpui_kit::{
     AnyWindowHandle, App, AppContext, Context, Entity, EventEmitter, Focusable, IntoElement,
     PathPromptOptions, Render, SharedString, Subscription, Task, TestSupportExt, WeakEntity,
-    Window, div, prelude::*, px,
+    Window, div, prelude::*, px, rems,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -454,6 +454,7 @@ impl ListDelegate for EntryList {
             let muted = cx.theme().muted_foreground;
             return Some(
                 ListItem::new(id)
+                    .min_h(rems(3.25))
                     .selected(selected)
                     .accessibility_label(label)
                     .child(
@@ -593,6 +594,7 @@ impl ListDelegate for EntryList {
             });
         Some(
             ListItem::new(row.id.clone())
+                .min_h(rems(3.25))
                 .selected(selected)
                 .when(active, |item| item.bg(cx.theme().selection).rounded_md())
                 .accessibility_label(row.search.clone())
@@ -11823,6 +11825,35 @@ export const collections = {blog, dataAuthors};
             view.update(cx, |view, cx| view.library_back(window, cx));
             window.render_frame(cx);
             assert!(window.try_find("project-collections").is_some());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn library_entry_rows_leave_room_for_the_filename(cx: &mut TestAppContext) {
+        let dir = fixture();
+        std::fs::create_dir_all(dir.path().join("src/posts/nested")).unwrap();
+        std::fs::write(dir.path().join("src/posts/nested/one.md"), "# One\n").unwrap();
+        for (name, title) in [("a.md", "First entry"), ("b.mdx", "Second entry")] {
+            std::fs::write(
+                dir.path().join("src/posts").join(name),
+                format!("---\ntitle: {title}\n---\n\n# Body\n"),
+            )
+            .unwrap();
+        }
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.select_collection(Some("blog".into()), window, cx)
+            });
+            window.render_frame(cx);
+            let first = window.find("entry:blog:a").bounds();
+            let second = window.find("entry:blog:b").bounds();
+            assert!(
+                second.origin.y >= first.origin.y + first.size.height,
+                "a two-line entry row must not overlap the next row: first={first:?} second={second:?}"
+            );
         })
         .unwrap();
     }
