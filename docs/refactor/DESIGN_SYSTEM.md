@@ -95,7 +95,7 @@ CSS `--radius = 0.625rem`；原型导出：sm .375rem、md .5rem、lg .625rem、
 | --- | --- | --- |
 | 模式切换 | Shell 的 Actions + Kit tabs/segmented composition | persistent selected，键盘可达；同一文档不换示例文件 |
 | Toolbar | 现有 Button/DropdownMenu/Tooltip | ghost 常规动作；图标具名；危险/加载/禁用有可见原因 |
-| 文件导航 | 现有 ProjectWorkspace/List | domain ID、键盘选择、filter/sort 保留；不是演示树 |
+| 文件导航 | Writing/Preview：现有 ProjectWorkspace/List；Build：`FileBrowser` + Kit List | Writing 保留 domain ID、filter/sort；Build 显示真实项目树，方向键/Enter 与点击均可展开或打开；不是演示树 |
 | Inspector | retained FrontmatterForm + controlled Popover | 默认关闭、outside/Esc 关闭、返回触发焦点、编辑区几何不变 |
 | 表单 | 现有 Input/NumberInput/Switch/DatePicker/Select 与 row entities | schema path 身份、required/default/description/error，长 label 可换行 |
 | 设置 | 现有 PreferencesSheet / draft model | Apply/Cancel 语义保留，新增页不重复 resolver |

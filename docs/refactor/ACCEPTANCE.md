@@ -324,3 +324,16 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 - 未完成/未验证：
   - 只对 Appearance 做了逐像素截图；Workspace、Preview、Project、Collections、Advanced 由 GPUI 测试覆盖，未逐页原生截图。
   - 未重新执行 M7 的完整性能 workload；本轮改动不涉及列表/文档热路径，性能结论仍引用 §16。
+
+## 18. Build 文件浏览器执行记录
+
+- 范围：`astrolith-workspace/src/files.rs`、`astrolith-gpui/src/file_browser.rs`、`project_discovery.rs`、`shell.rs`。
+- 行为：Writing/Preview 保持原 Library；Build 的左侧栏改为文件浏览器。真实项目树按目录优先、大小写不敏感名称排序；跳过 `node_modules`、`target`、`dist`、`build`、`.git`、`.astro` 等依赖/输出/生成目录，不跟随符号链接，深度 16、节点 5000、检查项 20000 有界。读取失败的子目录被跳过，根目录失败显示错误状态。
+- 交互：点击或方向键选择后 Enter 均会确认行；目录展开/折叠，文件打开。内容条目与项目内 `.astro` 走原有 retained session（标签、dirty、history、保存），其他项目文件经 `ReadonlyFileRequested` 交给 Shell 走既定 8 MiB/50,000 行 readonly 路径。扫描在服务阻塞通道执行，渲染不读取文件系统。
+- 刷新：项目打开时建立根；进入 Build、索引发布与手动刷新都会重扫，展开状态与当前选中行按 domain ID 保留；打开中的文件按路径高亮。
+- 回归：
+  - workspace `files` 单元测试：目录优先与嵌套相对路径、依赖/输出/隐藏目录规则、符号链接跳过、根目录不可读报错（3 个用例）。
+  - GPUI `build_swaps_the_library_for_a_project_file_explorer`：Writing 显示 Library 且无 explorer；Build 显示 explorer 且无 Library；根行包含 `src`/`index.astro`/`package.json` 且不含 `node_modules`；点击目录只展开该层；点击 `.astro` 建立真实 session；选择后 Enter 打开第二个 `.astro`；内容条目走索引 session；配置文件的 readonly 请求携带规范化路径；切回 Writing 恢复 Library。
+- 验证：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试 **872 passed、0 failed、8 ignored**；fixture 单元 6 passed，Astro fixture compatibility PASS。
+- 原生证据：Hyprland 0.57.1 / Wayland / 100%，`fixtures/parity-project`，dark/light 主题为 Light；截图 `/tmp/astrolith--build-explorer.png`。截图中 Build 顶部为真实标签条，左侧 Explorer 显示目录优先的真实文件列表与刷新按钮，中央为完整源码。运行日志记录 `.astro` 与 Markdown 进入 session、`.tsx`/`.jsx`/`.vue`/`.svelte`/`.json`/`.mjs`/`.gitignore`/`bun.lock` 进入 readonly 路径，未出现 panic。
+- 限制：原生窗口在并行编译/测试期间被系统以 `SIGKILL`（exit 137）终止，发生在上述交互与截图之后；未重跑完整三模式键盘矩阵、macOS/Windows 或 150%/200% 显示缩放。Writing 的 Library 与 Build 的 explorer 仍共享同一左侧 Dock 宽度与布局记录。

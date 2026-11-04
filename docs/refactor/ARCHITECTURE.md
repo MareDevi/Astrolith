@@ -60,7 +60,7 @@ flowchart TD
 | --- | --- | --- | --- |
 | Astro 5/6/7 discovery：`astrolith-astro/src/{discovery,config,pattern}.rs` | 保守静态发现，不执行任意配置推断 | 直接复用；供三模式同一项目使用 | 不可解析配置仍显示诊断；fixtures 验证 |
 | 索引/监听：`astrolith-workspace/src/{index,watcher}.rs` | 有界刷新、同源合并、nested collections | 直接复用；导航改外观 | 旧代际不能覆盖新项目/dirty buffer |
-| 文件导航：`project_discovery.rs`、workspace `list.rs` | collection/目录层级、映射标题、过滤/排序、counts | Writing 按需，Build 默认导航；保留筛选与路径身份 | 不是任意项目文件树；新导航必须真实接入 |
+| 文件导航：`project_discovery.rs`、`file_browser.rs`、workspace `{list,files}.rs` | Writing 是 collection/目录层级、映射标题、过滤/排序、counts；Build 是有界真实项目文件树（跳过依赖/输出目录、不跟随符号链接） | 按模式共享侧栏面板：Writing/Preview 保留 Library，Build 使用 `FileBrowser`；内容条目与 `.astro` 复用 retained session，其他文件经 Shell 走 readonly | 两种导航都必须真实接入且有界；Build 树刷新不覆盖 expanded/active 身份 |
 | 多文档 session：`editor/session.rs`、`project_discovery.rs` | 打开文件保留 editor/history，现用 document rail overflow 导航 | 模式共享同一 session registry；Build 加真实标签条 | 不重建 editor、不丢 dirty/selection/history |
 | 读写：`file.rs`、document `buffer.rs`、`save.rs` | 项目条目可编辑；任意 Open file readonly，8 MiB/50,000 行上限 | 保留安全读写逻辑；项目内 `.astro` 开发文件编辑为必交付新增能力 | 不误称已有任意源码编辑 |
 | Markdown/MDX/YAML：document `parse.rs`、`projection.rs`、`serialize.rs` | 隐藏 FM/imports，无损映射；不安全分隔时显示完整源并告知 | 复用完整源与映射；Build complete-source 展示需事务桥 | UTF-8、CRLF、隐藏字节、拒绝路径 |
