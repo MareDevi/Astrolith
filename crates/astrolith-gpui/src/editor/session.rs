@@ -1,5 +1,5 @@
 //! One retained editor/history for each canonical source, independent of selection.
-use std::ops::Range;
+use std::{ops::Range, time::Instant};
 
 use astrolith_document::{
     DocumentBuffer, DocumentIdentity, DocumentKind, DocumentRevision, FormatCommand, FormatOutcome,
@@ -41,6 +41,10 @@ pub(crate) struct DocumentSession {
     /// Whether the last `Change` this session delivered came from its own write
     /// rather than from the user's keyboard.
     programmatic_change: bool,
+    /// Complete-source transactions, one ordered stack for body and frontmatter.
+    history: SourceHistory,
+    /// Selection captured before the next source transaction.
+    last_selection: Range<usize>,
     /// The active selection and the end of the occurrence `select_next_occurrence`
     /// added last, so a repeated press continues instead of finding it again.
     next_occurrence: Option<(Range<usize>, usize)>,
@@ -86,9 +90,14 @@ pub(crate) struct DocumentSession {
     _cursor: Subscription,
     _blur: Subscription,
     _placeholder_keys: Subscription,
+    _history_keys: Subscription,
 }
 pub(crate) struct SessionChanged;
 impl EventEmitter<SessionChanged> for DocumentSession {}
+
+/// Emitted when undo/redo changed the complete source outside an editor change.
+pub(crate) struct HistoryChanged;
+impl EventEmitter<HistoryChanged> for DocumentSession {}
 
 /// The editor lost focus while its document was dirty.
 ///
@@ -162,7 +171,12 @@ impl DocumentSession {
                 // text is diffed at this boundary and mapped back before anything
                 // reads the buffer.
                 this.programmatic_change = std::mem::take(&mut this.writing_self);
-                this.absorb(cx);
+                let intent = if this.programmatic_change {
+                    HistoryIntent::Atomic
+                } else {
+                    HistoryIntent::Typing
+                };
+                this.absorb_with_intent(cx, intent);
                 if this.refused {
                     // Fail closed: the refused text never reached the source, so put
                     // the editor back on the authoritative projection (and clear the
@@ -180,8 +194,9 @@ impl DocumentSession {
         // Cursor moves notify the editor without changing text; focus dimming and
         // typewriter centring follow the caret, so they refresh here and nowhere
         // near the render path.
-        let cursor = cx.observe_in(&editor, window, |this, _editor, window, cx| {
+        let cursor = cx.observe_in(&editor, window, |this, editor, window, cx| {
             let _ = window;
+            this.last_selection = editor.read(cx).selected_range();
             this.refresh_cursor(cx);
         });
         // Losing focus is the writer's save trigger: the workspace turns it into
@@ -228,6 +243,33 @@ impl DocumentSession {
                 }
             }
         });
+        let history_weak = cx.weak_entity();
+        let history_focus = editor.read(cx).focus_handle(cx);
+        let history_keys = cx.intercept_keystrokes(move |event, window, cx| {
+            if !history_focus.is_focused(window) {
+                return;
+            }
+            let modifiers = event.keystroke.modifiers;
+            if !modifiers.control && !modifiers.platform {
+                return;
+            }
+            let key = event.keystroke.key.as_str();
+            match key {
+                "z" if modifiers.shift => {
+                    let _ = history_weak.update(cx, |session, cx| session.redo_source(window, cx));
+                }
+                "z" => {
+                    let _ = history_weak.update(cx, |session, cx| session.undo_source(window, cx));
+                }
+                "y" => {
+                    let _ = history_weak.update(cx, |session, cx| session.redo_source(window, cx));
+                }
+                _ => return,
+            }
+            // The complete-source stack owns undo; the editor's internal stack
+            // must never receive the same key.
+            cx.stop_propagation();
+        });
         Self {
             editor,
             buffer,
@@ -235,6 +277,8 @@ impl DocumentSession {
             origin: false,
             writing_self: false,
             programmatic_change: false,
+            history: SourceHistory::default(),
+            last_selection: 0..0,
             next_occurrence: None,
             refused: false,
             notice,
@@ -256,6 +300,7 @@ impl DocumentSession {
             _cursor: cursor,
             _blur: blur,
             _placeholder_keys: placeholder_keys,
+            _history_keys: history_keys,
         }
     }
 
@@ -975,6 +1020,68 @@ impl DocumentSession {
     ///
     /// Called at every save, recovery snapshot and frontmatter patch boundary;
     /// the editor event path already absorbed the last delivered `Change`.
+    /// Undo one complete-source transaction, body or hidden frontmatter.
+    pub(crate) fn undo_source(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.absorb(cx);
+        let Some(entry) = self.history.undo_entry() else {
+            return false;
+        };
+        let current = self.buffer.current_text().to_owned();
+        if !entry.matches_after(&current) {
+            // A source rewrite outside the transaction stack invalidates it.
+            self.history.clear();
+            return false;
+        }
+        let restored = entry.undo(&current);
+        if self.buffer.apply_text(restored).is_err() {
+            return false;
+        }
+        self.after_history_step(entry.selection_before.clone(), window, cx);
+        true
+    }
+
+    /// Redo one complete-source transaction.
+    pub(crate) fn redo_source(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.absorb(cx);
+        let Some(entry) = self.history.redo_entry() else {
+            return false;
+        };
+        let current = self.buffer.current_text().to_owned();
+        if !entry.matches_before(&current) {
+            self.history.clear();
+            return false;
+        }
+        let restored = entry.redo(&current);
+        if self.buffer.apply_text(restored).is_err() {
+            return false;
+        }
+        self.after_history_step(entry.selection_after.clone(), window, cx);
+        true
+    }
+
+    fn after_history_step(
+        &mut self,
+        selection: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.rebuild_projection(window, cx);
+        let visible_len = self.projection.visible.len();
+        let start = selection.start.min(visible_len);
+        let end = selection.end.min(visible_len);
+        self.editor.update(cx, |editor, cx| {
+            editor.set_selected_range(start..end, cx);
+        });
+        self.last_selection = selection;
+        self.refresh_copyedit(cx);
+        self.refresh_writer(cx);
+        self.sync_placeholders(cx);
+        self.dirty = self.buffer.is_dirty();
+        cx.emit(HistoryChanged);
+        cx.emit(SessionChanged);
+        cx.notify();
+    }
+
     pub fn sync_buffer(&mut self, cx: &App) {
         self.absorb(cx);
         self.dirty = self.buffer.is_dirty();
@@ -1021,11 +1128,23 @@ impl DocumentSession {
         patch: impl FnOnce(&str) -> Result<String, String>,
     ) -> Result<(), String> {
         self.absorb(cx);
-        let patched = patch(self.buffer.current_text())?;
+        let before = self.buffer.current_text().to_owned();
+        let selection_before = self.editor.read(cx).selected_range();
+        let patched = patch(&before)?;
         self.buffer
             .apply_text(patched)
             .map_err(|error| error.to_string())?;
         self.rebuild_projection(window, cx);
+        let after = self.buffer.current_text().to_owned();
+        let selection_after = self.editor.read(cx).selected_range();
+        self.history.record(
+            &before,
+            &after,
+            selection_before,
+            selection_after.clone(),
+            HistoryIntent::Atomic,
+        );
+        self.last_selection = selection_after;
         self.refresh_copyedit(cx);
         self.refresh_writer(cx);
         self.dirty = self.buffer.is_dirty();
@@ -1034,8 +1153,13 @@ impl DocumentSession {
         Ok(())
     }
 
-    /// Map the whole visible text back into the complete source and absorb it.
+    /// Flush a pending visible edit as an atomic transaction boundary.
     fn absorb(&mut self, cx: &App) {
+        self.absorb_with_intent(cx, HistoryIntent::Atomic);
+    }
+
+    /// Map the whole visible text back into the complete source and absorb it.
+    fn absorb_with_intent(&mut self, cx: &App, intent: HistoryIntent) {
         if self.refused {
             // The editor text is known to be newer-and-rejected; nothing may be
             // mapped from it until a rebuild resynchronises it.
@@ -1045,13 +1169,24 @@ impl DocumentSession {
         if visible == self.projection.visible {
             return;
         }
+        let before = self.buffer.current_text().to_owned();
+        let selection_before = self.last_selection.clone();
+        let selection_after = self.editor.read(cx).selected_range();
         let edit = diff_visible(&self.projection.visible, &visible);
-        match apply_visible_edit(self.buffer.current_text(), &self.projection, edit) {
+        match apply_visible_edit(&before, &self.projection, edit) {
             Ok(source) => {
                 if let Err(error) = self.buffer.apply_text(source) {
                     self.refuse(&error.to_string());
                     return;
                 }
+                let after = self.buffer.current_text().to_owned();
+                self.history.record(
+                    &before,
+                    &after,
+                    selection_before,
+                    selection_after.clone(),
+                    intent,
+                );
                 match self.projection.renew_visible(visible) {
                     Ok(projection) => self.projection = projection,
                     Err(error) => self.refuse(&error.to_string()),
@@ -1061,6 +1196,7 @@ impl DocumentSession {
             // text is never guessed into it.
             Err(error) => self.refuse(&error.to_string()),
         }
+        self.last_selection = selection_after;
     }
 
     fn refuse(&mut self, reason: &str) {
@@ -1093,9 +1229,12 @@ impl DocumentSession {
         {
             let caret = map_visible_offset(&previous_visible, &self.projection.visible, caret);
             let visible = self.projection.visible.clone();
-            self.origin = true;
+            // History is owned by the complete-source transactions below; the
+            // editor's own stack must not record this programmatic rewrite.
+            self.origin = false;
+            self.writing_self = false;
             self.editor.update(cx, |editor, cx| {
-                editor.replace_all(visible, window, cx);
+                editor.set_value(visible, window, cx);
                 editor.set_selected_range(caret..caret, cx);
             });
         }
@@ -1103,6 +1242,185 @@ impl DocumentSession {
         // absorb.
         self.refused = false;
     }
+}
+
+/// Whether a transaction may merge with adjacent typing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryIntent {
+    Typing,
+    Atomic,
+}
+
+/// One complete-source edit: replacing `range` with `removed` changes `before`
+/// into `after`.
+#[derive(Clone, Debug)]
+struct SourceTransaction {
+    range: Range<usize>,
+    removed: String,
+    inserted: String,
+    selection_before: Range<usize>,
+    selection_after: Range<usize>,
+    intent: HistoryIntent,
+    at: Instant,
+}
+
+impl SourceTransaction {
+    fn undo(&self, current: &str) -> String {
+        let mut text = current.to_owned();
+        text.replace_range(
+            self.range.start..self.range.start + self.inserted.len(),
+            &self.removed,
+        );
+        text
+    }
+
+    fn redo(&self, current: &str) -> String {
+        let mut text = current.to_owned();
+        text.replace_range(
+            self.range.start..self.range.start + self.removed.len(),
+            &self.inserted,
+        );
+        text
+    }
+
+    fn matches_after(&self, current: &str) -> bool {
+        current.get(self.range.start..self.range.start + self.inserted.len())
+            == Some(self.inserted.as_str())
+    }
+
+    fn matches_before(&self, current: &str) -> bool {
+        current.get(self.range.start..self.range.start + self.removed.len())
+            == Some(self.removed.as_str())
+    }
+}
+
+/// Ordered complete-source history shared by body and frontmatter edits.
+#[derive(Default)]
+struct SourceHistory {
+    entries: Vec<SourceTransaction>,
+    cursor: usize,
+}
+
+impl SourceHistory {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.cursor = 0;
+    }
+
+    fn record(
+        &mut self,
+        before: &str,
+        after: &str,
+        selection_before: Range<usize>,
+        selection_after: Range<usize>,
+        intent: HistoryIntent,
+    ) {
+        if before == after {
+            return;
+        }
+        self.entries.truncate(self.cursor);
+        let now = Instant::now();
+        if intent == HistoryIntent::Typing && self.try_merge(before, after, &selection_after, now) {
+            self.cursor = self.entries.len();
+            return;
+        }
+        let Some((range, removed, inserted)) = source_diff(before, after) else {
+            return;
+        };
+        self.entries.push(SourceTransaction {
+            range,
+            removed,
+            inserted,
+            selection_before,
+            selection_after,
+            intent,
+            at: now,
+        });
+        if self.entries.len() > 500 {
+            self.entries.remove(0);
+        }
+        self.cursor = self.entries.len();
+    }
+
+    fn try_merge(
+        &mut self,
+        before: &str,
+        after: &str,
+        selection_after: &Range<usize>,
+        now: Instant,
+    ) -> bool {
+        let Some(last) = self.entries.last_mut() else {
+            return false;
+        };
+        if last.intent != HistoryIntent::Typing || now.duration_since(last.at).as_millis() > 900 {
+            return false;
+        }
+        let Some((range, removed, inserted)) = source_diff(before, after) else {
+            return true;
+        };
+        if !last.removed.is_empty() || !removed.is_empty() {
+            return false;
+        }
+        if range.start != last.range.start + last.inserted.len() {
+            return false;
+        }
+        last.inserted.push_str(&inserted);
+        last.selection_after = selection_after.clone();
+        last.at = now;
+        true
+    }
+
+    fn undo_entry(&mut self) -> Option<SourceTransaction> {
+        if self.cursor == 0 {
+            return None;
+        }
+        self.cursor -= 1;
+        self.entries.get(self.cursor).cloned()
+    }
+
+    fn redo_entry(&mut self) -> Option<SourceTransaction> {
+        let entry = self.entries.get(self.cursor).cloned()?;
+        self.cursor += 1;
+        Some(entry)
+    }
+}
+
+/// Return the single contiguous replacement that turns `before` into `after`.
+fn source_diff(before: &str, after: &str) -> Option<(Range<usize>, String, String)> {
+    let before_bytes = before.as_bytes();
+    let after_bytes = after.as_bytes();
+    let mut prefix = before_bytes
+        .iter()
+        .zip(after_bytes)
+        .take_while(|(left, right)| left == right)
+        .count();
+    while prefix > 0 && !before.is_char_boundary(prefix) {
+        prefix -= 1;
+    }
+    let mut suffix = 0;
+    while suffix < before_bytes.len() - prefix
+        && suffix < after_bytes.len() - prefix
+        && before_bytes[before_bytes.len() - 1 - suffix]
+            == after_bytes[after_bytes.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    while suffix > 0
+        && (!before.is_char_boundary(before.len() - suffix)
+            || !after.is_char_boundary(after.len() - suffix))
+    {
+        suffix -= 1;
+    }
+    let before_end = before.len() - suffix;
+    let after_end = after.len() - suffix;
+    if prefix == before_end && prefix == after_end {
+        return None;
+    }
+    Some((
+        prefix..before_end,
+        before[prefix..before_end].to_owned(),
+        after[prefix..after_end].to_owned(),
+    ))
 }
 
 /// Which projection applies to a canonical source path.

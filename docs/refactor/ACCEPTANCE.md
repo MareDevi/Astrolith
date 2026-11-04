@@ -132,3 +132,12 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 - 新增 `Toggle terminal` 命令（Ctrl+`）与 View 菜单项；快捷键文档由命令 registry 校验。
 - 验证：`astrolith-terminal` 4 个服务测试通过（ANSI 红色与退出码 7、交互输入/resize、Ctrl-D 退出码 3、kill 长进程、revision 增长）；GPUI 集成测试验证真实 shell 输出进入屏幕、Dock/模式隐藏后 session 与 pid 不变、切项目后旧 pid 终止且新 root 启动。`cargo test --workspace --locked` 全部通过（GPUI 347 passed、4 ignored）。
 - 未完成：A24/A25 的真实原生窗口录屏、IME/焦点隔离、ANSI 视觉与 150%/200% 缩放验收尚未执行；headless 与 service 测试不能替代真机证据。
+
+## 9. M4a 执行记录
+
+- `DocumentSession` 新增单一完整源事务栈，记录 `before/after` 的连续替换区间、可见 selection 与编辑意图；正文、格式化、链接包裹、组件标签和隐藏 frontmatter patch 都进入同一顺序。导入 patch 仍保持“撤销标签保留 import”的既有语义，不由事务回滚。
+- 编辑器内部 undo 栈不再作为用户历史：`Ctrl+Z`/`Ctrl+Shift+Z`/`Ctrl+Y` 在编辑器 focus 下由会话 interceptor 截获；projection 重建改用不写历史的 `set_value`。每次 undo/redo 重建投影后恢复该事务的可见 selection，并继续把完整源作为唯一权威。
+- 连续键入按 900 ms 与相邻插入合并，避免逐字符 undo 破坏现有粒度；事务数上限 500。非相邻或结构编辑保持原子。
+- 新增 `HistoryChanged` 事件：`ProjectWorkspace` 转发后，Shell 强制 frontmatter form 从恢复后的完整源重新加载，避免隐藏字段 undo 后表单与正文分叉。
+- 回归：新增正文编辑→隐藏 FM 修改→Undo→Undo→Redo→Redo 的交错测试，以及 CRLF + 中文/emoji 的字节保真 undo/redo 测试；现有 projection、formatting、MDX import、save/conflict/recovery 测试全部继续通过（GPUI 349 passed、4 ignored）。
+- 未完成/未覆盖：原生窗口中的真实键盘、IME composition、跨模式 undo 与表单焦点恢复尚未执行；恢复文件在外部重载路径上的历史失效主要依赖现有 session 重开，未新增磁盘恢复集成用例。

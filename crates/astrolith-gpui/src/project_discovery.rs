@@ -15,7 +15,7 @@ use crate::{
             SaveCompletion, SaveCoordinator, SaveKind, SaveRequest, SaveResult, SaveStatus,
         },
         save_failure::SaveFailureArtifact,
-        session::{DocumentSession, SaveOnBlur, SessionChanged},
+        session::{DocumentSession, HistoryChanged, SaveOnBlur, SessionChanged},
         writing_modes::WritingModes,
     },
     frontmatter::{FrontmatterEdit, ReferenceCatalog},
@@ -915,6 +915,10 @@ impl Drop for ProjectWorkspace {
 }
 impl EventEmitter<SessionChanged> for ProjectWorkspace {}
 
+/// The active session's complete-source history moved; the inspector must reload.
+pub(crate) struct HistoryChangedEvent;
+impl EventEmitter<HistoryChangedEvent> for ProjectWorkspace {}
+
 /// Emitted once a project's manifest and entry index are published.
 ///
 /// Carries the canonical root so preference consumers never derive a project
@@ -1197,6 +1201,14 @@ impl ProjectWorkspace {
                 this.note_session_change(&changed_path, cx);
             },
         );
+        let history = cx.subscribe_in(
+            &session,
+            window,
+            move |_this, _, _: &HistoryChanged, _, cx| {
+                cx.emit(HistoryChangedEvent);
+                cx.notify();
+            },
+        );
         let blur_path = path.clone();
         let blur = cx.subscribe_in(
             &session,
@@ -1215,7 +1227,8 @@ impl ProjectWorkspace {
         });
         self.save_coordinator
             .observe(&path, revision, dirty, cx.background_executor().now());
-        self.session_subscriptions.insert(path, vec![changed, blur]);
+        self.session_subscriptions
+            .insert(path, vec![changed, blur, history]);
     }
 
     /// Feed one session's revision into the save coordinator.
@@ -9299,6 +9312,122 @@ export const collections = {blog, dataAuthors};
                 "absorbing a change must not swallow the notice"
             );
             assert_eq!(session.buffer.current_text(), "# Body edited\n");
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn complete_source_history_preserves_crlf_and_unicode_bytes(cx: &mut TestAppContext) {
+        let source = "---\r\ntitle: Old\r\n---\r\n\r\n# 标题 🦀\r\n";
+        let (handle, _view) = mount(cx);
+        let session = bare_session(cx, handle, "src/posts/crlf.md", source);
+        replace_visible(cx, handle, &session, "# 标题 changed 🦀\r\n");
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .patch_complete(window, cx, |live| {
+                        let mut document = parse_document(live).map_err(|e| e.to_string())?;
+                        document
+                            .set_field(
+                                "title",
+                                astrolith_document::FrontmatterValue::String("New".to_owned()),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        document.serialize().map_err(|e| e.to_string())
+                    })
+                    .expect("CRLF frontmatter patch applies");
+            });
+        })
+        .unwrap();
+        let edited = "---\r\ntitle: New\r\n---\r\n\r\n# 标题 changed 🦀\r\n";
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.buffer.current_text(), edited);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(session.update(cx, |session, cx| session.undo_source(window, cx)));
+            assert!(session.update(cx, |session, cx| session.redo_source(window, cx)));
+        })
+        .unwrap();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.buffer.current_text(), edited);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(session.update(cx, |session, cx| session.undo_source(window, cx)));
+        })
+        .unwrap();
+        session.read_with(cx, |session, _| {
+            assert_eq!(
+                session.buffer.current_text(),
+                "---\r\ntitle: Old\r\n---\r\n\r\n# 标题 changed 🦀\r\n",
+                "undoing the metadata patch must not rewrite any other byte"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn complete_source_history_interleaves_body_and_frontmatter_transactions(
+        cx: &mut TestAppContext,
+    ) {
+        let source = "---\ntitle: Old\n---\n\n# Body\n";
+        let (handle, _view) = mount(cx);
+        let session = bare_session(cx, handle, "src/posts/history.md", source);
+        replace_visible(cx, handle, &session, "# Body edited\n");
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .patch_complete(window, cx, |live| {
+                        let mut document = parse_document(live).map_err(|e| e.to_string())?;
+                        document
+                            .set_field(
+                                "title",
+                                astrolith_document::FrontmatterValue::String("New".to_owned()),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        document.serialize().map_err(|e| e.to_string())
+                    })
+                    .expect("the frontmatter patch applies over the body edit");
+            });
+        })
+        .unwrap();
+        let edited = "---\ntitle: New\n---\n\n# Body edited\n";
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.buffer.current_text(), edited);
+            assert_eq!(session.projection.visible, "# Body edited\n");
+            assert_eq!(session.editor.read(cx).value(), "# Body edited\n");
+            assert!(session.is_dirty());
+        });
+
+        // Undo the hidden frontmatter change only: body bytes stay untouched.
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(session.update(cx, |session, cx| session.undo_source(window, cx)));
+        })
+        .unwrap();
+        session.read_with(cx, |session, cx| {
+            assert_eq!(
+                session.buffer.current_text(),
+                "---\ntitle: Old\n---\n\n# Body edited\n"
+            );
+            assert_eq!(session.projection.visible, "# Body edited\n");
+            assert_eq!(session.editor.read(cx).value(), "# Body edited\n");
+        });
+
+        // A second undo removes the body edit; redo replays in the same order.
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(session.update(cx, |session, cx| session.undo_source(window, cx)));
+        })
+        .unwrap();
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.buffer.current_text(), source);
+            assert_eq!(session.projection.visible, "# Body\n");
+            assert_eq!(session.editor.read(cx).value(), "# Body\n");
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(session.update(cx, |session, cx| session.redo_source(window, cx)));
+            assert!(session.update(cx, |session, cx| session.redo_source(window, cx)));
+        })
+        .unwrap();
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.buffer.current_text(), edited);
+            assert_eq!(session.editor.read(cx).value(), "# Body edited\n");
         });
     }
 

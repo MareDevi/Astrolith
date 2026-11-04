@@ -29,7 +29,9 @@ use crate::{
         CollectionEntry, PreferenceEdits, PreferencesContext, PreferencesEvent, PreferencesSheet,
     },
     preview::{PreviewPanel, PreviewStateChanged},
-    project_discovery::{FrontmatterKey, ProjectOpened, ProjectWorkspace, now_secs},
+    project_discovery::{
+        FrontmatterKey, HistoryChangedEvent, ProjectOpened, ProjectWorkspace, now_secs,
+    },
     recent_projects::{self, RecentEntry},
     runtime,
     settings::{
@@ -452,6 +454,14 @@ impl Shell {
             this.track_active_entry(cx);
             this.refresh_component_builder(&project, cx);
         }));
+        // Undo/redo can change hidden frontmatter without changing the field key;
+        // force the form to reload from the restored complete source.
+        subscriptions.push(
+            cx.subscribe(&project, |this, _, _: &HistoryChangedEvent, cx| {
+                this.frontmatter_key = None;
+                cx.notify();
+            }),
+        );
         // Menu and palette availability follows the dev-server phase.
         subscriptions.push(cx.subscribe_in(
             &preview,
