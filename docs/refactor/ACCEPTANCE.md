@@ -260,3 +260,44 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - A11/A22 的原生最小窗口长 schema、150%/200% 显示缩放、对比度与 reduced motion 审计未执行；本轮只覆盖 1000×700 + 28 px 界面字号的 GPUI 布局与 XWayland 截图。
   - macOS/Windows 未构建运行验收；Wayland 原生截图未取得。
   - M6 完成不改变 M7 的截图/平台验证待办；A19 真实 Embedded 等既有平台结论不受本轮影响。
+
+## 16. M7 执行记录
+
+- 范围：全量自动检查、性能 workload、fixture oracle、`docs/refactor/` 要求的原生视觉矩阵与回归复核。代码改动只有一处：`project_discovery.rs` 的导航行高与对应回归测试（commit `ea5ec8c`）；其余为验收文档。
+- 自动化：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试 **867 passed、0 failed、8 ignored**；fixture 单元 6 passed，Astro fixture compatibility PASS；`astrolith-workspace/tests/fixture_oracle.rs` 3 个 fixture oracle 用例通过。
+- 回归范围（均在上述 check 中执行）：create/duplicate/rename/trash 与并发编辑保护；draft filter、排序、Content Finder 查找/插入；MDX builder 的 palette/表单/占位符/import 计划；assets 复制与图片路径安全；save/conflict/recovery/autosave 与脱敏失败记录；设置继承/Apply/Cancel/Reset/迁移；Help、命令注册、快捷键文档；preview server 生命周期、路由与 capability；desktop_actions、single-instance、URL scheme 与启动参数。
+- 性能 workload（当前开发/发布配置基线，不是与旧版本的优化对比；M7 行高改动不在这些 workload 的测量路径内）：
+  - `PROJECTION_DIFF` 1 KB / 100 KB / 1 MB：p50 0.0011 / 0.0266 / 0.1403 ms；单行 100 KB 0.0127 ms。
+  - `PROJECTED_WRITER` 1 KB / 100 KB / 1 MB：p50 1.087 / 12.082 / 107.448 ms；单行 100 KB 45.788 ms。
+  - `SHELL_RESIZE`：90 帧，avg 2.496 ms，p95 2.873 ms，worst 3.070 ms。
+  - `SHELL_OPEN`：1 KB / 100 KB / 1 MB / 单行 100 KB 的 frame 为 1.037 / 11.559 / 115.362 / 9.804 ms。
+  - release `EDITOR_WORKLOAD`：100 次 headless input 的 p50 为 2.930 / 4.323 / 2.670 / 9.934 ms；1 MB `set_value` 39.098 ms。
+- 新回归与视觉缺陷修复：
+  - 原生审查发现 Build 导航中“标题 + 文件名”两行条目与下一条目重叠。原因：pinned `List` 以首行（目录行，单行）测量统一行高，随后所有条目复用该高度。
+  - 新增 `library_entry_rows_leave_room_for_the_filename`：集合含子目录时，断言两行条目的实际 bounds 不与下一条目重叠；修复前失败，修复后通过。
+  - 修复：目录行与条目行都设置 `min_h(rems(3.25))`，随界面字号缩放；1000×700 与 28 px 界面字号下均无重叠。
+- 原生证据（Linux Hyprland 0.57.1，Wayland，HDMI-A-1 2560×1440 @ scale 1.0 / 100%，`grim` 截图；应用 commit `ea5ec8c`；fixture `fixtures/parity-project` 复制到 `/tmp/m7-project` 并装入真实 Astro 7.4.4 依赖；第二项目 `/tmp/m7-project-b` 为 quiet-site 副本）：
+  - Writing：dark 1000×700 / 1440×900 / 2200×1300，light 1000×700 / 1440×900 / 2200×1300。正文 sans、16/32、768 measure 居中；保存状态与计数在文档 rail；宽窗测量不变。
+  - Build：dark 1000×700 / 1440×900，light 1000×700 / 1440×900。真实完整源、真实标签条、集合导航、目录行与两行条目间距正常；1000×700 下文件标签、集合面包屑、保存状态与 Inspector 触发器均可见。
+  - Preview：dark 1000×700 显示真实 stopped 状态与禁用动作；1440×900 启动真实 Astro dev server 后显示 `http://127.0.0.1:41625/`、ready 状态和可用 Open/Copy 动作；模式往返后同一文档与 server 保留。
+  - Inspector：dark/light 1000×700 浮层覆盖正文且正文 bounds 不变；28 px 界面字号下字段可读、关闭按钮可达。
+  - Settings：dark/light 1000×700；28 px 界面字号下 Appearance/Workspace/Preview/Advanced 与 Cancel/Apply 可见，内容区可滚动。
+  - 大字号：`ui_font_size=28` 的 Writing / Build / Inspector / Settings 已截图；模式切换器、文档 rail、Apply/Cancel 未被裁切。导航筛选占位文字与文档 rail 在 1000 宽下更紧凑，但不影响关键动作。
+  - 重启隔离：项目 A 切到 Build、项目 B 切到 Preview 后退出；重启 A 恢复 Build，重启 B 恢复 Preview；`global.default_mode` 仍为 `writing`。项目注册表中 `last_mode` 分别为 `build` / `preview`。
+  - 原型参考：light Writing 的浏览器截图 `/tmp/m7-mock-writing-light.png`（1000×700）；其余原型区域按源码对照。
+  - 截图位于 `/tmp/m7-shots/`（`writing-dark-*`、`writing-light-*`、`build-dark-*`、`build-light-*`、`preview-*`、`inspector-*`、`settings-*`、`mode-a-after-b-restart`、`mode-b-after-restart`）。未提交二进制附件；文件只含 fixture 内容。
+- 与 HTML 原型的分区域差异：
+  - Writing 原生是可编辑 Markdown 完整源视图并弱化标记；原型是渲染后的演示 HTML，还包含 mock 的固定副标题/导语。原生不复制这类演示文案。
+  - 原生文档身份、集合、字数与保存状态位于顶部文档 rail；原型放在底部状态栏。Writing 不保留底部状态栏，1000 宽时字数让位给保存状态。
+  - 原生顶栏为搜索、面板、设置图标与平台窗口装饰；原型含 macOS 三点、Focus 段落按钮和主题切换按钮。原生 Focus 通过命令/键盘，不使用原型按钮。
+  - Build 原生显示真实完整源、真实标签与按需终端；原型是静态 `index.astro` 加硬编码 Terminal/“Problems 0”。原生的 Problems 计数不会被伪造。
+  - External Preview 原生是带真实 server 状态的紧凑底栏并保留可编辑正文；原型是居中演示卡片和 alert，属于已在 VISION/M5a 明确纠正的行为。
+  - 中性表面层级、模式 pill、圆角、768 正文 measure 与 mock 基本一致；导航行高在修复后统一且随字号缩放。
+- 验收映射：A04/A11/A22 的 dark/light、1000×700、28 px 与键盘驱动证据已补；A15/A16/A17 的真实 server ready 状态已复测；A20/A21 增加原生双项目模式隔离证据；A26 由本轮矩阵与 §11 用户确认共同支撑。A01/A05/A10/A12/A14/A24/A25/A26 的用户确认见 §11；A19 仍引用 §14 的 XWayland/X11 evidence，本轮未重跑 Embedded。
+- 未完成/阻碍：
+  - macOS/Windows 未构建、未运行、未做 IME/WebView 生命周期验收；不得宣称平台支持。
+  - Wayland 下 Embedded 按设计 unavailable；A19 的真实 surface 证据仅为 XWayland/X11，本机 NVIDIA + XWayland 仍需 `WEBKIT_DISABLE_DMABUF_RENDERER=1`。本轮未重跑 Embedded。
+  - 显示缩放只覆盖 scale 1.0（100%）；150%/200% 显示缩放未测，28 px 界面字号仅覆盖 UI zoom 轴。
+  - A11 的长 schema 滚动、A20/A21 的原生 Reset All 与移动项目、A22 的 reduced motion/对比度审计仍未完成。
+  - 完整 LSP、Astro 语法高亮、Problems 面板仍是独立扩展，未以占位 UI 冒充。
+  - 因此本记录不宣布 v0.2.0 整体完成；平台矩阵与上述未完成项必须显式保留。

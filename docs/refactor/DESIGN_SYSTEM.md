@@ -154,3 +154,10 @@ M1 首先校对 Theme adapter；随后逐区域迁移 chrome、表单、菜单�
 - 默认关闭；按钮和 `Ctrl+2` 打开，outside/Esc/关闭按钮关闭。Escape 与焦点恢复由 pinned popover 拥有；关闭后回到正文编辑器。模式切换关闭它但不写入布局。
 - Form 在 `active_frontmatter_key` 变化时从完整源重建；schema 刷新使用最新 buffer 文本，因此已提交的字段编辑不会回退。无 frontmatter 的文档禁用按钮与命令。
 - GPUI 测试覆盖：默认关闭、按钮打开、outside/close/Esc 关闭、正文 bounds 不变、Esc 后编辑器焦点恢复、模式切换关闭。原生 Wayland 以 `Ctrl+2` 打开真实字段并 Esc 关闭。
+
+## 12. M7 视觉审查记录
+
+- 原生矩阵：Hyprland 0.57.1 / Wayland / 100% 显示缩放，dark/light × 1000×700、1440×900、2200×1300，另加 `ui_font_size=28`。Writing、Build、Preview、Inspector、Settings 均已截图；记录与差异见 ACCEPTANCE §16。
+- 匹配项：中性 canvas/sidebar/overlay 层级、模式 pill、圆角、768 正文 measure、顶部 toolbar 高度、保存状态与集合身份。
+- 修复项：pinned `List` 曾用单行目录行的高度测量所有导航行，导致“标题 + 文件名”两行条目与下一行重叠。目录行与条目行改为 `min_h(rems(3.25))`，随界面字号缩放，并有 GPUI 回归测试。
+- 保留差异：Writing 是可编辑完整源并弱化 Markdown 标记，不是 mock 的渲染 HTML/演示文案；文档状态在顶部 rail 而非底部状态栏；External Preview 使用真实 server 紧凑底栏；Build 不伪造 Problems 计数。大字号下筛选占位与 rail 更紧凑，但关键动作可达。
