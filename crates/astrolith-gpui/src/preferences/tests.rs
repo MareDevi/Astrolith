@@ -84,6 +84,19 @@ fn font_size_and_autosave_reject_unsupported_values() {
 }
 
 #[test]
+fn line_height_stays_inside_the_readable_band() {
+    assert_eq!(line_height_value("2").unwrap(), 2.);
+    assert_eq!(line_height_value("1.2").unwrap(), 1.2);
+    assert_eq!(line_height_value("3.0").unwrap(), 3.);
+    for invalid in ["1.1", "3.1", "0", "-2", "loose", ""] {
+        assert!(
+            line_height_value(invalid).is_err(),
+            "{invalid} must be refused"
+        );
+    }
+}
+
+#[test]
 fn editor_width_stays_inside_the_readable_band() {
     assert_eq!(editor_width_value("720").unwrap(), 720.);
     assert_eq!(editor_width_value("480").unwrap(), 480.);

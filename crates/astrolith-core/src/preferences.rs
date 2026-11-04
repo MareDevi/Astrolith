@@ -587,10 +587,18 @@ pub struct GlobalPreferencesV2 {
     pub ui_font_family: String,
     /// Interface base font size in logical pixels; controls the rem scale.
     pub ui_font_size: f32,
-    /// Editor base font size in logical pixels.
+    /// Document font family; empty uses the mock's sans face.
+    pub prose_font_family: String,
+    /// Document font size in logical pixels.
     pub editor_font_size: f32,
+    /// Document line height as a multiple of the font size.
+    pub editor_line_height: f32,
     /// Widest prose column in logical pixels.
     pub editor_width: f32,
+    /// Dim every sentence except the cursor sentence.
+    pub focus_mode: bool,
+    /// Keep the cursor line vertically centred.
+    pub typewriter_mode: bool,
     /// Idle autosave delay.
     pub autosave_delay: AutosaveDelay,
     /// Extension used for new entries unless a narrower scope overrides it.
@@ -616,8 +624,12 @@ impl Default for GlobalPreferencesV2 {
             heading_colors: HeadingColors::default(),
             ui_font_family: String::new(),
             ui_font_size: 14.,
-            editor_font_size: 18.,
-            editor_width: 720.,
+            prose_font_family: String::new(),
+            editor_font_size: 16.,
+            editor_line_height: 2.,
+            editor_width: 768.,
+            focus_mode: false,
+            typewriter_mode: false,
             autosave_delay: AutosaveDelay::default(),
             default_extension: FileExtension::default(),
             ide: IdeCommand::default(),
@@ -777,8 +789,18 @@ pub struct ResolvedPreferences {
     pub ui_font_family: String,
     /// Interface base font size in logical pixels.
     pub ui_font_size: f32,
-    /// Editor base font size.
+    /// Document font family; empty uses the mock's sans face.
+    pub prose_font_family: String,
+    /// Document font size.
     pub editor_font_size: f32,
+    /// Document line height as a multiple of the font size.
+    pub editor_line_height: f32,
+    /// Widest prose column in logical pixels.
+    pub editor_width: f32,
+    /// Focus and typewriter presentation.
+    pub focus_mode: bool,
+    /// Keep the cursor line vertically centred.
+    pub typewriter_mode: bool,
     /// Idle autosave delay.
     pub autosave_delay: AutosaveDelay,
     /// Effective new-entry extension.
@@ -831,7 +853,12 @@ pub fn resolve(
         heading_colors: global.heading_colors.clone(),
         ui_font_family: global.ui_font_family.clone(),
         ui_font_size: global.ui_font_size,
+        prose_font_family: global.prose_font_family.clone(),
         editor_font_size: global.editor_font_size,
+        editor_line_height: global.editor_line_height,
+        editor_width: global.editor_width,
+        focus_mode: global.focus_mode,
+        typewriter_mode: global.typewriter_mode,
         autosave_delay: global.autosave_delay,
         default_extension: collection
             .and_then(|collection| collection.default_extension)
@@ -1411,7 +1438,39 @@ mod tests {
         assert_eq!(retired.theme, ThemePreference::System);
         assert_eq!(retired.ui_font_family, "");
         assert_eq!(retired.ui_font_size, 14.);
-        assert_eq!(retired.editor_width, 720.);
+        assert_eq!(retired.prose_font_family, "");
+        assert_eq!(retired.editor_font_size, 16.);
+        assert_eq!(retired.editor_line_height, 2.);
+        assert_eq!(retired.editor_width, 768.);
+        assert!(!retired.focus_mode);
+        assert!(!retired.typewriter_mode);
+    }
+
+    #[test]
+    fn writing_typography_and_modes_resolve_from_the_global_scope() {
+        let global = GlobalPreferencesV2 {
+            prose_font_family: "Inter Display".into(),
+            editor_font_size: 19.,
+            editor_line_height: 1.75,
+            editor_width: 840.,
+            focus_mode: true,
+            typewriter_mode: true,
+            ..GlobalPreferencesV2::default()
+        };
+        let resolved = resolve(&global, None, None);
+        assert_eq!(resolved.prose_font_family, "Inter Display");
+        assert_eq!(resolved.editor_font_size, 19.);
+        assert_eq!(resolved.editor_line_height, 1.75);
+        assert_eq!(resolved.editor_width, 840.);
+        assert!(resolved.focus_mode);
+        assert!(resolved.typewriter_mode);
+
+        let decoded: GlobalPreferencesV2 =
+            serde_json::from_str(&serde_json::to_string(&global).unwrap()).unwrap();
+        assert_eq!(decoded.prose_font_family, "Inter Display");
+        assert_eq!(decoded.editor_line_height, 1.75);
+        assert!(decoded.focus_mode);
+        assert!(decoded.typewriter_mode);
     }
 
     #[test]

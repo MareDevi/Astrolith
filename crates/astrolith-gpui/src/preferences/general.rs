@@ -65,6 +65,50 @@ impl PreferencesSheet {
             })
             .into_any_element();
 
+        let focus_weak = weak.clone();
+        let focus_label = if self.focus_mode { "On" } else { "Off" };
+        let focus_mode = Button::new("preferences-focus-mode")
+            .small()
+            .outline()
+            .label(focus_label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for (label, value) in [("Off", false), ("On", true)] {
+                    let weak = focus_weak.clone();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |sheet, cx| {
+                            sheet.focus_mode = value;
+                            cx.notify();
+                        });
+                    }));
+                }
+                menu
+            })
+            .into_any_element();
+
+        let typewriter_weak = weak.clone();
+        let typewriter_label = if self.typewriter_mode { "On" } else { "Off" };
+        let typewriter_mode = Button::new("preferences-typewriter-mode")
+            .small()
+            .outline()
+            .label(typewriter_label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for (label, value) in [("Off", false), ("On", true)] {
+                    let weak = typewriter_weak.clone();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |sheet, cx| {
+                            sheet.typewriter_mode = value;
+                            cx.notify();
+                        });
+                    }));
+                }
+                menu
+            })
+            .into_any_element();
+
         let autosave_weak = weak.clone();
         let autosave = Button::new("preferences-autosave")
             .small()
@@ -113,9 +157,7 @@ impl PreferencesSheet {
                 self.control(FieldId::UiFontFamily),
                 FieldExtras {
                     field: Some(FieldId::UiFontFamily),
-                    hint: Some(
-                        "An installed font family. Empty uses the system UI font; the page keeps its book face.",
-                    ),
+                    hint: Some("An installed font family. Empty uses the system UI font."),
                     trailing: Some(self.reset_button(
                         FieldId::UiFontFamily,
                         "preferences-reset-ui-font-family",
@@ -142,12 +184,27 @@ impl PreferencesSheet {
         ];
         let writing = vec![
             self.field(
+                "preferences-field-prose-font-family",
+                "Document font",
+                self.control(FieldId::ProseFontFamily),
+                FieldExtras {
+                    field: Some(FieldId::ProseFontFamily),
+                    hint: Some("An installed font family. Empty uses the mock's sans face (Inter or the platform UI font)."),
+                    trailing: Some(self.reset_button(
+                        FieldId::ProseFontFamily,
+                        "preferences-reset-prose-font-family",
+                        cx,
+                    )),
+                },
+                cx,
+            ),
+            self.field(
                 "preferences-field-font-size",
-                "Editor font size",
+                "Document font size",
                 self.control(FieldId::FontSize),
                 FieldExtras {
                     field: Some(FieldId::FontSize),
-                    hint: Some("1–30 logical pixels; the default is 18."),
+                    hint: Some("1–30 logical pixels; the default is 16."),
                     trailing: Some(self.reset_button(
                         FieldId::FontSize,
                         "preferences-reset-font-size",
@@ -157,17 +214,54 @@ impl PreferencesSheet {
                 cx,
             ),
             self.field(
+                "preferences-field-line-height",
+                "Line height",
+                self.control(FieldId::LineHeight),
+                FieldExtras {
+                    field: Some(FieldId::LineHeight),
+                    hint: Some("1.2–3.0 × the font size; the default is 2.0 (16/32)."),
+                    trailing: Some(self.reset_button(
+                        FieldId::LineHeight,
+                        "preferences-reset-line-height",
+                        cx,
+                    )),
+                },
+                cx,
+            ),
+            self.field(
                 "preferences-field-editor-width",
-                "Editor width",
+                "Page width",
                 self.control(FieldId::EditorWidth),
                 FieldExtras {
                     field: Some(FieldId::EditorWidth),
-                    hint: Some("480–1200 logical pixels; the default is 720."),
+                    hint: Some("480–1200 logical pixels; the default is 768."),
                     trailing: Some(self.reset_button(
                         FieldId::EditorWidth,
                         "preferences-reset-editor-width",
                         cx,
                     )),
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-focus-mode",
+                "Focus mode",
+                focus_mode,
+                FieldExtras {
+                    field: None,
+                    hint: Some("Dim every sentence except the one holding the cursor."),
+                    trailing: None,
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-typewriter-mode",
+                "Typewriter mode",
+                typewriter_mode,
+                FieldExtras {
+                    field: None,
+                    hint: Some("Keep the cursor line vertically centred."),
+                    trailing: None,
                 },
                 cx,
             ),
@@ -260,15 +354,13 @@ impl PreferencesSheet {
             ))
             .child(self.section(
                 "Interface",
-                Some(
-                    "Typography for panels, controls and menus. The page keeps its own book face.",
-                ),
+                Some("Typography for panels, controls and menus."),
                 interface,
                 cx,
             ))
             .child(self.section(
                 "Writing",
-                Some("Editor typography and document defaults."),
+                Some("Document typography, page measure and writing modes."),
                 writing,
                 cx,
             ))

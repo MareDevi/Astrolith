@@ -235,6 +235,86 @@ impl Stored<GlobalPreferencesV2> {
 }
 
 impl Stored<GlobalPreferencesV2> {
+    /// Replace the pre-writing defaults with the mock's body typography once.
+    ///
+    /// Files written before M3 have no `editor_line_height`. The old defaults
+    /// (18 px at 720 px) came from the retired serif page, so an untouched value
+    /// is rewritten to the neutral 16/32 at 768; a value the user changed is
+    /// preserved. The exact previous file is kept beside the new one.
+    fn migrate_writing_defaults(&mut self) -> Option<String> {
+        let envelope = self.envelope.as_mut()?;
+        if envelope.contains_key("editor_line_height") {
+            return None;
+        }
+        if !self.writable {
+            return Some(format!(
+                "The pre-writing typography remains in {} because the file is read-only.",
+                self.path.display()
+            ));
+        }
+        let baseline = self.baseline.as_deref()?;
+        let backup = unique_destination(&self.path.with_file_name("global.json.pre-writing.json"));
+        if let Err(error) = fs::write(&backup, baseline) {
+            return Some(format!(
+                "Could not back up the pre-writing typography to {}: {error}. The settings file is preserved.",
+                backup.display()
+            ));
+        }
+        let defaults = GlobalPreferencesV2::default();
+        if (self.value.editor_font_size - 18.).abs() < f32::EPSILON {
+            self.value.editor_font_size = defaults.editor_font_size;
+        }
+        if (self.value.editor_width - 720.).abs() < f32::EPSILON {
+            self.value.editor_width = defaults.editor_width;
+        }
+        self.value.editor_line_height = defaults.editor_line_height;
+        for (key, value) in [
+            (
+                "editor_font_size",
+                serde_json::json!(self.value.editor_font_size),
+            ),
+            (
+                "editor_line_height",
+                serde_json::json!(self.value.editor_line_height),
+            ),
+            ("editor_width", serde_json::json!(self.value.editor_width)),
+            (
+                "prose_font_family",
+                serde_json::json!(self.value.prose_font_family),
+            ),
+            ("focus_mode", serde_json::json!(self.value.focus_mode)),
+            (
+                "typewriter_mode",
+                serde_json::json!(self.value.typewriter_mode),
+            ),
+        ] {
+            envelope.insert(key.to_owned(), value);
+        }
+        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Some(format!(
+                    "Could not encode migrated writing typography: {error}"
+                ));
+            }
+        };
+        match write_atomic(&self.path, &bytes) {
+            Ok(()) => {
+                self.baseline = Some(bytes);
+                tracing::info!(
+                    path = %self.path.display(),
+                    backup = %backup.display(),
+                    "applied the neutral writing typography defaults"
+                );
+                None
+            }
+            Err(error) => Some(format!(
+                "Could not apply the writing typography in {}: {error}. The file is preserved.",
+                self.path.display()
+            )),
+        }
+    }
+
     /// Replace the pre-mode split layout with the per-mode defaults once.
     ///
     /// The previous composition is backed up beside the file and never
@@ -383,12 +463,14 @@ impl PreferencesStore {
             Stored::<GlobalPreferencesV2>::load(global_path, GLOBAL_PREFERENCES_VERSION);
         let palette_migration_warning = global.retire_legacy_palettes();
         let mode_migration_warning = global.migrate_mode_layouts();
+        let writing_migration_warning = global.migrate_writing_defaults();
         let registry =
             Stored::<ProjectRegistry>::load(root.join("projects.json"), PROJECT_REGISTRY_VERSION);
         let warning = combine_warnings([
             migration_warning,
             palette_migration_warning,
             mode_migration_warning,
+            writing_migration_warning,
             global.warning.clone(),
             registry.warning.clone(),
         ]);
@@ -821,6 +903,54 @@ mod tests {
         let (_, defaults, _) = PreferencesStore::load(path);
         assert_eq!(defaults.theme, ThemePreference::System);
         assert_eq!(defaults.layouts, ModeLayouts::default());
+    }
+
+    #[test]
+    fn pre_writing_defaults_upgrade_once_and_preserve_explicit_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"{"version":2,"editor_font_size":18.0,"editor_width":720.0,"future_field":{"keep":true}}"#;
+        fs::write(&path, original).unwrap();
+
+        let (_, preferences, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(preferences.editor_font_size, 16.);
+        assert_eq!(preferences.editor_line_height, 2.);
+        assert_eq!(preferences.editor_width, 768.);
+        assert!(!preferences.focus_mode);
+        assert!(!preferences.typewriter_mode);
+        let backup = path.with_file_name("global.json.pre-writing.json");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
+        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(envelope["editor_font_size"], 16.0);
+        assert_eq!(envelope["editor_line_height"], 2.0);
+        assert_eq!(envelope["editor_width"], 768.0);
+        assert_eq!(envelope["future_field"]["keep"], true);
+
+        // A second load does not migrate again.
+        let (_, restored, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(restored.editor_font_size, 16.);
+        assert!(
+            !path
+                .with_file_name("global.json.pre-writing-2.json")
+                .exists()
+        );
+
+        // A size the user chose survives even though the old width was default.
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"version":2,"editor_font_size":20.0,"editor_width":720.0}"#,
+        )
+        .unwrap();
+        let (_, preferences, warning) = PreferencesStore::load(path);
+        assert!(warning.is_none());
+        assert_eq!(preferences.editor_font_size, 20.);
+        assert_eq!(preferences.editor_width, 768.);
     }
 
     #[test]

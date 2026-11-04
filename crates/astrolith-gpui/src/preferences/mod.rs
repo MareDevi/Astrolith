@@ -132,7 +132,9 @@ pub(crate) enum FieldId {
     HeadingDark,
     UiFontFamily,
     UiFontSize,
+    ProseFontFamily,
     FontSize,
+    LineHeight,
     EditorWidth,
     ProjectContent,
     ProjectAssets,
@@ -165,7 +167,9 @@ struct Inputs {
     heading_dark: Entity<InputState>,
     ui_font_family: Entity<InputState>,
     ui_font_size: Entity<InputState>,
+    prose_font_family: Entity<InputState>,
     font_size: Entity<InputState>,
+    line_height: Entity<InputState>,
     editor_width: Entity<InputState>,
     project_content: Entity<InputState>,
     project_assets: Entity<InputState>,
@@ -190,6 +194,8 @@ pub(crate) struct PreferencesSheet {
     theme: ThemePreference,
     global_extension: FileExtension,
     autosave: AutosaveDelay,
+    focus_mode: bool,
+    typewriter_mode: bool,
     project_image_mode: Option<ImagePathMode>,
     project_extension: Option<FileExtension>,
     project_insert_imports: Option<bool>,
@@ -232,6 +238,8 @@ impl PreferencesSheet {
             theme: ThemePreference::default(),
             global_extension: FileExtension::default(),
             autosave: AutosaveDelay::default(),
+            focus_mode: false,
+            typewriter_mode: false,
             project_image_mode: None,
             project_extension: None,
             project_insert_imports: None,
@@ -245,8 +253,10 @@ impl PreferencesSheet {
                 heading_dark: input!("#e6edf3"),
                 ui_font_family: input!("System UI font"),
                 ui_font_size: input!("14"),
-                font_size: input!("18"),
-                editor_width: input!("720"),
+                prose_font_family: input!("Inter / system sans"),
+                font_size: input!("16"),
+                line_height: input!("2"),
+                editor_width: input!("768"),
                 project_content: input!("Inherit the Astro content directory"),
                 project_assets: input!("Inherit the configured assets directory"),
                 project_mdx: input!("Inherit the MDX component directory"),
@@ -281,6 +291,8 @@ impl PreferencesSheet {
         self.theme = global.theme;
         self.global_extension = global.default_extension;
         self.autosave = global.autosave_delay;
+        self.focus_mode = global.focus_mode;
+        self.typewriter_mode = global.typewriter_mode;
         self.set_text(FieldId::IdeExecutable, &global.ide.executable, window, cx);
         self.set_text(
             FieldId::IdeArguments,
@@ -308,8 +320,20 @@ impl PreferencesSheet {
             cx,
         );
         self.set_text(
+            FieldId::ProseFontFamily,
+            &global.prose_font_family,
+            window,
+            cx,
+        );
+        self.set_text(
             FieldId::FontSize,
             &format_number(global.editor_font_size),
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::LineHeight,
+            &format_number(global.editor_line_height),
             window,
             cx,
         );
@@ -418,6 +442,7 @@ impl PreferencesSheet {
             .ok()
             .filter(|size| size.is_finite() && (8.0..=28.0).contains(size))
             .unwrap_or(global.ui_font_size);
+        global.prose_font_family = self.text(FieldId::ProseFontFamily, cx).trim().to_owned();
         global.editor_font_size = self
             .text(FieldId::FontSize, cx)
             .trim()
@@ -425,6 +450,15 @@ impl PreferencesSheet {
             .ok()
             .filter(|size| size.is_finite() && (1.0..=30.0).contains(size))
             .unwrap_or(global.editor_font_size);
+        global.editor_line_height = self
+            .text(FieldId::LineHeight, cx)
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|height| height.is_finite() && (1.2..=3.0).contains(height))
+            .unwrap_or(global.editor_line_height);
+        global.focus_mode = self.focus_mode;
+        global.typewriter_mode = self.typewriter_mode;
         global.editor_width = self
             .text(FieldId::EditorWidth, cx)
             .trim()
@@ -482,9 +516,16 @@ impl PreferencesSheet {
                 window,
                 cx,
             ),
+            FieldId::ProseFontFamily => self.set_text(field, "", window, cx),
             FieldId::FontSize => self.set_text(
                 field,
                 &format_number(GlobalPreferencesV2::default().editor_font_size),
+                window,
+                cx,
+            ),
+            FieldId::LineHeight => self.set_text(
+                field,
+                &format_number(GlobalPreferencesV2::default().editor_line_height),
                 window,
                 cx,
             ),
@@ -713,7 +754,9 @@ impl PreferencesSheet {
             FieldId::HeadingDark => self.inputs.heading_dark.read(cx).value(),
             FieldId::UiFontFamily => self.inputs.ui_font_family.read(cx).value(),
             FieldId::UiFontSize => self.inputs.ui_font_size.read(cx).value(),
+            FieldId::ProseFontFamily => self.inputs.prose_font_family.read(cx).value(),
             FieldId::FontSize => self.inputs.font_size.read(cx).value(),
+            FieldId::LineHeight => self.inputs.line_height.read(cx).value(),
             FieldId::EditorWidth => self.inputs.editor_width.read(cx).value(),
             FieldId::ProjectContent => self.inputs.project_content.read(cx).value(),
             FieldId::ProjectAssets => self.inputs.project_assets.read(cx).value(),
@@ -759,9 +802,17 @@ impl PreferencesSheet {
                 .inputs
                 .ui_font_size
                 .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::ProseFontFamily => self
+                .inputs
+                .prose_font_family
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
             FieldId::FontSize => self
                 .inputs
                 .font_size
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::LineHeight => self
+                .inputs
+                .line_height
                 .update(cx, |input, cx| input.set_value(value, window, cx)),
             FieldId::EditorWidth => self
                 .inputs
@@ -897,8 +948,21 @@ impl PreferencesSheet {
         if let Err(message) = ui_font_size_value(&self.text(FieldId::UiFontSize, cx)) {
             insert(FieldId::UiFontSize, message);
         }
+        let prose_font_family = self.text(FieldId::ProseFontFamily, cx);
+        if !theme::font_family_available(cx, &prose_font_family) {
+            insert(
+                FieldId::ProseFontFamily,
+                format!(
+                    "“{}” is not an installed font family.",
+                    prose_font_family.trim()
+                ),
+            );
+        }
         if let Err(message) = font_size_value(&self.text(FieldId::FontSize, cx)) {
             insert(FieldId::FontSize, message);
+        }
+        if let Err(message) = line_height_value(&self.text(FieldId::LineHeight, cx)) {
+            insert(FieldId::LineHeight, message);
         }
         if let Err(message) = editor_width_value(&self.text(FieldId::EditorWidth, cx)) {
             insert(FieldId::EditorWidth, message);
@@ -1011,7 +1075,15 @@ impl PreferencesSheet {
                     .small()
                     .into_any_element()
             }
+            FieldId::ProseFontFamily => {
+                gpui_kit::component::input::Input::new(&self.inputs.prose_font_family)
+                    .small()
+                    .into_any_element()
+            }
             FieldId::FontSize => gpui_kit::component::input::Input::new(&self.inputs.font_size)
+                .small()
+                .into_any_element(),
+            FieldId::LineHeight => gpui_kit::component::input::Input::new(&self.inputs.line_height)
                 .small()
                 .into_any_element(),
             FieldId::EditorWidth => {
@@ -1437,6 +1509,18 @@ pub(crate) fn font_size_value(value: &str) -> Result<f32, String> {
         return Err("Font size must be between 1 and 30.".into());
     }
     Ok(size)
+}
+
+/// Validate the document line height as a multiple of the font size.
+pub(crate) fn line_height_value(value: &str) -> Result<f32, String> {
+    let value = value.trim();
+    let Ok(height) = value.parse::<f32>() else {
+        return Err("Enter a line height between 1.2 and 3.0.".into());
+    };
+    if !height.is_finite() || !(1.2..=3.0).contains(&height) {
+        return Err("Line height must be between 1.2 and 3.0.".into());
+    }
+    Ok(height)
 }
 
 /// Validate the editor's prose column width.
