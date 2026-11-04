@@ -164,6 +164,7 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 | A24 | 交互终端、ANSI、Ctrl+C、resize、滚动回看、选择复制 | 用户验收通过 |
 | A25 | 隐藏 Dock/切模式保留会话，切项目/退出清理进程 | 用户验收通过 |
 | A26 | 新布局与 mock 的分区域视觉对照 | 用户验收通过 |
+| A12 | Focus/Typewriter、中文输入、组合取消、跨段选区、跳行与滚动 | 用户验收通过（M3） |
 
 本次回复未附带截图路径、显示缩放和主题组合明细；后续如归档需要，应补齐这些附件元数据。A19/M5b（真实 Embedded WebView）不在本次确认范围。
 
@@ -185,7 +186,7 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - 既有 sentence focus、typewriter 几何、投影与 undo 测试全部继续通过。
 - 自动检查：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；Rust workspace 844 passed、0 failed、8 ignored；fixture 单元 6 passed，Astro fixture compatibility PASS。
 - 原生证据：Linux Wayland（Hyprland），dark/System 主题，窗口 2538×1384；fixture `fixtures/parity-project/src/content/blog/markdown-showcase.md`。默认设置截图确认正文 sans、居中 768 measure、保存状态与计数可见；随后把 `editor_font_size=22`、`editor_line_height=2.4`、`editor_width=900`、`focus_mode=true` 写入 `global.json` 并重启，截图中字号、行距、页宽与 sentence focus 均按持久值生效，文档计数仍为 120 words / 827 characters。截图临时保存在 `/tmp/astrolith-m3-writing.png` 与 `/tmp/astrolith-m3-typography.png`，未提交用户内容。
+- 原生验收：用户于 2026-11-04 确认 A12 通过（中文输入、组合取消、跨段选区、跳行、选区、滚动与 Typewriter 行为正常）。本次回复未附截图与显示缩放组合明细。
 - 未完成/未验证：
-  - A12 的原生中文 IME composition、组合取消与跨段选区未在本机实际输入，headless 与几何测试不能替代；Typewriter 的原生键盘切换与滚动行为也未做视频验收。
-  - 150%/200% 显示缩放、最小窗口下的排版与设置页新字段布局未截图验收。
+  - 150%/200% 显示缩放、最小窗口下的设置页新字段布局未截图验收。
   - paragraph focus 不在本次范围。
