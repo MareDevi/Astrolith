@@ -45,6 +45,15 @@ fn explicit_interface_typography_overrides_the_theme_face_and_scale(cx: &mut Tes
             ui_font_size: 17.,
             ..GlobalPreferencesV2::default()
         };
+        assert_eq!(
+            configured_prose_font(cx, ""),
+            prose_font(cx),
+            "an empty document family uses the mock's sans face"
+        );
+        assert_eq!(
+            configured_prose_font(cx, &custom),
+            SharedString::from(custom.clone())
+        );
         apply(&settings, WindowAppearance::Light, cx);
         assert_eq!(cx.theme().font_family, SharedString::from(custom.clone()));
         assert_eq!(cx.theme().font_size, px(17.));

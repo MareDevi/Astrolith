@@ -13,7 +13,7 @@
 
 use astrolith_document::{cursor_sentence, other_sentences};
 use gpui_kit::component::input::{EditorState, TextDecoration, TextDecorationCollection};
-use gpui_kit::{App, Bounds, Entity, HighlightStyle, Pixels, Point, px};
+use gpui_kit::{App, Bounds, Entity, HighlightStyle, Pixels, Point, SharedString, px};
 
 use crate::editor::writer_chrome::{
     ProsePalette, analyze_prose, hanging_markers, prose_decorations,
@@ -28,40 +28,37 @@ pub(crate) struct WritingModes {
     pub typewriter: bool,
 }
 
-/// Prose size and line spacing for one pane width.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ProseTypography {
+/// Resolved document presentation: face, size, line spacing and measure.
+///
+/// The values come from preferences and are used as written; the pane no
+/// longer scales type by its width, so an explicit size or line height means
+/// the same thing in every window. Out-of-range values from a hand-edited file
+/// are clamped rather than trusted by the renderer.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ProseStyle {
+    /// Document face.
+    pub font_family: SharedString,
     /// Font size in logical pixels.
     pub font_size: f32,
     /// Line height as a multiple of the font size.
     pub line_height: f32,
+    /// Widest prose column in logical pixels.
+    pub measure: f32,
 }
 
-/// Narrowest prose size factor: a narrow pane shrinks the text.
-const NARROW: f32 = 0.88;
-/// Widest prose size factor: a wide pane grows the text.
-const WIDE: f32 = 1.12;
-
-/// Scale prose typography with the document pane's width.
-///
-/// A narrow pane trades size for looser lines, a wide pane does the opposite,
-/// and both stay inside a readable band around the configured base size.
-pub(crate) fn prose_typography(pane_width: f32, base_font_size: f32) -> ProseTypography {
-    let base = base_font_size.clamp(12., 32.);
-    let (factor, ratio) = if pane_width <= 640. {
-        (NARROW, 1.85)
-    } else if pane_width <= 960. {
-        let t = (pane_width - 640.) / 320.;
-        (NARROW + (1. - NARROW) * t, 1.85 - 0.1 * t)
-    } else if pane_width <= 1400. {
-        let t = (pane_width - 960.) / 440.;
-        (1. + (WIDE - 1.) * t, 1.75 - 0.1 * t)
-    } else {
-        (WIDE, 1.65)
-    };
-    ProseTypography {
-        font_size: ((base * factor) * 2.).round() / 2.,
-        line_height: (ratio * 100.).round() / 100.,
+impl ProseStyle {
+    pub(crate) fn new(
+        font_family: SharedString,
+        font_size: f32,
+        line_height: f32,
+        measure: f32,
+    ) -> Self {
+        Self {
+            font_family,
+            font_size: font_size.clamp(1., 30.),
+            line_height: line_height.clamp(1.2, 3.),
+            measure: measure.clamp(480., 1200.),
+        }
     }
 }
 
@@ -332,21 +329,15 @@ mod tests {
     }
 
     #[test]
-    fn prose_typography_grows_with_the_pane_and_tightens_its_lines() {
-        let narrow = prose_typography(480., 18.);
-        let middle = prose_typography(800., 18.);
-        let wide = prose_typography(1600., 18.);
-        assert!(narrow.font_size < middle.font_size);
-        assert!(middle.font_size < wide.font_size);
-        assert!(narrow.line_height > middle.line_height);
-        assert!(middle.line_height > wide.line_height);
-        assert_eq!(wide.font_size, 20.);
-        assert_eq!(narrow.font_size, 16.);
-    }
+    fn prose_style_keeps_configured_values_and_clamps_corrupt_ones() {
+        let style = ProseStyle::new("Inter".into(), 16., 2., 768.);
+        assert_eq!(style.font_size, 16.);
+        assert_eq!(style.line_height, 2.);
+        assert_eq!(style.measure, 768.);
 
-    #[test]
-    fn prose_typography_clamps_the_configured_base_size() {
-        assert_eq!(prose_typography(1200., 2.).font_size, 13.);
-        assert_eq!(prose_typography(1200., 400.).font_size, 34.);
+        let clamped = ProseStyle::new("Inter".into(), 0., 9., 10_000.);
+        assert_eq!(clamped.font_size, 1.);
+        assert_eq!(clamped.line_height, 3.);
+        assert_eq!(clamped.measure, 1200.);
     }
 }

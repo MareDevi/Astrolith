@@ -317,7 +317,13 @@ impl Shell {
         });
         let project = cx.new(|cx| ProjectWorkspace::new(document.clone(), window, cx));
         project.update(cx, |project, cx| {
-            project.set_preferences(settings.clone(), None, cx)
+            project.set_preferences(settings.clone(), None, cx);
+            project.apply_writing_preferences(
+                settings.focus_mode,
+                settings.typewriter_mode,
+                window,
+                cx,
+            );
         });
         navigator.update(cx, |navigator, cx| {
             navigator.set_view(project.clone().into(), cx)
@@ -1971,12 +1977,22 @@ impl Shell {
                     .update(cx, |project, cx| project.apply_format(command, window, cx));
             }
             CommandId::ToggleFocusMode => {
-                self.project
-                    .update(cx, |project, cx| project.toggle_focus_mode(window, cx));
+                let modes = self.project.update(cx, |project, cx| {
+                    project.toggle_focus_mode(window, cx);
+                    project.writing_modes()
+                });
+                self.settings.focus_mode = modes.focus;
+                self.settings.typewriter_mode = modes.typewriter;
+                self.persist_global(cx);
             }
             CommandId::ToggleTypewriterMode => {
-                self.project
-                    .update(cx, |project, cx| project.toggle_typewriter_mode(window, cx));
+                let modes = self.project.update(cx, |project, cx| {
+                    project.toggle_typewriter_mode(window, cx);
+                    project.writing_modes()
+                });
+                self.settings.focus_mode = modes.focus;
+                self.settings.typewriter_mode = modes.typewriter;
+                self.persist_global(cx);
             }
             CommandId::ToggleCopyeditNouns
             | CommandId::ToggleCopyeditVerbs
@@ -2283,6 +2299,10 @@ impl Shell {
         };
         theme::apply(&self.settings, window.appearance(), cx);
         self.sync_project_preferences(cx);
+        let (focus, typewriter) = (self.settings.focus_mode, self.settings.typewriter_mode);
+        self.project.update(cx, |project, cx| {
+            project.apply_writing_preferences(focus, typewriter, window, cx)
+        });
         self.persist_global(cx);
         self.persist_project(cx);
         cx.notify();
@@ -2779,25 +2799,16 @@ impl Render for Shell {
             }
         }
         let layout = self.settings.layouts.get(self.mode);
-        // Responsive prose typography follows the document pane's width, which
-        // the shell owns: no layout feedback loop, no geometry guesswork.
-        let pane_width = (f32::from(window.viewport_size().width)
-            - if layout.sidebar_visible {
-                layout.sidebar_width
-            } else {
-                0.
-            }
-            - if layout.inspector_visible {
-                layout.inspector_width
-            } else {
-                0.
-            })
-        .max(320.);
-        let base_font_size = self.settings.editor_font_size;
-        let measure = self.settings.editor_width;
-        self.document.update(cx, |panel, cx| {
-            panel.set_prose_width(base_font_size, pane_width, measure, cx)
-        });
+        // The document face, size, line height and measure are explicit
+        // preferences; the pane width no longer rescales the prose.
+        let style = crate::editor::writing_modes::ProseStyle::new(
+            theme::configured_prose_font(cx, &self.settings.prose_font_family),
+            self.settings.editor_font_size,
+            self.settings.editor_line_height,
+            self.settings.editor_width,
+        );
+        self.document
+            .update(cx, |panel, cx| panel.set_prose_style(style, cx));
         self.chrome
             .set_sidebars(!layout.sidebar_visible && !layout.inspector_visible);
         let chrome_hidden = self.chrome.is_hidden() && self.warning.is_none();
@@ -3178,6 +3189,57 @@ mod tests {
                 .iter()
                 .all(|category| !view.settings.copyedit.enabled(*category))
         }));
+    }
+
+    #[gpui_kit::test]
+    async fn writing_mode_toggles_persist_and_restore(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_path = workspace.path().join("preferences/global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path.clone());
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.execute(CommandId::ToggleFocusMode, window, cx);
+                shell.execute(CommandId::ToggleTypewriterMode, window, cx);
+            });
+        })
+        .unwrap();
+        assert!(view.read_with(cx, |shell, _| shell.settings.focus_mode));
+        assert!(view.read_with(cx, |shell, _| shell.settings.typewriter_mode));
+
+        cx.executor().advance_clock(Duration::from_millis(400));
+        let written = global_path.clone();
+        cx.condition(&view, move |_, _| {
+            std::fs::read(&written)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value["focus_mode"].as_bool())
+                .is_some_and(|enabled| enabled)
+        })
+        .await;
+        let (_, restored, _) = PreferencesStore::load(global_path);
+        assert!(restored.focus_mode);
+        assert!(restored.typewriter_mode);
+
+        // Applying preferences replaces the same live presentation state.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.settings.focus_mode = false;
+                shell.settings.typewriter_mode = false;
+                shell.sync_project_preferences(cx);
+                let project = shell.project.clone();
+                project.update(cx, |project, cx| {
+                    project.apply_writing_preferences(false, false, window, cx)
+                });
+                assert!(!project.read(cx).writing_modes().focus);
+                assert!(!project.read(cx).writing_modes().typewriter);
+            });
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

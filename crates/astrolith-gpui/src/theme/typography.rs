@@ -11,13 +11,13 @@ use std::sync::OnceLock;
 use gpui_kit::{App, SharedString, component::ActiveTheme};
 
 /// Comfortable line length for prose, in logical pixels at the base size.
-pub(crate) const PROSE_MEASURE: f32 = 720.;
+pub(crate) const PROSE_MEASURE: f32 = 768.;
 
 /// Horizontal inset inside the prose column.
 pub(crate) const PROSE_INSET: f32 = 32.;
 
 /// Vertical breathing room above the first line and below the last.
-pub(crate) const PROSE_TOP: f32 = 64.;
+pub(crate) const PROSE_TOP: f32 = 96.;
 
 /// The mock's interface and prose face, under the names font managers use.
 const UI_ALTERNATES: &[&str] = &["Inter Variable", "Inter", "Inter Display"];
@@ -40,9 +40,26 @@ pub(crate) fn preferred_ui_font(cx: &App) -> SharedString {
         .clone()
 }
 
-/// The document face. Prose shares the interface family in the neutral design.
+/// The default document face: the mock's sans face.
 pub(crate) fn prose_font(cx: &App) -> SharedString {
     preferred_ui_font(cx)
+}
+
+/// The configured document face, falling back to the mock's sans face when the
+/// preference is empty or the installed family disappeared.
+pub(crate) fn configured_prose_font(cx: &App, family: &str) -> SharedString {
+    let family = family.trim();
+    if family.is_empty() {
+        return prose_font(cx);
+    }
+    if font_family_available(cx, family) {
+        return family.to_owned().into();
+    }
+    tracing::warn!(
+        family,
+        "document font is not installed; using the default sans face"
+    );
+    prose_font(cx)
 }
 
 /// The platform's resolved UI family, captured before a preference overrides it.

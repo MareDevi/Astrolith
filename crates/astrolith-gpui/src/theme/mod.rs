@@ -6,8 +6,8 @@ mod typography;
 
 pub(crate) use metrics::METRICS;
 pub(crate) use typography::{
-    PROSE_INSET, PROSE_MEASURE, PROSE_TOP, display_font, font_family_available, preferred_ui_font,
-    prose_font, system_ui_font,
+    PROSE_INSET, PROSE_MEASURE, PROSE_TOP, configured_prose_font, display_font,
+    font_family_available, preferred_ui_font, prose_font, system_ui_font,
 };
 
 use astrolith_core::preferences::GlobalPreferencesV2;

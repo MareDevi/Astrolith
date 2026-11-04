@@ -4683,6 +4683,20 @@ impl ProjectWorkspace {
         });
     }
 
+    /// Apply the persisted writing modes after the shell replaces preferences.
+    pub(crate) fn apply_writing_preferences(
+        &mut self,
+        focus: bool,
+        typewriter: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let modes = WritingModes { focus, typewriter };
+        if modes != self.writing {
+            self.set_writing_modes(modes, window, cx);
+        }
+    }
+
     /// Toggle focus mode for every retained session.
     pub(crate) fn toggle_focus_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut modes = self.writing;

@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::editor::formatting::EditorWiring;
 use crate::editor::image_preview::{self, ImagePreviewState, PreviewSource};
 use crate::editor::selection_toolbar;
-use crate::editor::writing_modes::{ProseTypography, prose_typography};
+use crate::editor::writing_modes::ProseStyle;
 use crate::runtime;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -32,8 +32,8 @@ pub(crate) struct WorkspacePanel {
     /// Focus handle of the selection toolbar, so focusing one of its buttons
     /// keeps the overlay mounted and reachable.
     pub(crate) toolbar_focus: FocusHandle,
-    /// Base prose size, the document pane width and the configured measure.
-    prose: Option<(f32, f32, f32)>,
+    /// Configured document face, size, line height and measure.
+    prose: Option<ProseStyle>,
     /// Whether this panel is navigation chrome and uses the sidebar surface.
     surface: bool,
     /// Alt-hover preview and its in-flight request.
@@ -125,19 +125,15 @@ impl WorkspacePanel {
         cx.notify();
     }
 
-    /// Resolve responsive prose typography from the base size and pane width.
-    pub fn set_prose_width(
-        &mut self,
-        base_font_size: f32,
-        pane_width: f32,
-        measure: f32,
-        cx: &mut Context<Self>,
-    ) {
-        let next = (base_font_size, pane_width, measure);
-        if self.prose == Some(next) {
+    /// Install the configured document typography.
+    ///
+    /// This only changes how the existing editor is painted; the editor's text,
+    /// caret, selection and history are untouched.
+    pub fn set_prose_style(&mut self, style: ProseStyle, cx: &mut Context<Self>) {
+        if self.prose.as_ref() == Some(&style) {
             return;
         }
-        self.prose = Some(next);
+        self.prose = Some(style);
         cx.notify();
     }
 
@@ -345,12 +341,10 @@ impl Render for WorkspacePanel {
             })
             .when_some(self.editor.as_ref(), |view, editor| {
                 let editor = editor.clone();
-                let typography = self
-                    .prose
-                    .map(|(base, width, _)| prose_typography(width, base));
-                let measure = self
-                    .prose
-                    .map(|(_, _, measure)| measure)
+                let style = self.prose.clone();
+                let measure = style
+                    .as_ref()
+                    .map(|style| style.measure)
                     .unwrap_or(crate::theme::PROSE_MEASURE);
                 let wiring = self.wiring.clone();
                 let overlay = wiring.as_ref().and_then(|wiring| {
@@ -368,7 +362,12 @@ impl Render for WorkspacePanel {
                 });
                 let preview_image = self.preview.image();
                 let mut element = Editor::new(&editor)
-                    .font_family(crate::theme::prose_font(cx))
+                    .font_family(
+                        style
+                            .as_ref()
+                            .map(|style| style.font_family.clone())
+                            .unwrap_or_else(|| crate::theme::prose_font(cx)),
+                    )
                     .readonly(self.readonly)
                     .bordered(false)
                     .aria_label(if self.readonly {
@@ -377,14 +376,10 @@ impl Render for WorkspacePanel {
                         "Document source, editable"
                     })
                     .size_full();
-                if let Some(ProseTypography {
-                    font_size,
-                    line_height,
-                }) = typography
-                {
+                if let Some(style) = style.as_ref() {
                     element = element
-                        .text_size(px(font_size))
-                        .line_height(gpui_kit::relative(line_height));
+                        .text_size(px(style.font_size))
+                        .line_height(gpui_kit::relative(style.line_height));
                 }
                 if let Some(wiring) = wiring.as_ref() {
                     let paste = wiring.hooks.paste.clone();
@@ -463,6 +458,44 @@ impl Render for WorkspacePanel {
 #[cfg(test)]
 mod preview_tests {
     use super::*;
+    use gpui_kit::test::TestWindowExt;
+
+    #[gpui_kit::test]
+    async fn typography_changes_leave_the_document_state_untouched(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (handle, panel, editor) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            let mut panel = None;
+            let mut editor = None;
+            let (handle, _) =
+                gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |window, cx| {
+                    let state =
+                        cx.new(|cx| EditorState::new(window, cx).default_value("alpha\nbeta\n"));
+                    state.update(cx, |state, cx| state.set_selected_range(2..6, cx));
+                    let view = cx.new(|cx| {
+                        WorkspacePanel::new("document-panel", "Document", "", window, cx)
+                    });
+                    view.update(cx, |view, cx| {
+                        view.show_editor("doc.md".into(), state.clone(), None, cx)
+                    });
+                    panel = Some(view.clone());
+                    editor = Some(state);
+                    view
+                })
+                .unwrap();
+            (handle, panel.unwrap(), editor.unwrap())
+        });
+        let style = ProseStyle::new("Inter".into(), 22., 2.6, 900.);
+        cx.update_window(handle, |_, window, cx| {
+            panel.update(cx, |panel, cx| panel.set_prose_style(style.clone(), cx));
+            window.render_frame(cx);
+            assert_eq!(editor.read(cx).value(), "alpha\nbeta\n");
+            assert_eq!(editor.read(cx).selected_range(), 2..6);
+            assert_eq!(editor.read(cx).cursor(), 6);
+        })
+        .unwrap();
+    }
 
     #[test]
     fn a_failed_preview_is_not_reloaded_for_the_same_source() {
