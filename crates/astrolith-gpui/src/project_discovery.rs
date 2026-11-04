@@ -799,6 +799,8 @@ pub(crate) struct ProjectWorkspace {
     data_references_task: Option<Task<()>>,
     /// Writing modes applied to every retained session.
     writing: WritingModes,
+    /// Build shows complete source in the active session's editor.
+    source_view: bool,
     /// Shell view state mirrored for one authoritative availability value.
     view_sidebar: bool,
     view_inspector: bool,
@@ -1028,6 +1030,7 @@ impl ProjectWorkspace {
             data_references: BTreeMap::new(),
             data_references_task: None,
             writing: WritingModes::default(),
+            source_view: false,
             view_sidebar: true,
             view_inspector: true,
             view_preview: false,
@@ -2602,6 +2605,103 @@ impl ProjectWorkspace {
         Ok(())
     }
 
+    /// Whether `path` is a project-owned `.astro` source this workspace may edit.
+    pub(crate) fn is_editable_project_source(&self, path: &std::path::Path) -> bool {
+        let Some(root) = self.project_root() else {
+            return false;
+        };
+        let extension = path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default();
+        extension.eq_ignore_ascii_case("astro")
+            && path.starts_with(&root)
+            && !path
+                .components()
+                .any(|part| part.as_os_str() == "node_modules" || part.as_os_str() == ".git")
+    }
+
+    /// Open one project `.astro` source as a retained, editable document.
+    pub(crate) fn open_project_source(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let root = self
+            .project_root()
+            .ok_or_else(|| "Open the project before opening a source file.".to_owned())?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+        let source = relative_source(&root, &canonical)
+            .ok_or_else(|| format!("{} is outside the open project.", canonical.display()))?;
+        if !self.is_editable_project_source(&canonical) {
+            return Err(format!(
+                "{} is not an editable project .astro source.",
+                canonical.display()
+            ));
+        }
+        if self.sessions.contains_key(&canonical) {
+            self.activate_session(&canonical, window, cx);
+            return Ok(());
+        }
+        if self.loads.contains_key(&canonical) {
+            self.active = Some(canonical);
+            self.document
+                .update(cx, |document, cx| document.clear_editor(cx));
+            return Ok(());
+        }
+        if self.loads.len() >= 2 {
+            return Err("Two documents are loading; try again when one finishes.".into());
+        }
+        if self.sessions.len() + self.loads.len() >= 32 {
+            return Err("Close an open document before opening more than 32 documents.".into());
+        }
+        let Some(project) = self.project_id.clone() else {
+            return Err("The project is not ready; try again after it opens.".into());
+        };
+        let generation = self.generation;
+        let source_string = source.as_str().to_owned();
+        let identity = DocumentIdentity::new(project, generation, source);
+        let ticket = DocumentLoadTicket::new(identity, DocumentRevision::INITIAL);
+        let index_revision = self.index_revision;
+        let expected = canonical.clone();
+        let key = canonical.clone();
+        let root = root.to_path_buf();
+        self.document
+            .update(cx, |document, cx| document.clear_editor(cx));
+        let cancellation = self.cancellation.clone();
+        let load = runtime::blocking(cx, move || {
+            cancellation.check().map_err(|error| error.to_string())?;
+            let actual = contained_path(&root, std::path::Path::new(&source_string))
+                .map_err(|error| error.to_string())?;
+            if actual != expected {
+                return Err("Source mapping changed; reopen the project.".into());
+            }
+            let source =
+                read_bounded(&actual, 8 * 1024 * 1024).map_err(|error| error.to_string())?;
+            if source.lines().count() > 50_000 {
+                return Err("Documents are limited to 50,000 lines.".into());
+            }
+            cancellation.check().map_err(|error| error.to_string())?;
+            Ok(source)
+        });
+        self.loads.insert(
+            key.clone(),
+            cx.spawn_in(window, async move |this, cx| {
+                let result = load.await.and_then(|result| result);
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.finish_load(ticket, index_revision, key, result, window, cx);
+                });
+            }),
+        );
+        self.active = Some(canonical);
+        self.status = "Loading document…".into();
+        cx.notify();
+        Ok(())
+    }
+
     /// Open the project, a collection's file list or one entry in the IDE.
     pub(crate) fn open_in_ide(
         &mut self,
@@ -3361,6 +3461,10 @@ impl ProjectWorkspace {
                 session.update(cx, |session, cx| {
                     session.set_writing_modes(modes, window, cx)
                 });
+                let source_view = self.source_view;
+                session.update(cx, |session, cx| {
+                    session.set_source_view(source_view, window, cx)
+                });
                 let copyedit = self.copyedit.clone();
                 session.update(cx, |session, cx| session.set_copyedit_config(copyedit, cx));
                 self.watch_session(key.clone(), session.clone(), window, cx);
@@ -3405,6 +3509,10 @@ impl ProjectWorkspace {
         }
         self.active = Some(path.to_owned());
         self.focus_collection_for(path, cx);
+        let source_view = self.source_view;
+        session.update(cx, |session, cx| {
+            session.set_source_view(source_view, window, cx)
+        });
         self.install(path, session, cx);
         self.refresh_entry_selection(cx);
         self.document.read(cx).focus_handle(cx).focus(window, cx);
@@ -4434,9 +4542,15 @@ impl ProjectWorkspace {
                 .focus_handle(cx)
                 .is_focused(window)
         });
-        let kind = session.as_ref().map(|session| session.read(cx).kind());
-        let markdown = kind == Some(DocumentKind::Markdown);
-        let mdx = kind == Some(DocumentKind::Mdx);
+        let (kind, source_view) = session
+            .as_ref()
+            .map(|session| {
+                let session = session.read(cx);
+                (session.kind(), session.is_source_view())
+            })
+            .unwrap_or((DocumentKind::Plain, false));
+        let markdown = matches!(kind, DocumentKind::Markdown) && !source_view;
+        let mdx = matches!(kind, DocumentKind::Mdx) && !source_view;
         let selection_nonempty = session
             .as_ref()
             .is_some_and(|session| !session.read(cx).editor.read(cx).selected_range().is_empty());
@@ -4548,6 +4662,25 @@ impl ProjectWorkspace {
             return 0;
         };
         session.update(cx, |session, cx| session.cursors_at_line_ends(cx))
+    }
+
+    /// Switch the active editor between complete source and writer projection.
+    pub(crate) fn set_source_view(
+        &mut self,
+        source: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.source_view = source;
+        let Some(path) = self.active.clone() else {
+            return;
+        };
+        let Some(session) = self.sessions.get(&path).cloned() else {
+            return;
+        };
+        session.update(cx, |session, cx| {
+            session.set_source_view(source, window, cx)
+        });
     }
 
     /// Toggle focus mode for every retained session.
@@ -6641,6 +6774,54 @@ pub(crate) fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+/// Scan project-owned `.astro` sources for the Build file navigator.
+///
+/// The walk is bounded by depth, directory and result count, skips dependency
+/// and build output directories, and never follows symlinks.
+pub(crate) fn scan_project_astro_sources(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
+    const SKIP: [&str; 6] = ["node_modules", "target", "dist", "build", ".git", ".astro"];
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut found = Vec::new();
+    let mut inspected = 0usize;
+    while let Some((directory, depth)) = stack.pop() {
+        if depth > 12 || inspected >= 5_000 || found.len() >= 500 {
+            break;
+        }
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|error| format!("Could not read {}: {error}", directory.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            inspected += 1;
+            let file_type = entry.file_type().map_err(|error| error.to_string())?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if file_type.is_dir() {
+                if !name.starts_with('.') && !SKIP.contains(&name.as_ref()) {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            if !file_type.is_file() || !name.ends_with(".astro") {
+                continue;
+            }
+            if let Ok(relative) = path.strip_prefix(root) {
+                let relative = relative
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                found.push((path, relative));
+            }
+        }
+    }
+    found.sort_by(|left, right| left.1.cmp(&right.1));
+    Ok(found)
 }
 
 /// Project-relative canonical source for one absolute path, if it is inside.
@@ -9360,6 +9541,123 @@ export const collections = {blog, dataAuthors};
                 "---\r\ntitle: Old\r\n---\r\n\r\n# 标题 changed 🦀\r\n",
                 "undoing the metadata patch must not rewrite any other byte"
             );
+        });
+    }
+
+    #[test]
+    fn project_astro_source_scan_is_sorted_and_skips_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src/pages")).unwrap();
+        std::fs::create_dir_all(root.path().join("src/layouts")).unwrap();
+        std::fs::create_dir_all(root.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(root.path().join("src/pages/index.astro"), "").unwrap();
+        std::fs::write(root.path().join("src/layouts/Base.astro"), "").unwrap();
+        std::fs::write(root.path().join("src/pages/readme.md"), "").unwrap();
+        std::fs::write(root.path().join("node_modules/pkg/Bad.astro"), "").unwrap();
+        let found = scan_project_astro_sources(root.path()).unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|(_, relative)| relative.as_str())
+                .collect::<Vec<_>>(),
+            ["src/layouts/Base.astro", "src/pages/index.astro"]
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn project_astro_source_opens_edits_saves_and_has_no_frontmatter(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let source =
+            "---\nimport Layout from '../layouts/Base.astro';\n---\n<Layout title=\"Home\" />\n";
+        let path = dir.path().join("src/pages/index.astro");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, source).unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        let canonical = std::fs::canonicalize(&path).unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.open_project_source(path.clone(), window, cx)
+                    .expect("a project .astro source opens for editing");
+            });
+        })
+        .unwrap();
+        wait_for_session(cx, &view, &canonical).await;
+        let session = view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&canonical).unwrap().clone();
+            let session_read = session.read(cx);
+            assert_eq!(session_read.kind(), DocumentKind::Plain);
+            assert_eq!(session_read.editor.read(cx).value(), source);
+            assert_eq!(session_read.projection.visible, source);
+            assert!(!session_read.is_dirty());
+            assert!(
+                view.active_frontmatter_key().is_none(),
+                "an Astro development file has no content-entry frontmatter"
+            );
+            session
+        });
+        let edited =
+            "---\nimport Layout from '../layouts/Base.astro';\n---\n<Layout title=\"Edited\" />\n";
+        replace_visible(cx, handle, &session, edited);
+        session.read_with(cx, |session, _| assert!(session.is_dirty()));
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx));
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if std::fs::read_to_string(&canonical).unwrap() == edited {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&canonical).unwrap(), edited);
+    }
+
+    #[gpui_kit::test]
+    async fn source_view_edits_the_same_buffer_and_maps_back_to_the_writer(
+        cx: &mut TestAppContext,
+    ) {
+        let source = "---\ntitle: Old\n---\n\n# Body\n";
+        let (handle, _view) = mount(cx);
+        let session = bare_session(cx, handle, "src/posts/source.md", source);
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| session.set_source_view(true, window, cx));
+        })
+        .unwrap();
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.editor.read(cx).value(), source);
+            assert_eq!(session.projection.visible, "# Body\n");
+        });
+        let edited = "---\ntitle: New\n---\n\n# Body edited\n";
+        replace_visible(cx, handle, &session, edited);
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.buffer.current_text(), edited);
+            assert_eq!(session.projection.visible, "# Body edited\n");
+            assert_eq!(session.editor.read(cx).value(), edited);
+            assert!(session.is_dirty());
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            assert!(session.update(cx, |session, cx| session.undo_source(window, cx)));
+        })
+        .unwrap();
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.buffer.current_text(), source);
+            assert_eq!(session.editor.read(cx).value(), source);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| session.set_source_view(false, window, cx));
+        })
+        .unwrap();
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.editor.read(cx).value(), "# Body\n");
+            assert_eq!(session.buffer.current_text(), source);
         });
     }
 

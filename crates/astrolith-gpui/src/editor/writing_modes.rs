@@ -233,6 +233,22 @@ impl SessionPresentation {
     }
 
     /// Rebuild both layers after a mode change.
+    /// Remove writer decorations when the editor shows complete source.
+    pub(crate) fn clear_layers(&mut self, cx: &mut App) {
+        if self.prose_key.is_none() && self.focus_key.is_none() {
+            return;
+        }
+        if let Some(collection) = self.prose.as_mut() {
+            collection.set(Vec::new(), cx);
+        }
+        if let Some(collection) = self.focus.as_mut() {
+            collection.set(Vec::new(), cx);
+        }
+        self.prose_key = None;
+        self.focus_key = None;
+        self.typewriter_request = None;
+    }
+
     pub(crate) fn invalidate(&mut self) {
         self.prose_key = None;
         self.focus_key = None;

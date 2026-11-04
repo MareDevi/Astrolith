@@ -3,8 +3,8 @@ use std::{ops::Range, time::Instant};
 
 use astrolith_document::{
     DocumentBuffer, DocumentIdentity, DocumentKind, DocumentRevision, FormatCommand, FormatOutcome,
-    TextEdit, TokenSnapshot, WriterProjection, apply_visible_edit, diff_visible, format_document,
-    map_visible_offset, project_writer, token_snapshot,
+    ProjectionSegment, TextEdit, TokenSnapshot, WriterProjection, apply_visible_edit, diff_visible,
+    format_document, map_visible_offset, project_writer, token_snapshot,
 };
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::input::{
@@ -43,8 +43,10 @@ pub(crate) struct DocumentSession {
     programmatic_change: bool,
     /// Complete-source transactions, one ordered stack for body and frontmatter.
     history: SourceHistory,
-    /// Selection captured before the next source transaction.
+    /// Selection captured before the next source transaction, in source bytes.
     last_selection: Range<usize>,
+    /// Build shows the complete source in the same editor; Writer shows the projection.
+    source_view: bool,
     /// The active selection and the end of the occurrence `select_next_occurrence`
     /// added last, so a repeated press continues instead of finding it again.
     next_occurrence: Option<(Range<usize>, usize)>,
@@ -194,9 +196,9 @@ impl DocumentSession {
         // Cursor moves notify the editor without changing text; focus dimming and
         // typewriter centring follow the caret, so they refresh here and nowhere
         // near the render path.
-        let cursor = cx.observe_in(&editor, window, |this, editor, window, cx| {
+        let cursor = cx.observe_in(&editor, window, |this, _editor, window, cx| {
             let _ = window;
-            this.last_selection = editor.read(cx).selected_range();
+            this.last_selection = this.current_source_selection(cx);
             this.refresh_cursor(cx);
         });
         // Losing focus is the writer's save trigger: the workspace turns it into
@@ -279,6 +281,7 @@ impl DocumentSession {
             programmatic_change: false,
             history: SourceHistory::default(),
             last_selection: 0..0,
+            source_view: false,
             next_occurrence: None,
             refused: false,
             notice,
@@ -304,6 +307,11 @@ impl DocumentSession {
         }
     }
 
+    /// Whether the editor currently shows complete source rather than prose.
+    pub(crate) fn is_source_view(&self) -> bool {
+        self.source_view
+    }
+
     /// The source syntax this session was built for.
     pub(crate) fn kind(&self) -> DocumentKind {
         self.kind
@@ -316,7 +324,7 @@ impl DocumentSession {
 
     /// One-based line and column of the primary cursor in the visible text.
     pub(crate) fn cursor_line_column(&self, cx: &App) -> (u32, u32) {
-        let visible = &self.projection.visible;
+        let visible = self.editor.read(cx).text().to_string();
         let offset = self.editor.read(cx).cursor().min(visible.len());
         let prefix = &visible[..offset];
         let line = prefix.matches('\n').count() as u32 + 1;
@@ -339,6 +347,12 @@ impl DocumentSession {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), SharedString> {
+        if self.source_view {
+            let message = "Formatting commands are unavailable in complete-source view.";
+            self.notice = Some(SharedString::from(message));
+            cx.notify();
+            return Err(SharedString::from(message));
+        }
         self.absorb(cx);
         let selection = self.editor.read(cx).selected_range();
         let formatted = match format_document(
@@ -979,6 +993,11 @@ impl DocumentSession {
     fn refresh_writer(&mut self, cx: &mut Context<Self>) {
         self.counts = token_snapshot(&self.projection.visible);
         self.text_key = fingerprint(&self.projection.visible);
+        if self.source_view {
+            self.presentation.clear_layers(cx);
+            self.copyedit.invalidate(cx);
+            return;
+        }
         self.presentation
             .refresh_prose(&self.editor, &self.projection.visible, self.text_key, cx);
         self.presentation
@@ -988,6 +1007,11 @@ impl DocumentSession {
 
     /// Refresh only what follows the caret.
     fn refresh_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.source_view {
+            self.presentation.clear_layers(cx);
+            self.copyedit.invalidate(cx);
+            return;
+        }
         // The prose key includes the text and the pane width, so a caret move
         // after either changed rebuilds the layer instead of leaving it stale.
         self.presentation
@@ -1066,9 +1090,14 @@ impl DocumentSession {
         cx: &mut Context<Self>,
     ) {
         self.rebuild_projection(window, cx);
-        let visible_len = self.projection.visible.len();
-        let start = selection.start.min(visible_len);
-        let end = selection.end.min(visible_len);
+        let view_selection = if self.source_view {
+            clamp_range(selection.clone(), self.buffer.current_text().len())
+        } else {
+            self.source_range_to_projection(&selection)
+        };
+        let visible_len = self.editor.read(cx).text().len();
+        let start = view_selection.start.min(visible_len);
+        let end = view_selection.end.min(visible_len);
         self.editor.update(cx, |editor, cx| {
             editor.set_selected_range(start..end, cx);
         });
@@ -1129,14 +1158,14 @@ impl DocumentSession {
     ) -> Result<(), String> {
         self.absorb(cx);
         let before = self.buffer.current_text().to_owned();
-        let selection_before = self.editor.read(cx).selected_range();
+        let selection_before = self.current_source_selection(cx);
         let patched = patch(&before)?;
         self.buffer
             .apply_text(patched)
             .map_err(|error| error.to_string())?;
         self.rebuild_projection(window, cx);
         let after = self.buffer.current_text().to_owned();
-        let selection_after = self.editor.read(cx).selected_range();
+        let selection_after = self.current_source_selection(cx);
         self.history.record(
             &before,
             &after,
@@ -1160,6 +1189,10 @@ impl DocumentSession {
 
     /// Map the whole visible text back into the complete source and absorb it.
     fn absorb_with_intent(&mut self, cx: &App, intent: HistoryIntent) {
+        if self.source_view {
+            self.absorb_source(cx, intent);
+            return;
+        }
         if self.refused {
             // The editor text is known to be newer-and-rejected; nothing may be
             // mapped from it until a rebuild resynchronises it.
@@ -1171,7 +1204,8 @@ impl DocumentSession {
         }
         let before = self.buffer.current_text().to_owned();
         let selection_before = self.last_selection.clone();
-        let selection_after = self.editor.read(cx).selected_range();
+        let selection_after =
+            self.projection_range_to_source(self.editor.read(cx).selected_range());
         let edit = diff_visible(&self.projection.visible, &visible);
         match apply_visible_edit(&before, &self.projection, edit) {
             Ok(source) => {
@@ -1199,6 +1233,137 @@ impl DocumentSession {
         self.last_selection = selection_after;
     }
 
+    fn absorb_source(&mut self, cx: &App, intent: HistoryIntent) {
+        if self.refused {
+            return;
+        }
+        let source = self.editor.read(cx).text().to_string();
+        if source == self.buffer.current_text() {
+            return;
+        }
+        let before = self.buffer.current_text().to_owned();
+        let selection_before = self.last_selection.clone();
+        let selection_after = self.editor.read(cx).selected_range();
+        if let Err(error) = self.buffer.apply_text(source) {
+            self.refuse(&error.to_string());
+            return;
+        }
+        let after = self.buffer.current_text().to_owned();
+        let (projection, notice) = project_or_complete(&after, self.kind);
+        self.projection = projection;
+        if self.notice.is_none() {
+            self.notice = notice;
+        }
+        self.counts = token_snapshot(&self.projection.visible);
+        self.text_key = fingerprint(&self.projection.visible);
+        self.history.record(
+            &before,
+            &after,
+            selection_before,
+            selection_after.clone(),
+            intent,
+        );
+        self.last_selection = selection_after;
+    }
+
+    /// Show the complete source (Build) or the writer projection (Writing/Preview).
+    pub(crate) fn set_source_view(
+        &mut self,
+        source: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.source_view == source {
+            return;
+        }
+        self.absorb(cx);
+        let source_selection = self.current_source_selection(cx);
+        self.source_view = source;
+        let (text, selection) = if source {
+            (
+                self.buffer.current_text().to_owned(),
+                clamp_range(source_selection.clone(), self.buffer.current_text().len()),
+            )
+        } else {
+            let selection = self.source_range_to_projection(&source_selection);
+            (self.projection.visible.clone(), selection)
+        };
+        self.editor.update(cx, |editor, cx| {
+            editor.set_value(text, window, cx);
+            editor.set_selected_range(selection.clone(), cx);
+        });
+        self.last_selection = if source {
+            selection
+        } else {
+            self.projection_range_to_source(selection)
+        };
+        self.refresh_copyedit(cx);
+        self.refresh_writer(cx);
+        // The mode owner notifies the shell; emitting SessionChanged here would
+        // run project subscriptions reentrantly from inside a project update.
+        cx.notify();
+    }
+
+    /// Current editor selection expressed in complete-source bytes.
+    fn current_source_selection(&self, cx: &App) -> Range<usize> {
+        let selection = self.editor.read(cx).selected_range();
+        if self.source_view {
+            clamp_range(selection, self.buffer.current_text().len())
+        } else {
+            self.projection_range_to_source(selection)
+        }
+    }
+
+    fn projection_range_to_source(&self, range: Range<usize>) -> Range<usize> {
+        self.projection_offset_to_source(range.start)..self.projection_offset_to_source(range.end)
+    }
+
+    fn projection_offset_to_source(&self, offset: usize) -> usize {
+        let mut last_source = 0;
+        for segment in &self.projection.segments {
+            match segment {
+                ProjectionSegment::Hidden { source } => last_source = source.end,
+                ProjectionSegment::Visible { source, visible } => {
+                    if offset < visible.end {
+                        return source.start + offset.saturating_sub(visible.start);
+                    }
+                    last_source = source.end;
+                }
+            }
+        }
+        last_source
+    }
+
+    fn source_range_to_projection(&self, range: &Range<usize>) -> Range<usize> {
+        self.source_offset_to_projection(range.start)..self.source_offset_to_projection(range.end)
+    }
+
+    fn source_offset_to_projection(&self, offset: usize) -> usize {
+        for segment in &self.projection.segments {
+            match segment {
+                ProjectionSegment::Hidden { source } => {
+                    if offset < source.end {
+                        return self
+                            .projection
+                            .segments
+                            .iter()
+                            .find_map(|segment| match segment {
+                                ProjectionSegment::Visible { visible, .. } => Some(visible.start),
+                                ProjectionSegment::Hidden { .. } => None,
+                            })
+                            .unwrap_or(0);
+                    }
+                }
+                ProjectionSegment::Visible { source, visible } => {
+                    if offset < source.end {
+                        return visible.start + offset.saturating_sub(source.start);
+                    }
+                }
+            }
+        }
+        self.projection.visible.len()
+    }
+
     fn refuse(&mut self, reason: &str) {
         // Fail closed: the complete source is authoritative and untouched. Rebuild
         // the projection from it so the next diff is still measured against the
@@ -1218,10 +1383,34 @@ impl DocumentSession {
     fn rebuild_projection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous_visible = self.projection.visible.clone();
         let caret = self.editor.read(cx).cursor().min(previous_visible.len());
+        let source_caret = if self.source_view {
+            caret.min(self.buffer.current_text().len())
+        } else {
+            self.projection_offset_to_source(caret)
+        };
         let (projection, notice) = project_or_complete(self.buffer.current_text(), self.kind);
         self.projection = projection;
         if let Some(notice) = notice {
             self.notice = Some(notice);
+        }
+        if self.source_view {
+            let source = self.buffer.current_text().to_owned();
+            let matches = {
+                let current = self.editor.read(cx).text();
+                current.len() == source.len() && current.chars().eq(source.chars())
+            };
+            if !matches {
+                self.origin = false;
+                self.writing_self = false;
+                self.editor.update(cx, |editor, cx| {
+                    editor.set_value(source.clone(), window, cx);
+                });
+            }
+            let caret = source_caret.min(source.len());
+            self.editor
+                .update(cx, |editor, cx| editor.set_selected_range(caret..caret, cx));
+            self.refused = false;
+            return;
         }
         let current = self.editor.read(cx).text();
         if current.len() != self.projection.visible.len()
@@ -1421,6 +1610,12 @@ fn source_diff(before: &str, after: &str) -> Option<(Range<usize>, String, Strin
         before[prefix..before_end].to_owned(),
         after[prefix..after_end].to_owned(),
     ))
+}
+
+fn clamp_range(range: Range<usize>, length: usize) -> Range<usize> {
+    let start = range.start.min(length);
+    let end = range.end.min(length);
+    start..end.max(start)
 }
 
 /// Which projection applies to a canonical source path.

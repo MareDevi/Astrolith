@@ -141,3 +141,13 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 - 新增 `HistoryChanged` 事件：`ProjectWorkspace` 转发后，Shell 强制 frontmatter form 从恢复后的完整源重新加载，避免隐藏字段 undo 后表单与正文分叉。
 - 回归：新增正文编辑→隐藏 FM 修改→Undo→Undo→Redo→Redo 的交错测试，以及 CRLF + 中文/emoji 的字节保真 undo/redo 测试；现有 projection、formatting、MDX import、save/conflict/recovery 测试全部继续通过（GPUI 349 passed、4 ignored）。
 - 未完成/未覆盖：原生窗口中的真实键盘、IME composition、跨模式 undo 与表单焦点恢复尚未执行；恢复文件在外部重载路径上的历史失效主要依赖现有 session 重开，未新增磁盘恢复集成用例。
+
+## 10. M2b 执行记录
+
+- Build 模式把当前 session 的 EditorState 切到完整源表示：同一个 `DocumentBuffer`、同一 editor、同一完整源事务栈。切回 Writing/Preview 时按 projection 隐藏 frontmatter/imports，保序映射 caret 与 selection；格式化命令在完整源视图下禁用，避免把源码坐标当作可见坐标。
+- Build 顶部新增真实标签条，数据来自 `ProjectWorkspace::open_tabs`；点击激活 retained session，关闭按钮走现有脏文档确认与保存路径。
+- 新增项目 `.astro` 源码能力：`ProjectWorkspace::open_project_source` 校验项目内路径、拒绝 `node_modules`/`.git`、复用 8 MiB/50,000 行上限、DocumentSession、保存、冲突、恢复与完整源历史；`.astro` 作为 Plain 文档，不显示 frontmatter/schema 控件。
+- 新增 `Open project source…` 命令与有界 `.astro` 扫描（深度、目录、结果数上限，跳过依赖/构建目录，不跟随符号链接），供 Build 文件导航使用。Open file 对项目内 `.astro` 进入可编辑 session，项目外文件仍保持原有 readonly 入口。
+- MDX 导入 patch 的既有语义保持不变：撤销组件标签仍保留 import。ProjectWorkspace 在 source view 切换和激活时应用当前模式；进入 Build 不改文件、不重读磁盘、不重启服务。
+- 回归：新增 `.astro` 扫描排序/跳过依赖、`.astro` 打开/编辑/保存/无 frontmatter、Build 完整源与标签条、source-view 编辑与 Undo/映射回 Writer 测试；`cargo test --workspace --locked` 通过（GPUI 353 passed、4 ignored），clippy `-D warnings` 通过。
+- 未完成：未启用 `tree-sitter-astro` 高亮（没有真实高亮证据，不让空 feature 冒充），未新增 Problems 面板或 LSP；原生窗口的源码浏览、焦点、标签条与 `.astro` 保存尚未做真机验收；`.astro` 导航为命令/对话框入口，侧栏项目树未扩展。

@@ -8,6 +8,7 @@ use crate::recent_projects::RecentEntry;
 #[action(namespace = astrolith, no_json)]
 pub(crate) enum CommandId {
     OpenFile,
+    OpenProjectSource,
     OpenProject,
     OpenRecentProjects,
     ReloadCollections,
@@ -83,6 +84,7 @@ pub(crate) enum CommandId {
 
 pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::OpenFile,
+    CommandId::OpenProjectSource,
     CommandId::OpenProject,
     CommandId::OpenRecentProjects,
     CommandId::ReloadCollections,
@@ -283,6 +285,7 @@ impl CommandId {
             Self::RestartPreview => state.preview_attached && !state.busy,
             Self::OpenPreview => state.preview_ready && state.active_entry && !state.busy,
             Self::CopyPreviewUrl => state.preview_ready && state.active_entry,
+            Self::OpenProjectSource => state.project_open && !state.busy,
             Self::OpenProjectInIde | Self::OpenCollectionInIde => {
                 state.project_open && state.ide_configured && !state.busy
             }
@@ -323,6 +326,7 @@ impl CommandId {
     pub fn label(self) -> &'static str {
         match self {
             Self::OpenFile => "Open file…",
+            Self::OpenProjectSource => "Open project source…",
             Self::OpenProject => "Open project…",
             Self::OpenRecentProjects => "Manage Recent Projects…",
             Self::ReloadCollections => "Reload collections",
@@ -716,6 +720,7 @@ pub(crate) fn install_menus(
         let mut items = items_for(
             &[
                 CommandId::OpenFile,
+                CommandId::OpenProjectSource,
                 CommandId::OpenProject,
                 CommandId::ReloadCollections,
                 CommandId::NewEntry,
@@ -945,6 +950,7 @@ pub(crate) const ENTRY_CONTEXT_IDE_COMMANDS: &[CommandId] = &[
 pub(crate) fn command_group(command: CommandId) -> &'static str {
     match command {
         CommandId::OpenFile
+        | CommandId::OpenProjectSource
         | CommandId::OpenProject
         | CommandId::OpenRecentProjects
         | CommandId::ReloadCollections

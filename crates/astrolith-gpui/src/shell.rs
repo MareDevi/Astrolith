@@ -31,6 +31,7 @@ use crate::{
     preview::{PreviewPanel, PreviewStateChanged},
     project_discovery::{
         FrontmatterKey, HistoryChangedEvent, ProjectOpened, ProjectWorkspace, now_secs,
+        scan_project_astro_sources,
     },
     recent_projects::{self, RecentEntry},
     runtime,
@@ -233,6 +234,7 @@ pub(crate) struct Shell {
     resetting: Arc<AtomicBool>,
     opening: bool,
     opening_task: Option<Task<()>>,
+    source_picker_task: Option<Task<()>>,
     file_status: String,
     preview_sync_key: Option<(u64, Option<PathBuf>, astrolith_preview::RouteMapping)>,
     last_viewport: gpui_kit::Size<gpui_kit::Pixels>,
@@ -610,6 +612,7 @@ impl Shell {
             resetting,
             opening: false,
             opening_task: None,
+            source_picker_task: None,
             file_status: "Readonly · No file open".into(),
             preview_sync_key: None,
             last_viewport: window.viewport_size(),
@@ -1532,6 +1535,10 @@ impl Shell {
         self.sync_project_preferences(cx);
         self.mode = resolved.last_mode.unwrap_or(resolved.default_mode);
         self.settings.layouts = resolved.layouts;
+        let source_view = self.mode == WorkspaceMode::Build;
+        self.project.update(cx, |project, cx| {
+            project.set_source_view(source_view, window, cx)
+        });
         let layout = self.settings.layouts.get(self.mode).clone();
         self.apply_layout(layout, window, cx);
         self.project.update(cx, |project, cx| {
@@ -1630,6 +1637,79 @@ impl Shell {
         self.persist_project(cx);
     }
 
+    /// Real document tabs for Build, backed by retained sessions.
+    fn build_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabs = self.project.read(cx).open_tabs();
+        let active = self.project.read(cx).active_path();
+        let owner = cx.weak_entity();
+        let project = self.project.clone();
+        div()
+            .h(px(40.))
+            .flex_shrink_0()
+            .h_flex()
+            .items_end()
+            .gap_1()
+            .px(px(12.))
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .children(tabs.iter().enumerate().map(|(index, tab)| {
+                let owner = owner.clone();
+                let project = project.clone();
+                let path = tab.path.clone();
+                let close_owner = owner.clone();
+                let close_project = project.clone();
+                let close_path = tab.path.clone();
+                let selected = active.as_ref() == Some(&tab.path);
+                div()
+                    .id(format!("build-tab-{index}"))
+                    .test_support()
+                    .h_flex()
+                    .h(px(32.))
+                    .items_center()
+                    .gap_2()
+                    .px(px(10.))
+                    .rounded_t(px(6.))
+                    .when(selected, |tab| {
+                        tab.bg(cx.theme().tab_active)
+                            .text_color(cx.theme().tab_active_foreground)
+                    })
+                    .when(!selected, |tab| tab.text_color(cx.theme().tab_foreground))
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| {
+                        let _ = owner.update(cx, |_this, cx| {
+                            project.update(cx, |project, cx| {
+                                project.activate_session(&path, window, cx)
+                            });
+                        });
+                    })
+                    .child(
+                        div()
+                            .max_w(px(200.))
+                            .truncate()
+                            .text_xs()
+                            .child(tab.label.clone()),
+                    )
+                    .when(tab.dirty, |tab| {
+                        tab.child(div().size_1p5().rounded_full().bg(cx.theme().foreground))
+                    })
+                    .child(
+                        Button::new(("build-tab-close", index))
+                            .small()
+                            .ghost()
+                            .icon(IconName::X)
+                            .tooltip("Close file")
+                            .on_click(move |_, window, cx| {
+                                let _ = close_owner.update(cx, |_, cx| {
+                                    close_project.update(cx, |project, cx| {
+                                        project.close_path(close_path.clone(), window, cx)
+                                    });
+                                });
+                            }),
+                    )
+            }))
+    }
+
     /// The centered three-way mode switch.
     fn mode_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.mode;
@@ -1667,6 +1747,9 @@ impl Shell {
         self.capture_layout(cx);
         let inspector_open = self.dock.read(cx).is_dock_open(DockPlacement::Right);
         self.mode = mode;
+        self.project.update(cx, |project, cx| {
+            project.set_source_view(mode == WorkspaceMode::Build, window, cx)
+        });
         let layout = self.settings.layouts.get(mode).clone();
         self.apply_layout(layout, window, cx);
         if let Some(scope) = self.project_scope.as_mut()
@@ -1739,6 +1822,7 @@ impl Shell {
     fn execute(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         match command {
             CommandId::OpenFile => self.open_file(window, cx),
+            CommandId::OpenProjectSource => self.open_project_source_picker(window, cx),
             CommandId::Save => {
                 self.project
                     .update(cx, |project, cx| project.save_active(window, cx));
@@ -2439,7 +2523,21 @@ impl Shell {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.opening = false;
                 match result {
-                    Some(Ok(source)) => this.show_document(source, window, cx),
+                    Some(Ok(source)) => {
+                        if this
+                            .project
+                            .read(cx)
+                            .is_editable_project_source(&source.path)
+                        {
+                            if let Err(error) = this.project.update(cx, |project, cx| {
+                                project.open_project_source(source.path, window, cx)
+                            }) {
+                                this.file_status = error;
+                            }
+                        } else {
+                            this.show_document(source, window, cx);
+                        }
+                    }
                     Some(Err(error)) => {
                         tracing::warn!(%error, "could not open a text file");
                         this.file_status = format!("Could not open file: {error}");
@@ -2449,6 +2547,77 @@ impl Shell {
                 cx.notify();
             });
         }));
+    }
+
+    /// List project `.astro` sources and open one as an editable retained document.
+    fn open_project_source_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let Some(root) = self.project.read(cx).project_root() else {
+            self.file_status = "Open a project before opening its sources.".into();
+            return;
+        };
+        let scan = runtime::blocking(cx, move || scan_project_astro_sources(&root));
+        self.source_picker_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let sources = scan.await.and_then(|result| result);
+            let _ = this.update_in(cx, |this, window, cx| match sources {
+                Ok(sources) => this.show_source_picker(sources, window, cx),
+                Err(error) => {
+                    this.file_status = format!("Could not scan project sources: {error}");
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn show_source_picker(
+        &mut self,
+        sources: Vec<(PathBuf, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let rows = if sources.is_empty() {
+                div()
+                    .p_4()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("No .astro sources were found in this project.")
+                    .into_any_element()
+            } else {
+                div()
+                    .id("project-source-list")
+                    .test_support()
+                    .v_flex()
+                    .max_h(px(380.))
+                    .overflow_y_scroll()
+                    .children(sources.iter().enumerate().map(|(index, (path, label))| {
+                        let owner = owner.clone();
+                        let path = path.clone();
+                        Button::new(format!("project-source-{index}"))
+                            .small()
+                            .ghost()
+                            .label(label.clone())
+                            .w_full()
+                            .justify_start()
+                            .on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                let _ = owner.update(cx, |this, cx| {
+                                    if let Err(error) = this.project.update(cx, |project, cx| {
+                                        project.open_project_source(path.clone(), window, cx)
+                                    }) {
+                                        this.file_status = error;
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                    }))
+                    .into_any_element()
+            };
+            dialog.title("Open project source").w(px(560.)).child(rows)
+        });
     }
 
     fn show_document(
@@ -2503,6 +2672,7 @@ fn format_command(command: CommandId) -> astrolith_document::FormatCommand {
 fn command_icon(command: CommandId) -> IconName {
     match command {
         CommandId::OpenFile => IconName::FileText,
+        CommandId::OpenProjectSource => IconName::FileSearch,
         CommandId::OpenProject => IconName::FolderOpen,
         CommandId::OpenRecentProjects => IconName::FolderOpen,
         CommandId::ReloadCollections => IconName::RotateCcw,
@@ -2836,6 +3006,9 @@ impl Render for Shell {
                         |element, delta| element.opacity(delta),
                     )
                     .into_any_element()
+            })
+            .when(self.mode == WorkspaceMode::Build, |shell| {
+                shell.child(self.build_tab_strip(cx))
             })
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
     }
@@ -3386,6 +3559,74 @@ mod tests {
             assert_eq!(shell.mode, WorkspaceMode::Build);
             assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
         });
+    }
+
+    #[gpui_kit::test]
+    async fn build_mode_shows_complete_source_and_real_document_tabs(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_path = workspace.path().join("preferences/global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let project = project_fixture("build-source-site");
+        let source = "---\ntitle: Hidden\n---\n\n# Body\n";
+        std::fs::write(project.path().join("src/content/first.md"), source).unwrap();
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == canonical)
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.project.update(cx, |project, cx| {
+                    project.open_first_entry_for_tests(window, cx)
+                })
+            });
+        })
+        .unwrap();
+        let project_entity = view.read_with(cx, |shell, _| shell.project.clone());
+        wait_for_active_session(cx, &project_entity).await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_mode(WorkspaceMode::Build, window, cx)
+            });
+            window.render_frame(cx);
+            assert!(window.find("build-tab-0").visible());
+            view.update(cx, |view, cx| {
+                let session = view
+                    .project
+                    .read(cx)
+                    .active_session(cx)
+                    .expect("the entry stays open");
+                assert_eq!(
+                    session.read(cx).editor.read(cx).value(),
+                    source,
+                    "Build must show the complete source"
+                );
+            });
+            view.update(cx, |view, cx| {
+                view.set_mode(WorkspaceMode::Writing, window, cx)
+            });
+            view.update(cx, |view, cx| {
+                let session = view
+                    .project
+                    .read(cx)
+                    .active_session(cx)
+                    .expect("the entry stays open");
+                assert_eq!(
+                    session.read(cx).editor.read(cx).value(),
+                    "# Body\n",
+                    "Writing hides the frontmatter again"
+                );
+            });
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
