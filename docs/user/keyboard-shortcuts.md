@@ -37,6 +37,7 @@ Switching modes keeps the open document, its caret, selection and history.
 | Toggle files | Ctrl+1 |
 | Toggle inspector | Ctrl+2 |
 | Toggle preview | Ctrl+Alt+P |
+| Toggle terminal | Ctrl+` |
 | Focus document | Ctrl+0 |
 | Enter full screen | F11 |
 

@@ -15,6 +15,7 @@ mod runtime;
 mod settings;
 mod shell;
 mod single_instance;
+mod terminal;
 pub mod theme;
 mod ui;
 mod update;

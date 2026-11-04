@@ -60,6 +60,7 @@ pub(crate) enum CommandId {
     ToggleSidebar,
     ToggleInspector,
     TogglePreview,
+    ToggleTerminal,
     StartPreview,
     StopPreview,
     OpenPreview,
@@ -134,6 +135,7 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::ToggleSidebar,
     CommandId::ToggleInspector,
     CommandId::TogglePreview,
+    CommandId::ToggleTerminal,
     CommandId::StartPreview,
     CommandId::StopPreview,
     CommandId::OpenPreview,
@@ -383,6 +385,7 @@ impl CommandId {
             Self::ToggleSidebar => "Toggle files",
             Self::ToggleInspector => "Toggle inspector",
             Self::TogglePreview => "Toggle preview",
+            Self::ToggleTerminal => "Toggle terminal",
             Self::StartPreview => "Start preview server",
             Self::StopPreview => "Stop preview server",
             Self::OpenPreview => "Open preview in browser",
@@ -622,6 +625,7 @@ impl CommandId {
                     "ctrl-shift-t"
                 }
             }
+            Self::ToggleTerminal => "ctrl-`",
             Self::OpenPreview => {
                 if mac {
                     "cmd-enter"
@@ -781,6 +785,7 @@ pub(crate) fn install_menus(
                 CommandId::ToggleSidebar,
                 CommandId::ToggleInspector,
                 CommandId::TogglePreview,
+                CommandId::ToggleTerminal,
                 CommandId::FocusDocument,
                 CommandId::ResetLayout,
                 CommandId::ToggleFullscreen,
@@ -965,6 +970,7 @@ pub(crate) fn command_group(command: CommandId) -> &'static str {
         | CommandId::ToggleSidebar
         | CommandId::ToggleInspector
         | CommandId::TogglePreview
+        | CommandId::ToggleTerminal
         | CommandId::FocusDocument
         | CommandId::FocusSelectionToolbar
         | CommandId::ResetLayout

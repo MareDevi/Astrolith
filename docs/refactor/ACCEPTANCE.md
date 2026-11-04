@@ -123,3 +123,12 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 - 项目 `last_mode` 优先于 global `default_mode` 恢复；布局解析按模式叠加项目覆盖。模式命令与可见性状态并入共享 `CommandAvailability`。
 - 验证：`mise run check` 退出码 0；Rust workspace 测试通过（GPUI 346 passed、4 ignored），fixture 单元 6 passed，Astro fixture compatibility PASS。
 - 未完成：A01/A26 的原生窗口、真实模式下 screenshot/bounds 对照与最小窗口视觉检查尚未执行；Inspector 的浮动 Popover 属于 M4b。M2b/M2c（Build 源码、终端）未在本记录中声明完成。
+
+## 8. M2c 执行记录
+
+- 新增 `astrolith-terminal` 服务 crate：`portable-pty 0.9.0` 持有 PTY 子进程，`vt100 0.18.1` 解析 ANSI、颜色、光标、宽字符与有界 scrollback（2000 行）。reader 线程分批解析并递增 revision；GPUI 以 16 ms 轮询 revision，不在渲染路径读文件或等待进程。
+- 新增 GPUI `TerminalPanel`：Build 模式底部 Dock 显示；项目路径绑定 shell，输入/箭头/功能键/Ctrl 组合、选择复制、粘贴、滚轮回看、PTY resize、Clear/Restart、退出码/失败提示。终端焦点用 keystroke interceptor 消费按键，避免触发编辑器/应用快捷键。
+- 生命周期：隐藏 Dock 与切换模式不销毁 session；切换项目先终止旧子进程再启动新 shell；窗口/实体销毁时 `TerminalSession::drop` 终止并回收 reader。Terminal 与 Astro dev server 完全分离。
+- 新增 `Toggle terminal` 命令（Ctrl+`）与 View 菜单项；快捷键文档由命令 registry 校验。
+- 验证：`astrolith-terminal` 4 个服务测试通过（ANSI 红色与退出码 7、交互输入/resize、Ctrl-D 退出码 3、kill 长进程、revision 增长）；GPUI 集成测试验证真实 shell 输出进入屏幕、Dock/模式隐藏后 session 与 pid 不变、切项目后旧 pid 终止且新 root 启动。`cargo test --workspace --locked` 全部通过（GPUI 347 passed、4 ignored）。
+- 未完成：A24/A25 的真实原生窗口录屏、IME/焦点隔离、ANSI 视觉与 150%/200% 缩放验收尚未执行；headless 与 service 测试不能替代真机证据。

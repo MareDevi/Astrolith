@@ -12,6 +12,7 @@ astrolith-core = { path = "../astrolith-core" }
 astrolith-astro = { path = "../astrolith-astro" }
 astrolith-document = { path = "../astrolith-document" }
 astrolith-preview = { path = "../astrolith-preview" }
+astrolith-terminal = { path = "../astrolith-terminal" }
 astrolith-observability = { path = "../astrolith-observability" }
 gpui-kit.workspace = true
 tokio.workspace = true

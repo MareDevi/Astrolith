@@ -37,6 +37,7 @@ use crate::{
         resolve, settings_path,
     },
     single_instance,
+    terminal::TerminalPanel,
     theme::{self, ThemeMode},
     update,
     url_scheme::{self, StartupRequest, StartupTarget},
@@ -217,6 +218,9 @@ pub(crate) struct Shell {
     /// The reading-view panel; kept here because the bottom dock is removed
     /// entirely while the view is hidden.
     preview_panel: Entity<WorkspacePanel>,
+    /// Project terminal, retained while its dock is hidden.
+    terminal: Entity<TerminalPanel>,
+    terminal_panel: Entity<WorkspacePanel>,
     palette: Entity<CommandState>,
     palette_focus: FocusHandle,
     finder: Entity<CommandState>,
@@ -330,6 +334,17 @@ impl Shell {
         let preview = cx.new(PreviewPanel::new);
         let preview_panel = cx.new(|cx| WorkspacePanel::new("preview-panel", "Preview", "No preview running\n\nStart the Astro dev server, then open the active entry in your browser.", window, cx));
         preview_panel.update(cx, |panel, cx| panel.set_view(preview.clone().into(), cx));
+        let terminal = cx.new(|cx| TerminalPanel::new(window, cx));
+        let terminal_panel = cx.new(|cx| {
+            WorkspacePanel::new(
+                "terminal-panel",
+                "Terminal",
+                "No project terminal\n\nOpen a project to start an interactive shell.",
+                window,
+                cx,
+            )
+        });
+        terminal_panel.update(cx, |panel, cx| panel.set_view(terminal.clone().into(), cx));
         let (dock, skin) = DockSkin::dock_area("astrolith-workspace", Some(1), window, cx);
         dock.update(cx, |area, cx| {
             area.set_center(
@@ -422,7 +437,10 @@ impl Shell {
             &project,
             window,
             |this, _, event: &ProjectOpened, window, cx| {
-                this.open_project_scope(event.root.clone(), window, cx);
+                let root = event.root.clone();
+                this.open_project_scope(root.clone(), window, cx);
+                this.terminal
+                    .update(cx, |terminal, cx| terminal.attach(&root, cx));
                 this.finish_pending_entry(window, cx);
             },
         ));
@@ -571,6 +589,8 @@ impl Shell {
             frontmatter_key: None,
             preview,
             preview_panel,
+            terminal,
+            terminal_panel,
             palette,
             palette_focus: cx.focus_handle().tab_stop(true),
             finder,
@@ -1564,9 +1584,19 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let panel = panel_handle(self.preview_panel.clone());
+        let panel = if self.mode == WorkspaceMode::Build {
+            panel_handle(self.terminal_panel.clone())
+        } else {
+            panel_handle(self.preview_panel.clone())
+        };
         self.dock.update(cx, |dock, cx| match visible {
-            true => attach_preview_dock(dock, panel, height, window, cx),
+            true => {
+                // Switching between Build and Preview swaps the bottom panel.
+                if dock.has_dock(DockPlacement::Bottom) {
+                    dock.remove_dock(DockPlacement::Bottom, window, cx);
+                }
+                attach_preview_dock(dock, panel, height, window, cx)
+            }
             false => dock.remove_dock(DockPlacement::Bottom, window, cx),
         });
     }
@@ -1768,6 +1798,12 @@ impl Shell {
             CommandId::ToggleSidebar => self.toggle_panel(PanelKind::Sidebar, window, cx),
             CommandId::ToggleInspector => self.toggle_panel(PanelKind::Inspector, window, cx),
             CommandId::TogglePreview => self.toggle_panel(PanelKind::Preview, window, cx),
+            CommandId::ToggleTerminal => {
+                if self.mode != WorkspaceMode::Build {
+                    self.set_mode(WorkspaceMode::Build, window, cx);
+                }
+                self.toggle_panel(PanelKind::Preview, window, cx);
+            }
             CommandId::StartPreview => self.preview.update(cx, |preview, cx| preview.start(cx)),
             CommandId::StopPreview => self.preview.update(cx, |preview, cx| preview.stop(cx)),
             CommandId::RestartPreview => self.preview.update(cx, |preview, cx| preview.restart(cx)),
@@ -2480,6 +2516,7 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::ToggleSidebar => IconName::PanelLeft,
         CommandId::ToggleInspector => IconName::PanelRight,
         CommandId::TogglePreview => IconName::PanelBottom,
+        CommandId::ToggleTerminal => IconName::Terminal,
         CommandId::StartPreview => IconName::Play,
         CommandId::StopPreview => IconName::Square,
         CommandId::RestartPreview => IconName::RefreshCw,
@@ -3339,6 +3376,137 @@ mod tests {
             assert_eq!(shell.mode, WorkspaceMode::Build);
             assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
         });
+    }
+
+    #[gpui_kit::test]
+    async fn terminal_is_project_bound_and_survives_mode_and_dock_changes(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_path = workspace.path().join("preferences/global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let first = project_fixture("terminal-first");
+        let second = project_fixture("terminal-second");
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+
+        open_project(cx, handle, &view, first.path().to_path_buf());
+        let first_root = std::fs::canonicalize(first.path()).unwrap();
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == first_root)
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_mode(WorkspaceMode::Build, window, cx)
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::TogglePreview, window, cx)
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell
+                    .terminal
+                    .read(cx)
+                    .root()
+                    .and_then(|root| std::fs::canonicalize(root).ok()),
+                Some(first_root.clone())
+            );
+            assert!(shell.terminal.read(cx).is_running());
+            assert!(shell.dock.read(cx).has_dock(DockPlacement::Bottom));
+        });
+        let first_pid = view.read_with(cx, |shell, cx| shell.terminal.read(cx).process_id());
+        assert!(first_pid.is_some());
+
+        // Real shell input and output reach the parsed terminal screen.
+        view.update(cx, |shell, cx| {
+            shell.terminal.update(cx, |terminal, _| {
+                terminal.write(b"printf 'terminal-ready\\n'\r")
+            });
+        });
+        let mut saw_output = false;
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.read_with(cx, |shell, cx| {
+                shell
+                    .terminal
+                    .read(cx)
+                    .screen_contents()
+                    .contains("terminal-ready")
+            }) {
+                saw_output = true;
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert!(saw_output, "the shell command must render in the terminal");
+
+        // Hiding the dock and changing modes never kills the session.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::TogglePreview, window, cx);
+                view.set_mode(WorkspaceMode::Writing, window, cx);
+            });
+        })
+        .unwrap();
+        view.read_with(cx, |shell, cx| {
+            assert!(shell.terminal.read(cx).is_running());
+            assert_eq!(shell.terminal.read(cx).process_id(), first_pid);
+        });
+
+        // Switching projects terminates the old child and starts the new one.
+        open_project(cx, handle, &view, second.path().to_path_buf());
+        let second_root = std::fs::canonicalize(second.path()).unwrap();
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == second_root)
+        })
+        .await;
+        let second_pid = view.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell
+                    .terminal
+                    .read(cx)
+                    .root()
+                    .and_then(|root| std::fs::canonicalize(root).ok()),
+                Some(second_root.clone())
+            );
+            assert!(shell.terminal.read(cx).is_running());
+            shell.terminal.read(cx).process_id()
+        });
+        assert!(second_pid.is_some());
+        assert_ne!(second_pid, first_pid);
+        #[cfg(target_os = "linux")]
+        if let Some(pid) = first_pid {
+            let mut gone = false;
+            for _ in 0..300 {
+                if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                    gone = true;
+                    break;
+                }
+                runtime::blocking(cx, || {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                })
+                .await
+                .unwrap();
+            }
+            assert!(gone, "the previous project's shell must be terminated");
+        }
     }
 
     #[gpui_kit::test]
