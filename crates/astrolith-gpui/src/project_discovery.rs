@@ -10295,8 +10295,11 @@ export const collections = {blog, dataAuthors};
                         .find("https://other.dev")
                         .unwrap();
                     editor.set_selected_range(0..0, cx);
+                    // The neutral sans face is wider than the old serif and can
+                    // wrap a long URL. Click the first glyph, as a user would,
+                    // instead of the centre of an inverted multi-line rectangle.
                     editor
-                        .range_to_bounds(&(start..start + "https://other.dev".len()))
+                        .range_to_bounds(&(start..start + 1))
                         .expect("the URL is laid out")
                 })
             })

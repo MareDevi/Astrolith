@@ -537,9 +537,7 @@ impl DocumentSession {
             let ranges = crate::editor::formatting::link_destinations(&self.projection.visible);
             let editor = self.editor.read(cx);
             let hit = ranges.into_iter().find(|range| {
-                editor
-                    .range_to_bounds(range)
-                    .is_some_and(|bounds| bounds.contains(&position))
+                Self::range_contains_point(editor, &self.projection.visible, range, position)
             })?;
             external_url(&self.projection.visible[hit])?
         };
@@ -563,11 +561,40 @@ impl DocumentSession {
         links
             .into_iter()
             .find(|(range, _)| {
-                editor
-                    .range_to_bounds(range)
-                    .is_some_and(|bounds| bounds.contains(&position))
+                Self::range_contains_point(editor, &self.projection.visible, range, position)
             })
             .map(|(_, destination)| destination)
+    }
+
+    /// Whether `position` falls on any laid-out character of `range`.
+    ///
+    /// The pinned editor computes one rectangle from the range's start and end
+    /// positions. That rectangle is valid only while the range stays on one soft
+    /// line; a wrapped link yields an inverted, unusable rectangle. Hit testing
+    /// each character inside the range keeps modified clicks and image hover
+    /// working when a long URL wraps.
+    fn range_contains_point(
+        editor: &EditorState,
+        visible: &str,
+        range: &Range<usize>,
+        position: Point<Pixels>,
+    ) -> bool {
+        let Some(bounds) = editor.range_to_bounds(range) else {
+            return false;
+        };
+        if bounds.contains(&position) {
+            return true;
+        }
+        let Some(text) = visible.get(range.clone()) else {
+            return false;
+        };
+        text.char_indices().any(|(offset, character)| {
+            let start = range.start + offset;
+            let end = start + character.len_utf8();
+            editor
+                .range_to_bounds(&(start..end))
+                .is_some_and(|bounds| bounds.contains(&position))
+        })
     }
 
     /// Project-relative source this session edits.
