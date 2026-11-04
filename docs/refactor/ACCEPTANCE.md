@@ -337,3 +337,28 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 - 验证：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试 **872 passed、0 failed、8 ignored**；fixture 单元 6 passed，Astro fixture compatibility PASS。
 - 原生证据：Hyprland 0.57.1 / Wayland / 100%，`fixtures/parity-project`，主题 Light；截图 `/tmp/astrolith--build-explorer.png`（Build 顶部真实标签条、Explorer 目录优先文件列表、中央完整源码）与 `/tmp/astrolith--build-explorer-final2.png`（最终列表实现、无打开文档时中央文案指向 explorer）。同一原生会话日志记录 `.astro` 与 Markdown 进入 session、`.tsx`/`.jsx`/`.vue`/`.svelte`/`.json`/`.mjs`/`.gitignore`/`bun.lock` 进入 readonly 路径；该会话使用初版 explorer 渲染器，最终 `List` 实现的点击、目录展开、Enter 打开与 readonly 路由由 headless 回归覆盖。
 - 限制：原生窗口在并行编译/测试期间被系统以 `SIGKILL`（exit 137）终止，发生在上述交互与截图之后；未重跑完整三模式键盘矩阵、macOS/Windows 或 150%/200% 显示缩放。Writing 的 Library 与 Build 的 explorer 仍共享同一左侧 Dock 宽度与布局记录。
+
+## 19. 按模式分离编辑区执行记录
+
+- 范围：`editor/session.rs`（源视图代码呈现）、`layout/panels.rs`（code/prose 两种 panel 呈现）、`editor/rendered.rs`（原生 Markdown/MDX 阅读面）、`shell.rs`（按模式选择中心面板、Inspector 限制、Astro preview 底部化）、`commands.rs`（Inspector 可用性）、core `PanelLayout` 默认值。
+- 行为：
+  - Writing 仍是居中写作页：正文投影、Focus/Typewriter、选区工具条、Alt 图片预览与文档 rail 不变；唯一 Inspector 入口保留在此模式。
+  - Build 复用同一 `DocumentSession` 与 `EditorState`，`set_source_view` 同时切换行号、缩进参考线、折叠、自动括号/智能缩进、软换行关闭与语法高亮语言（`.md`/`.mdx` → markdown、`.astro` → astro、`.yaml`/`.yml` → yaml，其余 text）。panel 在 Build 铺满 pane、恢复滚动条并隐藏写作 rail；shell 的真实标签条、Explorer 与终端不变。
+  - Preview 中心显示当前 session 的 writer projection（frontmatter 与 MDX prelude 不出现）经原生 `TextViewState` 渲染的正文；只读、可选择、按文档字体/字号/行高/页宽排版，并解析项目内相对图片与 Astro `public/` 绝对路径。进入 Preview 后焦点归阅读面，键入不会写回 session。
+  - Astro preview 从 Preview 模式的中心分屏改为独立底部面板（默认关闭，Panels 菜单在非 Build 模式显示 “Astro preview”）；打开时才 arm Open-on-Enter 并在 Embedded 可用时分屏。Preview 默认布局不再显示该 dock。
+  - Inspector 仅 Writing：`ToggleInspector` 可用性要求 `workspace_mode == writing`，Panels 菜单只在 Writing 列出 Details，模式切换关闭并拒绝重新打开。
+- 回归：
+  - 新增 GPUI `modes_show_writing_build_and_rendered_preview_surfaces`：Writing 有 rail/Inspector 触发器；Preview 只有 `rendered-preview-panel`、无文档 rail 与 Astro dock、预览源等于 writer projection、键入不修改 buffer、Inspector 命令无效；Build 无文档 rail、编辑器值为完整源、Inspector 命令无效；回到 Writing 恢复 rail。
+  - `source_view_edits_the_same_buffer_and_maps_back_to_the_writer` 增加语法语言断言：Build 为 `markdown`，写作面为 `text`。
+  - 新增 `images_resolve_from_the_document_or_astro_public`：文档相对、`public/` 绝对与项目外 traversal/URL 的解析规则。
+  - 更新 `mode_layouts_persist_per_mode_and_a_project_restores_its_last_mode` 与 core 默认布局断言：Preview 默认 `preview_visible = false`。
+- 验证：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试 **874 passed、0 failed、8 ignored**；fixture 单元 6 passed，Astro fixture compatibility PASS。
+- 原生证据：Hyprland 0.57.1 / Wayland / 100%，dark，fixture `fixtures/parity-project`，`markdown-showcase.md`。截图：
+  - `/tmp/astrolith-smoke/writing2.png`：写作页与文档 rail 保留。
+  - `/tmp/astrolith-smoke/build.png`：完整源、行号/折叠 gutter、Markdown 语法着色、等宽铺满 pane、Explorer 与标签条。
+  - `/tmp/astrolith-smoke/preview3.png`：标题/段落/链接/代码块/表格/引用渲染，项目图片 `/parity-banner.svg` 从 `public/` 载入；无文档 rail 与 Astro dock。
+- 限制：
+  - 远程图片仍依赖 GPUI 自带 HTTP client；当前 Linux 构建没有 HttpClient，只有项目内本地图片可显示。
+  - `TextView` 的表格列宽由库决定；窄页宽下会出现单元格末字符换行（截图中 “Frontmatter”），未在应用层覆盖。
+  - Build 的 Astro 语法高亮依赖 `tree-sitter-astro`；该 grammar 未注册 `rust`/`ts` 代码块语言，Preview 中这类 fenced code 回退为纯文本。未新增 AST/语言服务。
+  - macOS/Windows、150%/200% 显示缩放与 IME 未在本轮重验。

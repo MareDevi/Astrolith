@@ -183,12 +183,21 @@ saved with these settings and restored on the next launch.
 The workspace is a writing desk: the **Library** opens on the project's
 collection index, and selecting a collection shows only that collection's
 entries (the back arrow returns to the index). The page sits in the middle,
-the frontmatter **Details** inspector floats above it, and the **Reading view**
-(the Astro preview controls) sits below when it is open. Both stay closed by
+the frontmatter **Details** inspector floats above it, and the **Astro
+preview** controls sit below when that panel is open. Both stay closed by
 default so the page remains the primary surface. The title bar carries the
 project, search and one view menu. The document rail carries the active
 document, its collection, save state and save action; closing and switching
 other open documents remain in its overflow menu.
+
+The three modes present the same document differently. **Writing** is the
+centred writing page described here. **Build** turns the same retained editor
+into a source view with line numbers, indent guides, folding and syntax
+highlighting, keeping the real file tabs, project explorer and terminal.
+**Preview** replaces the editor with a read-only rendering of the body,
+frontmatter and MDX imports excluded, like a Markdown preview in a code
+editor; the Astro preview remains a separate bottom panel opened from the
+Panels menu. The **Details** inspector exists only in Writing.
 
 Open **Details** with the sliders button at the right of the document rail or
 `Ctrl+2` (`Cmd+2` on macOS). It is a non-modal popover: it never changes the
@@ -378,17 +387,26 @@ Exact locations are in [Privacy and local data](privacy.md).
 
 ## 11. Preview
 
-Preview is an Astrolith addition; upstream Astro Editor does not ship one. On
-Linux the only supported presentation is your **external default browser**.
-Embedded preview is not available on Wayland and is not built into the released
-dependency graph.
+**Preview mode** renders the active Markdown or MDX entry with a native
+rich-text view. Frontmatter and MDX imports are not shown; headings, links,
+lists, code blocks, tables, quotes and project-local images are. The pane is
+read-only and follows the document font, size, line height and page width
+preferences. Typing in Preview does not modify the document. Other file types
+show a short notice instead of a rendering.
 
-The preview panel starts, stops, restarts and retries the project-local Astro
-dev server. It shows `stopped`, `starting`, `ready`, `stopping` or `failed`,
-and keeps the child's stderr excerpt for every spawn, exit, port and timeout
-failure. **Copy preview URL** and **Open preview in browser** use the same
-route resolution for the active entry; an unmapped entry reports that instead
-of opening a URL. `Ctrl+Enter` runs the same command as the menu and panel.
+The **Astro preview** is a separate bottom panel, not part of Preview mode. It
+is an Astrolith addition; upstream Astro Editor does not ship one. On Linux the
+only supported presentation is your **external default browser** unless the
+embedded build runs on a supported display backend. Embedded preview is not
+available on Wayland and is not built into the released dependency graph.
+
+The Astro preview panel starts, stops, restarts and retries the project-local
+Astro dev server. It shows `stopped`, `starting`, `ready`, `stopping` or
+`failed`, and keeps the child's stderr excerpt for every spawn, exit, port and
+timeout failure. **Copy preview URL** and **Open preview in browser** use the
+same route resolution for the active entry; an unmapped entry reports that
+instead of opening a URL. `Ctrl+Enter` runs the same command as the menu and
+panel.
 
 The preview route follows create, rename, trash, project switch and Content
 Finder open. The panel remembers its open state and dock height per project.

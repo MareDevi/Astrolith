@@ -33,9 +33,11 @@
 
 | 模式 | 默认注意力 | 按需能力 | 保持的状态 |
 | --- | --- | --- | --- |
-| Writing | 居中的正文，关闭导航、Inspector、底部工具 | 文件导航、格式命令、Focus、Typewriter、悬浮元数据 | 同一 session、光标、选区、滚动、保存与恢复 |
-| Build | 文档源码与项目导航 | 真实文件标签、Astro 源码编辑、诊断和交互终端；不自动展开所有 Dock | 同一文档身份与历史，不重新读取磁盘覆盖 buffer |
-| Preview | 编辑区和真实预览操作 | External 使用紧凑状态与打开浏览器；可用的 Embedded 才分屏 | 同一 dev server、路由和编辑内容 |
+| Writing | 居中的正文，关闭导航、Inspector、底部工具 | 文件导航、格式命令、Focus、Typewriter、悬浮元数据；唯一的 Inspector 入口 | 同一 session、光标、选区、滚动、保存与恢复 |
+| Build | IDE 式编辑区：完整源码、行号、折叠、语法高亮、真实文件标签与项目导航 | 交互终端、诊断和项目文件浏览；不自动展开所有 Dock | 同一文档身份与历史，不重新读取磁盘覆盖 buffer |
+| Preview | 当前文档正文的原生 Markdown/MDX 渲染，只读 | Astro preview 作为独立底部面板按需打开（External 状态或可用的 Embedded 分屏） | 同一 session、未保存内容与编辑历史；预览不写回 |
+
+Writing 与 Build 共享同一个编辑器 entity，但呈现不同：Build 打开行号、缩进参考线、折叠、代码缩进与语法高亮，并使用等宽字体铺满 pane；Writing 保留居中写作页、段落装饰与 Focus/Typewriter。Preview 使用原生 rich-text 视图解析正文，不做 Astro 站点渲染。三种模式中只有 Writing 提供 Frontmatter Inspector。
 
 新旧用户统一使用 mock 对应的新 UI，默认进入 Writing。旧 palette、serif 默认排版、旧 Dock 布局和旧 chrome 不作为兼容外观保留。迁移仍需保留文档、恢复记录、项目配置和有效功能设置；旧外观配置不再覆盖新设计。Inspector 每次启动关闭。
 

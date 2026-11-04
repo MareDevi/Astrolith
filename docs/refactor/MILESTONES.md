@@ -27,6 +27,7 @@
 | M6 | 完成（代码、自动化与 1000×700 原生大字体验证）；原生重启/缩放验收待用户确认 | 设置分为 Appearance/Workspace/Preview，保留 Project/Collections/Advanced；默认模式与按模式布局重置进入 Apply 草稿；启动/项目布局 clamp、临时浮层不恢复；可访问名称与 Tab 顺序有回归；记录见 ACCEPTANCE §15 |
 | M7 | 完成（Linux Wayland 矩阵、回归与视觉收尾；平台/缩放边界显式保留） | check 867 passed、perf workload、fixture oracle；dark/light × 1000×700/1440×900/2200×1300、28 px、Inspector/Settings/Preview、双项目模式隔离；导航两行条目重叠修复与回归；记录见 ACCEPTANCE §16 |
 | M7-UI | 完成（用户反馈后的界面放大与 Preferences 重设计） | 默认界面 18 px，旧 14/16 一次性迁移并备份；Preferences 去掉重复标题、dialog 放大、分区卡片与固定动作栏；记录见 ACCEPTANCE §17 |
+| M8 | 完成（自动化与原生截图） | Writing 保留写作页；Build 单一 session 切换为 IDE 源码呈现（行号、缩进参考线、折叠、语法高亮、等宽铺满）；Preview 渲染 Markdown/MDX 正文；Inspector 仅 Writing；记录见 ACCEPTANCE §19 |
 
 M1 的退出只覆盖主题与共享控件本身；mock 的模式切换器、Build 标签条等区域属于 M2 及后续里程碑，未在 M1 提前实现。
 
@@ -141,3 +142,11 @@ Preferred Browser 用 executable+argv 或经验证的平台 browser identity，�
 对照 HTML 原型记录差异：主题/表面/圆角/正文中心/工具显隐/浮层，而不是只看静态截图相似度。回归 covers create/duplicate/rename/trash、过滤/查找、builder/assets、save/conflict/recovery、settings、Help/命令、preview 与桌面集成。
 
 退出条件：所有 mandatory acceptance 有可追溯证据；平台阻碍与未交付功能显式列出。真实 Embedded、M2b Astro 开发文件编辑、M2c 交互终端任一缺失，v0.2.0 不得整体标记完成；完整 LSP 的额外范围单独记录。每次提交只包含该逻辑变更，保持用户原型和其他未提交文件不被意外暂存。
+
+## M8 — 按模式分离编辑区
+
+范围：`editor/session.rs`、`layout/panels.rs`、`editor/rendered.rs`、`shell.rs`、`commands.rs`、core `PanelLayout` 默认值。
+
+Writing 保留现有写作页。Build 与 Writing 共用同一个 `DocumentSession`/`EditorState`，但由 `set_source_view` 打开代码呈现：行号、缩进参考线、折叠、智能缩进/自动括号、关闭软换行、按扩展名选择语法高亮（Markdown/MDX、Astro、YAML）；panel 在 Build 铺满 pane、显示滚动条并隐藏写作 rail。Preview 中心改用 `TextViewState` 渲染正文投影（frontmatter 与 MDX prelude 已隐藏），只读、可选择、按设置排版；Astro preview 改为独立底部面板，默认关闭，模式本身不再占用中心区。Inspector 仅 Writing 可用：命令可用性、Panels 菜单与模式切换共同保证。
+
+退出条件：三模式往返不重建 session，Build 显示完整源，Preview 显示渲染正文且键盘输入不写回文档；`mise run check` 通过；原生窗口截图见 ACCEPTANCE §19。
