@@ -237,3 +237,26 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - 外部浏览器原生启动使用记录脚本验证 argv；未实际启动系统浏览器。系统 opener 命令仍由既有单元测试覆盖。
   - macOS/Windows 未编译运行验收；150%/200% 显示缩放、Wayland 下的 embedded 不存在（按设计 external）。
   - 分屏宽度未持久化：用户拖动 splitter 只在当前 Dock 生命周期内有效；模式离开后返回按参考比例重建。M6 若要求恢复该宽度需新增字段。
+
+## 15. M6 执行记录
+
+- 范围：GPUI `preferences/{mod,appearance,workspace,preview}.rs`、`shell.rs`（设置上下文/应用/对话框尺寸/无障碍名称）、`editor/header.rs`、`project_discovery.rs`、`preferences/tests.rs` 与本轮新增 shell 回归测试。核心 `preferences.rs` 与 store 的既有迁移、未知字段、future-version 和 revision 语义未改写。
+- 设置整合：`General` 拆为 `Appearance`（主题、界面字体/字号、正文排版、标题颜色）与 `Workspace`（默认模式、按模式布局重置、项目布局覆盖重置、Focus/Typewriter、自动保存、新文件类型、外部编辑器）。`Preview`、`Project Settings`、`Collections`、`Advanced` 内容保留；Apply/Cancel 仍是一次全量草稿，Esc/Cancel 不落盘。
+- 默认模式：`Workspace` 页写入 `global.default_mode`。启动无项目时使用该值；打开项目后仍以项目 `last_mode` 优先（既有 M2a 测试与代码路径未变）。
+- 布局重置：草稿只记录显式重置集合，不携带打开的对话框快照。Apply 时把全局对应模式恢复为 `ModeLayouts::default()`，项目重置清空 `layout_overrides`；普通 Apply 不触碰 live dock 或保留的底部面板。重置后按解析结果 clamp 并立即应用当前模式。
+- 恢复与 clamp：启动按视口宽度 clamp 所有模式布局（回归把 10000 px 存值 clamp 到 390/400），项目范围安装时同样 clamp。Inspector 仍为临时状态，启动和布局重置都不恢复。正文排版、Focus/Typewriter、preview `open_on_enter=false`、空浏览器 argv 与 External presentation 由重启回归覆盖；`false`/`0`/inherit 的解析语义继续由 core `explicit_false_and_zero_survive_inheritance` 与 resolve 测试约束。
+- 对话框与大字：宽度改为 `viewport−64`（560–880），高度 `viewport−64`（420–680）；导航宽度随界面字号从 184 增长到最多 280。Apply/Cancel 所在动作行允许说明文字收缩、按钮不收缩；字段标签可换行而不是撑宽对话框。1000×700、`ui_font_size=28` 的 GPUI 布局回归断言 Apply/Cancel 完整位于视口内，`Appearance/Workspace/Preview/Advanced` 均可见且有名称。
+- 可访问性：设置页导航使用稳定 ID（`preferences-pane-*`），显式 `tab_index` 使 Tab 顺序为导航(0) → 字段(0 的树序) → Cancel/Apply(1)。顶栏图标按钮（command palette、panels、preferences）、Build 标签关闭、文档操作/Inspector 触发器与关闭、库返回/更多操作补充 `accessibility_label`；测试直接读取快照 label。原有可见文字按钮继续以 label 作为名称。
+- 新增回归：
+  - `startup_restores_the_default_mode_layout_typography_and_writing_modes`：真实 `global.json` 装载后恢复 Build 默认模式、深色主题、正文排版、Focus/Typewriter、preview 设置，布局超限 clamp，Inspector 关闭。
+  - `workspace_settings_apply_the_default_mode_and_reset_one_layout_scope`：Workspace 草稿写 default mode、重置 Writing 布局，Apply 后 live dock、解析布局与磁盘 `global.json` 一致。
+  - `project_layout_reset_clears_overrides_while_global_defaults_stay`：项目覆盖重置后继承全局布局，项目文件 `layout_overrides` 清空，全局布局不变。
+  - `preferences_sheet_names_controls_and_fits_the_minimum_window`：1000×700 + 28 px 界面字号下 Apply/Cancel 不越界，窗格名称可读，图标按钮有名称，首个 Tab 到导航。
+  - `project_and_collection_panes_follow_the_open_project`：更新后的 Appearance/Workspace/Preview 顺序与项目可见性。
+- 自动检查：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试 866 passed、0 failed、8 ignored；fixture 单元 6 passed，Astro fixture compatibility PASS。
+- 原生证据（Linux Hyprland，XWayland/X11 窗口，dark，真实窗口 1000×700，`ui_font_size=28`，`default_mode=build`）：`/tmp/astrolith-m6-x11-prefs.png` 显示 Preferences 对话框、Appearance/Workspace/Preview/Advanced 与 Cancel/Apply 均在窗口内，未裁切关键动作；`/tmp/astrolith-m6-x11-workspace.png` 为同一 1000×700 主窗口，模式切换器与导航文字换行但无裁切。另以 Wayland 后端启动过一次，窗口创建日志正常，但本次会话的工作区截图未捕获该 surface，因此不作为视觉证据，也不据此声称 Wayland 视觉通过。
+- 未完成/未验证：
+  - A20/A21 的原生重启（两项目 mode/layout 隔离、Reset All、移动项目）目前只有 store/shell 自动化证据，未做用户原生确认。
+  - A11/A22 的原生最小窗口长 schema、150%/200% 显示缩放、对比度与 reduced motion 审计未执行；本轮只覆盖 1000×700 + 28 px 界面字号的 GPUI 布局与 XWayland 截图。
+  - macOS/Windows 未构建运行验收；Wayland 原生截图未取得。
+  - M6 完成不改变 M7 的截图/平台验证待办；A19 真实 Embedded 等既有平台结论不受本轮影响。

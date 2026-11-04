@@ -24,6 +24,7 @@
 | M3 | 已完成（用户原生验收） | 可持久化文档字体/字号/行高/measure 与 Focus/Typewriter；mock 16/32、768 默认；排版变更不触碰文档状态；记录见 ACCEPTANCE §12 |
 | M5a | 完成（代码与自动化；原生浏览器启动未复测） | External 默认、browser argv、Open on Enter 单次、系统回退、同一 active route；记录见 ACCEPTANCE §14 |
 | M5b | 完成（XWayland/X11 真实 surface；Wayland external） | 可选 `embedded-webview` + gpui-webview，保留实例、分屏 resize、输入、热更新、模式切换与失败/平台原因回退；记录见 ACCEPTANCE §14 |
+| M6 | 完成（代码、自动化与 1000×700 原生大字体验证）；原生重启/缩放验收待用户确认 | 设置分为 Appearance/Workspace/Preview，保留 Project/Collections/Advanced；默认模式与按模式布局重置进入 Apply 草稿；启动/项目布局 clamp、临时浮层不恢复；可访问名称与 Tab 顺序有回归；记录见 ACCEPTANCE §15 |
 
 M1 的退出只覆盖主题与共享控件本身；mock 的模式切换器、Build 标签条等区域属于 M2 及后续里程碑，未在 M1 提前实现。
 
