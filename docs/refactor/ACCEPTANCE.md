@@ -343,19 +343,23 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 - 范围：`editor/session.rs`（源视图代码呈现）、`layout/panels.rs`（code/prose 两种 panel 呈现）、`editor/rendered.rs`（原生 Markdown/MDX 阅读面）、`shell.rs`（按模式选择中心面板、Inspector 限制、Astro preview 底部化）、`commands.rs`（Inspector 可用性）、core `PanelLayout` 默认值。
 - 行为：
   - Writing 仍是居中写作页：正文投影、Focus/Typewriter、选区工具条、Alt 图片预览与文档 rail 不变；唯一 Inspector 入口保留在此模式。
-  - Build 复用同一 `DocumentSession` 与 `EditorState`，`set_source_view` 同时切换行号、缩进参考线、折叠、自动括号/智能缩进、软换行关闭与语法高亮语言（`.md`/`.mdx` → markdown、`.astro` → astro、`.yaml`/`.yml` → yaml，其余 text）。panel 在 Build 铺满 pane、恢复滚动条并隐藏写作 rail；shell 的真实标签条、Explorer 与终端不变。
+  - Build 复用同一 `DocumentSession` 与 `EditorState`，`set_source_view` 同时切换行号、缩进参考线、折叠、自动括号/智能缩进、软换行关闭与语法高亮语言（`.md`/`.mdx` → markdown、`.astro` → astro、`.yaml`/`.yml` → yaml，其余 text）。panel 在 Build 铺满 pane、恢复滚动条并隐藏写作 rail。
+  - Build 的 buffer tab 条只列真实 retained session：有 buffer 时才出现，无 buffer 时整条不渲染，不再保留空行；多个 tab 在可用宽度内排布，超出后水平滚动（`overflow_x_scroll` + `restrict_scroll_to_axis`），沿用 `tab_active`/`tab_foreground`/`tab_bar`/`border` 设计 token、32 px 高圆角 tab、dirty 点与关闭按钮。
   - Preview 中心显示当前 session 的 writer projection（frontmatter 与 MDX prelude 不出现）经原生 `TextViewState` 渲染的正文；只读、可选择、按文档字体/字号/行高/页宽排版，并解析项目内相对图片与 Astro `public/` 绝对路径。进入 Preview 后焦点归阅读面，键入不会写回 session。
   - Astro preview 从 Preview 模式的中心分屏改为独立底部面板（默认关闭，Panels 菜单在非 Build 模式显示 “Astro preview”）；打开时才 arm Open-on-Enter 并在 Embedded 可用时分屏。Preview 默认布局不再显示该 dock。
   - Inspector 仅 Writing：`ToggleInspector` 可用性要求 `workspace_mode == writing`，Panels 菜单只在 Writing 列出 Details，模式切换关闭并拒绝重新打开。
 - 回归：
+  - 新增 `build_buffer_tabs_appear_only_while_buffers_are_open`：空 Build 无 `build-tabs`；打开条目后 tab 条与 `build-tab-0` 出现；关闭最后一个 buffer 后整条消失。
   - 新增 GPUI `modes_show_writing_build_and_rendered_preview_surfaces`：Writing 有 rail/Inspector 触发器；Preview 只有 `rendered-preview-panel`、无文档 rail 与 Astro dock、预览源等于 writer projection、键入不修改 buffer、Inspector 命令无效；Build 无文档 rail、编辑器值为完整源、Inspector 命令无效；回到 Writing 恢复 rail。
   - `source_view_edits_the_same_buffer_and_maps_back_to_the_writer` 增加语法语言断言：Build 为 `markdown`，写作面为 `text`。
   - 新增 `images_resolve_from_the_document_or_astro_public`：文档相对、`public/` 绝对与项目外 traversal/URL 的解析规则。
   - 更新 `mode_layouts_persist_per_mode_and_a_project_restores_its_last_mode` 与 core 默认布局断言：Preview 默认 `preview_visible = false`。
-- 验证：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试 **874 passed、0 failed、8 ignored**；fixture 单元 6 passed，Astro fixture compatibility PASS。
+- 验证：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试 **875 passed、0 failed、8 ignored**；fixture 单元 6 passed，Astro fixture compatibility PASS。
 - 原生证据：Hyprland 0.57.1 / Wayland / 100%，dark，fixture `fixtures/parity-project`，`markdown-showcase.md`。截图：
   - `/tmp/astrolith-smoke/writing2.png`：写作页与文档 rail 保留。
   - `/tmp/astrolith-smoke/build.png`：完整源、行号/折叠 gutter、Markdown 语法着色、等宽铺满 pane、Explorer 与标签条。
+  - `/tmp/astrolith-smoke/build-notabs.png`：无 buffer 的 Build 不再出现空白 tab 行。
+  - `/tmp/astrolith-smoke/build-tabs.png`：单 buffer 时应用 token 风格的 buffer tab 与关闭按钮。
   - `/tmp/astrolith-smoke/preview3.png`：标题/段落/链接/代码块/表格/引用渲染，项目图片 `/parity-banner.svg` 从 `public/` 载入；无文档 rail 与 Astro dock。
 - 限制：
   - 远程图片仍依赖 GPUI 自带 HTTP client；当前 Linux 构建没有 HttpClient，只有项目内本地图片可显示。
