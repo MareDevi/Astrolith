@@ -111,13 +111,15 @@ flowchart TD
 
 旧 PanelLayout 仅用于识别并迁移旧配置，不恢复旧三栏构图；首次升级按 mock 初始化新模式布局，后续恢复新格式的模式偏好。Writing 初始关闭工具，旧 Inspector dock visibility 不转为自动浮层。旧 palette/旧默认 serif 与外观字段迁移为 mock Neutral 和排版默认，不保留兼容旧 UI 的切换入口；不删除用户原配置备份或文档数据。窗口尺寸变化后 clamp。模式切换不重置 default mode 设置；后续启动恢复优先项目 last mode，再 global default。
 
-`embedded-webview = []` 当前只是空 feature，仓库没有真实嵌入实现。`capabilities.rs` 对 feature+X11/macOS/Windows 可返回 Embedded，**这不证明可渲染**。真实 Embedded 是必交付；M5 必须实现可运行 adapter 和实际 surface availability/reason，再启用设置，不能靠空 feature 或全平台 unavailable 宣称完成。Wayland（即使有 DISPLAY）永远保持 external；不修改显示服务器环境。
+`embedded-webview` 已不再是空 feature：`astrolith-gpui`/`astrolith-desktop` 的可选 feature 编译真实 `gpui-webview`（Wry/WebKitGTK）surface，并在 Preview 模式接入可拖动分屏、保留实例、URL/路由同步和失败回退。默认构建不启用，因此没有 WebKit 依赖；验证和发布需显式启用该 feature。
+
+Surface 可用性按**实际窗口后端**判断：`WAYLAND_DISPLAY` 存在时是 Wayland 窗口，永远 external；只有 `DISPLAY` 时 GPUI 选择 X11，即 Wayland 会话中的 XWayland 窗口（`XDG_SESSION_TYPE=wayland` 不覆盖这一事实），可以承载 WebKitGTK。headless、未编译 surface 和不支持平台返回明确原因（`EmbeddedUnavailable`）。应用不修改 `WAYLAND_DISPLAY`/`GDK_BACKEND` 强制切换窗口后端；XWayland 验证通过显式 `DISPLAY` 启动完成。
 
 ## 7. 必交付新增能力与所有权
 
 - Astro 开发文件编辑：在 `ProjectWorkspace` 的真实项目文件导航中打开 `.astro` 源码，以 DocumentSession/DocumentBuffer 复用 dirty、history、save/conflict/recovery；源码不使用 Markdown frontmatter 投影。文件类型识别与内容集合身份分离。
 - 交互终端：M2c 新增项目绑定的 terminal service/state 和 GPUI 原生终端视图。服务持有 PTY/子进程和有界输出，视图负责输入、ANSI 呈现、选择/复制与 resize；隐藏 Dock/换模式不杀会话，关闭/切项目/退出按明确策略清理。具体 PTY/终端库在实施时核对文档、锁定版本并论证依赖。
-- Embedded：M5b 必须在至少一个明确支持的真实原生平台交付运行证据，保留实例并与现有 dev server 共享生命周期；Wayland 的受限平台 fallback 不构成整个功能的替代交付。
+- Embedded：M5b 已以 XWayland/X11 窗口交付真实 surface，保留 WebView 实例并与现有 dev server 共享生命周期；Wayland 窗口保持 external fallback 并显示原因。macOS/Windows 仍只有编译路径，未做平台验收，不据此宣布支持。
 
 ## 8. 风险排序
 

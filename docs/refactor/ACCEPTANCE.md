@@ -209,3 +209,31 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 - 未完成/未验证：
   - 最小窗口、150%/200% 缩放、原生 IME 焦点与长表单滚动未截图验收。
   - Schema 刷新时已提交字段编辑依赖完整源重建；未新增专门的 schema-refresh 表单集成测试。
+
+## 14. M5a/M5b 执行记录
+
+- 范围：core `preferences.rs`、GPUI `preferences/{mod,preview,tests}.rs`、`preview/{mod,embedded,tests}.rs`、`shell.rs`、preview crate `{capabilities,external,lib}.rs`、`astrolith-gpui`/`astrolith-desktop` feature 与 lockfile。
+- M5a 偏好：`GlobalPreferencesV2` 新增 `preview`。默认 `External`、空 browser argv（系统 opener）、`open_on_enter=false`；`BrowserCommand` 保存 executable 与逐项 arguments，`{url}` 在启动前替换，缺失时追加为最后一项。设置页新增 Preview pane，支持 presentation、browser executable/arguments、Open on Enter，并对占位符、控制字符、无 executable 的 arguments 做内联校验。旧 `global.json` 缺字段时由 serde default 补齐，未知字段与显式 `false` 保留。
+- M5a 生命周期：仅在用户显式进入 Preview 时 arm 一次 Open on Enter；attach 早于项目加载时保持 arm，离开 Preview、启动失败或手动打开后取消/消费。server ready 且路由可解析后启动一次；同一次访问内的 render/通知不会重复启动。copy 与 open 共用 `url_for_entry` 的同一 URL。
+- 首选浏览器失败时保留已解析 URL，显示错误并提供 “Open with system browser” 回退按钮；系统 opener 路径不变。消息只声称 browser command 已启动，不声称页面已连接。
+- M5b 依赖：`astrolith-gpui` 新增可选 feature `embedded-webview`，编译 pinned `gpui-webview 0.8.1` 与 `lb-wry 0.53.3`；`astrolith-desktop` 转发同名 feature。默认构建不引入 WebKit 依赖，`mise run check` 的默认矩阵不编译该 surface。
+- M5b 实现：`EmbeddedPreview` 持有 WebView entity，首次 ready 时 `WebView::build`，之后只 `load_url`/`show`/`hide`，不因模式切换重建。Preview 模式在 center Dock 使用 `h_split`（参考 42/58）承载正文与 embedded panel，splitter 可拖动；离开 Preview 隐藏并移除 pane，返回时显示同一实例。URL 跟随 active entry 路由，未知路由回退到 server base URL。
+- 可用性：`HostEnvironment` 按实际窗口后端分类——`WAYLAND_DISPLAY` 存在即 Wayland external；只有 `DISPLAY` 时为 X11/XWayland，可启用 embedded。`EmbeddedUnavailable` 明确区分未编译、Wayland、headless 与不支持平台；设置页与 Preview 状态显示原因。应用不修改 `WAYLAND_DISPLAY`/`GDK_BACKEND`，XWayland 验证通过显式环境启动。
+- 自动检查：
+  - `mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；Rust workspace 862 passed、0 failed、8 ignored；fixture 单元 6 passed，Astro fixture compatibility PASS。
+  - `cargo test -p astrolith-gpui --features embedded-webview --locked`：366 passed、0 failed、4 ignored。
+  - `cargo clippy -p astrolith-gpui --features embedded-webview --all-targets --locked -- -D warnings`：无问题。
+- 新增回归：preview preferred argv/占位符/回退、Open on Enter 单次与 attach 前进入、离开取消、embedded URL 跟随 entry、缺 feature 原因、browser argv 设置校验、capability 的 Wayland/XWayland/headless 分支。
+- 原生证据（Linux Hyprland，XWayland；feat `embedded-webview`）：
+  - 启动：`env -u WAYLAND_DISPLAY DISPLAY=:1 ASTROLITH_SETTINGS_PATH=… target/debug/astrolith-desktop /tmp/astrolith-m5-project`。日志记录 X11 client、`Astro dev server ready` 与 `embedded preview WebView created url=…/blog/markdown-showcase`；页面真实渲染于右侧分屏（`/tmp/astrolith-m5-xwayland2.png`）。
+  - Astro 热更新：运行中修改内容文件，页面自动显示新增 “Live embedded update” 段落（`/tmp/astrolith-m5-xwayland-hot2.png`）。
+  - resize：以 Xlib 将窗口从 1000×700 改为 1263 宽再缩回，WebView 与分屏同步重排并继续渲染（`/tmp/astrolith-m5-xwayland-resized.png`）。
+  - 焦点/输入：在 GPUI 正文输入字符改变文档；在 WebView 内滚轮滚动页面到 “Hot update marker” 与表格区域（`/tmp/astrolith-m5-webview-wheel.png`），证明 native surface 接收指针输入。
+  - 模式切换：Writing→Preview 返回后仍是同一 WebView 实例，进程日志中 `embedded preview WebView created` 始终只有 1 次；返回页面保留原内容（`/tmp/astrolith-m5-rel-writing.png`）。
+  - Wayland fallback：正常 Wayland 启动（保留 `WAYLAND_DISPLAY`）时不创建 WebView，Preview 保持 external 操作（`/tmp/astrolith-m5-wayland-fallback.png`）。
+  - M5a 原生：设置 `presentation=external`、`open_on_enter=true`、browser executable 为记录 argv 的脚本、arguments `["--new-window", "{url}"]`。启动后 server ready 一次，脚本收到恰好一项 `--new-window` 与 entry URL，应用日志记录只打开一次（`/tmp/astrolith-m5-openenter.log`、`/tmp/astrolith-m5-browser-opened.txt`）。
+- 已知限制/未验证：
+  - 本机 NVIDIA + XWayland 下 WebKitGTK 默认 DMA-BUF renderer 显示黑屏并记录 `Failed to create GBM buffer of size 1x1`；以 `WEBKIT_DISABLE_DMABUF_RENDERER=1` 启动后正常渲染。应用未自动设置该变量（workspace 禁止 `unsafe set_var`），因此该环境需要显式设置；这是本机/驱动的运行前提，不是已消除的产品缺陷。
+  - 外部浏览器原生启动使用记录脚本验证 argv；未实际启动系统浏览器。系统 opener 命令仍由既有单元测试覆盖。
+  - macOS/Windows 未编译运行验收；150%/200% 显示缩放、Wayland 下的 embedded 不存在（按设计 external）。
+  - 分屏宽度未持久化：用户拖动 splitter 只在当前 Dock 生命周期内有效；模式离开后返回按参考比例重建。M6 若要求恢复该宽度需新增字段。
