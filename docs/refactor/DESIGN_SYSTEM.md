@@ -67,7 +67,7 @@ OKLCH 不是 GPUI 组件直接接受的 CSS。M1 在主题边界完成受验证�
 
 提取 spacing 集合为 2、4、6、8、12、16、20、24、32、48、64、96。原生核心采用 2/4/8/12/16/24/32 的命名级别；6/20 为控件局部补充，48/64/96 为写作空间级别。保存在 token 定义，布局通过 rem helpers/semantic size 消费。
 
-窗口 UI base size 当前 14，editor base 18，editor_width 720。必须明确 UI zoom、正文大小、系统显示缩放三个轴，不把 web 的 16 px root 当原生 rem。新默认比例按 mock 校准，旧外观字段不得压过新默认；用户后续显式调整仍需持久化。缓存排版测量需随字号、宽度、rem 失效。
+窗口 UI base size 当前 18（2026-11 UI 放大；旧默认 14/16 由迁移调整），editor base 16，editor_width 768。必须明确 UI zoom、正文大小、系统显示缩放三个轴，不把 web 的 16 px root 当原生 rem。新默认比例按 mock 校准，旧外观字段不得压过新默认；用户后续显式调整仍需持久化。缓存排版测量需随字号、宽度、rem 失效。
 
 ## 4. 圆角、边界与表面
 
@@ -161,3 +161,12 @@ M1 首先校对 Theme adapter；随后逐区域迁移 chrome、表单、菜单�
 - 匹配项：中性 canvas/sidebar/overlay 层级、模式 pill、圆角、768 正文 measure、顶部 toolbar 高度、保存状态与集合身份。
 - 修复项：pinned `List` 曾用单行目录行的高度测量所有导航行，导致“标题 + 文件名”两行条目与下一行重叠。目录行与条目行改为 `min_h(rems(3.25))`，随界面字号缩放，并有 GPUI 回归测试。
 - 保留差异：Writing 是可编辑完整源并弱化 Markdown 标记，不是 mock 的渲染 HTML/演示文案；文档状态在顶部 rail 而非底部状态栏；External Preview 使用真实 server 紧凑底栏；Build 不伪造 Problems 计数。大字号下筛选占位与 rail 更紧凑，但关键动作可达。
+
+## 13. UI 放大与 Preferences 重设计记录
+
+- 默认界面字号从 14 提升到 18，正文仍为独立的 16/32 与 768 measure；`type_scale.ui` 同步为 18。旧配置中 14/16 px 的默认值一次性迁移到 18，其他显式字号保留，迁移前备份为 `global.json.pre-interface-scale.json`；写入 `interface_scale` 防止重复迁移。
+- Preferences 去掉导航内重复的 “Preferences” 标题，只保留 dialog 标题；pane 标题改为内容区 header（标题 + 说明），并根据 pane 提供一句用途说明。
+- dialog 尺寸从 560–880 × 420–680 放大到 720–1040 × 560–1040，随窗口变化；左侧导航加宽并随界面字号增长，User guide / Keyboard shortcuts 固定在 pane 列表下方。
+- 表单改为圆角分组卡片：`Theme`、`Interface`、`Document` 等 section 使用 `group_box` 表面、内边距和细边界；字段标签提升到 `text_base`，提示提升到 `text_sm`，文本控件与下拉按钮取消 `small` 尺寸。
+- Apply/Cancel 固定在 header 右侧，说明文案放在标题下方，避免长表单滚动后丢失动作；`preferences-body` 仍是唯一滚动区。
+- 原生验证：1000×700 与 1440×900、light 主题、`ui_font_size=18` 截图确认单一标题、卡片层级、导航链接与 Apply/Cancel 可见；Build 主界面同字号下导航两行条目不重叠。

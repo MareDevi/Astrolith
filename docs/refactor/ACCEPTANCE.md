@@ -301,3 +301,23 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - A11 的长 schema 滚动、A20/A21 的原生 Reset All 与移动项目、A22 的 reduced motion/对比度审计仍未完成。
   - 完整 LSP、Astro 语法高亮、Problems 面板仍是独立扩展，未以占位 UI 冒充。
   - 因此本记录不宣布 v0.2.0 整体完成；平台矩阵与上述未完成项必须显式保留。
+
+## 17. UI 放大与 Preferences 重设计记录
+
+- 范围：core `preferences.rs` 默认值、GPUI settings store 迁移、`theme/metrics.rs`、`preferences/{mod,appearance,preview}.rs` 与全部 pane 的控件尺寸、`shell.rs` 的 dialog 尺寸。
+- 问题与修复：
+  - Preferences 出现两遍 “Preferences”：dialog 标题与导航内标题重复。导航内标题已删除；dialog 标题保留一次，内容区改为 pane 标题（如 Appearance）+ 一句说明。
+  - 界面整体偏小：默认 `ui_font_size` 从 14 提升到 18，`type_scale.ui` 同步。正文仍使用独立的 16/32 与 768 measure，不受界面字号控制。
+  - 旧配置 14/16 px 被视为旧视觉比例，一次性迁移到 18；其他显式字号保留。迁移前备份为 `global.json.pre-interface-scale.json`，写入 `interface_scale: 1` 防止重复迁移。用户仍可在 Appearance 面板调整 8–28。
+- Preferences 重设计：
+  - dialog 尺寸 720–1040 × 560–1040，随窗口增长；左侧导航加宽并随界面字号增长。
+  - 表单改为圆角分组卡片（`group_box` 表面 + 细边界 + 内边距）；section 标题与字段标签使用 `text_base`，提示使用 `text_sm`；文本输入与下拉按钮取消 `small` 尺寸。
+  - Apply/Cancel 固定到 header 右侧，说明文案在 pane 标题下；`preferences-body` 仍为唯一滚动区。User guide / Keyboard shortcuts 固定在 pane 列表下方，不再被导航高度挤出。
+  - Appearance 的 section 由重复的 “Appearance” 改为 “Theme”，主题字段标签改为 “Colour mode”；Preview 的 section 改为 “Browser”，消除 pane 标题与 section 标题同名。
+- 验证：
+  - 新增 `retired_interface_scale_upgrades_once_and_preserves_other_sizes`：16→18 迁移、备份、`interface_scale` 标记、重复加载不重迁移、20 px 显式值保留。
+  - `mise run check` 退出码 0；workspace Rust 测试 **868 passed、0 failed、8 ignored**；fixture oracle 与 fixture 单元测试通过。
+  - 原生截图（Hyprland 0.57.1 / Wayland / 100%，light，18 px）：`/tmp/m7-prefs-redesign2-1000x700.png`、`/tmp/m7-prefs-1440-appearance.png`、`/tmp/m7-app-1440.png`、`/tmp/m7-build-18px.png`。确认单一标题、卡片、导航链接、Apply/Cancel 与主界面字号；1000×700 下 dialog 完整位于窗口内。
+- 未完成/未验证：
+  - 只对 Appearance 做了逐像素截图；Workspace、Preview、Project、Collections、Advanced 由 GPUI 测试覆盖，未逐页原生截图。
+  - 未重新执行 M7 的完整性能 workload；本轮改动不涉及列表/文档热路径，性能结论仍引用 §16。
