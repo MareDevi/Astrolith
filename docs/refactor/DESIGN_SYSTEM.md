@@ -1,6 +1,6 @@
 # Neutral 原生设计系统
 
-状态：M0 提取与设计，尚未修改 Rust tokens。目标是尽量还原 mock 的视觉，而非延续旧 UI。基准来源为 `astrolith-web-mock/src/index.css` 和 `src/components/`。视觉参考必须经过原生交互和可访问性约束校正。
+状态：M0 提取与设计，M1 已实现中性 light/dark tokens、OKLCH 转换、共享控件映射与尺度快照。目标仍是尽量还原 mock 的视觉，而非延续旧 UI。基准来源为 `astrolith-web-mock/src/index.css` 和 `src/components/`。视觉参考必须经过原生交互和可访问性约束校正。
 
 ## 1. 颜色提取
 
@@ -18,7 +18,7 @@
 | secondary-foreground / accent-foreground | `oklch(0.205 0 0)` | `oklch(0.985 0 0)` | 对应表面文字 |
 | muted-foreground | `oklch(0.556 0 0)` | `oklch(0.708 0 0)` | 辅助说明，不用于必要正文 |
 | border / input | `oklch(0.922 0 0)` | `oklch(1 0 0 / 10%)` / `oklch(1 0 0 / 15%)` | 结构细线 / 控件底色基值 |
-| ring | `oklch(0.708 0 0)` | `oklch(0.556 0 0)` | 键盘焦点 |
+| ring | `oklch(0.708 0 0)` → 原生 `0.65` | `oklch(0.556 0 0)` | 键盘焦点；light 下调以满足 3:1 |
 | destructive | `oklch(0.577 0.245 27.325)` | `oklch(0.704 0.191 22.216)` | 真实错误/破坏性动作 |
 | sidebar | `oklch(0.985 0 0)` | `oklch(0.205 0 0)` | 导航背景 |
 | sidebar-foreground | `oklch(0.145 0 0)` | `oklch(0.985 0 0)` | 导航文字 |
@@ -113,6 +113,26 @@ Rest、Hover、Pressed、Open、Selected、Focus visible、Disabled、Loading、
 
 原型 Sidebar 200 ms、Dialog 100 ms 与 opacity transition 只作动效上界参考。优先即时模式切换，尊重 reduced motion；不添加持续装饰动画。
 
-## 8. 实施审查
+## 8. M1 实施记录
+
+- `theme/tokens.rs` 用产品语义命名角色；CSS `muted`（背景）映射为 `control`/`hover`，`muted-foreground` 映射为 `muted`，避免同名误解。`accent` 不再承担 primary 与 ring 两个角色，拆为 `primary`、`primary_foreground`、`focus`。
+- `theme/palettes.rs` 只保留中性 light/dark 两组值，并在主题边界把 CSS OKLCH 转为 HSLA；alpha 保留，透明细线由渲染器合成。测试覆盖白/黑/红参考值、alpha、边界合成与文本对比度。
+- Light focus ring 从 mock 的 `0.708` 调整为 `0.65`：mock 原值在白色画布上约 2.6:1，低于必要控件/焦点 3:1 目标；颜色仍为中性灰。Dark ring 保持 `0.556`（约 4.2:1）。
+- `theme/metrics.rs` 固化 spacing 2…96、type 12/14/16/32/24/36/48/13、radius small/control/surface/overlay/pill 与 overlay elevation。Kit 0.8.1 只持久化 `radius` 与 `radius_lg`，分别投影为 10 px 与 14 px。
+- `theme/typography.rs` 默认使用 Inter（`Inter Variable`/`Inter`），缺失时回退平台 UI 字体；正文不再默认 serif。CJK 由 GPUI 的脚本回退覆盖。
+- Kit `Theme::change` + `Theme::update` 同步 Component/Base；sidebar、title bar、status bar、tabs、list、table、primary/secondary、popover、switch、slider、overlay 均映射到中性角色。
+- `light_theme` / `dark_theme` 配置字段、palette 枚举和设置页入口已删除。升级加载时把原 `global.json` 完整备份为 `global.json.pre-neutral.json`，再移除两个旧键；未知顶层字段、主题偏好与其它设置保留。
+- 导航 `WorkspacePanel` 使用 `surface`，正文面板使用 `background`，建立与 mock 一致的 sidebar/canvas 层级。
+- 已用真实原生窗口（Linux Wayland）截图检查 light/dark：画布、sidebar、title bar、按钮与空状态均为中性，无蓝色通用强调，focus ring 为中性灰。
+
+仍未迁移（不阻塞 M1，但 A26 未完成）：
+
+- mock 的模式 tabs、Build 标签条与预览浮层属于 M2；本轮未添加。
+- Kit 的 light input 背景固定取 `background`，因此无法在不改上游的情况下复现 mock 的 `input/50` 浅灰填充；dark 输入已使用半透明 input 基值。
+- Kit 按钮/输入统一使用 `radius`，尚未逐控件复现 mock 的 pill（`rounded-4xl`/`rounded-3xl`）轮廓；模式切换器为 M2 范围。
+- 正文 measure 仍沿用用户配置默认 720，M3 再按 mock 768 与可配置排版收口；spacing 尺度尚未替换全部旧布局硬编码。
+- 代码高亮与 Copyedit 自有语义色未改。
+
+## 9. 实施审查
 
 M1 首先校对 Theme adapter；随后逐区域迁移 chrome、表单、菜单与选中态。M7 在真实内容与真实窗口下记录 dark/light、最小/宽窗、UI zoom 和缩放截图及边界测量。M0 只有源码对照，不宣称完成 pixel parity。

@@ -95,3 +95,20 @@ A14、A19、A24、A25 为功能完成门；A26 为视觉完成门。平台局部
 2026-11-04 范围校正：已将真实 WebView、交互终端、Astro 开发文件编辑和 mock 外观还原写入必交付标准，删除旧 UI 外观保留要求。文档校正后再次执行 `mise run check` 通过；未开始功能实现。
 
 M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更新证据，不预先勾选。
+
+## 6. M1 执行记录
+
+- 范围：`theme/{tokens,palettes,mod,typography,metrics}.rs`、`ui.rs`、导航面板表面、设置页外观入口、偏好迁移及受字体度量影响的链接点击回归。
+- 结果：
+  - `cargo test -p astrolith-gpui --locked`：343 passed、0 failed、4 ignored。
+  - `cargo test -p astrolith-core --locked` 与设置迁移定向测试通过；新增备份迁移测试验证 `global.json.pre-neutral.json`、旧键移除与未知字段保留。
+  - `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --package astrolith-desktop --locked` 通过。
+  - 真实 Linux Wayland 原生窗口：以隔离的 `ASTROLITH_SETTINGS_PATH` 分别启动 light/dark，窗口截图确认中性画布、sidebar 表面、title bar、按钮与空状态；未使用 mock 外框或网页壳。
+- 视觉对照：light 画布纯白、sidebar 近白、title bar 近白；dark 画布 `#0a0a0a`、sidebar `#171717`、title bar `#131313`。通用强调色不再为蓝。focus ring 为中性灰；light 值由 mock 的 0.708 调整为 0.65 以满足 3:1。
+- 回归：中性无衬线字体度量使长 URL 软换行，暴露 pinned `range_to_bounds` 跨行矩形不可用；链接/图片命中改为逐字符回退，现有 URL 交替点击测试继续通过。
+- 未完成/未验证：
+  - A04 的 System 跟随与两主题截图已在本机验证，但 A26 的全区域 mock 对照未完成；模式 tabs、Build 标签条属于 M2。
+  - Kit light 输入填充无法复现 mock `input/50`；按钮/输入 pill 轮廓未逐控件还原。
+  - 未在 macOS/Windows 或 150%/200% 显示缩放下验收。
+
+

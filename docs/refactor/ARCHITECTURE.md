@@ -77,7 +77,7 @@ flowchart TD
 | 恢复：document `recovery.rs`、`recover_pending` | 脏编辑恢复、失败脱敏记录 | 入口保留；新事务同步 recovery revision | 不把模式切换当作丢弃/保存成功 |
 | 预览：preview crate + GPUI `preview/mod.rs` | dev server start/stop/restart/retry、route、外部默认浏览器 | 服务原样复用；presentation backend 与 server backend 分开 | 模式切换不重启 server；失败保持编辑可用 |
 | 设置：core `preferences.rs`、GPUI `settings/`、`preferences/` | global v2 / project v1 / collection overrides，atomic Apply/Cancel | 复用 resolver/store，新增模式/预览/写作字段 | 保留 unknown envelope、false/0、future-version readonly |
-| 主题：`theme/{mod,palettes,tokens,typography}.rs` | system/light/dark、多 palette、UI size/font、editor size/width | 以 mock Neutral 与排版 scales 替换旧外观；旧配色选项不保留为兼容 UI | 显式迁移弃用的外观字段；fallback 尽量匹配 mock 字体度量 |
+| 主题：`theme/{mod,palettes,tokens,typography,metrics}.rs` | M1 已改为单一中性 light/dark，删除 palette 选择；OKLCH 在主题边界转换，尺度快照与 sidebar/canvas 层级已接入 | 后续里程碑只在消费点迁移表单/浮层/正文排版，不再恢复旧 palette | 旧 palette 键一次性备份并移除；light input 填充受 Kit 限制；A26 仍需 M7 全区域截图 |
 | Desktop：`commands.rs`、`desktop_actions.rs`、`single_instance.rs`、`url_scheme.rs` | 菜单、palette、IDE argv、fullscreen、协议、reopen | 共用命令注册表，增加模式命令 | Ctrl+B/I 已用于 bold/italic，不照搬 mock |
 | Help/日志/更新：`help.rs`、`update.rs`、observability crate | bundled help、无遥测、受构建 capability 限制的签名更新 | 保留入口和脱敏；补文档导航兼容 | 无签名发布/安装证据时不声称发布可用 |
 
