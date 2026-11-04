@@ -329,7 +329,7 @@ impl Shell {
             WorkspacePanel::new(
                 "document-panel",
                 "Welcome",
-                "Open a project, then choose an entry from the library to begin writing.",
+                document_empty_copy(mode, false),
                 window,
                 cx,
             )
@@ -1607,6 +1607,7 @@ impl Shell {
         });
         self.sync_project_preferences(cx);
         self.mode = resolved.last_mode.unwrap_or(resolved.default_mode);
+        self.sync_document_empty_copy(cx);
         self.settings.layouts = resolved.layouts;
         self.settings
             .layouts
@@ -1806,6 +1807,14 @@ impl Shell {
             }))
     }
 
+    /// Keep the document empty state aligned with the navigation the mode shows.
+    fn sync_document_empty_copy(&mut self, cx: &mut Context<Self>) {
+        let has_project = self.project.read(cx).project_root().is_some();
+        let copy = document_empty_copy(self.mode, has_project);
+        self.document
+            .update(cx, |document, cx| document.set_content(copy.to_owned(), cx));
+    }
+
     /// Switch the workspace mode without touching the open document.
     ///
     /// Layouts are per mode, the floating inspector is transient, and no mode
@@ -1819,6 +1828,7 @@ impl Shell {
         let inspector_open = self.inspector_open;
         self.set_inspector_open(false, cx);
         self.mode = mode;
+        self.sync_document_empty_copy(cx);
         self.project.update(cx, |project, cx| {
             project.set_source_view(mode == WorkspaceMode::Build, window, cx)
         });
@@ -3291,6 +3301,17 @@ impl Render for Shell {
                 shell.child(self.build_tab_strip(cx))
             })
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
+    }
+}
+
+/// Empty document copy for the navigation the active mode shows.
+fn document_empty_copy(mode: WorkspaceMode, has_project: bool) -> &'static str {
+    match (mode, has_project) {
+        (WorkspaceMode::Build, true) => "Choose a file from the explorer to open it.",
+        (WorkspaceMode::Build, false) => "Open a project to browse its files.",
+        (WorkspaceMode::Writing | WorkspaceMode::Preview, _) => {
+            "Open a project, then choose an entry from the library to begin writing."
+        }
     }
 }
 
