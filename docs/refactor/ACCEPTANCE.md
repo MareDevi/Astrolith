@@ -165,6 +165,7 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 | A25 | 隐藏 Dock/切模式保留会话，切项目/退出清理进程 | 用户验收通过 |
 | A26 | 新布局与 mock 的分区域视觉对照 | 用户验收通过 |
 | A12 | Focus/Typewriter、中文输入、组合取消、跨段选区、跳行与滚动 | 用户验收通过（M3） |
+| A05/A10 | Inspector 浮层不改变正文 bounds；按钮/快捷键打开；outside/Esc/关闭按钮关闭；嵌套 Select/DatePicker 逐层关闭 | 用户验收通过（M4b） |
 
 本次回复未附带截图路径、显示缩放和主题组合明细；后续如归档需要，应补齐这些附件元数据。A19/M5b（真实 Embedded WebView）不在本次确认范围。
 
@@ -204,7 +205,7 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - 现有 frontmatter 字段/校验/patch、模式布局、project layout、resize 与 shell 测试全部继续通过。
 - 自动检查：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；Rust workspace 846 passed、0 failed、8 ignored；fixture 单元 6 passed，Astro fixture compatibility PASS。
 - 原生证据：Linux Wayland（Hyprland），dark/System，窗口 1263×1384，fixture `fixtures/parity-project/src/content/blog/markdown-showcase.md`。截图确认默认关闭、`Ctrl+2` 打开真实 schema 字段（title/description/slug/date/updated/draft/featured/order/rating/tags/category/status/author/related）、右侧 16 px inset、正文与保存状态仍可见、Esc 关闭。截图临时保存于 `/tmp/astrolith-m4b-closed.png`、`/tmp/astrolith-m4b-open.png`、`/tmp/astrolith-m4b-escaped.png`。
+- 原生验收：用户于 2026-11-04 确认 M4b 通过，包含内层 Select/DatePicker 先关子层、再关父层的 Esc 顺序（A10）。本次回复未附截图、显示缩放与主题组合明细。
 - 未完成/未验证：
-  - 内层 Select/DatePicker 的“先关子层、再关父层”只由 pinned popover 语义和代码审查保证，未在本机用真实鼠标/键盘实际展开验证；A10 仍待原生补证。
   - 最小窗口、150%/200% 缩放、原生 IME 焦点与长表单滚动未截图验收。
   - Schema 刷新时已提交字段编辑依赖完整源重建；未新增专门的 schema-refresh 表单集成测试。
