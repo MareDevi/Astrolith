@@ -129,15 +129,18 @@ and destinations escape brackets, parentheses and backslashes.
 ## 5. Preferences and three-tier overrides
 
 Open **Preferences…** with `Ctrl+,` or **View → Preferences…**. The sheet has
-four panes:
+six panes:
 
-- **General** — appearance (follow system, light or dark) with one neutral
-  light and dark palette. The pane also controls the IDE command and
-  arguments, default new-file extension, heading colours per appearance,
-  interface font family and size (8–28, default 14), document font family,
-  document font size (1–30, default 16), line height (1.2–3.0 × the font size,
-  default 2.0), page width (480–1200, default 768), Focus and Typewriter mode,
-  autosave delay (1, 2, 5 or 10 seconds) and Copyedit colours and toggles.
+- **Appearance** — follow system, light or dark with one neutral palette,
+  interface font family and size (8–28, default 18), heading colours,
+  document font family, document font size (1–30, default 16), line height
+  (1.2–3.0 × the font size, default 2.0) and page width (30–100% of the editor
+  pane, default 64%).
+- **Workspace** — default workspace mode, per-mode layout resets, Focus and
+  Typewriter mode, autosave delay (1, 2, 5 or 10 seconds), default new-file
+  extension, and the external editor command and arguments.
+- **Preview** — external or embedded presentation, the preferred browser
+  executable and arguments, and Open on Enter.
 - **Project Settings** — content, assets and MDX component directories,
   absolute versus document-relative image paths, default extension override,
   title/date/description/draft field mappings, and the experimental
@@ -170,9 +173,10 @@ platform UI font); **Document font** names another installed family and falls
 back to that sans face when it is missing. CJK text uses the platform's script
 fallback because no bundled CJK face is shipped. **Interface size** controls
 the UI scale and spacing. **Document font size** and **Line height** set the
-page independently, and **Page width** sets the widest prose column before it
-centers in a wider pane. Focus and Typewriter toggles are saved with these
-settings and restored on the next launch.
+page independently, and **Page width** sets the prose column as a percentage
+of the editor pane (30–100%, default 64%), clamped to a readable 320–1200 px.
+The column centres when the pane is wider. Focus and Typewriter toggles are
+saved with these settings and restored on the next launch.
 
 ## 6. Writing
 
@@ -223,9 +227,10 @@ Writer commands:
   closed and returns on a top-edge hover. The selection toolbar appears for a
   non-empty selection and is keyboard reachable.
 - The page is set in the neutral sans face at 16 px with 32 px lines and a
-  768 px measure by default, without line numbers, indent guides, folding or
-  automatic brackets. Font family, size, line height and page width are
-  preferences, and the writing column no longer rescales with the pane.
+  64% page width (clamped to 320–1200 px) by default, without line numbers,
+  indent guides, folding or automatic brackets. Font family, size, line height
+  and page width are preferences; the page width follows the editor pane and
+  the writing column no longer rescales its type with the pane.
   Markdown presentation includes dimmed syntax markers, tinted code spans and
   blocks, muted italic blockquotes, and uniform bold headings.
 - Copyedit (`Writer` menu) highlights nouns, verbs, adjectives, adverbs or
