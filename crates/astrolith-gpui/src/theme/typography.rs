@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 
 use gpui_kit::{App, SharedString, component::ActiveTheme};
 
-/// Comfortable line length for prose, in logical pixels at the base size.
-pub(crate) const PROSE_MEASURE: f32 = 768.;
+/// Default prose column width as a percentage of the editor pane.
+pub(crate) const PROSE_PAGE_WIDTH_PERCENT: f32 = 64.;
 
 /// Horizontal inset inside the prose column.
 pub(crate) const PROSE_INSET: f32 = 32.;

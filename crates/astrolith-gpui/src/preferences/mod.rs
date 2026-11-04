@@ -199,7 +199,7 @@ pub(crate) enum FieldId {
     ProseFontFamily,
     FontSize,
     LineHeight,
-    EditorWidth,
+    PageWidth,
     ProjectContent,
     ProjectAssets,
     ProjectMdx,
@@ -236,7 +236,7 @@ struct Inputs {
     prose_font_family: Entity<InputState>,
     font_size: Entity<InputState>,
     line_height: Entity<InputState>,
-    editor_width: Entity<InputState>,
+    page_width_percent: Entity<InputState>,
     project_content: Entity<InputState>,
     project_assets: Entity<InputState>,
     project_mdx: Entity<InputState>,
@@ -340,7 +340,7 @@ impl PreferencesSheet {
                 prose_font_family: input!("Inter / system sans"),
                 font_size: input!("16"),
                 line_height: input!("2"),
-                editor_width: input!("768"),
+                page_width_percent: input!("64"),
                 project_content: input!("Inherit the Astro content directory"),
                 project_assets: input!("Inherit the configured assets directory"),
                 project_mdx: input!("Inherit the MDX component directory"),
@@ -438,8 +438,8 @@ impl PreferencesSheet {
             cx,
         );
         self.set_text(
-            FieldId::EditorWidth,
-            &format_number(global.editor_width),
+            FieldId::PageWidth,
+            &format_number(global.page_width_percent),
             window,
             cx,
         );
@@ -569,13 +569,13 @@ impl PreferencesSheet {
             .ok()?,
             open_on_enter: self.preview_open_on_enter,
         };
-        global.editor_width = self
-            .text(FieldId::EditorWidth, cx)
+        global.page_width_percent = self
+            .text(FieldId::PageWidth, cx)
             .trim()
             .parse::<f32>()
             .ok()
-            .filter(|width| width.is_finite() && (480.0..=1200.0).contains(width))
-            .unwrap_or(global.editor_width);
+            .filter(|width| width.is_finite() && (30.0..=100.0).contains(width))
+            .unwrap_or(global.page_width_percent);
         global.ide = ide_command(
             &self.text(FieldId::IdeExecutable, cx),
             &self.text(FieldId::IdeArguments, cx),
@@ -643,9 +643,9 @@ impl PreferencesSheet {
                 window,
                 cx,
             ),
-            FieldId::EditorWidth => self.set_text(
+            FieldId::PageWidth => self.set_text(
                 field,
-                &format_number(GlobalPreferencesV2::default().editor_width),
+                &format_number(GlobalPreferencesV2::default().page_width_percent),
                 window,
                 cx,
             ),
@@ -912,7 +912,7 @@ impl PreferencesSheet {
             FieldId::ProseFontFamily => self.inputs.prose_font_family.read(cx).value(),
             FieldId::FontSize => self.inputs.font_size.read(cx).value(),
             FieldId::LineHeight => self.inputs.line_height.read(cx).value(),
-            FieldId::EditorWidth => self.inputs.editor_width.read(cx).value(),
+            FieldId::PageWidth => self.inputs.page_width_percent.read(cx).value(),
             FieldId::ProjectContent => self.inputs.project_content.read(cx).value(),
             FieldId::ProjectAssets => self.inputs.project_assets.read(cx).value(),
             FieldId::ProjectMdx => self.inputs.project_mdx.read(cx).value(),
@@ -977,9 +977,9 @@ impl PreferencesSheet {
                 .inputs
                 .line_height
                 .update(cx, |input, cx| input.set_value(value, window, cx)),
-            FieldId::EditorWidth => self
+            FieldId::PageWidth => self
                 .inputs
-                .editor_width
+                .page_width_percent
                 .update(cx, |input, cx| input.set_value(value, window, cx)),
             FieldId::ProjectContent => self
                 .inputs
@@ -1127,8 +1127,8 @@ impl PreferencesSheet {
         if let Err(message) = line_height_value(&self.text(FieldId::LineHeight, cx)) {
             insert(FieldId::LineHeight, message);
         }
-        if let Err(message) = editor_width_value(&self.text(FieldId::EditorWidth, cx)) {
-            insert(FieldId::EditorWidth, message);
+        if let Err(message) = page_width_value(&self.text(FieldId::PageWidth, cx)) {
+            insert(FieldId::PageWidth, message);
         }
         if let Err(message) = ide_command_value(
             &self.text(FieldId::IdeExecutable, cx),
@@ -1256,8 +1256,9 @@ impl PreferencesSheet {
             FieldId::LineHeight => {
                 gpui_kit::component::input::Input::new(&self.inputs.line_height).into_any_element()
             }
-            FieldId::EditorWidth => {
-                gpui_kit::component::input::Input::new(&self.inputs.editor_width).into_any_element()
+            FieldId::PageWidth => {
+                gpui_kit::component::input::Input::new(&self.inputs.page_width_percent)
+                    .into_any_element()
             }
             FieldId::ProjectContent => {
                 gpui_kit::component::input::Input::new(&self.inputs.project_content)
@@ -1733,14 +1734,14 @@ pub(crate) fn line_height_value(value: &str) -> Result<f32, String> {
     Ok(height)
 }
 
-/// Validate the editor's prose column width.
-pub(crate) fn editor_width_value(value: &str) -> Result<f32, String> {
+/// Validate the editor's prose column width as a percentage of the pane.
+pub(crate) fn page_width_value(value: &str) -> Result<f32, String> {
     let value = value.trim();
     let Ok(width) = value.parse::<f32>() else {
-        return Err("Enter a width between 480 and 1200.".into());
+        return Err("Enter a page width between 30 and 100 percent.".into());
     };
-    if !width.is_finite() || !(480.0..=1200.0).contains(&width) {
-        return Err("Width must be between 480 and 1200.".into());
+    if !width.is_finite() || !(30.0..=100.0).contains(&width) {
+        return Err("Page width must be between 30 and 100 percent.".into());
     }
     Ok(width)
 }

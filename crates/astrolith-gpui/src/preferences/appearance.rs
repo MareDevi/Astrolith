@@ -129,12 +129,12 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-editor-width",
                 "Page width",
-                self.control(FieldId::EditorWidth),
+                self.control(FieldId::PageWidth),
                 FieldExtras {
-                    field: Some(FieldId::EditorWidth),
-                    hint: Some("480–1200 logical pixels; the default is 768."),
+                    field: Some(FieldId::PageWidth),
+                    hint: Some("30–100% of the editor pane; the default is 64%."),
                     trailing: Some(self.reset_button(
-                        FieldId::EditorWidth,
+                        FieldId::PageWidth,
                         "preferences-reset-editor-width",
                         cx,
                     )),

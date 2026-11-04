@@ -235,6 +235,64 @@ impl Stored<GlobalPreferencesV2> {
 }
 
 impl Stored<GlobalPreferencesV2> {
+    /// Convert the retired fixed page width in pixels to a pane percentage once.
+    ///
+    /// The old default was 768 px on a 1200 px reference pane, i.e. 64%.
+    /// Explicit widths scale the same way, so 900 px becomes 75%. The exact
+    /// previous file is kept beside the new one.
+    fn migrate_page_width_percent(&mut self) -> Option<String> {
+        let envelope = self.envelope.as_mut()?;
+        if envelope.contains_key("page_width_percent") {
+            return None;
+        }
+        let old_width = envelope.get("editor_width")?.as_f64()? as f32;
+        let percent = ((old_width / 1200. * 100.).clamp(30., 100.) * 10.).round() / 10.;
+        if !self.writable {
+            return Some(format!(
+                "The fixed page width remains in {} because the file is read-only.",
+                self.path.display()
+            ));
+        }
+        let baseline = self.baseline.as_deref()?;
+        let backup =
+            unique_destination(&self.path.with_file_name("global.json.pre-page-width.json"));
+        if let Err(error) = fs::write(&backup, baseline) {
+            return Some(format!(
+                "Could not back up the fixed page width to {}: {error}. The settings file is preserved.",
+                backup.display()
+            ));
+        }
+        self.value.page_width_percent = percent;
+        envelope.remove("editor_width");
+        envelope.insert(
+            "page_width_percent".to_owned(),
+            serde_json::json!(self.value.page_width_percent),
+        );
+        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Some(format!(
+                    "Could not encode the page width percentage: {error}"
+                ));
+            }
+        };
+        match write_atomic(&self.path, &bytes) {
+            Ok(()) => {
+                self.baseline = Some(bytes);
+                tracing::info!(
+                    path = %self.path.display(),
+                    backup = %backup.display(),
+                    "converted the fixed page width to a pane percentage"
+                );
+                None
+            }
+            Err(error) => Some(format!(
+                "Could not convert the page width in {}: {error}. The file is preserved.",
+                self.path.display()
+            )),
+        }
+    }
+
     /// Replace the pre-writing defaults with the mock's body typography once.
     ///
     /// Files written before M3 have no `editor_line_height`. The old defaults
@@ -264,9 +322,6 @@ impl Stored<GlobalPreferencesV2> {
         if (self.value.editor_font_size - 18.).abs() < f32::EPSILON {
             self.value.editor_font_size = defaults.editor_font_size;
         }
-        if (self.value.editor_width - 720.).abs() < f32::EPSILON {
-            self.value.editor_width = defaults.editor_width;
-        }
         self.value.editor_line_height = defaults.editor_line_height;
         for (key, value) in [
             (
@@ -277,7 +332,6 @@ impl Stored<GlobalPreferencesV2> {
                 "editor_line_height",
                 serde_json::json!(self.value.editor_line_height),
             ),
-            ("editor_width", serde_json::json!(self.value.editor_width)),
             (
                 "prose_font_family",
                 serde_json::json!(self.value.prose_font_family),
@@ -532,6 +586,7 @@ impl PreferencesStore {
         let palette_migration_warning = global.retire_legacy_palettes();
         let mode_migration_warning = global.migrate_mode_layouts();
         let interface_migration_warning = global.migrate_interface_scale();
+        let page_width_migration_warning = global.migrate_page_width_percent();
         let writing_migration_warning = global.migrate_writing_defaults();
         let registry =
             Stored::<ProjectRegistry>::load(root.join("projects.json"), PROJECT_REGISTRY_VERSION);
@@ -540,6 +595,7 @@ impl PreferencesStore {
             palette_migration_warning,
             mode_migration_warning,
             interface_migration_warning,
+            page_width_migration_warning,
             writing_migration_warning,
             global.warning.clone(),
             registry.warning.clone(),
@@ -987,15 +1043,17 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(preferences.editor_font_size, 16.);
         assert_eq!(preferences.editor_line_height, 2.);
-        assert_eq!(preferences.editor_width, 768.);
+        assert_eq!(preferences.page_width_percent, 60.);
         assert!(!preferences.focus_mode);
         assert!(!preferences.typewriter_mode);
-        let backup = path.with_file_name("global.json.pre-writing.json");
-        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
+        let width_backup = path.with_file_name("global.json.pre-page-width.json");
+        assert_eq!(fs::read_to_string(&width_backup).unwrap(), original);
+        assert!(path.with_file_name("global.json.pre-writing.json").exists());
         let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(envelope["editor_font_size"], 16.0);
         assert_eq!(envelope["editor_line_height"], 2.0);
-        assert_eq!(envelope["editor_width"], 768.0);
+        assert_eq!(envelope["page_width_percent"], 60.0);
+        assert!(envelope.get("editor_width").is_none());
         assert_eq!(envelope["future_field"]["keep"], true);
 
         // A second load does not migrate again.
@@ -1005,6 +1063,11 @@ mod tests {
         assert!(
             !path
                 .with_file_name("global.json.pre-writing-2.json")
+                .exists()
+        );
+        assert!(
+            !path
+                .with_file_name("global.json.pre-page-width-2.json")
                 .exists()
         );
 
@@ -1020,7 +1083,7 @@ mod tests {
         let (_, preferences, warning) = PreferencesStore::load(path);
         assert!(warning.is_none());
         assert_eq!(preferences.editor_font_size, 20.);
-        assert_eq!(preferences.editor_width, 768.);
+        assert_eq!(preferences.page_width_percent, 60.);
     }
 
     #[test]

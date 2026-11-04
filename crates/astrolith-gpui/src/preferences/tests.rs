@@ -107,13 +107,13 @@ fn line_height_stays_inside_the_readable_band() {
 }
 
 #[test]
-fn editor_width_stays_inside_the_readable_band() {
-    assert_eq!(editor_width_value("720").unwrap(), 720.);
-    assert_eq!(editor_width_value("480").unwrap(), 480.);
-    assert_eq!(editor_width_value("1200").unwrap(), 1200.);
-    for invalid in ["479", "1201", "-720", "wide", ""] {
+fn page_width_percent_stays_inside_the_readable_band() {
+    assert_eq!(page_width_value("64").unwrap(), 64.);
+    assert_eq!(page_width_value("30").unwrap(), 30.);
+    assert_eq!(page_width_value("100").unwrap(), 100.);
+    for invalid in ["29", "101", "-64", "wide", ""] {
         assert!(
-            editor_width_value(invalid).is_err(),
+            page_width_value(invalid).is_err(),
             "{invalid} must be refused"
         );
     }

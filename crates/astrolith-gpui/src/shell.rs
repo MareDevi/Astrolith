@@ -62,7 +62,8 @@ use gpui_kit::component::{
 use gpui_kit::{
     Animation, AnimationExt as _, App, AppContext, Bounds, Context, Entity, ExternalPaths,
     FocusHandle, Focusable, IntoElement, PathPromptOptions, Render, SharedString, Subscription,
-    Task, TestSupportExt, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, size,
+    Task, TestSupportExt, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, rems,
+    size,
 };
 
 /// Latest global and project snapshots, flushed by the quit observer.
@@ -1779,13 +1780,12 @@ impl Shell {
             .h_flex()
             .items_center()
             .gap_0p5()
-            .p(px(2.))
+            .p(px(3.))
             .rounded_full()
             .bg(cx.theme().tab_bar_segmented)
             .children(WorkspaceMode::ALL.map(|mode| {
                 let owner = owner.clone();
                 Button::new(mode.label())
-                    .small()
                     .ghost()
                     .label(mode.label())
                     .selected(mode == current)
@@ -3031,7 +3031,7 @@ impl Render for Shell {
             theme::configured_prose_font(cx, &self.settings.prose_font_family),
             self.settings.editor_font_size,
             self.settings.editor_line_height,
-            self.settings.editor_width,
+            self.settings.page_width_percent,
         );
         self.document
             .update(cx, |panel, cx| panel.set_prose_style(style, cx));
@@ -3088,6 +3088,7 @@ impl Render for Shell {
                     .flex_shrink_0()
                     .child(
                         TitleBar::new()
+                            .h(rems(3.5))
                             .on_close_window(move |_, window, cx| {
                                 let clean = close_owner
                                     .update(cx, |project, cx| {
@@ -6149,7 +6150,7 @@ mod tests {
                 },
                 "editor_font_size": 20.0,
                 "editor_line_height": 2.4,
-                "editor_width": 900.0,
+                "page_width_percent": 75.0,
                 "focus_mode": true,
                 "typewriter_mode": true,
                 "preview": {
@@ -6171,7 +6172,7 @@ mod tests {
             assert_eq!(shell.settings.theme, ThemePreference::Dark);
             assert_eq!(shell.settings.editor_font_size, 20.);
             assert_eq!(shell.settings.editor_line_height, 2.4);
-            assert_eq!(shell.settings.editor_width, 900.);
+            assert_eq!(shell.settings.page_width_percent, 75.);
             assert!(!shell.settings.preview.open_on_enter);
             assert!(!shell.settings.preview.browser.is_configured());
             // Stored sizes larger than the window can host are clamped on load.

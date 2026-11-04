@@ -342,10 +342,10 @@ impl Render for WorkspacePanel {
             .when_some(self.editor.as_ref(), |view, editor| {
                 let editor = editor.clone();
                 let style = self.prose.clone();
-                let measure = style
+                let page_width_percent = style
                     .as_ref()
-                    .map(|style| style.measure)
-                    .unwrap_or(crate::theme::PROSE_MEASURE);
+                    .map(|style| style.page_width_percent)
+                    .unwrap_or(crate::theme::PROSE_PAGE_WIDTH_PERCENT);
                 let wiring = self.wiring.clone();
                 let overlay = wiring.as_ref().and_then(|wiring| {
                     // Focus on the document, the toolbar or one of its buttons
@@ -394,8 +394,9 @@ impl Render for WorkspacePanel {
                     .child(
                         div()
                             .h_full()
-                            .w_full()
-                            .max_w(px(measure))
+                            .w(gpui_kit::relative(page_width_percent / 100.))
+                            .min_w(px(320.))
+                            .max_w(px(1200.))
                             .px(px(crate::theme::PROSE_INSET))
                             .pt(px(crate::theme::PROSE_TOP))
                             .child(element),

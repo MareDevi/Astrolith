@@ -655,8 +655,8 @@ pub struct GlobalPreferencesV2 {
     pub editor_font_size: f32,
     /// Document line height as a multiple of the font size.
     pub editor_line_height: f32,
-    /// Widest prose column in logical pixels.
-    pub editor_width: f32,
+    /// Page width as a percentage of the editor pane.
+    pub page_width_percent: f32,
     /// Dim every sentence except the cursor sentence.
     pub focus_mode: bool,
     /// Keep the cursor line vertically centred.
@@ -691,7 +691,7 @@ impl Default for GlobalPreferencesV2 {
             prose_font_family: String::new(),
             editor_font_size: 16.,
             editor_line_height: 2.,
-            editor_width: 768.,
+            page_width_percent: 64.,
             focus_mode: false,
             typewriter_mode: false,
             autosave_delay: AutosaveDelay::default(),
@@ -860,8 +860,8 @@ pub struct ResolvedPreferences {
     pub editor_font_size: f32,
     /// Document line height as a multiple of the font size.
     pub editor_line_height: f32,
-    /// Widest prose column in logical pixels.
-    pub editor_width: f32,
+    /// Page width as a percentage of the editor pane.
+    pub page_width_percent: f32,
     /// Focus and typewriter presentation.
     pub focus_mode: bool,
     /// Keep the cursor line vertically centred.
@@ -923,7 +923,7 @@ pub fn resolve(
         prose_font_family: global.prose_font_family.clone(),
         editor_font_size: global.editor_font_size,
         editor_line_height: global.editor_line_height,
-        editor_width: global.editor_width,
+        page_width_percent: global.page_width_percent,
         focus_mode: global.focus_mode,
         typewriter_mode: global.typewriter_mode,
         autosave_delay: global.autosave_delay,
@@ -1530,7 +1530,7 @@ mod tests {
         assert_eq!(retired.prose_font_family, "");
         assert_eq!(retired.editor_font_size, 16.);
         assert_eq!(retired.editor_line_height, 2.);
-        assert_eq!(retired.editor_width, 768.);
+        assert_eq!(retired.page_width_percent, 64.);
         assert!(!retired.focus_mode);
         assert!(!retired.typewriter_mode);
     }
@@ -1541,7 +1541,7 @@ mod tests {
             prose_font_family: "Inter Display".into(),
             editor_font_size: 19.,
             editor_line_height: 1.75,
-            editor_width: 840.,
+            page_width_percent: 70.,
             focus_mode: true,
             typewriter_mode: true,
             ..GlobalPreferencesV2::default()
@@ -1550,7 +1550,7 @@ mod tests {
         assert_eq!(resolved.prose_font_family, "Inter Display");
         assert_eq!(resolved.editor_font_size, 19.);
         assert_eq!(resolved.editor_line_height, 1.75);
-        assert_eq!(resolved.editor_width, 840.);
+        assert_eq!(resolved.page_width_percent, 70.);
         assert!(resolved.focus_mode);
         assert!(resolved.typewriter_mode);
 
