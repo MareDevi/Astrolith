@@ -62,9 +62,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     Animation, AnimationExt as _, App, AppContext, Bounds, Context, Entity, ExternalPaths,
-    FocusHandle, Focusable, IntoElement, PathPromptOptions, Render, SharedString, Subscription,
-    Task, TestSupportExt, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, rems,
-    size,
+    FocusHandle, Focusable, IntoElement, PathPromptOptions, Render, ScrollHandle, SharedString,
+    Subscription, Task, TestSupportExt, Window, WindowBounds, WindowOptions, div, point,
+    prelude::*, px, rems, size,
 };
 
 /// Latest global and project snapshots, flushed by the quit observer.
@@ -247,6 +247,8 @@ pub(crate) struct Shell {
     /// Project terminal, retained while its dock is hidden.
     terminal: Entity<TerminalPanel>,
     terminal_panel: Entity<WorkspacePanel>,
+    /// Horizontal position of the Build buffer tabs.
+    build_tabs: ScrollHandle,
     palette: Entity<CommandState>,
     palette_focus: FocusHandle,
     finder: Entity<CommandState>,
@@ -691,6 +693,7 @@ impl Shell {
             embedded_failure: None,
             terminal,
             terminal_panel,
+            build_tabs: ScrollHandle::new(),
             palette,
             palette_focus: cx.focus_handle().tab_stop(true),
             finder,
@@ -1735,78 +1738,101 @@ impl Shell {
         self.persist_project(cx);
     }
 
-    /// Real document tabs for Build, backed by retained sessions.
+    /// Build's buffer tabs, backed by retained sessions.
+    ///
+    /// The strip is only drawn while at least one buffer exists. Many tabs
+    /// scroll horizontally instead of being clipped, and each tab uses the
+    /// shared tab tokens so it reads as the same surface as the rest of the
+    /// application.
     fn build_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs = self.project.read(cx).open_tabs();
         let active = self.project.read(cx).active_path();
         let owner = cx.weak_entity();
         let project = self.project.clone();
         div()
+            .id("build-tabs")
+            .test_support()
             .h(px(40.))
             .flex_shrink_0()
             .h_flex()
             .items_end()
-            .gap_1()
-            .px(px(12.))
             .border_b_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
-            .children(tabs.iter().enumerate().map(|(index, tab)| {
-                let owner = owner.clone();
-                let project = project.clone();
-                let path = tab.path.clone();
-                let close_owner = owner.clone();
-                let close_project = project.clone();
-                let close_path = tab.path.clone();
-                let selected = active.as_ref() == Some(&tab.path);
+            .child(
                 div()
-                    .id(format!("build-tab-{index}"))
-                    .test_support()
+                    .id("build-tabs-scroll")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
                     .h_flex()
-                    .h(px(32.))
-                    .items_center()
-                    .gap_2()
-                    .px(px(10.))
-                    .rounded_t(px(6.))
-                    .when(selected, |tab| {
-                        tab.bg(cx.theme().tab_active)
-                            .text_color(cx.theme().tab_active_foreground)
-                    })
-                    .when(!selected, |tab| tab.text_color(cx.theme().tab_foreground))
-                    .cursor_pointer()
-                    .on_click(move |_, window, cx| {
-                        let _ = owner.update(cx, |_this, cx| {
-                            project.update(cx, |project, cx| {
-                                project.activate_session(&path, window, cx)
-                            });
-                        });
-                    })
-                    .child(
+                    .items_end()
+                    .gap_1()
+                    .px(px(12.))
+                    .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
+                    .track_scroll(&self.build_tabs)
+                    .children(tabs.iter().enumerate().map(|(index, tab)| {
+                        let owner = owner.clone();
+                        let project = project.clone();
+                        let path = tab.path.clone();
+                        let close_owner = owner.clone();
+                        let close_project = project.clone();
+                        let close_path = tab.path.clone();
+                        let selected = active.as_ref() == Some(&tab.path);
                         div()
-                            .max_w(px(200.))
-                            .truncate()
-                            .text_xs()
-                            .child(tab.label.clone()),
-                    )
-                    .when(tab.dirty, |tab| {
-                        tab.child(div().size_1p5().rounded_full().bg(cx.theme().foreground))
-                    })
-                    .child(
-                        Button::new(("build-tab-close", index))
-                            .small()
-                            .ghost()
-                            .icon(IconName::X)
-                            .tooltip("Close file")
-                            .accessibility_label(format!("Close {}", tab.label))
+                            .id(format!("build-tab-{index}"))
+                            .test_support()
+                            .flex_none()
+                            .h_flex()
+                            .h(px(32.))
+                            .items_center()
+                            .gap_2()
+                            .px(px(10.))
+                            .rounded_t(px(6.))
+                            .when(selected, |tab| {
+                                tab.bg(cx.theme().tab_active)
+                                    .text_color(cx.theme().tab_active_foreground)
+                            })
+                            .when(!selected, |tab| {
+                                tab.text_color(cx.theme().tab_foreground)
+                                    .hover(|tab| tab.bg(cx.theme().tab_bar))
+                            })
+                            .cursor_pointer()
                             .on_click(move |_, window, cx| {
-                                let _ = close_owner.update(cx, |_, cx| {
-                                    close_project.update(cx, |project, cx| {
-                                        project.close_path(close_path.clone(), window, cx)
+                                let _ = owner.update(cx, |_this, cx| {
+                                    project.update(cx, |project, cx| {
+                                        project.activate_session(&path, window, cx)
                                     });
                                 });
-                            }),
-                    )
-            }))
+                            })
+                            .child(
+                                div()
+                                    .max_w(px(200.))
+                                    .truncate()
+                                    .text_xs()
+                                    .child(tab.label.clone()),
+                            )
+                            .when(tab.dirty, |tab| {
+                                tab.child(div().size_1p5().rounded_full().bg(cx.theme().foreground))
+                            })
+                            .child(
+                                Button::new(("build-tab-close", index))
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::X)
+                                    .tooltip("Close file")
+                                    .accessibility_label(format!("Close {}", tab.label))
+                                    .on_click(move |_, window, cx| {
+                                        let _ = close_owner.update(cx, |_, cx| {
+                                            close_project.update(cx, |project, cx| {
+                                                project.close_path(close_path.clone(), window, cx)
+                                            });
+                                        });
+                                    }),
+                            )
+                    })),
+            )
     }
 
     /// The centered three-way mode switch.
@@ -3162,6 +3188,7 @@ impl Render for Shell {
         );
         let chrome_hidden = self.chrome.is_hidden() && self.warning.is_none();
         let project_name = self.project.read(cx).project_name();
+        let has_buffers = !self.project.read(cx).open_tabs().is_empty();
 
         let close_owner = self.project.downgrade();
         div()
@@ -3385,7 +3412,7 @@ impl Render for Shell {
                     )
                     .into_any_element()
             })
-            .when(self.mode == WorkspaceMode::Build, |shell| {
+            .when(self.mode == WorkspaceMode::Build && has_buffers, |shell| {
                 shell.child(self.build_tab_strip(cx))
             })
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
@@ -4274,6 +4301,66 @@ mod tests {
             assert_eq!(shell.mode, WorkspaceMode::Build);
             assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
         });
+    }
+
+    #[gpui_kit::test]
+    async fn build_buffer_tabs_appear_only_while_buffers_are_open(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_path = workspace.path().join("preferences/global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let project = project_fixture("build-tabs-site");
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == canonical)
+        })
+        .await;
+
+        // An empty Build leaves no buffer strip behind.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.set_mode(WorkspaceMode::Build, window, cx)
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("build-tabs").is_none());
+        })
+        .unwrap();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.project.update(cx, |project, cx| {
+                    project.open_first_entry_for_tests(window, cx)
+                });
+            });
+        })
+        .unwrap();
+        let project_entity = view.read_with(cx, |shell, _| shell.project.clone());
+        wait_for_active_session(cx, &project_entity).await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("build-tabs").visible());
+            assert!(window.find("build-tab-0").visible());
+        })
+        .unwrap();
+
+        // Closing the last buffer removes the strip instead of leaving a blank row.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell
+                    .project
+                    .update(cx, |project, cx| project.close_active(window, cx));
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("build-tabs").is_none());
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
