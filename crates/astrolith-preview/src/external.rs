@@ -9,6 +9,7 @@
 
 use std::process::{Command, Stdio};
 
+use astrolith_core::preferences::BrowserCommand;
 use url::Url;
 
 use crate::surface::{PreviewSurface, SurfaceError, validate_preview_url};
@@ -68,8 +69,39 @@ impl Opener for SystemOpener {
 /// as `&` that URL encoding leaves intact. `rundll32` receives the URL as one
 /// argument with no shell in between.
 pub fn open_command(url: &Url) -> Result<OpenCommand, SurfaceError> {
+    open_command_with(url, None)
+}
+
+/// The opener command for `url`, using `preferred` when it names an executable.
+///
+/// The preferred executable is started directly with its argv: no shell parses
+/// the arguments. Every argument may contain `{url}`; when none does, the URL is
+/// appended as the final argument. An unconfigured browser uses the platform
+/// opener.
+pub fn open_command_with(
+    url: &Url,
+    preferred: Option<&BrowserCommand>,
+) -> Result<OpenCommand, SurfaceError> {
     validate_preview_url(url)?;
     let url = url.to_string();
+    if let Some(preferred) = preferred.filter(|browser| browser.is_configured()) {
+        let mut args: Vec<String> = preferred
+            .arguments
+            .iter()
+            .map(|argument| argument.replace("{url}", &url))
+            .collect();
+        if !preferred
+            .arguments
+            .iter()
+            .any(|argument| argument.contains("{url}"))
+        {
+            args.push(url);
+        }
+        return Ok(OpenCommand {
+            program: preferred.executable.trim().to_owned(),
+            args,
+        });
+    }
     let command = if cfg!(target_os = "macos") {
         OpenCommand {
             program: "open".to_owned(),
@@ -96,6 +128,7 @@ pub fn open_command(url: &Url) -> Result<OpenCommand, SurfaceError> {
 /// A [`PreviewSurface`] that hands preview URLs to the system browser.
 pub struct ExternalBrowser {
     opener: Box<dyn Opener>,
+    preferred: Option<BrowserCommand>,
 }
 
 impl std::fmt::Debug for ExternalBrowser {
@@ -116,14 +149,33 @@ impl ExternalBrowser {
         Self::with_opener(Box::new(SystemOpener))
     }
 
+    /// A browser surface using a configured browser argv.
+    pub fn with_preferred(preferred: BrowserCommand) -> Self {
+        Self {
+            opener: Box::new(SystemOpener),
+            preferred: Some(preferred),
+        }
+    }
+
     /// A browser surface using `opener` (tests inject a fake).
     pub fn with_opener(opener: Box<dyn Opener>) -> Self {
-        Self { opener }
+        Self {
+            opener,
+            preferred: None,
+        }
+    }
+
+    /// A browser surface using `preferred` and `opener` (tests).
+    pub fn with_preferred_opener(preferred: BrowserCommand, opener: Box<dyn Opener>) -> Self {
+        Self {
+            opener,
+            preferred: Some(preferred),
+        }
     }
 
     /// Spawn the opener for `url` without waiting for it.
     pub fn launch(&self, url: &Url) -> Result<OpenCommand, SurfaceError> {
-        let command = open_command(url)?;
+        let command = open_command_with(url, self.preferred.as_ref())?;
         self.opener
             .spawn(&command.program, &command.args)
             .map_err(|message| SurfaceError::LaunchFailed {
@@ -217,6 +269,70 @@ mod tests {
             }
             other => panic!("expected LaunchFailed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn preferred_browser_argv_is_used_without_a_shell() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let preferred = BrowserCommand {
+            executable: "firefox".into(),
+            arguments: vec!["--new-window".into(), "{url}".into()],
+        };
+        let browser = ExternalBrowser::with_preferred_opener(
+            preferred,
+            Box::new(FakeOpener {
+                calls: calls.clone(),
+                fail: None,
+            }),
+        );
+        let command = browser.launch(&url()).unwrap();
+        assert_eq!(command.program, "firefox");
+        assert_eq!(
+            command.args,
+            vec!["--new-window".to_owned(), url().to_string()]
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls[0].0, "firefox");
+        assert_eq!(calls[0].1, command.args);
+    }
+
+    #[test]
+    fn preferred_browser_without_a_placeholder_appends_the_url_once() {
+        let command = open_command_with(
+            &url(),
+            Some(&BrowserCommand {
+                executable: "chromium".into(),
+                arguments: vec!["--incognito".into()],
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            command.args,
+            vec!["--incognito".to_owned(), url().to_string()]
+        );
+    }
+
+    #[test]
+    fn an_empty_preferred_executable_uses_the_platform_opener() {
+        let preferred = BrowserCommand {
+            executable: "  ".into(),
+            arguments: vec!["--flag".into()],
+        };
+        let command = open_command_with(&url(), Some(&preferred)).unwrap();
+        assert_eq!(command, open_command(&url()).unwrap());
+    }
+
+    #[test]
+    fn preferred_browser_never_receives_an_invalid_url() {
+        let preferred = BrowserCommand {
+            executable: "firefox".into(),
+            arguments: vec![],
+        };
+        let bad = Url::parse("file:///etc/passwd").unwrap();
+        assert!(matches!(
+            open_command_with(&bad, Some(&preferred)),
+            Err(SurfaceError::InvalidUrl { .. })
+        ));
     }
 
     #[test]

@@ -6,6 +6,8 @@ use std::sync::{
 use astrolith_preview::{RecordingSurface, SurfaceError};
 use gpui_kit::{Entity, WindowHandle, base::Root};
 
+#[cfg(not(feature = "embedded-webview"))]
+use super::embedded::EmbeddedPreview;
 use super::*;
 use crate::runtime;
 
@@ -577,4 +579,218 @@ fn application_exit_aborts_the_backend_without_a_notification(cx: &mut gpui_kit:
         assert!(!panel.is_attached());
         assert!(matches!(panel.status(), ServerStatus::Stopped));
     });
+}
+
+fn preview_preferences(
+    open_on_enter: bool,
+    presentation: PreviewPresentation,
+) -> PreviewPreferences {
+    PreviewPreferences {
+        presentation,
+        open_on_enter,
+        ..PreviewPreferences::default()
+    }
+}
+
+#[gpui_kit::test]
+fn open_on_enter_opens_the_ready_route_once(cx: &mut gpui_kit::TestAppContext) {
+    let _serial = Serial::acquire();
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, surface) = mount(cx, backend);
+    let entry = EntryId::new("docs", "intro").unwrap();
+    panel.update(cx, |panel, cx| {
+        panel.set_preferences(
+            &preview_preferences(true, PreviewPresentation::External),
+            cx,
+        );
+        panel.force_ready(Url::parse("http://127.0.0.1:4321/").unwrap(), cx);
+        panel.set_entry(Some(entry), cx);
+        panel.enter_preview(cx);
+        // Rendering or a duplicate notification must not launch again.
+        panel.resume_visit(cx);
+    });
+    assert_eq!(
+        surface.opened(),
+        vec!["http://127.0.0.1:4321/docs/intro".to_owned()]
+    );
+}
+
+#[gpui_kit::test]
+async fn open_on_enter_starts_a_stopped_server_then_opens_once(cx: &mut gpui_kit::TestAppContext) {
+    let _serial = Serial::acquire();
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, surface) = mount(cx, backend);
+    let entry = EntryId::new("docs", "intro").unwrap();
+    panel.update(cx, |panel, cx| {
+        panel.set_preferences(
+            &preview_preferences(true, PreviewPresentation::External),
+            cx,
+        );
+        panel.set_entry(Some(entry), cx);
+        panel.enter_preview(cx);
+    });
+    wait_for(cx, &panel, |panel| {
+        panel.status().is_ready() && !panel.is_busy()
+    })
+    .await;
+    cx.run_until_parked();
+    assert_eq!(
+        surface.opened(),
+        vec!["http://127.0.0.1:4321/docs/intro".to_owned()]
+    );
+}
+
+#[gpui_kit::test]
+fn leaving_preview_cancels_the_pending_launch(cx: &mut gpui_kit::TestAppContext) {
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, surface) = mount(cx, backend);
+    panel.update(cx, |panel, cx| {
+        panel.set_preferences(
+            &preview_preferences(true, PreviewPresentation::External),
+            cx,
+        );
+        panel.force_ready(Url::parse("http://127.0.0.1:4321/").unwrap(), cx);
+        // No entry yet: the launch stays armed.
+        panel.enter_preview(cx);
+        panel.leave_preview(cx);
+        panel.set_entry(Some(EntryId::new("docs", "intro").unwrap()), cx);
+    });
+    assert!(surface.opened().is_empty());
+}
+
+#[gpui_kit::test]
+fn open_on_enter_is_off_by_default_and_never_opens_without_an_entry(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, surface) = mount(cx, backend);
+    panel.update(cx, |panel, cx| {
+        panel.force_ready(Url::parse("http://127.0.0.1:4321/").unwrap(), cx);
+        panel.set_entry(Some(EntryId::new("docs", "intro").unwrap()), cx);
+        panel.enter_preview(cx);
+    });
+    assert!(surface.opened().is_empty());
+}
+
+#[gpui_kit::test]
+fn preferred_browser_failure_offers_the_system_fallback(cx: &mut gpui_kit::TestAppContext) {
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, surface) = mount(cx, backend);
+    panel.update(cx, |panel, cx| {
+        panel.preferred_surface = Some(Arc::new(RecordingSurface::failing(
+            SurfaceError::LaunchFailed {
+                command: "firefox".into(),
+                message: "not installed".into(),
+            },
+        )));
+        panel.force_ready(Url::parse("http://127.0.0.1:4321/").unwrap(), cx);
+        let entry = EntryId::new("docs", "intro").unwrap();
+        panel.set_entry(Some(entry.clone()), cx);
+        panel.open_entry(&entry, cx);
+        assert!(
+            panel
+                .message()
+                .unwrap_or_default()
+                .contains("system default browser"),
+            "message was {:?}",
+            panel.message()
+        );
+        assert_eq!(
+            panel.fallback_url().map(Url::to_string),
+            Some("http://127.0.0.1:4321/docs/intro".to_owned())
+        );
+        assert!(surface.opened().is_empty());
+        panel.open_fallback(cx);
+    });
+    assert_eq!(
+        surface.opened(),
+        vec!["http://127.0.0.1:4321/docs/intro".to_owned()]
+    );
+}
+
+#[cfg(not(feature = "embedded-webview"))]
+#[gpui_kit::test]
+fn a_build_without_the_webview_feature_reports_the_reason(cx: &mut gpui_kit::TestAppContext) {
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (handle, _panel, _surface) = mount(cx, backend);
+    let embedded = cx.update(|cx| cx.new(EmbeddedPreview::new));
+    let result = cx
+        .update_window(handle.into(), |_, window, cx| {
+            embedded.update(cx, |embedded, cx| {
+                embedded.set_url(
+                    Some(Url::parse("http://127.0.0.1:4321/").unwrap()),
+                    window,
+                    cx,
+                )
+            })
+        })
+        .unwrap();
+    assert!(result.is_err());
+    embedded.read_with(cx, |embedded, _| {
+        assert!(!embedded.has_webview());
+        assert!(
+            embedded
+                .failure()
+                .unwrap_or_default()
+                .contains("embedded-webview")
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn embedded_url_follows_the_active_entry_route(cx: &mut gpui_kit::TestAppContext) {
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, _surface) = mount(cx, backend);
+    panel.update(cx, |panel, cx| {
+        panel.force_ready(Url::parse("http://127.0.0.1:4321/").unwrap(), cx);
+        panel.set_entry(Some(EntryId::new("docs", "guides/nested").unwrap()), cx);
+    });
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(
+            panel.embedded_url().map(|url| url.to_string()),
+            Some("http://127.0.0.1:4321/docs/guides/nested".to_owned())
+        );
+    });
+    panel.update(cx, |panel, cx| {
+        panel.set_entry(Some(EntryId::new("notes", "unmapped").unwrap()), cx);
+    });
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(
+            panel.embedded_url().map(|url| url.to_string()),
+            Some("http://127.0.0.1:4321/".to_owned())
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn open_on_enter_survives_entering_preview_before_the_project_attaches(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, surface) = mount(cx, backend.clone());
+    let entry = EntryId::new("docs", "intro").unwrap();
+    panel.update(cx, |panel, cx| {
+        panel.detach(cx);
+        panel.set_preferences(
+            &preview_preferences(true, PreviewPresentation::External),
+            cx,
+        );
+        panel.enter_preview(cx);
+    });
+    panel.update(cx, |panel, cx| {
+        panel.attach(
+            backend,
+            ProjectId::new("preview-test").unwrap(),
+            PathBuf::from("/tmp/preview-test"),
+            mapping(),
+            cx,
+        );
+        panel.force_ready(Url::parse("http://127.0.0.1:4321/").unwrap(), cx);
+        panel.set_entry(Some(entry), cx);
+        panel.resume_visit(cx);
+    });
+    assert_eq!(
+        surface.opened(),
+        vec!["http://127.0.0.1:4321/docs/intro".to_owned()]
+    );
 }

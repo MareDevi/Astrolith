@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# Compiles the real embedded WebView surface. Linux hosts it on X11/XWayland.
+embedded-webview = ["dep:gpui-webview", "dep:wry"]
+
 [dependencies]
 tracing.workspace = true
 astrolith-workspace = { path = "../astrolith-workspace" }
@@ -15,6 +20,8 @@ astrolith-preview = { path = "../astrolith-preview" }
 astrolith-terminal = { path = "../astrolith-terminal" }
 astrolith-observability = { path = "../astrolith-observability" }
 gpui-kit.workspace = true
+gpui-webview = { version = "=0.8.1", optional = true }
+wry = { version = "=0.53.3", package = "lb-wry", optional = true }
 tokio.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

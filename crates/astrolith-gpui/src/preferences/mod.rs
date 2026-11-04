@@ -9,6 +9,7 @@
 pub(crate) mod advanced;
 pub(crate) mod collection;
 pub(crate) mod general;
+pub(crate) mod preview;
 pub(crate) mod project;
 #[cfg(test)]
 mod tests;
@@ -17,8 +18,9 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use astrolith_astro::schema::{CollectionSchema, FieldKind};
 use astrolith_core::preferences::{
-    AutosaveDelay, CollectionPreferencesV1, FieldMappings, FileExtension, GlobalPreferencesV2,
-    HeadingColors, IdeCommand, ImagePathMode, ProjectPreferencesV1, ThemePreference,
+    AutosaveDelay, BrowserCommand, CollectionPreferencesV1, FieldMappings, FileExtension,
+    GlobalPreferencesV2, HeadingColors, IdeCommand, ImagePathMode, PreviewPreferences,
+    PreviewPresentation, ProjectPreferencesV1, ThemePreference,
 };
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt, WindowExt,
@@ -39,6 +41,8 @@ use crate::theme;
 pub(crate) enum Pane {
     /// Global application and editor settings.
     General,
+    /// Preview presentation, browser argv and entry behaviour.
+    Preview,
     /// Preferences of the open project.
     Project,
     /// Per-collection overrides.
@@ -49,8 +53,9 @@ pub(crate) enum Pane {
 
 impl Pane {
     /// Display order in the sheet's navigation.
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::General,
+        Self::Preview,
         Self::Project,
         Self::Collections,
         Self::Advanced,
@@ -60,6 +65,7 @@ impl Pane {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Preview => "Preview",
             Self::Project => "Project Settings",
             Self::Collections => "Collections",
             Self::Advanced => "Advanced",
@@ -68,7 +74,7 @@ impl Pane {
 
     /// Project-scoped panes exist only while a project is open.
     pub(crate) fn available(self, has_project: bool) -> bool {
-        has_project || matches!(self, Self::General | Self::Advanced)
+        has_project || matches!(self, Self::General | Self::Preview | Self::Advanced)
     }
 }
 
@@ -96,6 +102,8 @@ pub(crate) struct PreferencesContext {
     pub preferences_folder: Option<PathBuf>,
     /// Latest persistence warning, if any.
     pub warning: Option<String>,
+    /// Why the embedded WebView cannot be offered on this host/build.
+    pub embedded_unavailable_reason: Option<String>,
 }
 
 /// One validated Apply: both scopes are replaced together or not at all.
@@ -128,6 +136,8 @@ impl EventEmitter<PreferencesEvent> for PreferencesSheet {}
 pub(crate) enum FieldId {
     IdeExecutable,
     IdeArguments,
+    PreviewBrowserExecutable,
+    PreviewBrowserArguments,
     HeadingLight,
     HeadingDark,
     UiFontFamily,
@@ -163,6 +173,8 @@ pub(crate) struct FieldExtras {
 struct Inputs {
     ide_executable: Entity<InputState>,
     ide_arguments: Entity<TextareaState>,
+    preview_browser_executable: Entity<InputState>,
+    preview_browser_arguments: Entity<TextareaState>,
     heading_light: Entity<InputState>,
     heading_dark: Entity<InputState>,
     ui_font_family: Entity<InputState>,
@@ -196,6 +208,8 @@ pub(crate) struct PreferencesSheet {
     autosave: AutosaveDelay,
     focus_mode: bool,
     typewriter_mode: bool,
+    preview_presentation: PreviewPresentation,
+    preview_open_on_enter: bool,
     project_image_mode: Option<ImagePathMode>,
     project_extension: Option<FileExtension>,
     project_insert_imports: Option<bool>,
@@ -240,6 +254,8 @@ impl PreferencesSheet {
             autosave: AutosaveDelay::default(),
             focus_mode: false,
             typewriter_mode: false,
+            preview_presentation: PreviewPresentation::default(),
+            preview_open_on_enter: false,
             project_image_mode: None,
             project_extension: None,
             project_insert_imports: None,
@@ -249,6 +265,16 @@ impl PreferencesSheet {
             inputs: Inputs {
                 ide_executable: input!("hx or code"),
                 ide_arguments,
+                preview_browser_executable: input!("Empty uses the system browser"),
+                preview_browser_arguments: {
+                    let input = cx.new(|cx| TextareaState::new(window, cx));
+                    subscriptions.push(cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            this.refresh_errors(cx);
+                        }
+                    }));
+                    input
+                },
                 heading_light: input!("#1f2328"),
                 heading_dark: input!("#e6edf3"),
                 ui_font_family: input!("System UI font"),
@@ -293,10 +319,24 @@ impl PreferencesSheet {
         self.autosave = global.autosave_delay;
         self.focus_mode = global.focus_mode;
         self.typewriter_mode = global.typewriter_mode;
+        self.preview_presentation = global.preview.presentation;
+        self.preview_open_on_enter = global.preview.open_on_enter;
         self.set_text(FieldId::IdeExecutable, &global.ide.executable, window, cx);
         self.set_text(
             FieldId::IdeArguments,
             &global.ide.arguments.join("\n"),
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::PreviewBrowserExecutable,
+            &global.preview.browser.executable,
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::PreviewBrowserArguments,
+            &global.preview.browser.arguments.join("\n"),
             window,
             cx,
         );
@@ -459,6 +499,15 @@ impl PreferencesSheet {
             .unwrap_or(global.editor_line_height);
         global.focus_mode = self.focus_mode;
         global.typewriter_mode = self.typewriter_mode;
+        global.preview = PreviewPreferences {
+            presentation: self.preview_presentation,
+            browser: browser_command(
+                &self.text(FieldId::PreviewBrowserExecutable, cx),
+                &self.text(FieldId::PreviewBrowserArguments, cx),
+            )
+            .ok()?,
+            open_on_enter: self.preview_open_on_enter,
+        };
         global.editor_width = self
             .text(FieldId::EditorWidth, cx)
             .trim()
@@ -535,6 +584,9 @@ impl PreferencesSheet {
                 window,
                 cx,
             ),
+            FieldId::PreviewBrowserExecutable | FieldId::PreviewBrowserArguments => {
+                self.set_text(field, "", window, cx)
+            }
             FieldId::CollectionUrlPattern
             | FieldId::HeadingLight
             | FieldId::HeadingDark
@@ -750,6 +802,12 @@ impl PreferencesSheet {
         let value = match field {
             FieldId::IdeExecutable => self.inputs.ide_executable.read(cx).value(),
             FieldId::IdeArguments => self.inputs.ide_arguments.read(cx).value(),
+            FieldId::PreviewBrowserExecutable => {
+                self.inputs.preview_browser_executable.read(cx).value()
+            }
+            FieldId::PreviewBrowserArguments => {
+                self.inputs.preview_browser_arguments.read(cx).value()
+            }
             FieldId::HeadingLight => self.inputs.heading_light.read(cx).value(),
             FieldId::HeadingDark => self.inputs.heading_dark.read(cx).value(),
             FieldId::UiFontFamily => self.inputs.ui_font_family.read(cx).value(),
@@ -785,6 +843,14 @@ impl PreferencesSheet {
             FieldId::IdeArguments => self
                 .inputs
                 .ide_arguments
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::PreviewBrowserExecutable => self
+                .inputs
+                .preview_browser_executable
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::PreviewBrowserArguments => self
+                .inputs
+                .preview_browser_arguments
                 .update(cx, |input, cx| input.set_value(value, window, cx)),
             FieldId::HeadingLight => self
                 .inputs
@@ -973,6 +1039,12 @@ impl PreferencesSheet {
         ) {
             insert(FieldId::IdeExecutable, message);
         }
+        if let Err(message) = browser_command(
+            &self.text(FieldId::PreviewBrowserExecutable, cx),
+            &self.text(FieldId::PreviewBrowserArguments, cx),
+        ) {
+            insert(FieldId::PreviewBrowserExecutable, message);
+        }
         let Some(context) = self.context.as_ref() else {
             return errors;
         };
@@ -1053,6 +1125,16 @@ impl PreferencesSheet {
             FieldId::IdeExecutable => {
                 gpui_kit::component::input::Input::new(&self.inputs.ide_executable)
                     .small()
+                    .into_any_element()
+            }
+            FieldId::PreviewBrowserExecutable => {
+                gpui_kit::component::input::Input::new(&self.inputs.preview_browser_executable)
+                    .small()
+                    .into_any_element()
+            }
+            FieldId::PreviewBrowserArguments => {
+                gpui_kit::component::input::Textarea::new(&self.inputs.preview_browser_arguments)
+                    .h(px(72.))
                     .into_any_element()
             }
             FieldId::HeadingLight => {
@@ -1334,6 +1416,7 @@ impl Render for PreferencesSheet {
             );
         let body = match self.pane {
             Pane::General => self.general_pane(cx).into_any_element(),
+            Pane::Preview => self.preview_pane(cx).into_any_element(),
             Pane::Project => self.project_pane(cx).into_any_element(),
             Pane::Collections => self.collection_pane(cx).into_any_element(),
             Pane::Advanced => self.advanced_pane(cx).into_any_element(),
@@ -1692,6 +1775,53 @@ pub(super) fn url_pattern(value: &str) -> Option<String> {
 
 pub(super) fn ide_command(executable: &str, arguments: &str) -> Option<IdeCommand> {
     ide_command_value(executable, arguments).ok()
+}
+
+/// Parse the preferred browser argv. An empty executable inherits the system
+/// opener and therefore must not carry arguments.
+pub(super) fn browser_command(executable: &str, arguments: &str) -> Result<BrowserCommand, String> {
+    let executable = executable.trim();
+    if executable.chars().any(char::is_control) {
+        return Err("The browser executable cannot contain control characters.".into());
+    }
+    let arguments: Vec<String> = arguments
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if executable.is_empty() {
+        if arguments.is_empty() {
+            return Ok(BrowserCommand::default());
+        }
+        return Err("Enter the browser executable before its arguments.".into());
+    }
+    for argument in &arguments {
+        if argument.chars().any(char::is_control) {
+            return Err("Browser arguments cannot contain control characters.".into());
+        }
+        let mut rest = argument.as_str();
+        while let Some(open) = rest.find('{') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('}') else {
+                return Err("Browser arguments have an unclosed placeholder.".into());
+            };
+            let name = &after[..close];
+            if name != "url" {
+                return Err(format!(
+                    "Unknown browser placeholder {{{name}}}; use {{url}}."
+                ));
+            }
+            rest = &after[close + 1..];
+        }
+        if rest.contains('}') {
+            return Err("Browser arguments have an unmatched closing brace.".into());
+        }
+    }
+    Ok(BrowserCommand {
+        executable: executable.to_owned(),
+        arguments,
+    })
 }
 
 pub(super) fn format_number(size: f32) -> String {

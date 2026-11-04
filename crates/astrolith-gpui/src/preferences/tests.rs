@@ -39,10 +39,16 @@ fn project_and_collection_panes_follow_the_open_project() {
             .map(Pane::label)
             .collect::<Vec<_>>()
     };
-    assert_eq!(panes(false), ["General", "Advanced"]);
+    assert_eq!(panes(false), ["General", "Preview", "Advanced"]);
     assert_eq!(
         panes(true),
-        ["General", "Project Settings", "Collections", "Advanced"]
+        [
+            "General",
+            "Preview",
+            "Project Settings",
+            "Collections",
+            "Advanced",
+        ]
     );
 }
 
@@ -322,4 +328,34 @@ fn reset_all_removes_only_preferences_and_the_registry() {
     assert!(directory.path().join("save-failures/failed.json").exists());
     // A second run is a no-op rather than an error.
     advanced::reset_preferences(&preferences).unwrap();
+}
+
+#[test]
+fn preferred_browser_argv_rejects_shell_ambiguous_placeholders() {
+    let empty = super::browser_command("  ", "\n").expect("empty inherits the system opener");
+    assert!(!empty.is_configured());
+
+    let browser =
+        super::browser_command("firefox", "--new-window\n{url}/docs\n").expect("a valid argv");
+    assert_eq!(browser.executable, "firefox");
+    assert_eq!(
+        browser.arguments,
+        vec!["--new-window".to_owned(), "{url}/docs".to_owned()]
+    );
+
+    assert!(
+        super::browser_command("", "{url}")
+            .unwrap_err()
+            .contains("before its arguments")
+    );
+    assert!(
+        super::browser_command("firefox", "{page}")
+            .unwrap_err()
+            .contains("Unknown browser placeholder")
+    );
+    assert!(
+        super::browser_command("fire\nfox", "{url}")
+            .unwrap_err()
+            .contains("control characters")
+    );
 }

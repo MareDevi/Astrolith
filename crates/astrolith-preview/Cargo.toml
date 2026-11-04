@@ -5,12 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-[features]
-default = []
-# Compiles the optional embedded WebView surface (M06.2). Detection reports
-# Embedded only when this feature is on and the host can host it.
-embedded-webview = []
-
 [dependencies]
 tracing.workspace = true
 astrolith-astro = { path = "../astrolith-astro" }

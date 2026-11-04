@@ -9,7 +9,10 @@
 
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
-use astrolith_core::{EntryId, ProjectId};
+use astrolith_core::{
+    EntryId, ProjectId,
+    preferences::{PreviewPreferences, PreviewPresentation},
+};
 use astrolith_preview::{
     DevServer, DevServerConfig, ExternalBrowser, PreviewLifecycle, PreviewSession, PreviewSurface,
     PreviewTarget, RouteMapping, ServerStatus, StartupFailure, TargetChange, target_change,
@@ -25,6 +28,8 @@ use gpui_kit::{
 use url::Url;
 
 use crate::runtime;
+
+pub(crate) mod embedded;
 
 /// A future returned by a preview backend operation.
 pub(crate) type PreviewFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
@@ -121,7 +126,20 @@ pub(crate) struct PreviewPanel {
     project: Option<ProjectId>,
     root: Option<PathBuf>,
     mapping: RouteMapping,
+    /// System browser, also the fallback when a preferred browser fails.
     surface: Arc<dyn PreviewSurface>,
+    /// Configured browser argv, when the preference is not empty.
+    preferred_surface: Option<Arc<dyn PreviewSurface>>,
+    presentation: PreviewPresentation,
+    open_on_enter: bool,
+    /// The user is explicitly in Preview mode.
+    visiting: bool,
+    /// An Open-on-Enter launch is still waiting for the server and route.
+    pending_open: bool,
+    /// Open-on-Enter already ran for this explicit visit.
+    opened_this_visit: bool,
+    /// URL whose preferred-browser launch failed; offers the system opener.
+    fallback_url: Option<Url>,
     /// Generation-checked dev-server state.
     lifecycle: PreviewLifecycle,
     message: Option<String>,
@@ -191,6 +209,13 @@ impl PreviewPanel {
             root: None,
             mapping: RouteMapping::new(),
             surface,
+            preferred_surface: None,
+            presentation: PreviewPresentation::External,
+            open_on_enter: false,
+            visiting: false,
+            pending_open: false,
+            opened_this_visit: false,
+            fallback_url: None,
             lifecycle: PreviewLifecycle::new(),
             message: None,
             pending_entry: None,
@@ -210,6 +235,12 @@ impl PreviewPanel {
     #[cfg(test)]
     pub(crate) fn message(&self) -> Option<&str> {
         self.message.as_deref()
+    }
+
+    /// URL waiting for the system-browser fallback, in tests.
+    #[cfg(test)]
+    pub(crate) fn fallback_url(&self) -> Option<&Url> {
+        self.fallback_url.as_ref()
     }
 
     /// Current lifecycle phase.
@@ -245,10 +276,119 @@ impl PreviewPanel {
         self.task.is_some()
     }
 
+    /// Apply the preview preferences to this panel.
+    ///
+    /// The browser surface is rebuilt only from the stored argv; it is never
+    /// interpreted by a shell. An empty executable keeps the desktop opener.
+    pub(crate) fn set_preferences(
+        &mut self,
+        preferences: &PreviewPreferences,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_on_enter = preferences.open_on_enter;
+        self.presentation = preferences.presentation;
+        self.preferred_surface = preferences.browser.is_configured().then(|| {
+            Arc::new(ExternalBrowser::with_preferred(preferences.browser.clone()))
+                as Arc<dyn PreviewSurface>
+        });
+        if !preferences.open_on_enter {
+            self.pending_open = false;
+        }
+        cx.notify();
+    }
+
+    /// The URL the embedded surface shows: the active entry route when it
+    /// resolves, otherwise the ready server's base URL.
+    pub(crate) fn embedded_url(&self) -> Option<Url> {
+        let status = self.lifecycle.status();
+        let base = status.url()?.clone();
+        let session = PreviewSession::new(self.mapping.clone(), self.surface.clone());
+        self.pending_entry
+            .as_ref()
+            .and_then(|entry| session.url_for_entry(entry, status).ok())
+            .or(Some(base))
+    }
+
+    /// The user explicitly entered Preview mode.
+    ///
+    /// This is the only place Open-on-Enter arms a launch. It never runs from
+    /// rendering, and a pending launch is cleared on leave or failure.
+    pub(crate) fn enter_preview(&mut self, cx: &mut Context<Self>) {
+        self.visiting = true;
+        self.fallback_url = None;
+        self.pending_open =
+            self.open_on_enter && self.presentation == PreviewPresentation::External;
+        self.resume_visit(cx);
+    }
+
+    /// The user left Preview mode; drop the pending launch, not the server.
+    pub(crate) fn leave_preview(&mut self, cx: &mut Context<Self>) {
+        if !self.visiting && !self.pending_open {
+            return;
+        }
+        self.visiting = false;
+        self.pending_open = false;
+        self.opened_this_visit = false;
+        cx.notify();
+    }
+
+    /// Continue an explicit Preview visit after the project or server changes.
+    pub(crate) fn resume_visit(&mut self, cx: &mut Context<Self>) {
+        if !self.visiting {
+            return;
+        }
+        if self.backend.is_none() {
+            // Keep an Open-on-Enter launch armed: the explicit visit may have
+            // begun before the project finished attaching.
+            if self.pending_open {
+                self.message = Some("Open an Astro project to start a preview.".to_owned());
+                cx.notify();
+            }
+            return;
+        }
+        // A failed server needs an explicit Retry; do not relaunch in a loop.
+        if self.phase() == PreviewPhase::Failed {
+            self.pending_open = false;
+            cx.notify();
+            return;
+        }
+        if !self.pending_open
+            && !self.opened_this_visit
+            && self.open_on_enter
+            && self.presentation == PreviewPresentation::External
+        {
+            // The project attached after the explicit visit began; attach()
+            // cleared the transient pending flag, so arm it once more.
+            self.pending_open = true;
+        }
+        let wants_embedded = self.presentation == PreviewPresentation::Embedded;
+        if !self.is_running() && (wants_embedded || self.pending_open) {
+            self.start(cx);
+            return;
+        }
+        self.maybe_open_pending(cx);
+    }
+
+    /// Open the armed entry once the server is ready and the route resolves.
+    fn maybe_open_pending(&mut self, cx: &mut Context<Self>) {
+        if !self.pending_open || !self.is_ready() {
+            return;
+        }
+        let Some(entry) = self.pending_entry.clone() else {
+            return;
+        };
+        self.pending_open = false;
+        self.opened_this_visit = true;
+        self.open_entry(&entry, cx);
+    }
+
     /// Set the entry the toolbar button opens (the active document's entry).
     pub(crate) fn set_entry(&mut self, entry: Option<EntryId>, cx: &mut Context<Self>) {
         if self.pending_entry != entry {
             self.pending_entry = entry;
+            // The shell also follows this event to retarget the embedded view.
+            cx.emit(PreviewStateChanged);
+            self.maybe_open_pending(cx);
             cx.notify();
         }
     }
@@ -360,6 +500,8 @@ impl PreviewPanel {
         self.root = None;
         self.mapping = RouteMapping::new();
         self.pending_entry = None;
+        self.pending_open = false;
+        self.fallback_url = None;
         self.lifecycle.detach();
         self.message = None;
         cx.emit(PreviewStateChanged);
@@ -459,10 +601,12 @@ impl PreviewPanel {
                         tracing::info!(url = %url, "Astro preview ready");
                         this.message = Some(format!("Preview ready at {url}"));
                         this.lifecycle.ready(generation, url);
+                        this.maybe_open_pending(cx);
                         this.watch_exit(backend.clone(), cx);
                     }
                     Ok(Err(failure)) => {
                         tracing::error!(%failure, "could not start the Astro preview");
+                        this.pending_open = false;
                         this.message =
                             Some(format!("Could not start the preview: {}", failure.report()));
                         this.lifecycle
@@ -470,6 +614,7 @@ impl PreviewPanel {
                     }
                     Err(error) => {
                         tracing::error!(%error, "could not start the Astro preview");
+                        this.pending_open = false;
                         let failure = StartupFailure::new(error, None);
                         this.message =
                             Some(format!("Could not start the preview: {}", failure.report()));
@@ -559,6 +704,7 @@ impl PreviewPanel {
                         tracing::info!(url = %url, "Astro preview restarted");
                         this.message = Some(format!("Preview ready at {url}"));
                         this.lifecycle.ready(generation, url);
+                        this.maybe_open_pending(cx);
                         this.watch_exit(backend.clone(), cx);
                     }
                     Ok(Err(failure)) => {
@@ -570,6 +716,7 @@ impl PreviewPanel {
                     }
                     Err(error) => {
                         tracing::error!(%error, "could not restart the Astro preview");
+                        this.pending_open = false;
                         let failure = StartupFailure::new(error, None);
                         this.message =
                             Some(format!("Could not start the preview: {}", failure.report()));
@@ -587,23 +734,74 @@ impl PreviewPanel {
     }
 
     /// Open `entry` in the external browser, reusing the running server.
+    ///
+    /// The preferred browser and the fallback share one resolved URL, so a
+    /// failed launch can retry the exact route with the system opener.
     pub(crate) fn open_entry(&mut self, entry: &EntryId, cx: &mut Context<Self>) {
         let session = PreviewSession::new(self.mapping.clone(), self.surface.clone());
-        match session.open_entry(entry, self.lifecycle.status()) {
-            Ok(url) => {
+        let url = match session.url_for_entry(entry, self.lifecycle.status()) {
+            Ok(url) => url,
+            Err(error) => {
+                tracing::warn!(%error, "could not open a preview route");
+                self.pending_open = false;
+                self.fallback_url = None;
+                self.message = Some(error.to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let surface = self
+            .preferred_surface
+            .clone()
+            .unwrap_or_else(|| self.surface.clone());
+        match surface.open(&url) {
+            Ok(()) => {
                 tracing::info!(url = %url, entry = %entry.id(), "opened a preview in the browser");
+                self.fallback_url = None;
                 self.message = Some(format!("Opened {url} in the browser."));
             }
             Err(error) => {
-                tracing::warn!(%error, "could not open a preview route");
-                self.message = Some(error.to_string());
+                tracing::warn!(%error, url = %url, "could not launch the preview browser");
+                self.fallback_url = Some(url);
+                self.message = Some(format!(
+                    "Could not open the preferred browser: {error}. The system default browser is available."
+                ));
             }
         }
         cx.notify();
     }
 
+    /// Retry the failed URL in the system default browser.
+    pub(crate) fn open_fallback(&mut self, cx: &mut Context<Self>) {
+        let Some(url) = self.fallback_url.clone() else {
+            return;
+        };
+        match self.surface.open(&url) {
+            Ok(()) => {
+                tracing::info!(url = %url, "opened the preview in the system browser");
+                self.fallback_url = None;
+                self.message = Some(format!("Opened {url} in the system browser."));
+            }
+            Err(error) => {
+                self.message = Some(format!("Could not open the system browser: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Report a host or adapter reason for unavailable embedded preview.
+    pub(crate) fn note_embedded_unavailable(&mut self, reason: &str, cx: &mut Context<Self>) {
+        self.message = Some(format!(
+            "Embedded preview unavailable: {reason}. External preview remains available."
+        ));
+        self.fallback_url = self.lifecycle.status().url().cloned();
+        cx.notify();
+    }
+
     /// Open whichever entry the shell last marked active.
     pub(crate) fn open_active(&mut self, cx: &mut Context<Self>) {
+        self.pending_open = false;
+        self.opened_this_visit = true;
         match self.pending_entry.clone() {
             Some(entry) => self.open_entry(&entry, cx),
             None => {
@@ -653,6 +851,8 @@ impl Render for PreviewPanel {
         let restart_owner = owner.clone();
         let open_owner = owner.clone();
         let copy_owner = owner.clone();
+        let fallback_owner = owner.clone();
+        let fallback_url = self.fallback_url.clone();
         let phase = self.phase();
         let ready = self.is_ready();
         let running = self.is_running();
@@ -690,7 +890,7 @@ impl Render for PreviewPanel {
                             .font_family(crate::theme::display_font(cx))
                             .text_base()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child("Reading view"),
+                            .child("Preview"),
                     )
                     .child(div().flex_1())
                     .child(
@@ -762,7 +962,19 @@ impl Render for PreviewPanel {
                                     .on_click(move |_, _, cx| {
                                         let _ = copy_owner.update(cx, |this, cx| this.copy_url(cx));
                                     }),
-                            ),
+                            )
+                            .when(fallback_url.is_some(), |row| {
+                                row.child(
+                                    Button::new("preview-open-system")
+                                        .small()
+                                        .outline()
+                                        .label("Open with system browser")
+                                        .on_click(move |_, _, cx| {
+                                            let _ = fallback_owner
+                                                .update(cx, |this, cx| this.open_fallback(cx));
+                                        }),
+                                )
+                            }),
                     )
                     .when_some(message, |view, message| {
                         view.child(

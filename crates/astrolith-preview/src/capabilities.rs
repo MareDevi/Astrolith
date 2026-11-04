@@ -24,13 +24,47 @@ pub enum PreviewCapability {
 
 impl PreviewCapability {
     /// Detect the capability of the running host.
-    pub fn detect() -> Self {
-        HostEnvironment::detect().capability()
+    ///
+    /// `webview_available` is whether this build compiled the real embedded
+    /// surface. Detection never probes a library installation: a WebView that
+    /// cannot be created at runtime degrades to the external surface.
+    pub fn detect_with(webview_available: bool) -> Self {
+        HostEnvironment::detect_with(webview_available).capability()
     }
 
     /// Whether the optional embedded surface may be offered.
     pub fn is_embedded(self) -> bool {
         matches!(self, Self::Embedded)
+    }
+}
+
+/// Why the embedded surface is not offered on this host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmbeddedUnavailable {
+    /// The build did not compile the embedded WebView surface.
+    NotCompiled,
+    /// A Wayland window cannot host the native WebView.
+    Wayland,
+    /// No display server was discovered.
+    Headless,
+    /// Any other target the WebView does not support
+    UnsupportedPlatform,
+}
+
+impl std::fmt::Display for EmbeddedUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotCompiled => formatter.write_str(
+                "this build was compiled without the embedded WebView feature",
+            ),
+            Self::Wayland => formatter.write_str(
+                "embedded WebView needs an X11 or XWayland window; this Wayland window is external-only",
+            ),
+            Self::Headless => formatter.write_str("no display server is available"),
+            Self::UnsupportedPlatform => {
+                formatter.write_str("the embedded WebView is not supported on this platform")
+            }
+        }
     }
 }
 
@@ -101,9 +135,17 @@ impl LinuxSession {
         let has_wayland_display = lookup("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
         let has_x11_display = lookup("DISPLAY").is_some_and(|value| !value.is_empty());
 
-        if has_wayland_display || session_type.as_deref() == Some("wayland") {
+        // Match the window the application will actually use: GPUI prefers a
+        // Wayland display when it is exported, then X11. An application started
+        // with only `DISPLAY` in a Wayland session runs on XWayland, which can
+        // host the WebView; `XDG_SESSION_TYPE` must not override that.
+        if has_wayland_display {
             Self::Wayland
-        } else if has_x11_display || session_type.as_deref() == Some("x11") {
+        } else if has_x11_display {
+            Self::X11
+        } else if session_type.as_deref() == Some("wayland") {
+            Self::Wayland
+        } else if session_type.as_deref() == Some("x11") {
             Self::X11
         } else {
             Self::Headless
@@ -133,9 +175,9 @@ impl HostEnvironment {
         }
     }
 
-    /// Detect the running host.
-    pub fn detect() -> Self {
-        Self::new(HostPlatform::detect(), cfg!(feature = "embedded-webview"))
+    /// Detect the running host and whether the build compiled the surface.
+    pub fn detect_with(webview_available: bool) -> Self {
+        Self::new(HostPlatform::detect(), webview_available)
     }
 
     /// Classify these facts.
@@ -155,6 +197,27 @@ impl HostEnvironment {
             PreviewCapability::Embedded
         } else {
             PreviewCapability::ExternalOnly
+        }
+    }
+
+    /// Why embedded preview is unavailable, when it is.
+    pub fn embedded_unavailable(self) -> Option<EmbeddedUnavailable> {
+        if !self.webview_available {
+            return Some(EmbeddedUnavailable::NotCompiled);
+        }
+        match self.platform {
+            HostPlatform::Linux {
+                session: LinuxSession::Wayland,
+            } => Some(EmbeddedUnavailable::Wayland),
+            HostPlatform::Linux {
+                session: LinuxSession::Headless,
+            } => Some(EmbeddedUnavailable::Headless),
+            HostPlatform::Other => Some(EmbeddedUnavailable::UnsupportedPlatform),
+            HostPlatform::Linux {
+                session: LinuxSession::X11,
+            }
+            | HostPlatform::MacOs
+            | HostPlatform::Windows => None,
         }
     }
 }
@@ -253,6 +316,18 @@ mod tests {
     }
 
     #[test]
+    fn an_xwayland_window_is_x11_even_in_a_wayland_session() {
+        // GPUI selects Wayland from WAYLAND_DISPLAY, then X11 from DISPLAY. A
+        // launch with only DISPLAY in a Wayland session draws through XWayland,
+        // so the WebView surface is allowed there.
+        let session = LinuxSession::from_lookup(lookup_from(&[
+            ("DISPLAY", ":1"),
+            ("XDG_SESSION_TYPE", "wayland"),
+        ]));
+        assert_eq!(session, LinuxSession::X11);
+    }
+
+    #[test]
     fn session_type_selects_wayland_without_a_display_variable() {
         let session = LinuxSession::from_lookup(lookup_from(&[("XDG_SESSION_TYPE", "wayland")]));
         assert_eq!(session, LinuxSession::Wayland);
@@ -286,11 +361,52 @@ mod tests {
         assert_eq!(session, LinuxSession::Headless);
     }
 
-    /// The default dependency graph compiles no WebView, so detection must never
-    /// claim the embedded surface regardless of the host session.
-    #[cfg(not(feature = "embedded-webview"))]
     #[test]
-    fn default_build_never_offers_embedded_preview() {
-        assert_eq!(PreviewCapability::detect(), PreviewCapability::ExternalOnly);
+    fn a_build_without_the_surface_never_offers_embedded_preview() {
+        assert_eq!(
+            PreviewCapability::detect_with(false),
+            PreviewCapability::ExternalOnly
+        );
+    }
+
+    #[test]
+    fn unavailability_names_the_blocking_reason() {
+        let wayland = HostEnvironment::new(
+            HostPlatform::Linux {
+                session: LinuxSession::Wayland,
+            },
+            true,
+        );
+        assert_eq!(
+            wayland.embedded_unavailable(),
+            Some(EmbeddedUnavailable::Wayland)
+        );
+        let headless = HostEnvironment::new(
+            HostPlatform::Linux {
+                session: LinuxSession::Headless,
+            },
+            true,
+        );
+        assert_eq!(
+            headless.embedded_unavailable(),
+            Some(EmbeddedUnavailable::Headless)
+        );
+        let not_compiled = HostEnvironment::new(
+            HostPlatform::Linux {
+                session: LinuxSession::X11,
+            },
+            false,
+        );
+        assert_eq!(
+            not_compiled.embedded_unavailable(),
+            Some(EmbeddedUnavailable::NotCompiled)
+        );
+        let x11 = HostEnvironment::new(
+            HostPlatform::Linux {
+                session: LinuxSession::X11,
+            },
+            true,
+        );
+        assert_eq!(x11.embedded_unavailable(), None);
     }
 }

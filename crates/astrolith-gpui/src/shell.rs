@@ -28,7 +28,10 @@ use crate::{
     preferences::{
         CollectionEntry, PreferenceEdits, PreferencesContext, PreferencesEvent, PreferencesSheet,
     },
-    preview::{PreviewPanel, PreviewStateChanged},
+    preview::{
+        PreviewPanel, PreviewStateChanged,
+        embedded::{EmbeddedPreview, EmbeddedPreviewEvent},
+    },
     project_discovery::{
         FrontmatterKey, HistoryChangedEvent, ProjectOpened, ProjectWorkspace, now_secs,
         scan_project_astro_sources,
@@ -45,7 +48,8 @@ use crate::{
     update,
     url_scheme::{self, StartupRequest, StartupTarget},
 };
-use astrolith_core::preferences::{ModeLayouts, WorkspaceMode};
+use astrolith_core::preferences::{ModeLayouts, PreviewPresentation, WorkspaceMode};
+use astrolith_preview::{HostEnvironment, PreviewCapability};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
@@ -224,6 +228,17 @@ pub(crate) struct Shell {
     /// The reading-view panel; kept here because the bottom dock is removed
     /// entirely while the view is hidden.
     preview_panel: Entity<WorkspacePanel>,
+    /// Retained embedded WebView surface for Preview mode.
+    embedded: Entity<EmbeddedPreview>,
+    embedded_panel: Entity<WorkspacePanel>,
+    /// The centre split currently contains the embedded preview.
+    embedded_center_active: bool,
+    /// Whether this build/host may host the embedded surface.
+    preview_capability: PreviewCapability,
+    /// Why the embedded surface is unavailable before any attempt.
+    preview_unavailable_reason: Option<String>,
+    /// Why the embedded surface failed in this session, if it did.
+    embedded_failure: Option<String>,
     /// Project terminal, retained while its dock is hidden.
     terminal: Entity<TerminalPanel>,
     terminal_panel: Entity<WorkspacePanel>,
@@ -342,9 +357,35 @@ impl Shell {
                 .update(cx, |project, cx| project.guard_window_close(window, cx))
                 .unwrap_or(true)
         });
+        let host = HostEnvironment::detect_with(cfg!(feature = "embedded-webview"));
+        let preview_capability = host.capability();
+        let preview_unavailable_reason =
+            host.embedded_unavailable().map(|reason| reason.to_string());
         let preview = cx.new(PreviewPanel::new);
         let preview_panel = cx.new(|cx| WorkspacePanel::new("preview-panel", "Preview", "No preview running\n\nStart the Astro dev server, then open the active entry in your browser.", window, cx));
         preview_panel.update(cx, |panel, cx| panel.set_view(preview.clone().into(), cx));
+        let embedded = cx.new(EmbeddedPreview::new);
+        let embedded_panel = cx.new(|cx| {
+            WorkspacePanel::new(
+                "embedded-preview-panel",
+                "Embedded preview",
+                "Start the preview server to load the page.",
+                window,
+                cx,
+            )
+        });
+        embedded_panel.update(cx, |panel, cx| panel.set_view(embedded.clone().into(), cx));
+        let mut initial_preview = settings.preview.clone();
+        if initial_preview.presentation == PreviewPresentation::Embedded
+            && !preview_capability.is_embedded()
+        {
+            initial_preview.presentation = PreviewPresentation::External;
+        }
+        preview.update(cx, |preview, cx| {
+            preview.set_preferences(&initial_preview, cx)
+        });
+        let embedded_center_active = mode == WorkspaceMode::Preview
+            && initial_preview.presentation == PreviewPresentation::Embedded;
         let terminal = cx.new(|cx| TerminalPanel::new(window, cx));
         let terminal_panel = cx.new(|cx| {
             WorkspacePanel::new(
@@ -357,12 +398,15 @@ impl Shell {
         });
         terminal_panel.update(cx, |panel, cx| panel.set_view(terminal.clone().into(), cx));
         let (dock, skin) = DockSkin::dock_area("astrolith-workspace", Some(1), window, cx);
+        let initial_center = center_layout_for(
+            &document,
+            &embedded_panel,
+            embedded_center_active,
+            window,
+            cx,
+        );
         dock.update(cx, |area, cx| {
-            area.set_center(
-                DockLayout::tabs().panel_view(panel_handle(document.clone()), cx),
-                window,
-                cx,
-            );
+            area.set_center(initial_center, window, cx);
             area.set_dock(
                 DockPlacement::Left,
                 DockLayout::tabs().panel_view(panel_handle(navigator.clone()), cx),
@@ -464,11 +508,26 @@ impl Shell {
                 cx.notify();
             }),
         );
-        // Menu and palette availability follows the dev-server phase.
+        // Menu and palette availability follows the dev-server phase; the
+        // embedded surface follows the same ready URL and entry changes.
         subscriptions.push(cx.subscribe_in(
             &preview,
             window,
-            |this, _, _: &PreviewStateChanged, window, cx| this.refresh_menus(window, cx),
+            |this, _, _: &PreviewStateChanged, window, cx| {
+                this.refresh_menus(window, cx);
+                this.sync_embedded(window, cx);
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &embedded,
+            window,
+            |this, _, event: &EmbeddedPreviewEvent, window, cx| match event {
+                EmbeddedPreviewEvent::OpenExternal => {
+                    this.preview
+                        .update(cx, |preview, cx| preview.open_active(cx));
+                    this.sync_embedded(window, cx);
+                }
+            },
         ));
         let apply_owner = project.downgrade();
         subscriptions.push(cx.subscribe_in(
@@ -603,6 +662,12 @@ impl Shell {
             inspector_open: false,
             preview,
             preview_panel,
+            embedded,
+            embedded_panel,
+            embedded_center_active,
+            preview_capability,
+            preview_unavailable_reason,
+            embedded_failure: None,
             terminal,
             terminal_panel,
             palette,
@@ -657,6 +722,11 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.listen_for_instances(listener, window, cx);
+        if self.mode == WorkspaceMode::Preview {
+            self.preview
+                .update(cx, |preview, cx| preview.enter_preview(cx));
+        }
+        self.sync_embedded(window, cx);
         let store = self.store.clone();
         let work = runtime::blocking(cx, move || match store {
             Some(store) => store.recent_projects(),
@@ -1746,6 +1816,17 @@ impl Shell {
             scope.preferences.last_mode = Some(mode);
             self.persist_project(cx);
         }
+        self.preview.update(cx, |preview, cx| {
+            if mode == WorkspaceMode::Preview {
+                preview.enter_preview(cx);
+            } else {
+                preview.leave_preview(cx);
+            }
+        });
+        if mode == WorkspaceMode::Preview {
+            self.note_preview_fallback(cx);
+        }
+        self.sync_embedded(window, cx);
         if inspector_open {
             self.document.read(cx).focus_handle(cx).focus(window, cx);
         }
@@ -1816,6 +1897,7 @@ impl Shell {
         self.preview_sync_key = Some(key);
         let context = self.project.read(cx).preview_context();
         let entry = self.project.read(cx).active_entry_id();
+        let in_preview = self.mode == WorkspaceMode::Preview;
         self.preview.update(cx, |preview, cx| {
             match context {
                 Some((project, root, mapping)) => {
@@ -1824,7 +1906,104 @@ impl Shell {
                 None => preview.detach(cx),
             }
             preview.set_entry(entry, cx);
+            if in_preview {
+                preview.resume_visit(cx);
+            }
         });
+        if in_preview {
+            self.note_preview_fallback(cx);
+        }
+    }
+
+    /// The presentation the workspace can actually use right now.
+    fn effective_preview_presentation(&self) -> PreviewPresentation {
+        if self.settings.preview.presentation == PreviewPresentation::Embedded
+            && self.preview_capability.is_embedded()
+            && self.embedded_failure.is_none()
+        {
+            PreviewPresentation::Embedded
+        } else {
+            PreviewPresentation::External
+        }
+    }
+
+    /// Push the (possibly downgraded) preference into the preview panel.
+    fn sync_preview_preferences(&mut self, cx: &mut Context<Self>) {
+        let mut preferences = self.settings.preview.clone();
+        preferences.presentation = self.effective_preview_presentation();
+        self.preview
+            .update(cx, |preview, cx| preview.set_preferences(&preferences, cx));
+    }
+
+    /// Explain an embedded request that this host/build downgraded to external.
+    fn note_preview_fallback(&mut self, cx: &mut Context<Self>) {
+        if self.settings.preview.presentation != PreviewPresentation::Embedded
+            || self.effective_preview_presentation() == PreviewPresentation::Embedded
+        {
+            return;
+        }
+        let reason = self
+            .embedded_failure
+            .clone()
+            .or_else(|| self.preview_unavailable_reason.clone())
+            .unwrap_or_else(|| "embedded preview is unavailable on this host".to_owned());
+        self.preview.update(cx, |preview, cx| {
+            preview.note_embedded_unavailable(&reason, cx)
+        });
+    }
+
+    /// Mount, retarget or remove the embedded surface for the current mode.
+    fn sync_embedded(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted = self.mode == WorkspaceMode::Preview
+            && self.effective_preview_presentation() == PreviewPresentation::Embedded;
+        tracing::debug!(
+            mode = ?self.mode,
+            wanted,
+            active = self.embedded_center_active,
+            failure = ?self.embedded_failure,
+            "sync embedded preview"
+        );
+        if !wanted {
+            self.embedded
+                .update(cx, |embedded, cx| embedded.set_active(false, cx));
+            if self.embedded_center_active {
+                self.set_embedded_center(false, window, cx);
+            }
+            return;
+        }
+        let url = self.preview.read(cx).embedded_url();
+        let result = self
+            .embedded
+            .update(cx, |embedded, cx| embedded.set_url(url, window, cx));
+        match result {
+            Ok(()) => {
+                self.embedded
+                    .update(cx, |embedded, cx| embedded.set_active(true, cx));
+                if !self.embedded_center_active {
+                    self.set_embedded_center(true, window, cx);
+                }
+            }
+            Err(reason) => {
+                tracing::warn!(%reason, "embedded preview unavailable; using the external browser");
+                self.embedded_failure = Some(reason.clone());
+                self.preview.update(cx, |preview, cx| {
+                    preview.note_embedded_unavailable(&reason, cx)
+                });
+                self.sync_preview_preferences(cx);
+                self.embedded
+                    .update(cx, |embedded, cx| embedded.set_active(false, cx));
+                if self.embedded_center_active {
+                    self.set_embedded_center(false, window, cx);
+                }
+            }
+        }
+    }
+
+    fn set_embedded_center(&mut self, embedded: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = center_layout_for(&self.document, &self.embedded_panel, embedded, window, cx);
+        self.dock
+            .update(cx, |dock, cx| dock.set_center(layout, window, cx));
+        self.embedded_center_active = embedded;
     }
 
     fn execute(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) {
@@ -2249,6 +2428,10 @@ impl Shell {
             auto_import: self.project.read(cx).auto_import_declared(),
             preferences_folder,
             warning: self.warning.clone(),
+            embedded_unavailable_reason: self
+                .embedded_failure
+                .clone()
+                .or_else(|| self.preview_unavailable_reason.clone()),
         };
         self.preferences_sheet
             .update(cx, |sheet, cx| sheet.open(context, window, cx));
@@ -2305,6 +2488,11 @@ impl Shell {
         self.project.update(cx, |project, cx| {
             project.apply_writing_preferences(focus, typewriter, window, cx)
         });
+        self.embedded_failure = None;
+        self.sync_preview_preferences(cx);
+        self.preview
+            .update(cx, |preview, cx| preview.resume_visit(cx));
+        self.sync_embedded(window, cx);
         self.persist_global(cx);
         self.persist_project(cx);
         cx.notify();
@@ -3031,6 +3219,31 @@ impl Render for Shell {
             })
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
     }
+}
+
+/// The centre layout: the document alone, or the document beside the embedded
+/// preview with a draggable splitter. The embedded slot keeps roughly the mock's
+/// inverse ratio (source 42%, preview 58%).
+fn center_layout_for(
+    document: &Entity<WorkspacePanel>,
+    embedded: &Entity<WorkspacePanel>,
+    embedded_active: bool,
+    window: &Window,
+    cx: &App,
+) -> DockLayout {
+    if !embedded_active {
+        return DockLayout::tabs().panel_view(panel_handle(document.clone()), cx);
+    }
+    let source_width = (f32::from(window.viewport_size().width) * 0.42).max(360.);
+    DockLayout::h_split()
+        .child(
+            DockLayout::tabs().panel_view(panel_handle(document.clone()), cx),
+            Some(px(source_width)),
+        )
+        .child(
+            DockLayout::tabs().panel_view(panel_handle(embedded.clone()), cx),
+            None,
+        )
 }
 
 /// Attach the reading view as the bottom dock.
@@ -5827,7 +6040,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             sheet.read_with(cx, |sheet, _| sheet.visible_panes()),
-            [PreferencesPane::General, PreferencesPane::Advanced]
+            [
+                PreferencesPane::General,
+                PreferencesPane::Preview,
+                PreferencesPane::Advanced
+            ]
         );
         assert_eq!(
             sheet.read_with(cx, |sheet, _| sheet.active_pane()),
@@ -5849,6 +6066,7 @@ mod tests {
             sheet.read_with(cx, |sheet, _| sheet.visible_panes()),
             [
                 PreferencesPane::General,
+                PreferencesPane::Preview,
                 PreferencesPane::Project,
                 PreferencesPane::Collections,
                 PreferencesPane::Advanced,

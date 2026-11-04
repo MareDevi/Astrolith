@@ -522,6 +522,82 @@ impl IdeCommand {
     }
 }
 
+/// Where a preview URL is presented.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Hash, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewPresentation {
+    /// The user's browser, opened through the desktop opener.
+    #[default]
+    External,
+    /// A WebView embedded in the workspace split.
+    Embedded,
+}
+
+impl PreviewPresentation {
+    /// Short label used by settings and status text.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::External => "External browser",
+            Self::Embedded => "Embedded WebView",
+        }
+    }
+}
+
+/// Preferred browser as argv; the executable is started without a shell.
+///
+/// An empty executable means the platform's default opener. Every argument may
+/// contain `{url}`; when no argument does, the URL is appended as the final
+/// argument.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserCommand {
+    /// Executable path or program name.
+    pub executable: String,
+    /// Arguments; `{url}` is replaced with the preview URL.
+    pub arguments: Vec<String>,
+}
+
+impl BrowserCommand {
+    /// True when a browser executable is configured.
+    pub fn is_configured(&self) -> bool {
+        !self.executable.trim().is_empty()
+    }
+
+    /// Render the argv for diagnostics.
+    pub fn display(&self) -> String {
+        let mut rendered = self.executable.clone();
+        for argument in &self.arguments {
+            rendered.push(' ');
+            rendered.push_str(argument);
+        }
+        rendered
+    }
+}
+
+/// Preview presentation, preferred browser and entry behaviour.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PreviewPreferences {
+    /// Which surface presents the resolved URL.
+    pub presentation: PreviewPresentation,
+    /// Preferred external browser argv; empty uses the desktop opener.
+    pub browser: BrowserCommand,
+    /// Open the active entry once when the user explicitly enters Preview.
+    pub open_on_enter: bool,
+}
+
+impl Default for PreviewPreferences {
+    fn default() -> Self {
+        Self {
+            presentation: PreviewPresentation::External,
+            browser: BrowserCommand::default(),
+            open_on_enter: false,
+        }
+    }
+}
+
 /// Persisted main-window geometry, restored on the next launch.
 ///
 /// Values are logical pixels in desktop coordinates; the caller enforces the
@@ -593,6 +669,8 @@ pub struct GlobalPreferencesV2 {
     pub ide: IdeCommand,
     /// Copyedit toggles and colors.
     pub copyedit: CopyeditPreferences,
+    /// Preview presentation, preferred browser and entry behaviour.
+    pub preview: PreviewPreferences,
     /// Local telemetry consent; disabled by default and never sent anywhere.
     pub telemetry_enabled: bool,
     /// Release version the user chose to skip in the update check.
@@ -620,6 +698,7 @@ impl Default for GlobalPreferencesV2 {
             default_extension: FileExtension::default(),
             ide: IdeCommand::default(),
             copyedit: CopyeditPreferences::default(),
+            preview: PreviewPreferences::default(),
             telemetry_enabled: false,
             skipped_update_version: None,
         }
@@ -795,6 +874,8 @@ pub struct ResolvedPreferences {
     pub ide: IdeCommand,
     /// Copyedit toggles and colors.
     pub copyedit: CopyeditPreferences,
+    /// Preview presentation, preferred browser and entry behaviour.
+    pub preview: PreviewPreferences,
     /// Local telemetry consent.
     pub telemetry_enabled: bool,
     /// Effective content directory, if configured.
@@ -852,6 +933,7 @@ pub fn resolve(
             .unwrap_or(global.default_extension),
         ide: global.ide.clone(),
         copyedit: global.copyedit.clone(),
+        preview: global.preview.clone(),
         telemetry_enabled: global.telemetry_enabled,
         content_directory: collection
             .and_then(|collection| collection.content_directory.clone())
@@ -1330,6 +1412,28 @@ mod tests {
             decoded.copyedit.colors.color(CopyeditCategory::Verb),
             "#123456"
         );
+    }
+
+    #[test]
+    fn preview_preferences_default_to_external_and_round_trip() {
+        let defaults = PreviewPreferences::default();
+        assert_eq!(defaults.presentation, PreviewPresentation::External);
+        assert!(!defaults.browser.is_configured());
+        assert!(!defaults.open_on_enter);
+
+        let mut global = GlobalPreferencesV2::default();
+        global.preview.presentation = PreviewPresentation::Embedded;
+        global.preview.browser = BrowserCommand {
+            executable: "firefox".into(),
+            arguments: vec!["--new-window".into(), "{url}".into()],
+        };
+        global.preview.open_on_enter = true;
+        let encoded = serde_json::to_string(&global).unwrap();
+        let decoded: GlobalPreferencesV2 = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.preview, global.preview);
+
+        let resolved = resolve(&decoded, None, None);
+        assert_eq!(resolved.preview, global.preview);
     }
 
     #[test]

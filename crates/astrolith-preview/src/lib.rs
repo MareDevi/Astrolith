@@ -8,9 +8,11 @@
 //! It also maps logical entries to preview URLs and hands
 //! them to a preview surface.
 //!
-//! Embedded preview is optional and build-gated: [`PreviewCapability`] reports
-//! whether the current host and build may present it, and Linux Wayland always
-//! falls back to the external browser.
+//! Embedded preview is optional and build-gated by the GUI layer that supplies
+//! the real surface: [`PreviewCapability`] classifies the host and the caller
+//! states whether the WebView adapter was compiled. Linux Wayland windows always
+//! fall back to the external browser, while an X11/XWayland window can host the
+//! embedded surface.
 //!
 //! The binding process contract lives in
 //! `docs/technical/concurrency-and-responsiveness.md` (M05).
@@ -25,9 +27,13 @@ pub mod routes;
 pub mod server;
 pub mod surface;
 
-pub use capabilities::{HostEnvironment, HostPlatform, LinuxSession, PreviewCapability};
+pub use capabilities::{
+    EmbeddedUnavailable, HostEnvironment, HostPlatform, LinuxSession, PreviewCapability,
+};
 pub use config::{ConfigError, RouteMapping, RouteRule};
-pub use external::{ExternalBrowser, OpenCommand, Opener, SystemOpener, open_command};
+pub use external::{
+    ExternalBrowser, OpenCommand, Opener, SystemOpener, open_command, open_command_with,
+};
 pub use lifecycle::{PreviewLifecycle, PreviewTarget, TargetChange, target_change};
 pub use preview::{PreviewError, PreviewSession};
 pub use process::{OUTPUT_CAP, OutputCapture, ProcessError, RunningProcess, SpawnSpec};
