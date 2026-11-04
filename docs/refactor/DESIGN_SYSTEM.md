@@ -136,3 +136,12 @@ Rest、Hover、Pressed、Open、Selected、Focus visible、Disabled、Loading、
 ## 9. 实施审查
 
 M1 首先校对 Theme adapter；随后逐区域迁移 chrome、表单、菜单与选中态。M7 在真实内容与真实窗口下记录 dark/light、最小/宽窗、UI zoom 和缩放截图及边界测量。M0 只有源码对照，不宣称完成 pixel parity。
+
+## 10. M3 实施记录
+
+- 正文排版不再随 pane 宽度缩放。`ProseStyle` 直接采用用户持久化的字体、字号、行高倍数与 measure，非法持久值在渲染边界 clamp；`set_prose_style` 只改绘制属性，不写编辑器文本、选区或历史。
+- 新默认按 mock：16 px 字号、2.0 行高（32 px）、768 px measure、`PROSE_INSET` 32、`PROSE_TOP` 96；正文默认 sans（Inter，缺失回退平台 UI 字体），旧 serif 默认不再存在。
+- 文档字体与界面字体分开配置：`prose_font_family` 为空时使用 mock sans；缺字体时回退同一 sans，校验层拒绝未安装家族。CJK 仍依赖 GPUI 的脚本回退，未捆绑 CJK 字体。
+- Focus/Typewriter 作为全局偏好持久化；启动、切换命令和 Apply 都走同一 `WritingModes` 状态。sentence focus 保持既有语义，未新增 paragraph focus。
+- 旧配置若没有 `editor_line_height`，一次性备份为 `global.json.pre-writing.json`，把未改动的旧默认 18/720 升为 16/768 并写入新字段；用户显式改过的字号或宽度保留。
+- 原生 Wayland dark/System 截图核对了默认排版与持久化后的 22 px/2.4/900 + Focus；150%/200% 缩放与 IME 组合仍未验收。

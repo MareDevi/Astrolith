@@ -131,16 +131,13 @@ and destinations escape brackets, parentheses and backslashes.
 Open **Preferences…** with `Ctrl+,` or **View → Preferences…**. The sheet has
 four panes:
 
-- **General** — appearance (follow system, light or dark) with an independent
-  light and dark palette. The default pair is Manuscript (warm paper and ink)
-  and Ink (warm charcoal and parchment); One, Catppuccin (Latte, Frappé,
-  Macchiato, Mocha), Nord, Gruvbox, Tokyo Night, Solarized and Rosé Pine remain
-  available. The pane also controls the IDE command and arguments, default
-  new-file extension,
-  heading colours per appearance, interface font family and size (8–28,
-  default 14), editor font size (1–30, default 18), editor width (480–1200,
-  default 720), autosave delay (1, 2, 5 or
-  10 seconds) and Copyedit colours and toggles.
+- **General** — appearance (follow system, light or dark) with one neutral
+  light and dark palette. The pane also controls the IDE command and
+  arguments, default new-file extension, heading colours per appearance,
+  interface font family and size (8–28, default 14), document font family,
+  document font size (1–30, default 16), line height (1.2–3.0 × the font size,
+  default 2.0), page width (480–1200, default 768), Focus and Typewriter mode,
+  autosave delay (1, 2, 5 or 10 seconds) and Copyedit colours and toggles.
 - **Project Settings** — content, assets and MDX component directories,
   absolute versus document-relative image paths, default extension override,
   title/date/description/draft field mappings, and the experimental
@@ -167,12 +164,15 @@ project registry, never recovery snapshots, save-failure records or logs, and
 then restarts.
 
 Astrolith uses the system UI font until you name another installed family in
-**Preferences → Interface font**; that family also sets interface headings,
-while the document keeps its installed book serif (New York or Iowan Old Style
-on macOS, Georgia on Windows, Noto Serif or another installed serif on Linux).
-**Interface size** controls the UI scale and spacing; **Editor font size**
-changes the page size independently. **Editor width** sets the widest prose
-column before it centers in a wider pane.
+**Preferences → Interface font**; that family also sets interface headings.
+The document uses the mock's sans face (Inter when installed, otherwise the
+platform UI font); **Document font** names another installed family and falls
+back to that sans face when it is missing. CJK text uses the platform's script
+fallback because no bundled CJK face is shipped. **Interface size** controls
+the UI scale and spacing. **Document font size** and **Line height** set the
+page independently, and **Page width** sets the widest prose column before it
+centers in a wider pane. Focus and Typewriter toggles are saved with these
+settings and restored on the next launch.
 
 ## 6. Writing
 

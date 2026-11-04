@@ -166,3 +166,26 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
 | A26 | 新布局与 mock 的分区域视觉对照 | 用户验收通过 |
 
 本次回复未附带截图路径、显示缩放和主题组合明细；后续如归档需要，应补齐这些附件元数据。A19/M5b（真实 Embedded WebView）不在本次确认范围。
+
+## 12. M3 执行记录
+
+- 范围：core `preferences.rs`（写作字段与解析）、GPUI `writing_modes.rs`、`layout/panels.rs`、`theme/{typography,mod}.rs`、`settings/store.rs`（迁移）、`preferences/{mod,general,tests}.rs`、`project_discovery.rs` 的写作模式入口、`shell.rs`（应用/持久化）。
+- 正文排版：删除按 pane 宽度缩放的字号/行高算法，新增 `ProseStyle`。字号、行高倍数、measure 与字体都来自持久设置；超出范围的手改值在渲染边界 clamp。`set_prose_style` 只改变 Editor 的绘制属性。
+- 默认对齐 mock：sans 正文（Inter，缺失回退平台 UI 字体）、16 px、2.0 行高（32 px）、768 px measure、96 px 顶部留白、32 px 内边距。旧默认 18/720 与 serif 路径不再作为默认。
+- 持久化字段：`prose_font_family`、`editor_font_size`、`editor_line_height`、`editor_width`、`focus_mode`、`typewriter_mode`。Focus/Typewriter 命令、启动恢复、Preferences Apply 共用同一 `WritingModes`；sentence focus 保留，未新增 paragraph focus。
+- 升级迁移：缺少 `editor_line_height` 的 `global.json` 先备份为 `global.json.pre-writing.json`，把未改动的旧默认 18/720 更新为 16/768，并写入全部写作字段；用户显式设置的其他字号/宽度保留。未知顶层字段继续保留。
+- 设置 UI：General 的 Writing 区新增 Document font、Document font size、Line height、Page width、Focus mode、Typewriter mode；字体必须已安装，行高限制 1.2–3.0。
+- 回归测试：
+  - `writing_typography_and_modes_resolve_from_the_global_scope`：解析与 serde 往返。
+  - `pre_writing_defaults_upgrade_once_and_preserve_explicit_values`：一次性迁移、备份、显式字号保留。
+  - `line_height_stays_inside_the_readable_band`：范围校验。
+  - `prose_style_keeps_configured_values_and_clamps_corrupt_ones`：渲染边界 clamp。
+  - `typography_changes_leave_the_document_state_untouched`：切换 22 px / 2.6 / 900 后文本、选区与 caret 不变。
+  - `writing_mode_toggles_persist_and_restore`：Focus/Typewriter 命令写入 `global.json`，重新加载为 true，Apply 后 live 状态同步。
+  - 既有 sentence focus、typewriter 几何、投影与 undo 测试全部继续通过。
+- 自动检查：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；Rust workspace 844 passed、0 failed、8 ignored；fixture 单元 6 passed，Astro fixture compatibility PASS。
+- 原生证据：Linux Wayland（Hyprland），dark/System 主题，窗口 2538×1384；fixture `fixtures/parity-project/src/content/blog/markdown-showcase.md`。默认设置截图确认正文 sans、居中 768 measure、保存状态与计数可见；随后把 `editor_font_size=22`、`editor_line_height=2.4`、`editor_width=900`、`focus_mode=true` 写入 `global.json` 并重启，截图中字号、行距、页宽与 sentence focus 均按持久值生效，文档计数仍为 120 words / 827 characters。截图临时保存在 `/tmp/astrolith-m3-writing.png` 与 `/tmp/astrolith-m3-typography.png`，未提交用户内容。
+- 未完成/未验证：
+  - A12 的原生中文 IME composition、组合取消与跨段选区未在本机实际输入，headless 与几何测试不能替代；Typewriter 的原生键盘切换与滚动行为也未做视频验收。
+  - 150%/200% 显示缩放、最小窗口下的排版与设置页新字段布局未截图验收。
+  - paragraph focus 不在本次范围。
