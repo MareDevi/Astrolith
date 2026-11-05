@@ -191,12 +191,35 @@ struct EntryList {
     directory: Vec<String>,
     /// Entries under the browsed directory (recursive) or in the collection.
     scope_total: usize,
+    /// Non-directory rows in `sections`, maintained by `rebuild` so the
+    /// per-frame header count never walks every entry.
+    entry_count: usize,
     /// Resolved field mappings per collection identity.
     mappings: BTreeMap<String, FieldMappings>,
+    /// Index publication this list was built from.
+    index_revision: u64,
+    /// Inputs that produced `sections`; an identical repeat reuses them
+    /// instead of re-filtering and re-sorting the whole collection.
+    rebuild_key: Option<EntryListKey>,
+    /// Number of full rebuilds, for the cache test.
+    #[cfg(test)]
+    rebuilds: usize,
     selected: Option<IndexPath>,
     active: Option<PathBuf>,
     root: Option<PathBuf>,
 }
+
+/// Every input that decides one list rebuild.
+#[derive(Clone, PartialEq, Eq)]
+struct EntryListKey {
+    query: String,
+    drafts_only: bool,
+    sort: EntrySort,
+    collection: Option<SharedString>,
+    directory: Vec<String>,
+    index_revision: u64,
+}
+
 impl EntryList {
     fn new(owner: WeakEntity<ProjectWorkspace>, entries: Arc<Vec<CollectionEntry>>) -> Self {
         let mut list = Self {
@@ -209,7 +232,12 @@ impl EntryList {
             collection_filter: None,
             directory: Vec::new(),
             scope_total: 0,
+            entry_count: 0,
             mappings: BTreeMap::new(),
+            index_revision: 0,
+            rebuild_key: None,
+            #[cfg(test)]
+            rebuilds: 0,
             selected: None,
             active: None,
             root: None,
@@ -219,6 +247,17 @@ impl EntryList {
     }
 
     fn rebuild(&mut self) {
+        let key = EntryListKey {
+            query: self.query.clone(),
+            drafts_only: self.filter.drafts_only,
+            sort: self.sort.clone(),
+            collection: self.collection_filter.clone(),
+            directory: self.directory.clone(),
+            index_revision: self.index_revision,
+        };
+        if self.rebuild_key.as_ref() == Some(&key) {
+            return;
+        }
         let filter = EntryFilter {
             query: self.query.clone(),
             drafts_only: self.filter.drafts_only,
@@ -321,7 +360,17 @@ impl EntryList {
                 sections.push(section);
             }
         }
+        self.entry_count = sections
+            .iter()
+            .flat_map(|section| section.rows.iter())
+            .filter(|row| row.directory.is_none())
+            .count();
         self.sections = sections;
+        self.rebuild_key = Some(key);
+        #[cfg(test)]
+        {
+            self.rebuilds += 1;
+        }
     }
 
     fn entry_row(
@@ -379,11 +428,13 @@ impl EntryList {
     }
 
     fn entry_count(&self) -> usize {
-        self.sections
-            .iter()
-            .flat_map(|section| section.rows.iter())
-            .filter(|row| row.directory.is_none())
-            .count()
+        self.entry_count
+    }
+
+    /// Drop the cached sections so the next rebuild sees changed entries or
+    /// configuration even when the query did not change.
+    fn invalidate(&mut self) {
+        self.rebuild_key = None;
     }
 
     fn selected_row(&self) -> Option<(usize, usize)> {
@@ -707,6 +758,12 @@ pub(crate) struct ProjectWorkspace {
     entries: Arc<Vec<CollectionEntry>>,
     /// Entry count per collection, rebuilt with the index rather than in render.
     collection_counts: BTreeMap<String, usize>,
+    /// `(collection, entry count)` summaries for the library header, rebuilt
+    /// with the index rather than per frame.
+    collection_summaries: Arc<Vec<(String, usize)>>,
+    /// Collection switch commands, rebuilt with the index and every active
+    /// document change rather than per frame.
+    collection_items: Vec<CollectionItem>,
     list: Entity<ListState<EntryList>>,
     /// Collection whose entries the library shows; `None` is the collection root.
     selected_collection: Option<String>,
@@ -1006,6 +1063,8 @@ impl ProjectWorkspace {
             manifest: None,
             entries,
             collection_counts: BTreeMap::new(),
+            collection_summaries: Arc::new(Vec::new()),
+            collection_items: Vec::new(),
             list,
             selected_collection: None,
             selected_directory: Vec::new(),
@@ -2561,28 +2620,35 @@ impl ProjectWorkspace {
         cx.notify();
     }
 
-    /// Collection switch commands generated from the live index.
-    pub(crate) fn collection_items(&self) -> Vec<CollectionItem> {
+    /// Rebuild the per-collection summaries and switch commands after the
+    /// index or the active document changed.
+    fn rebuild_collection_summaries(&mut self) {
         let active_collection = self
             .active
             .as_ref()
             .and_then(|path| self.collection_of(path));
-        self.manifest
-            .as_ref()
-            .map(|manifest| {
-                manifest
-                    .collections()
-                    .iter()
-                    .map(|descriptor| {
-                        let name = descriptor.id().as_str().to_owned();
-                        CollectionItem {
-                            active: active_collection.as_deref() == Some(name.as_str()),
-                            name,
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        let mut summaries = Vec::new();
+        let mut items = Vec::new();
+        if let Some(manifest) = self.manifest.as_ref() {
+            for descriptor in manifest.collections() {
+                let name = descriptor.id().as_str();
+                summaries.push((
+                    name.to_owned(),
+                    self.collection_counts.get(name).copied().unwrap_or(0),
+                ));
+                items.push(CollectionItem {
+                    active: active_collection.as_deref() == Some(name),
+                    name: name.to_owned(),
+                });
+            }
+        }
+        self.collection_summaries = Arc::new(summaries);
+        self.collection_items = items;
+    }
+
+    /// Collection switch commands generated from the live index.
+    pub(crate) fn collection_items(&self) -> &[CollectionItem] {
+        &self.collection_items
     }
 
     /// Select the first entry of one collection without opening it.
@@ -3375,6 +3441,7 @@ impl ProjectWorkspace {
             "published project entries"
         );
         self.rebuild_sort_options();
+        self.rebuild_collection_summaries();
         let root = self.project_root();
         let active = self.active.clone();
         let entries = self.entries.clone();
@@ -3383,6 +3450,7 @@ impl ProjectWorkspace {
         let sort = self.list_sort.clone();
         let collection_filter = self.selected_collection.clone().map(Into::into);
         let directory = self.selected_directory.clone();
+        let index_revision = self.index_revision;
         self.list.update(cx, |list, cx| {
             let delegate = list.delegate_mut();
             delegate.entries = entries;
@@ -3393,6 +3461,8 @@ impl ProjectWorkspace {
             delegate.sort = sort;
             delegate.collection_filter = collection_filter;
             delegate.directory = directory;
+            delegate.index_revision = index_revision;
+            delegate.invalidate();
             delegate.rebuild();
             delegate.selected = delegate
                 .selected_row()
@@ -3689,6 +3759,7 @@ impl ProjectWorkspace {
     }
 
     fn refresh_entry_selection(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_collection_summaries();
         let active = self.active.clone();
         self.list.update(cx, |list, cx| {
             let delegate = list.delegate_mut();
@@ -6295,6 +6366,7 @@ impl ProjectWorkspace {
         let sort = self.list_sort.clone();
         let collection_filter = self.selected_collection.clone().map(Into::into);
         let directory = self.selected_directory.clone();
+        let index_revision = self.index_revision;
         self.list.update(cx, |list, cx| {
             let delegate = list.delegate_mut();
             delegate.entries = entries;
@@ -6305,6 +6377,8 @@ impl ProjectWorkspace {
             delegate.sort = sort;
             delegate.collection_filter = collection_filter;
             delegate.directory = directory;
+            delegate.index_revision = index_revision;
+            delegate.invalidate();
             delegate.rebuild();
             delegate.selected = delegate
                 .selected_row()
@@ -6461,21 +6535,7 @@ impl Render for ProjectWorkspace {
         let visible = visible_entries;
         let selected_collection = self.selected_collection.clone();
         let selected_directory = self.selected_directory.clone();
-        let collections: Vec<(String, usize)> = self
-            .manifest
-            .as_ref()
-            .map(|manifest| {
-                manifest
-                    .collections()
-                    .iter()
-                    .map(|descriptor| {
-                        let name = descriptor.id().as_str();
-                        let count = self.collection_counts.get(name).copied().unwrap_or(0);
-                        (name.to_owned(), count)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let collections = self.collection_summaries.clone();
         let query = self.last_list_query.trim().to_owned();
         let drafts_only = self.list_filter.drafts_only;
         let filter_active = drafts_only || !query.is_empty();
@@ -12287,6 +12347,82 @@ export const collections = {blog, dataAuthors};
         assert_eq!(
             view.read_with(cx, |view, cx| view.visible_entry_names(cx)),
             ["c.md", "b.mdx", "a.md"]
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn library_list_count_and_search_reuse_cached_results(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+
+        let count = view.read_with(cx, |view, cx| {
+            let delegate = view.list.read(cx).delegate();
+            (delegate.entry_count(), delegate.rebuilds)
+        });
+        assert_eq!(count.0, 2, "the cached count tracks the published entries");
+
+        // An identical rebuild reuses the sections instead of re-filtering and
+        // re-sorting the whole collection.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.list
+                    .update(cx, |list, cx| list.set_query("a", window, cx));
+            });
+        })
+        .unwrap();
+        let repeated = view.read_with(cx, |view, cx| {
+            let delegate = view.list.read(cx).delegate();
+            (delegate.entry_count(), delegate.rebuilds)
+        });
+        assert_eq!(repeated.0, 1, "the filtered count is cached too");
+        cx.update_window(handle.into(), |_, _window, cx| {
+            view.update(cx, |view, cx| {
+                view.list.update(cx, |list, _| {
+                    let delegate = list.delegate_mut();
+                    delegate.rebuild();
+                    delegate.rebuild();
+                });
+            });
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.list.read(cx).delegate().rebuilds),
+            repeated.1,
+            "an identical rebuild is skipped"
+        );
+
+        // A new index revision rebuilds against the published entries even
+        // though the query stayed the same.
+        view.update(cx, |view, cx| {
+            let entries = vec![view.entries[1].clone()];
+            view.publish_entries(entries, cx);
+        });
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.visible_entry_names(cx)),
+            Vec::<String>::new(),
+            "the surviving entry does not match the active filter"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.list.read(cx).delegate().entry_count()),
+            0,
+            "the cached count follows removals"
+        );
+        assert!(
+            view.read_with(cx, |view, cx| view.list.read(cx).delegate().rebuilds) > repeated.1,
+            "a redrawn index invalidates the cached sections"
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.list
+                    .update(cx, |list, cx| list.set_query("b", window, cx));
+            });
+        })
+        .unwrap();
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.visible_entry_names(cx)),
+            ["b.mdx"],
+            "the result still reflects the current index revision"
         );
     }
 

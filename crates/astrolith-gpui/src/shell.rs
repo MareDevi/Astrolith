@@ -990,14 +990,21 @@ impl Shell {
     /// Rebuild the native menu bar only when its model changed.
     fn refresh_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let availability = self.availability(window, cx);
-        let collections = self.project.read(cx).collection_items();
-        if let Some((last, recent, last_collections)) = &self.menu_signature
-            && *last == availability
-            && *recent == self.recent
-            && *last_collections == collections
-        {
+        let unchanged = {
+            let project = self.project.read(cx);
+            let collections = project.collection_items();
+            self.menu_signature
+                .as_ref()
+                .is_some_and(|(last, recent, last_collections)| {
+                    *last == availability
+                        && *recent == self.recent
+                        && last_collections.as_slice() == collections
+                })
+        };
+        if unchanged {
             return;
         }
+        let collections = self.project.read(cx).collection_items().to_vec();
         commands::install_menus(
             cx,
             &self.settings.copyedit,
@@ -2461,9 +2468,10 @@ impl Shell {
                 });
             }
         }
-        let collections = self.project.read(cx).collection_items();
-        let available_collections: Vec<_> = collections
-            .into_iter()
+        let project = self.project.read(cx);
+        let available_collections: Vec<_> = project
+            .collection_items()
+            .iter()
             .filter(|collection| !collection.active)
             .collect();
         if !available_collections.is_empty() {
@@ -2477,7 +2485,7 @@ impl Shell {
                     label: commands::collection_command_label(&collection.name).into(),
                     shortcut: SharedString::default(),
                     icon: IconName::Folder,
-                    action: PaletteAction::Collection(collection.name),
+                    action: PaletteAction::Collection(collection.name.clone()),
                 });
             }
         }
@@ -3807,9 +3815,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    async fn preview_frames_do_not_replace_an_unchanged_reading_document(
-        cx: &mut TestAppContext,
-    ) {
+    async fn preview_frames_do_not_replace_an_unchanged_reading_document(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let directory = project_fixture("preview-frame-site");
         std::fs::write(
@@ -3844,14 +3850,13 @@ mod tests {
                 "an unchanged session must not copy or replace the body"
             );
 
-            session
-                .update(cx, |session, cx| {
-                    session
-                        .patch_complete(window, cx, |source| {
-                            Ok(format!("{source}\nAn appended paragraph.\n"))
-                        })
-                        .expect("the buffer accepts an edit")
-                });
+            session.update(cx, |session, cx| {
+                session
+                    .patch_complete(window, cx, |source| {
+                        Ok(format!("{source}\nAn appended paragraph.\n"))
+                    })
+                    .expect("the buffer accepts an edit")
+            });
             window.render_frame(cx);
             assert_eq!(
                 view.read(cx).rendered.read(cx).sync_count(),
@@ -3860,10 +3865,7 @@ mod tests {
             );
 
             window.render_frame(cx);
-            assert_eq!(
-                view.read(cx).rendered.read(cx).sync_count(),
-                installed + 1
-            );
+            assert_eq!(view.read(cx).rendered.read(cx).sync_count(), installed + 1);
         })
         .unwrap();
         // The editor entity stays mounted and unchanged by the reading pane.
