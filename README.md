@@ -38,16 +38,22 @@ exist but are neither delivered nor supported.
 - **Safe persistence** — atomic conflict-aware saves, autosave (1/2/5/10 s,
   default 2 s) with a 10 s continuous-typing checkpoint, dirty close/switch/quit
   prompts, and in-app recovery of unsaved edits.
-- **Preview** — project-local Astro dev server with start/stop/restart/retry,
-  route tracking and external-browser presentation (the only Linux surface).
-- **Preferences** — global/project/collection overrides with one resolver,
-  independent light and dark palettes (One, Catppuccin, Nord, Gruvbox, Tokyo
-  Night, Solarized, Rosé Pine), advanced versions and scoped Reset All.
-- **Desktop integration** — application menus from one command registry,
-  keyboard shortcuts, command palette, IDE argv launch, `astrolith://open?path=`
-  scheme handling, MIME associations in packages, and single-instance launch.
-- **Privacy** — no telemetry. The only Astrolith network request is the signed
-  update manifest in builds configured with a manifest URL and public key.
+- **Preview** — project-local Astro dev server with start/stop/restart/retry
+  and route tracking; the supported Linux presentation is your external
+  browser. An optional `embedded-webview` feature adds a native WebKitGTK
+  surface for X11/XWayland windows only; it is developer-only, needs the
+  WebKitGTK development packages, and no released package builds it.
+- **Preferences** — global/project/collection overrides with one resolver, one
+  neutral light and dark palette, advanced versions and scoped Reset All.
+- **Desktop integration** — application menus (macOS and Windows) and the
+  toolbar **Panels** dropdown from one command registry, keyboard shortcuts,
+  command palette, IDE argv launch, `astrolith://open?path=` scheme handling,
+  MIME associations in packages, and single-instance launch.
+- **Privacy** — no telemetry. Astrolith makes two kinds of network request: the
+  signed update manifest, only in builds configured with a manifest URL and
+  public key, and absolute `http`/`https` document images when Preview or the
+  image hover previews load them. Both paths are listed in
+  [privacy and local data](docs/user/privacy.md).
 
 ## Documentation
 
@@ -96,8 +102,10 @@ sudo pacman -S --needed base-devel clang cmake pkgconf fontconfig wayland \
 
 Install the Vulkan driver for your GPU (for example `vulkan-radeon`,
 `vulkan-intel`, or the distribution's NVIDIA driver) and launch from a
-graphical Wayland or X11 session. No WebKitGTK or ALSA development packages are
-required; preview uses your external browser.
+graphical Wayland or X11 session. The default build needs no WebKitGTK or ALSA
+development packages; preview uses your external browser. Only the optional,
+developer-only `embedded-webview` build links WebKitGTK and needs its
+development packages.
 
 ### Packages
 

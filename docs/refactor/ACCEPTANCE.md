@@ -346,8 +346,8 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - Build 复用同一 `DocumentSession` 与 `EditorState`，`set_source_view` 同时切换行号、缩进参考线、折叠、自动括号/智能缩进、软换行关闭与语法高亮语言（`.md`/`.mdx` → markdown、`.astro` → astro、`.yaml`/`.yml` → yaml，其余 text）。panel 在 Build 铺满 pane、恢复滚动条并隐藏写作 rail。
   - Build 的 buffer tab 条只列真实 retained session：有 buffer 时才出现，无 buffer 时整条不渲染，不再保留空行；多个 tab 在可用宽度内排布，超出后水平滚动（`overflow_x_scroll` + `restrict_scroll_to_axis`），沿用 `tab_active`/`tab_foreground`/`tab_bar`/`border` 设计 token、32 px 高圆角 tab、dirty 点与关闭按钮。
   - Preview 中心显示当前 session 的 writer projection（frontmatter 与 MDX prelude 不出现）经原生 `TextViewState` 渲染的正文；只读、可选择、按文档字体/字号/行高/页宽排版，并解析项目内相对图片与 Astro `public/` 绝对路径。进入 Preview 后焦点归阅读面，键入不会写回 session。
-  - Astro preview 从 Preview 模式的中心分屏改为独立底部面板（默认关闭，Panels 菜单在非 Build 模式显示 “Astro preview”）；打开时才 arm Open-on-Enter 并在 Embedded 可用时分屏。Preview 默认布局不再显示该 dock。
-  - Inspector 仅 Writing：`ToggleInspector` 可用性要求 `workspace_mode == writing`，Panels 菜单只在 Writing 列出 Details，模式切换关闭并拒绝重新打开。
+  - Astro preview 从 Preview 模式的中心分屏改为独立底部面板（默认关闭，工具栏 Panels 下拉菜单在非 Build 模式显示 “Astro preview”；Linux 不绘制原生菜单栏）；打开时才 arm Open-on-Enter 并在 Embedded 可用时分屏。Preview 默认布局不再显示该 dock。
+  - Inspector 仅 Writing：`ToggleInspector` 可用性要求 `workspace_mode == writing`，工具栏 Panels 下拉菜单只在 Writing 列出 Details，模式切换关闭并拒绝重新打开。
 - 回归：
   - 新增 `build_buffer_tabs_appear_only_while_buffers_are_open`：空 Build 无 `build-tabs`；打开条目后 tab 条与 `build-tab-0` 出现；关闭最后一个 buffer 后整条消失。
   - 新增 GPUI `modes_show_writing_build_and_rendered_preview_surfaces`：Writing 有 rail/Inspector 触发器；Preview 只有 `rendered-preview-panel`、无文档 rail 与 Astro dock、预览源等于 writer projection、键入不修改 buffer、Inspector 命令无效；Build 无文档 rail、编辑器值为完整源、Inspector 命令无效；回到 Writing 恢复 rail。

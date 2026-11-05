@@ -127,4 +127,4 @@ Surface 可用性按**实际窗口后端**判断：`WAYLAND_DISPLAY` 存在时�
 
 最高风险是统一 Undo/Redo、Writer/Source 投影切换、保存中的代际一致性。其次为浮层嵌套焦点与 IME、偏好迁移、主题适配与缩放。真实 WebView、`.astro` 开发文件服务和交互 Terminal 属于必交付新增能力，需独立可编译里程碑。完整 LSP 已作为独立 crate 交付可选服务器集成，但没有 rename/symbol/signature 等全量能力，不能宣称与 Zed 等 IDE 等价；基础真实源码高亮和已有诊断不能被演示替代。Terminal 必须有 PTY、真实 shell 输入输出、resize、退出码与清理，不以 dev-server 日志或 IDE launch 代替。
 
-现有 Help 链接测试在未改源码前失败，具体记录见 [ACCEPTANCE.md](ACCEPTANCE.md)。本次只补审计文档与文档兼容入口；所有功能差距仍留在后续里程碑，不在 M0 修代码。
+Help 链接测试（`help.rs::user_and_derived_documentation_links_resolve`）在基线上通过：它所链接的用户文档与派生文档均已存在，不再有待补的 stub。具体记录见 [ACCEPTANCE.md](ACCEPTANCE.md)。本次只补审计文档与文档兼容入口；所有功能差距仍留在后续里程碑，不在 M0 修代码。

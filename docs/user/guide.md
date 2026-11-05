@@ -34,9 +34,11 @@ mise run build
 mise run dev
 ```
 
-Native GTK/WebKit packages are not needed: Astrolith uses GPUI Kit and opens
-previews in your normal browser. A graphical Wayland or X11 session and a
-working Vulkan driver are required. See the
+The default build needs no native GTK/WebKit packages: Astrolith uses GPUI Kit
+and opens previews in your normal browser. Only the optional, developer-only
+`embedded-webview` build links WebKitGTK (X11/XWayland windows only) and needs
+its development packages. A graphical Wayland or X11 session and a working
+Vulkan driver are required. See the
 [README](../../README.md#build-from-source) for the distribution packages.
 
 At first launch Astrolith shows a welcome workspace. Use **Open project…**
@@ -203,8 +205,15 @@ indent guides, folding and syntax highlighting, keeping the real file tabs,
 project explorer and terminal. **Preview** replaces the editor with a
 read-only rendering of the body, frontmatter and MDX imports excluded, like a
 Markdown preview in a code editor; the Astro preview remains a separate bottom
-panel opened from the Panels menu. The **Details** inspector exists only in
-Writing.
+panel opened from the toolbar **Panels** dropdown or its command. The
+**Details** inspector exists only in Writing.
+
+Astrolith registers one command registry and installs native application menus
+from it, but the pinned Linux platform does not draw a menu bar: on Linux every
+menu action is reachable from the toolbar buttons and dropdowns, the command
+palette (`Ctrl+P`) and its keyboard shortcut. Paths written here as
+**File → …**, **View → …**, **Writer → …** or **Help → …** describe the native
+menu bar, which only macOS and Windows present.
 
 Build also speaks the Astro toolchain's language servers when the project has
 installed them: syntax highlighting for `.astro`, TypeScript/TSX,
@@ -501,8 +510,9 @@ Help opens an external website.
   external browser launch, single-instance forwarding, protocol cold/warm
   launch and packaged installs. Do not treat a successful build or headless
   test as proof of those behaviors.
-- **Open file:** arbitrary local files opened with **Open file…** are read-only
-  (up to 8 MiB and 50,000 lines). Editing applies to project entries.
+- **Open file:** **Open file…** opens project sources with an editable text
+  extension as editable documents. Files outside the project, binary and
+  resource files open read-only (up to 8 MiB and 50,000 lines).
 
 ## 15. Getting help
 
