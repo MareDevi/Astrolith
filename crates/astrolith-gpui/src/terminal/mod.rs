@@ -29,6 +29,11 @@ const FALLBACK_CELL_WIDTH: f32 = 7.8;
 const FALLBACK_LINE_HEIGHT: f32 = 17.;
 /// Scroll rows per wheel line.
 const WHEEL_ROWS: i32 = 3;
+/// Polling cadence while the terminal dock is visible.
+const ACTIVE_POLL: Duration = Duration::from_millis(16);
+/// Polling cadence while the terminal dock is hidden. Slow enough that a
+/// hidden terminal is not a repaint source, fast enough to notice an exit.
+const HIDDEN_POLL: Duration = Duration::from_millis(250);
 
 /// Measured geometry of one terminal cell.
 ///
@@ -151,7 +156,12 @@ pub(crate) struct TerminalPanel {
     exit: Option<ExitInfo>,
     status: Option<String>,
     failure: Option<String>,
+    /// Whether the terminal dock is on screen and in Build.
+    active: bool,
     poll_task: Option<Task<()>>,
+    /// Poll intervals chosen by the loop, recorded for tests.
+    #[cfg(test)]
+    poll_intervals: Vec<Duration>,
     _keys: gpui_kit::Subscription,
 }
 
@@ -186,7 +196,10 @@ impl TerminalPanel {
             exit: None,
             status: None,
             failure: None,
+            active: false,
             poll_task: None,
+            #[cfg(test)]
+            poll_intervals: Vec::new(),
             _keys: keys,
         }
     }
@@ -313,19 +326,55 @@ impl TerminalPanel {
         }
     }
 
+    /// Tell the view whether the terminal dock is on screen.
+    ///
+    /// Hidden terminals keep noticing exits at a slow cadence instead of
+    /// repainting every frame. Becoming visible restarts the loop so the
+    /// first frame after showing does not wait out the hidden interval.
+    pub(crate) fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        if active && self.session.is_some() && !self.running_state() {
+            return;
+        }
+        if active && self.session.is_some() {
+            // Restart immediately: the old task may be asleep on the slow
+            // hidden interval and would delay the first visible frame.
+            self.poll_task = None;
+            self.start_polling(cx);
+        }
+    }
+
+    /// Cadence for the next poll, chosen from visibility.
+    fn poll_interval(&self) -> Duration {
+        if self.active {
+            ACTIVE_POLL
+        } else {
+            HIDDEN_POLL
+        }
+    }
+
     fn start_polling(&mut self, cx: &mut Context<Self>) {
         if self.poll_task.is_some() {
             return;
         }
         self.poll_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let keep_going = this.update(cx, |this, cx| this.poll(cx)).unwrap_or(false);
-                if !keep_going {
+                let interval = this
+                    .update(cx, |this, cx| {
+                        let interval = this.poll_interval();
+                        #[cfg(test)]
+                        this.poll_intervals.push(interval);
+                        this.poll(cx).then_some(interval)
+                    })
+                    .ok()
+                    .flatten();
+                let Some(interval) = interval else {
                     break;
-                }
+                };
+                cx.background_executor().timer(interval).await;
             }
         }));
     }
@@ -911,6 +960,64 @@ mod tests {
                 );
                 assert!(metrics.col_width > 0. && metrics.row_height > 0.);
             });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn hidden_terminal_backs_off_the_poll_loop(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let mut panel = None;
+        let (handle, _host) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                panel = Some(cx.new(|cx| TerminalPanel::new(window, cx)));
+                cx.new(|_| Host)
+            })
+            .unwrap()
+        });
+        let handle = handle.downcast::<Root>().unwrap();
+        let panel = panel.expect("the panel is built with the window");
+        cx.update_window(handle.into(), |_, _, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.attach(root.path(), cx);
+                panel.set_active(true, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(96));
+        cx.run_until_parked();
+        let active_ticks = panel.read_with(cx, |panel, _| panel.poll_intervals.len());
+        assert!(
+            active_ticks >= 2,
+            "the visible terminal must poll on the active cadence"
+        );
+        assert!(
+            panel
+                .read_with(cx, |panel, _| panel.poll_intervals.clone())
+                .iter()
+                .all(|interval| *interval == ACTIVE_POLL)
+        );
+
+        cx.update_window(handle.into(), |_, _, cx| {
+            panel.update(cx, |panel, cx| panel.set_active(false, cx));
+        })
+        .unwrap();
+        cx.executor().advance_clock(Duration::from_millis(750));
+        cx.run_until_parked();
+        let intervals = panel.read_with(cx, |panel, _| panel.poll_intervals.clone());
+        let hidden: Vec<_> = intervals.iter().skip(active_ticks).copied().collect();
+        assert!(
+            !hidden.is_empty(),
+            "a hidden terminal must still poll to notice exit"
+        );
+        assert!(
+            hidden.iter().all(|interval| *interval == HIDDEN_POLL),
+            "hidden polls must not run at frame rate: {hidden:?}"
+        );
+        cx.update_window(handle.into(), |_, _, cx| {
+            panel.update(cx, |panel, cx| panel.shutdown(cx));
         })
         .unwrap();
     }

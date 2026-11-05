@@ -508,6 +508,7 @@ impl Shell {
                     // Dock events already carry the new geometry. Clamping here
                     // would mutate the dock on every splitter move.
                     this.capture_layout(cx);
+                    this.sync_terminal_activity(cx);
                 }
             }),
             cx.observe_window_bounds(window, |this, window, cx| {
@@ -551,6 +552,7 @@ impl Shell {
                 this.open_project_scope(root.clone(), window, cx);
                 this.terminal
                     .update(cx, |terminal, cx| terminal.attach(&root, cx));
+                this.sync_terminal_activity(cx);
                 this.finish_pending_entry(window, cx);
             },
         ));
@@ -1786,6 +1788,18 @@ impl Shell {
             self.note_preview_fallback(cx);
         }
         self.sync_embedded(window, cx);
+        self.sync_terminal_activity(cx);
+    }
+
+    /// The terminal polls at frame rate only while Build shows its dock.
+    ///
+    /// Hiding the dock, or leaving Build, drops it to the slow cadence so a
+    /// hidden shell is not a repaint source; the exit is still noticed.
+    fn sync_terminal_activity(&mut self, cx: &mut Context<Self>) {
+        let active =
+            self.mode == WorkspaceMode::Build && self.dock.read(cx).has_dock(DockPlacement::Bottom);
+        self.terminal
+            .update(cx, |terminal, cx| terminal.set_active(active, cx));
     }
 
     /// Record the active document as the open project's last entry.
