@@ -116,6 +116,12 @@ pub(crate) struct DocumentSession {
     lsp_diagnostic_version: Option<i32>,
     /// Capabilities the running server advertised, once its handshake landed.
     lsp_capabilities: Option<lsp_types::ServerCapabilities>,
+    /// What the document's server is doing, surfaced in the status line.
+    lsp_status: LspStatus,
+    /// Set when a failure already spent this cycle's single restart.
+    lsp_retry_armed: bool,
+    /// The pending restart timer; cancelling it leaves Build without a server.
+    lsp_restart: Option<Task<()>>,
     _change: Subscription,
     _cursor: Subscription,
     _blur: Subscription,
@@ -125,6 +131,24 @@ pub(crate) struct DocumentSession {
 }
 pub(crate) struct SessionChanged;
 impl EventEmitter<SessionChanged> for DocumentSession {}
+
+/// Delay before the single restart a failed server earns.
+const LSP_RESTART_DELAY_MS: u64 = 500;
+
+/// What this document's language server is doing, for the status line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LspStatus {
+    /// No server is expected right now (Writer view, stopped, or not installed).
+    Inactive,
+    /// Discovery or the initialize handshake is in flight.
+    Starting,
+    /// The server completed its handshake and providers are installed.
+    Ready,
+    /// The server could not start or failed mid-session.
+    Failed(String),
+    /// The server process ended on its own.
+    Exited(Option<i32>),
+}
 
 /// A language server asked the editor to reveal a location in another file.
 #[derive(Clone, Debug)]
@@ -453,6 +477,9 @@ impl DocumentSession {
             lsp_unavailable: false,
             lsp_diagnostic_version: None,
             lsp_capabilities: None,
+            lsp_status: LspStatus::Inactive,
+            lsp_retry_armed: false,
+            lsp_restart: None,
             _change: change,
             _cursor: cursor,
             _blur: blur,
@@ -1564,7 +1591,7 @@ impl DocumentSession {
     ) {
         if self.source_view == source {
             if source {
-                self.start_lsp(window, cx);
+                self.start_lsp(cx);
             }
             return;
         }
@@ -1606,7 +1633,7 @@ impl DocumentSession {
         self.refresh_copyedit(cx);
         self.refresh_writer(cx);
         if source {
-            self.start_lsp(window, cx);
+            self.start_lsp(cx);
         } else {
             self.stop_lsp(cx);
         }
@@ -1622,7 +1649,7 @@ impl DocumentSession {
     }
 
     /// Start the document's language server once Build mode has a project root.
-    fn start_lsp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_lsp(&mut self, cx: &mut Context<Self>) {
         if self.lsp.is_some() || self.lsp_start.is_some() || self.lsp_unavailable {
             return;
         }
@@ -1636,8 +1663,9 @@ impl DocumentSession {
         if language.server().is_none() {
             return;
         }
+        self.lsp_status = LspStatus::Starting;
         let document = path.clone();
-        self.lsp_start = Some(cx.spawn_in(window, async move |this, cx| {
+        self.lsp_start = Some(cx.spawn(async move |this, cx| {
             let search_root = root.clone();
             let started = runtime::spawn(cx, async move {
                 let spec = astrolith_lsp::discover(&search_root, language)
@@ -1649,8 +1677,8 @@ impl DocumentSession {
             .await;
             match started {
                 Ok(Ok(client)) => {
-                    let _ = this.update_in(cx, |session, window, cx| {
-                        session.attach_lsp(client, path, language, window, cx)
+                    let _ = this.update(cx, |session, cx| {
+                        session.attach_lsp(client, path, language, cx)
                     });
                 }
                 Ok(Err(error)) | Err(error) => {
@@ -1659,9 +1687,11 @@ impl DocumentSession {
                         %error,
                         "language server unavailable for this document"
                     );
-                    let _ = this.update_in(cx, |session, _, cx| {
+                    let _ = this.update(cx, |session, cx| {
                         session.lsp_start = None;
                         session.lsp_unavailable = true;
+                        session.lsp_status = LspStatus::Failed(error.clone());
+                        cx.emit(SessionChanged);
                         cx.notify();
                     });
                 }
@@ -1674,7 +1704,6 @@ impl DocumentSession {
         mut client: LspClient,
         path: PathBuf,
         language: LanguageId,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.lsp_start = None;
@@ -1696,7 +1725,6 @@ impl DocumentSession {
         state.open(self.buffer.current_text().to_owned());
         let weak = cx.weak_entity();
         let own_uri = uri.clone();
-        let diagnostics_uri = uri.clone();
         self.editor.update(cx, |editor, _| {
             editor.lsp_mut().show_document = Some(std::rc::Rc::new(move |params, _window, cx| {
                 if params.uri.as_str() == own_uri.as_str() {
@@ -1717,59 +1745,117 @@ impl DocumentSession {
         });
         self.lsp = Some(state);
         self.lsp_diagnostic_version = None;
-        self.lsp_events = Some(cx.spawn_in(window, async move |this, cx| {
+        self.lsp_events = Some(cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
-                match event {
-                    LspEvent::Diagnostics {
-                        uri,
-                        version,
-                        diagnostics,
-                    } => {
-                        let _ = this.update_in(cx, |session, _, cx| {
-                            if !crate::editor::lsp::accepts_diagnostics(
-                                &diagnostics_uri,
-                                session.lsp_diagnostic_version,
-                                &uri,
-                                version,
-                            ) {
-                                tracing::debug!(
-                                    document = %uri.as_str(),
-                                    ?version,
-                                    "dropping diagnostics for another document or an older version"
-                                );
-                                return;
-                            }
-                            session.lsp_diagnostic_version = version;
-                            crate::editor::lsp::apply_diagnostics(
-                                &session.editor,
-                                &diagnostics,
-                                cx,
-                            );
-                        });
-                    }
-                    LspEvent::Log { level, message } => match level {
-                        astrolith_lsp::client::LogLevel::Error => {
-                            tracing::error!(%message, "language server")
-                        }
-                        astrolith_lsp::client::LogLevel::Warning => {
-                            tracing::warn!(%message, "language server")
-                        }
-                        _ => tracing::info!(%message, "language server"),
-                    },
-                    LspEvent::Failed(error) => {
-                        tracing::warn!(%error, "language server failed");
-                    }
-                    LspEvent::Exited(code) => {
-                        tracing::info!(?code, "language server exited");
-                    }
-                    LspEvent::Ready(capabilities) => {
-                        let _ = this.update_in(cx, |session, _, cx| {
-                            session.install_lsp_providers(*capabilities, cx);
-                        });
-                    }
-                }
+                let _ = this.update(cx, |session, cx| session.apply_lsp_event(event, cx));
             }
         }));
+    }
+
+    /// Apply one server event; returns whether this failure armed a restart.
+    fn apply_lsp_event(&mut self, event: LspEvent, cx: &mut Context<Self>) -> bool {
+        match event {
+            LspEvent::Diagnostics {
+                uri,
+                version,
+                diagnostics,
+            } => {
+                let Some(document) = self.lsp.as_ref().map(|state| state.uri.clone()) else {
+                    return false;
+                };
+                if !crate::editor::lsp::accepts_diagnostics(
+                    &document,
+                    self.lsp_diagnostic_version,
+                    &uri,
+                    version,
+                ) {
+                    tracing::debug!(
+                        document = %uri.as_str(),
+                        ?version,
+                        "dropping diagnostics for another document or an older version"
+                    );
+                    return false;
+                }
+                self.lsp_diagnostic_version = version;
+                crate::editor::lsp::apply_diagnostics(&self.editor, &diagnostics, cx);
+                false
+            }
+            LspEvent::Log { level, message } => {
+                match level {
+                    astrolith_lsp::client::LogLevel::Error => {
+                        tracing::error!(%message, "language server")
+                    }
+                    astrolith_lsp::client::LogLevel::Warning => {
+                        tracing::warn!(%message, "language server")
+                    }
+                    _ => tracing::info!(%message, "language server"),
+                }
+                false
+            }
+            LspEvent::Ready(capabilities) => {
+                self.lsp_status = LspStatus::Ready;
+                self.clear_lsp_notice();
+                self.install_lsp_providers(*capabilities, cx);
+                false
+            }
+            LspEvent::Failed(error) => {
+                tracing::warn!(%error, "language server failed");
+                self.note_lsp_failure(LspStatus::Failed(error), cx)
+            }
+            LspEvent::Exited(code) => {
+                tracing::info!(?code, "language server exited");
+                self.note_lsp_failure(LspStatus::Exited(code), cx)
+            }
+        }
+    }
+
+    /// Record a server failure, surface it, and arm one restart per cycle.
+    fn note_lsp_failure(&mut self, status: LspStatus, cx: &mut Context<Self>) -> bool {
+        let message = match &status {
+            LspStatus::Failed(error) => format!("Language server failed: {error}"),
+            LspStatus::Exited(Some(code)) => format!("Language server exited with status {code}"),
+            LspStatus::Exited(None) => "Language server exited unexpectedly".to_owned(),
+            _ => return false,
+        };
+        self.lsp_status = status;
+        let retry = !self.lsp_retry_armed && self.source_view && self.project_root.is_some();
+        if retry {
+            self.lsp_retry_armed = true;
+            self.lsp_restart = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(LSP_RESTART_DELAY_MS))
+                    .await;
+                let _ = this.update(cx, |session, cx| {
+                    session.lsp_restart = None;
+                    if !session.source_view {
+                        return;
+                    }
+                    session.release_lsp(cx);
+                    session.start_lsp(cx);
+                    cx.notify();
+                });
+            }));
+        }
+        let suffix = if retry {
+            " Retrying once."
+        } else {
+            " Build continues without language support."
+        };
+        self.notice = Some(SharedString::from(format!("{message}.{suffix}")));
+        cx.emit(SessionChanged);
+        cx.notify();
+        retry
+    }
+
+    /// Drop an LSP notice the status line may have copied, leaving other notices.
+    fn clear_lsp_notice(&mut self) {
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| notice.starts_with("Language server"))
+        {
+            self.notice = None;
+        }
     }
 
     /// Install only the providers the server advertised in its handshake.
@@ -1806,6 +1892,9 @@ impl DocumentSession {
         self.lsp_capabilities = None;
         self.lsp_change = None;
         self.lsp_events = None;
+        self.lsp_restart = None;
+        self.lsp_retry_armed = false;
+        self.lsp_status = LspStatus::Inactive;
         self.release_lsp(cx);
     }
 
@@ -2310,5 +2399,127 @@ mod language_tests {
             "text",
             "unsupported formats stay readable instead of guessing"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use astrolith_core::{ProjectId, SourcePath};
+
+    struct Host;
+
+    impl gpui_kit::Render for Host {
+        fn render(
+            &mut self,
+            _: &mut gpui_kit::Window,
+            _: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            gpui_kit::div()
+        }
+    }
+
+    fn mounted_session(
+        cx: &mut gpui_kit::TestAppContext,
+        source_path: &str,
+        source: &str,
+    ) -> (gpui_kit::AnyWindowHandle, Entity<DocumentSession>) {
+        let mut session = None;
+        let (window, _host) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |window, cx| {
+                let identity = DocumentIdentity::new(
+                    ProjectId::new("projection").expect("a project id"),
+                    1,
+                    SourcePath::new(source_path).expect("a source path"),
+                );
+                session = Some(
+                    cx.new(|cx| DocumentSession::new(identity, source.to_owned(), window, cx)),
+                );
+                cx.new(|_| Host)
+            })
+            .expect("a test window")
+        });
+        (
+            window,
+            session.expect("the session is built with the window"),
+        )
+    }
+
+    #[gpui_kit::test]
+    fn a_failure_is_visible_and_arms_one_restart(cx: &mut gpui_kit::TestAppContext) {
+        let (window, session) = mounted_session(cx, "src/app.ts", "const x = 1;\n");
+        cx.update_window(window, |_, _, cx| {
+            session.update(cx, |session, cx| {
+                session.set_project_root(PathBuf::from("/project"));
+                // Entering Build would start discovery; this test drives the
+                // event seam directly, so only the state it depends on is set.
+                session.source_view = true;
+
+                assert!(session.apply_lsp_event(LspEvent::Failed("boom".into()), cx));
+                assert_eq!(session.lsp_status, LspStatus::Failed("boom".into()));
+                assert_eq!(
+                    session.notice.as_deref(),
+                    Some("Language server failed: boom. Retrying once.")
+                );
+                assert!(session.lsp_retry_armed);
+                assert!(session.lsp_restart.is_some());
+
+                assert!(
+                    !session.apply_lsp_event(LspEvent::Exited(Some(3)), cx),
+                    "the one restart this cycle was already spent"
+                );
+                assert_eq!(session.lsp_status, LspStatus::Exited(Some(3)));
+                assert_eq!(
+                    session.notice.as_deref(),
+                    Some(
+                        "Language server exited with status 3. Build continues without language support."
+                    )
+                );
+            });
+        })
+        .expect("the window is open");
+    }
+
+    #[gpui_kit::test]
+    fn a_ready_server_becomes_visible_and_clears_the_failure_notice(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let (window, session) = mounted_session(cx, "src/app.ts", "const x = 1;\n");
+        cx.update_window(window, |_, _, cx| {
+            session.update(cx, |session, cx| {
+                session.notice = Some(SharedString::from(
+                    "Language server failed: boom. Retrying once.",
+                ));
+                assert!(!session.apply_lsp_event(
+                    LspEvent::Ready(Box::new(lsp_types::ServerCapabilities::default())),
+                    cx,
+                ));
+                assert_eq!(session.lsp_status, LspStatus::Ready);
+                assert!(
+                    session.notice.is_none(),
+                    "the retry notice must not outlive a successful handshake"
+                );
+            });
+        })
+        .expect("the window is open");
+    }
+
+    #[gpui_kit::test]
+    fn stopping_clears_the_status_and_the_retry_latch(cx: &mut gpui_kit::TestAppContext) {
+        let (window, session) = mounted_session(cx, "src/app.ts", "const x = 1;\n");
+        cx.update_window(window, |_, _, cx| {
+            session.update(cx, |session, cx| {
+                session.set_project_root(PathBuf::from("/project"));
+                session.source_view = true;
+                assert!(session.apply_lsp_event(LspEvent::Failed("boom".into()), cx));
+
+                session.stop_lsp(cx);
+                assert_eq!(session.lsp_status, LspStatus::Inactive);
+                assert!(!session.lsp_retry_armed);
+                assert!(session.lsp_restart.is_none());
+            });
+        })
+        .expect("the window is open");
     }
 }
