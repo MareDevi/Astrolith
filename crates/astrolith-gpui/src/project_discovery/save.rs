@@ -964,20 +964,13 @@ mod tests {
             view.update(cx, |view, cx| view.resolve_conflict_reload(window, cx))
         })
         .unwrap();
-        for _ in 0..300 {
-            cx.run_until_parked();
-            if view.read_with(cx, |view, cx| {
-                let session = view.sessions.get(&path).unwrap().read(cx);
+        cx.condition(&view, |view, cx| {
+            view.sessions.get(&path).is_some_and(|session| {
+                let session = session.read(cx);
                 session.buffer.current_text() == "# External\n" && !session.buffer.is_dirty()
-            }) {
-                break;
-            }
-            runtime::blocking(cx, || {
-                std::thread::sleep(std::time::Duration::from_millis(10))
             })
-            .await
-            .unwrap();
-        }
+        })
+        .await;
         view.read_with(cx, |view, cx| {
             let session = view.sessions.get(&path).unwrap().read(cx);
             assert_eq!(session.buffer.current_text(), "# External\n");

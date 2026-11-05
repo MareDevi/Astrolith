@@ -551,17 +551,8 @@ mod tests {
         let (handle, view) = mount(cx);
         view.update(cx, |view, _| view.recovery = Some(store.clone()));
         open_project_and_wait(cx, handle, &view, dir.path()).await;
-        for _ in 0..300 {
-            cx.run_until_parked();
-            if view.read_with(cx, |view, _| view.sessions.contains_key(&path)) {
-                break;
-            }
-            runtime::blocking(cx, || {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            })
-            .await
-            .unwrap();
-        }
+        cx.condition(&view, |view, _| view.sessions.contains_key(&path))
+            .await;
         view.read_with(cx, |view, cx| {
             let session = view.sessions.get(&path).unwrap().read(cx);
             assert_eq!(session.buffer.original_text(), "# A\n");
@@ -577,17 +568,12 @@ mod tests {
             view.update(cx, |view, cx| view.save_active(window, cx))
         })
         .unwrap();
-        for _ in 0..300 {
-            cx.run_until_parked();
-            if std::fs::read_to_string(&path).unwrap() == "# Recovered\n" {
-                break;
-            }
-            runtime::blocking(cx, || {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            })
-            .await
-            .unwrap();
-        }
+        cx.condition(&view, |view, cx| {
+            view.sessions
+                .get(&path)
+                .is_some_and(|session| !session.read(cx).buffer.is_dirty())
+        })
+        .await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Recovered\n");
         view.read_with(cx, |view, cx| {
             assert!(!view.status.contains("conflict"), "{}", view.status);
