@@ -100,6 +100,69 @@ impl Drop for ServiceWatcher {
     }
 }
 
+/// How long a file's mtime must be old before its cached fingerprint is
+/// trusted. Filesystems commonly store whole-second timestamps, so an edit
+/// inside the same second can leave `(mtime, len)` unchanged.
+const FINGERPRINT_RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One cached document fingerprint and the stat values it was taken from.
+struct FingerprintSample {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    fingerprint: u64,
+}
+
+/// Per-path fingerprint cache for open documents, kept between watcher batches
+/// so an unchanged buffer is not re-read and re-hashed on every burst.
+#[derive(Default)]
+struct DocumentFingerprints {
+    samples: HashMap<PathBuf, FingerprintSample>,
+    /// Number of content reads, for the cache test.
+    #[cfg(test)]
+    reads: usize,
+}
+
+impl DocumentFingerprints {
+    /// Fingerprint `path`, reading it only when the cached sample is stale or
+    /// the file was modified too recently to trust its mtime.
+    fn sample(&mut self, path: &Path, now: std::time::SystemTime) -> Option<u64> {
+        let metadata = std::fs::metadata(path).ok()?;
+        let modified = metadata.modified().ok();
+        let len = metadata.len();
+        if metadata.is_file()
+            && let Some(cached) = self.samples.get(path)
+            && cached.len == len
+            && cached.modified == modified
+            && modified.is_some_and(|mtime| {
+                now.duration_since(mtime)
+                    .is_ok_and(|age| age >= FINGERPRINT_RACY_WINDOW)
+            })
+        {
+            return Some(cached.fingerprint);
+        }
+        let text = read_bounded(path, MAX_DOCUMENT_BYTES).ok()?;
+        #[cfg(test)]
+        {
+            self.reads += 1;
+        }
+        let fingerprint = crate::editor::session::fingerprint(&text);
+        self.samples.insert(
+            path.to_path_buf(),
+            FingerprintSample {
+                modified,
+                len,
+                fingerprint,
+            },
+        );
+        Some(fingerprint)
+    }
+
+    /// Drop samples for documents that are no longer retained or loading.
+    fn retain_paths(&mut self, paths: &BTreeSet<PathBuf>) {
+        self.samples.retain(|path, _| paths.contains(path));
+    }
+}
+
 /// One clickable ancestor in the library breadcrumb.
 #[derive(Clone)]
 enum CrumbAction {
@@ -3221,6 +3284,8 @@ impl ProjectWorkspace {
             "project watcher started"
         );
         let cancellation = self.cancellation.clone();
+        let document_fingerprints =
+            Arc::new(std::sync::Mutex::new(DocumentFingerprints::default()));
         self.watch_task = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -3287,6 +3352,7 @@ impl ProjectWorkspace {
                 };
                 let scanning = weak_watcher.clone();
                 let scan_root = root.clone();
+                let cached = document_fingerprints.clone();
                 let result = runtime::blocking(cx, move || {
                     request
                         .cancellation()
@@ -3296,6 +3362,9 @@ impl ProjectWorkspace {
                         return Err("Watcher stopped".to_string());
                     };
                     // Compare retained and in-flight sources even when reindexing fails.
+                    let mut cache = cached.lock().unwrap_or_else(|error| error.into_inner());
+                    cache.retain_paths(&snapshots);
+                    let now = std::time::SystemTime::now();
                     let fingerprints = snapshots
                         .into_iter()
                         .map(|path| {
@@ -3305,11 +3374,11 @@ impl ProjectWorkspace {
                             )
                             .ok()
                             .filter(|actual| actual == &path)
-                            .and_then(|actual| read_bounded(&actual, MAX_DOCUMENT_BYTES).ok())
-                            .map(|text| crate::editor::session::fingerprint(&text));
+                            .and_then(|actual| cache.sample(&actual, now));
                             (path, fingerprint)
                         })
                         .collect::<Vec<_>>();
+                    drop(cache);
                     let index: Result<_, String> =
                         (|| match inspect_project(&request).map_err(|error| error.to_string())? {
                             DiscoveryOutcome::Ready(manifest) => {
@@ -7614,6 +7683,54 @@ mod tests {
         .unwrap();
         dir
     }
+    #[test]
+    fn document_fingerprints_reuse_settled_samples_and_detect_edits() {
+        use std::{fs::FileTimes, time::Duration};
+
+        fn set_modified(path: &std::path::Path, time: std::time::SystemTime) {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(time))
+                .unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        std::fs::write(&path, "alpha").unwrap();
+        let mtime = std::time::SystemTime::now() - Duration::from_secs(10);
+        set_modified(&path, mtime);
+        let mut cache = DocumentFingerprints::default();
+        let first = cache.sample(&path, mtime + Duration::from_secs(5)).unwrap();
+        assert_eq!(cache.reads, 1);
+
+        // The same length and timestamp with a settled mtime reuses the
+        // sample instead of reading the file again.
+        assert_eq!(
+            cache.sample(&path, mtime + Duration::from_secs(6)),
+            Some(first)
+        );
+        assert_eq!(cache.reads, 1, "a settled sample is not re-read");
+
+        // A same-length edit that restores its timestamp is still inside the
+        // racy window, so it is re-read and the change is reported.
+        std::fs::write(&path, "bravo").unwrap();
+        set_modified(&path, mtime);
+        let edited = cache.sample(&path, mtime + Duration::from_millis(500));
+        assert_eq!(cache.reads, 2, "a racy timestamp forces a read");
+        assert_ne!(edited, Some(first), "a real content change is detected");
+
+        // A different length is detected even with a stale mtime.
+        std::fs::write(&path, "bravo and more").unwrap();
+        set_modified(&path, mtime);
+        assert_ne!(
+            cache.sample(&path, mtime + Duration::from_secs(10)),
+            Some(first),
+            "a size change is always re-read"
+        );
+    }
+
     #[test]
     fn frontmatter_tools_are_limited_to_markdown_sources() {
         for supported in ["entry.md", "entry.mdx", "nested/ENTRY.md"] {
