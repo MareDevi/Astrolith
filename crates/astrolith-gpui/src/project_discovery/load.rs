@@ -250,9 +250,6 @@ impl ProjectWorkspace {
                 session.update(cx, |session, cx| {
                     session.set_writing_modes(modes, window, cx)
                 });
-                if let Some(root) = self.project_root() {
-                    session.update(cx, |session, _| session.set_project_root(root));
-                }
                 // Only the visible document presents complete source; other
                 // retained buffers switch when they are activated.
                 let source_view = self.source_view && self.active.as_ref() == Some(&key);
@@ -272,6 +269,9 @@ impl ProjectWorkspace {
                     self.install(&key, session.clone(), cx);
                     self.reveal_pending(&key, &session, window, cx);
                     self.document.read(cx).focus_handle(cx).focus(window, cx);
+                    // A Build document opened directly loads behind the mode,
+                    // so its server attachment follows the load, not the click.
+                    self.sync_lsp(cx);
                 }
             }
             Err(error) => {

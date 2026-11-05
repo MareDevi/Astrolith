@@ -6,7 +6,7 @@ use astrolith_document::{
     ProjectionSegment, TextEdit, TokenSummary, WriterProjection, apply_visible_edit, diff_visible,
     format_document, map_visible_offset, project_writer, token_summary,
 };
-use astrolith_lsp::{Client as LspClient, Event as LspEvent, LanguageId};
+use astrolith_lsp::{ClientHandle, LanguageId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::input::{
     EditorState, InputEvent, Position, RangeDecoration, RangeDecorationCollection,
@@ -18,7 +18,7 @@ use gpui_kit::{
 };
 
 use crate::editor::component_builder::snippets::PreparedInsertion;
-use crate::editor::lsp::LspState;
+use crate::editor::lsp::ProviderSupport;
 
 use crate::editor::copyedit::{CopyeditConfig, CopyeditPresentation, DEBOUNCE};
 use crate::editor::formatting::external_url;
@@ -98,33 +98,19 @@ pub(crate) struct DocumentSession {
     /// An edit that grows the text without moving an anchor happened at that
     /// anchor's edge, so the caret offset advances by the inserted length.
     placeholder_text_len: usize,
-    /// Canonical project root, the language server's workspace folder.
-    project_root: Option<PathBuf>,
-    /// The running language server for this document, while Build is active.
-    lsp: Option<LspState>,
-    /// In-flight server discovery/start.
-    lsp_start: Option<Task<()>>,
+    /// This document's attachment to the project's shared server, while Build
+    /// shows it. The process belongs to the project, never to a session.
+    lsp: Option<LspAttachment>,
     /// In-flight debounced full-text document sync.
     lsp_change: Option<Task<()>>,
-    /// Applies server events (diagnostics, logs) to this session.
-    lsp_events: Option<Task<()>>,
-    /// Set after a failed discovery/start; retrying on every mode switch would
-    /// only repeat the same filesystem search.
-    lsp_unavailable: bool,
     /// Last diagnostics version accepted for this document, so an older
     /// `publishDiagnostics` cannot overwrite a newer set.
     lsp_diagnostic_version: Option<i32>,
-    /// Capabilities the running server advertised, once its handshake landed.
-    lsp_capabilities: Option<lsp_types::ServerCapabilities>,
-    /// What the document's server is doing, surfaced in the status line.
+    /// What this document's server is doing, surfaced in the status line.
     lsp_status: LspStatus,
-    /// Set when a failure already spent this cycle's single restart.
-    lsp_retry_armed: bool,
-    /// Whether this attachment already reported a failure, so the exit that
-    /// follows a handshake error does not overwrite its cause.
+    /// Set when a failure was already reported, so the exit that follows a
+    /// handshake error does not overwrite its cause.
     lsp_failure_seen: bool,
-    /// The pending restart timer; cancelling it leaves Build without a server.
-    lsp_restart: Option<Task<()>>,
     _change: Subscription,
     _cursor: Subscription,
     _blur: Subscription,
@@ -134,9 +120,6 @@ pub(crate) struct DocumentSession {
 }
 pub(crate) struct SessionChanged;
 impl EventEmitter<SessionChanged> for DocumentSession {}
-
-/// Delay before the single restart a failed server earns.
-const LSP_RESTART_DELAY_MS: u64 = 500;
 
 /// What this document's language server is doing, for the status line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,6 +134,17 @@ pub(crate) enum LspStatus {
     Failed(String),
     /// The server process ended on its own.
     Exited(Option<i32>),
+}
+
+/// One session's binding to a project-wide language server.
+///
+/// The server process, its event loop and its one-retry policy belong to
+/// [`crate::project_discovery::ProjectWorkspace`]; a session only names the
+/// document it has open and borrows the handle its providers call.
+pub(crate) struct LspAttachment {
+    pub handle: ClientHandle,
+    pub uri: lsp_types::Uri,
+    pub language: LanguageId,
 }
 
 /// A language server asked the editor to reveal a location in another file.
@@ -472,18 +466,11 @@ impl DocumentSession {
             placeholder_offsets: Vec::new(),
             placeholder_collection: None,
             placeholder_text_len: 0,
-            project_root: None,
             lsp: None,
-            lsp_start: None,
             lsp_change: None,
-            lsp_events: None,
-            lsp_unavailable: false,
             lsp_diagnostic_version: None,
-            lsp_capabilities: None,
             lsp_status: LspStatus::Inactive,
-            lsp_retry_armed: false,
             lsp_failure_seen: false,
-            lsp_restart: None,
             _change: change,
             _cursor: cursor,
             _blur: blur,
@@ -1594,9 +1581,6 @@ impl DocumentSession {
         cx: &mut Context<Self>,
     ) {
         if self.source_view == source {
-            if source {
-                self.start_lsp(cx);
-            }
             return;
         }
         self.absorb(cx);
@@ -1636,193 +1620,105 @@ impl DocumentSession {
         };
         self.refresh_copyedit(cx);
         self.refresh_writer(cx);
-        if source {
-            self.start_lsp(cx);
-        } else {
-            self.stop_lsp(cx);
-        }
+        // The workspace owns the project's language servers: it attaches this
+        // document when Build shows it and detaches it on the way out.
         // The mode owner notifies the shell; emitting SessionChanged here would
         // run project subscriptions reentrantly from inside a project update.
         cx.notify();
     }
 
-    /// Point this session at the project whose language servers it should use.
-    pub(crate) fn set_project_root(&mut self, root: PathBuf) {
-        self.project_root = Some(root);
-        self.lsp_unavailable = false;
-    }
-
-    /// Start the document's language server once Build mode has a project root.
-    fn start_lsp(&mut self, cx: &mut Context<Self>) {
-        if self.lsp.is_some() || self.lsp_start.is_some() || self.lsp_unavailable {
-            return;
-        }
-        let Some(root) = self.project_root.clone() else {
-            return;
-        };
-        let path = root.join(self.canonical_source());
-        let Some(language) = LanguageId::from_path(&path) else {
-            return;
-        };
-        if language.server().is_none() {
-            return;
-        }
-        self.lsp_status = LspStatus::Starting;
-        let document = path.clone();
-        self.lsp_start = Some(cx.spawn(async move |this, cx| {
-            let search_root = root.clone();
-            let started = runtime::spawn(cx, async move {
-                let spec = astrolith_lsp::discover(&search_root, language)
-                    .map_err(|error| error.to_string())?;
-                LspClient::spawn_process(spec.into())
-                    .await
-                    .map_err(|error| error.to_string())
-            })
-            .await;
-            match started {
-                Ok(Ok(client)) => {
-                    let _ = this.update(cx, |session, cx| {
-                        session.attach_lsp(client, path, language, cx)
-                    });
-                }
-                Ok(Err(error)) | Err(error) => {
-                    tracing::info!(
-                        document = %document.display(),
-                        %error,
-                        "language server unavailable for this document"
-                    );
-                    let _ = this.update(cx, |session, cx| {
-                        session.lsp_start = None;
-                        session.lsp_unavailable = true;
-                        session.lsp_status = LspStatus::Failed(error.clone());
-                        cx.emit(SessionChanged);
-                        cx.notify();
-                    });
-                }
-            }
-        }));
-    }
-
-    fn attach_lsp(
+    /// Attach this document to the project's shared server for its language.
+    ///
+    /// The workspace owns the process and its event loop; a session keeps only
+    /// the document URI its providers and diagnostics are scoped to.
+    pub(crate) fn attach_lsp(
         &mut self,
-        mut client: LspClient,
-        path: PathBuf,
+        handle: ClientHandle,
+        uri: lsp_types::Uri,
         language: LanguageId,
+        support: ProviderSupport,
+        ready: bool,
         cx: &mut Context<Self>,
     ) {
-        self.lsp_start = None;
-        if !self.source_view {
-            return;
-        }
-        let Some(uri) = crate::editor::lsp::uri_for(&path) else {
-            tracing::warn!(document = %path.display(), "could not build a document URI");
-            return;
-        };
-        let handle = client.handle();
-        let mut events = client.take_events();
-        let state = LspState {
-            _client: client,
-            handle: handle.clone(),
-            uri: uri.clone(),
-            language,
-        };
-        state.open(self.buffer.current_text().to_owned());
-        let weak = cx.weak_entity();
-        let own_uri = uri.clone();
-        self.editor.update(cx, |editor, _| {
-            editor.lsp_mut().show_document = Some(std::rc::Rc::new(move |params, _window, cx| {
-                if params.uri.as_str() == own_uri.as_str() {
-                    return false;
-                }
-                let Ok(url) = url::Url::parse(params.uri.as_str()) else {
-                    return false;
-                };
-                let Ok(path) = url.to_file_path() else {
-                    return false;
-                };
-                let selection = params.selection.map(|range| range.start);
-                weak.update(cx, |_, cx| {
-                    cx.emit(DefinitionTarget { path, selection });
-                })
-                .is_ok()
-            }));
+        let same_document = self.lsp.as_ref().is_some_and(|attachment| {
+            attachment.uri.as_str() == uri.as_str() && attachment.language == language
         });
-        self.lsp = Some(state);
-        self.lsp_diagnostic_version = None;
-        self.lsp_failure_seen = false;
-        self.lsp_events = Some(cx.spawn(async move |this, cx| {
-            while let Some(event) = events.recv().await {
-                let _ = this.update(cx, |session, cx| session.apply_lsp_event(event, cx));
-            }
-        }));
-    }
-
-    /// Apply one server event; returns whether this failure armed a restart.
-    fn apply_lsp_event(&mut self, event: LspEvent, cx: &mut Context<Self>) -> bool {
-        match event {
-            LspEvent::Diagnostics {
-                uri,
-                version,
-                diagnostics,
-            } => {
-                let Some(document) = self.lsp.as_ref().map(|state| state.uri.clone()) else {
-                    return false;
-                };
-                if !crate::editor::lsp::accepts_diagnostics(
-                    &document,
-                    self.lsp_diagnostic_version,
-                    &uri,
-                    version,
-                ) {
-                    tracing::debug!(
-                        document = %uri.as_str(),
-                        ?version,
-                        "dropping diagnostics for another document or an older version"
-                    );
-                    return false;
-                }
-                self.lsp_diagnostic_version = version;
-                crate::editor::lsp::apply_diagnostics(&self.editor, &diagnostics, cx);
-                false
-            }
-            LspEvent::Log { level, message } => {
-                match level {
-                    astrolith_lsp::client::LogLevel::Error => {
-                        tracing::error!(%message, "language server")
-                    }
-                    astrolith_lsp::client::LogLevel::Warning => {
-                        tracing::warn!(%message, "language server")
-                    }
-                    _ => tracing::info!(%message, "language server"),
-                }
-                false
-            }
-            LspEvent::Ready(capabilities) => {
-                self.lsp_status = LspStatus::Ready;
-                if self.take_lsp_notice() {
-                    // Replace the failure the status line copied with recovery.
-                    self.notice = Some(SharedString::from("Language server ready."));
-                    cx.emit(SessionChanged);
-                }
-                self.install_lsp_providers(*capabilities, cx);
-                false
-            }
-            LspEvent::Failed(error) => {
-                tracing::warn!(%error, "language server failed");
-                self.note_lsp_failure(LspStatus::Failed(error), cx)
-            }
-            LspEvent::Exited(code) => {
-                tracing::info!(?code, "language server exited");
-                self.note_lsp_failure(LspStatus::Exited(code), cx)
-            }
+        if !same_document {
+            let weak = cx.weak_entity();
+            let own_uri = uri.clone();
+            self.editor.update(cx, |editor, _| {
+                editor.lsp_mut().show_document =
+                    Some(std::rc::Rc::new(move |params, _window, cx| {
+                        if params.uri.as_str() == own_uri.as_str() {
+                            return false;
+                        }
+                        let Ok(url) = url::Url::parse(params.uri.as_str()) else {
+                            return false;
+                        };
+                        let Ok(path) = url.to_file_path() else {
+                            return false;
+                        };
+                        let selection = params.selection.map(|range| range.start);
+                        weak.update(cx, |_, cx| {
+                            cx.emit(DefinitionTarget { path, selection });
+                        })
+                        .is_ok()
+                    }));
+            });
+            self.lsp_diagnostic_version = None;
+            self.lsp_failure_seen = false;
         }
+        // A replacement runtime always supplies a fresh handle, even when the
+        // document URI itself is unchanged.
+        self.lsp = Some(LspAttachment {
+            handle,
+            uri,
+            language,
+        });
+        self.lsp_status = if ready {
+            LspStatus::Ready
+        } else {
+            LspStatus::Starting
+        };
+        self.install_lsp_providers(support, cx);
+        cx.notify();
     }
 
-    /// Record a server failure, surface it, and arm one restart per cycle.
-    fn note_lsp_failure(&mut self, status: LspStatus, cx: &mut Context<Self>) -> bool {
+    /// Record that the shared server completed its handshake.
+    pub(crate) fn lsp_ready(&mut self, support: ProviderSupport, cx: &mut Context<Self>) {
+        if self.lsp.is_none() {
+            return;
+        }
+        self.lsp_status = LspStatus::Ready;
+        if self.take_lsp_notice() {
+            // Replace the failure the status line copied with recovery.
+            self.notice = Some(SharedString::from("Language server ready."));
+            cx.emit(SessionChanged);
+        }
+        self.install_lsp_providers(support, cx);
+        cx.notify();
+    }
+
+    /// Surface work the shared server is doing for this document.
+    pub(crate) fn note_lsp_status(&mut self, status: LspStatus, cx: &mut Context<Self>) {
+        if self.lsp.is_none() || self.lsp_status == status {
+            return;
+        }
+        self.lsp_status = status;
+        cx.notify();
+    }
+
+    /// Report one server failure for this document, once per attachment.
+    ///
+    /// Returns whether the failure was new; the exit that follows a handshake
+    /// error is the same cause and never overwrites it.
+    pub(crate) fn report_lsp_failure(
+        &mut self,
+        status: LspStatus,
+        retry: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.lsp_failure_seen {
-            // `Failed` is followed by `Exited` for the same dead server; the
-            // first event is the cause and the one that owns the retry.
             return false;
         }
         let message = match &status {
@@ -1833,24 +1729,6 @@ impl DocumentSession {
         };
         self.lsp_failure_seen = true;
         self.lsp_status = status;
-        let retry = !self.lsp_retry_armed && self.source_view && self.project_root.is_some();
-        if retry {
-            self.lsp_retry_armed = true;
-            self.lsp_restart = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(LSP_RESTART_DELAY_MS))
-                    .await;
-                let _ = this.update(cx, |session, cx| {
-                    session.lsp_restart = None;
-                    if !session.source_view {
-                        return;
-                    }
-                    session.release_lsp(cx);
-                    session.start_lsp(cx);
-                    cx.notify();
-                });
-            }));
-        }
         let suffix = if retry {
             " Retrying once."
         } else {
@@ -1859,7 +1737,7 @@ impl DocumentSession {
         self.notice = Some(SharedString::from(format!("{message}.{suffix}")));
         cx.emit(SessionChanged);
         cx.notify();
-        retry
+        true
     }
 
     /// Take an LSP notice, leaving notices that belong to other features.
@@ -1875,73 +1753,75 @@ impl DocumentSession {
     }
 
     /// Install only the providers the server advertised in its handshake.
-    fn install_lsp_providers(
-        &mut self,
-        capabilities: lsp_types::ServerCapabilities,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(state) = self.lsp.as_ref() else {
+    fn install_lsp_providers(&mut self, support: ProviderSupport, cx: &mut Context<Self>) {
+        let Some(attachment) = self.lsp.as_ref() else {
             return;
         };
         crate::editor::lsp::install(
             &self.editor,
-            state.handle.clone(),
-            state.uri.clone(),
-            &capabilities,
+            attachment.handle.clone(),
+            attachment.uri.clone(),
+            support,
             cx,
         );
-        self.lsp_capabilities = Some(capabilities);
         cx.notify();
     }
 
-    /// Release the language server for a retained but inactive document.
-    pub(crate) fn suspend_lsp(&mut self, cx: &mut Context<Self>) {
-        self.stop_lsp(cx);
-    }
-
-    fn stop_lsp(&mut self, cx: &mut Context<Self>) {
-        self.lsp_start = None;
-        // Re-entering Build retries discovery, so a server installed while the
-        // app runs is picked up without reopening the project.
-        self.lsp_unavailable = false;
-        self.lsp_diagnostic_version = None;
-        self.lsp_capabilities = None;
+    /// Drop this document's attachment without ending the project's server.
+    ///
+    /// The workspace sends `didClose` for the returned URI; the process stays
+    /// up, so a tab switch never pays another discovery or `node_modules` scan.
+    pub(crate) fn detach_lsp(&mut self, cx: &mut Context<Self>) -> Option<LspAttachment> {
         self.lsp_change = None;
-        self.lsp_events = None;
-        self.lsp_restart = None;
-        self.lsp_retry_armed = false;
+        self.lsp_diagnostic_version = None;
         self.lsp_failure_seen = false;
         self.lsp_status = LspStatus::Inactive;
-        self.release_lsp(cx);
+        let attachment = self.lsp.take()?;
+        crate::editor::lsp::uninstall(&self.editor, cx);
+        cx.notify();
+        Some(attachment)
     }
 
-    /// Close the open document and give the server a bounded graceful exit.
+    /// This document open on the shared server, while Build shows it.
+    pub(crate) fn lsp_attachment(&self) -> Option<&LspAttachment> {
+        self.lsp.as_ref()
+    }
+
+    /// What the shared server is doing for this document.
     ///
-    /// Providers are uninstalled synchronously, so the editor is usable at
-    /// once. The client itself is held on the background executor for the
-    /// grace period; dropping it earlier would abort the actor and SIGKILL a
-    /// server that was mid-shutdown.
-    fn release_lsp(&mut self, cx: &mut Context<Self>) {
-        // Drop the event loop first: an exit from this client must not be
-        // attributed to a replacement attached a moment later.
-        self.lsp_events = None;
-        let Some(state) = self.lsp.take() else {
+    /// The registry reads it to avoid restating a state the session already
+    /// shows; the status line renders the same value.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn lsp_status(&self) -> &LspStatus {
+        &self.lsp_status
+    }
+
+    /// Apply one publish the workspace routed here by its document URI.
+    pub(crate) fn apply_lsp_diagnostics(
+        &mut self,
+        uri: lsp_types::Uri,
+        version: Option<i32>,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(attachment) = self.lsp.as_ref() else {
             return;
         };
-        state.close();
-        let LspState {
-            _client: client,
-            handle,
-            ..
-        } = state;
-        crate::editor::lsp::release_after_shutdown(
-            &handle,
-            client,
-            cx.background_executor().clone(),
-            crate::editor::lsp::SHUTDOWN_GRACE,
-        )
-        .detach();
-        crate::editor::lsp::uninstall(&self.editor, cx);
+        if !crate::editor::lsp::accepts_diagnostics(
+            &attachment.uri,
+            self.lsp_diagnostic_version,
+            &uri,
+            version,
+        ) {
+            tracing::debug!(
+                document = %uri.as_str(),
+                ?version,
+                "dropping diagnostics for another document or an older version"
+            );
+            return;
+        }
+        self.lsp_diagnostic_version = version;
+        crate::editor::lsp::apply_diagnostics(&self.editor, &diagnostics, cx);
     }
 
     /// Focus this document at a language-server selection.
@@ -1971,11 +1851,11 @@ impl DocumentSession {
 
     /// Push the latest complete source to the server, coalescing keystrokes.
     fn sync_lsp_change(&mut self, cx: &mut Context<Self>) {
-        let Some(state) = self.lsp.as_ref() else {
+        let Some(attachment) = self.lsp.as_ref() else {
             return;
         };
-        let handle = state.handle.clone();
-        let uri = state.uri.clone();
+        let handle = attachment.handle.clone();
+        let uri = attachment.uri.clone();
         let text = self.buffer.current_text().to_owned();
         let executor = cx.background_executor().clone();
         self.lsp_change = Some(cx.background_spawn(async move {
@@ -2466,32 +2346,65 @@ mod tests {
         )
     }
 
+    /// A handle for a shared server the test never talks to.
+    ///
+    /// Providers only borrow the handle; the protocol loop is not needed to
+    /// prove that a session keeps, reports and drops its attachment.
+    fn shared_handle() -> (ClientHandle, lsp_types::Uri) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a test runtime");
+        let client = runtime.block_on(async {
+            let (client_stream, peer) = tokio::io::duplex(1024);
+            let client = astrolith_lsp::Client::connect(
+                client_stream,
+                "file:///project".parse().expect("a root URI"),
+            )
+            .await
+            .expect("an in-memory client");
+            drop(peer);
+            client
+        });
+        let handle = client.handle();
+        drop(client);
+        (
+            handle,
+            "file:///project/src/app.ts"
+                .parse()
+                .expect("a document URI"),
+        )
+    }
+
     #[gpui_kit::test]
-    fn a_failure_is_visible_and_arms_one_restart(cx: &mut gpui_kit::TestAppContext) {
+    fn a_failure_is_visible_and_reported_once(cx: &mut gpui_kit::TestAppContext) {
         let (window, session) = mounted_session(cx, "src/app.ts", "const x = 1;\n");
+        let (handle, uri) = shared_handle();
         cx.update_window(window, |_, _, cx| {
             session.update(cx, |session, cx| {
-                session.set_project_root(PathBuf::from("/project"));
-                // Entering Build would start discovery; this test drives the
-                // event seam directly, so only the state it depends on is set.
-                session.source_view = true;
+                session.attach_lsp(
+                    handle,
+                    uri,
+                    LanguageId::TypeScript,
+                    ProviderSupport::default(),
+                    false,
+                    cx,
+                );
 
-                assert!(session.apply_lsp_event(LspEvent::Failed("boom".into()), cx));
+                assert!(session.report_lsp_failure(LspStatus::Failed("boom".into()), true, cx));
                 assert_eq!(session.lsp_status, LspStatus::Failed("boom".into()));
                 assert_eq!(
                     session.notice.as_deref(),
                     Some("Language server failed: boom. Retrying once.")
                 );
-                assert!(session.lsp_retry_armed);
-                assert!(session.lsp_restart.is_some());
 
                 assert!(
-                    !session.apply_lsp_event(LspEvent::Exited(Some(3)), cx),
+                    !session.report_lsp_failure(LspStatus::Exited(Some(3)), true, cx),
                     "the exit that follows the failure is not a second cause"
                 );
                 assert_eq!(
-                    session.lsp_status,
-                    LspStatus::Failed("boom".into()),
+                    &session.lsp_status,
+                    &LspStatus::Failed("boom".into()),
                     "the first failure keeps the diagnosis and the retry"
                 );
                 assert_eq!(
@@ -2508,12 +2421,23 @@ mod tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let (window, session) = mounted_session(cx, "src/app.ts", "const x = 1;\n");
+        let (handle, uri) = shared_handle();
         cx.update_window(window, |_, _, cx| {
             session.update(cx, |session, cx| {
                 session.notice = Some(SharedString::from(
                     "Language server failed: boom. Retrying once.",
                 ));
-                assert!(!session.apply_lsp_event(LspEvent::Ready(Box::default()), cx,));
+                session.attach_lsp(
+                    handle,
+                    uri,
+                    LanguageId::TypeScript,
+                    ProviderSupport::default(),
+                    false,
+                    cx,
+                );
+                assert_eq!(session.lsp_status, LspStatus::Starting);
+
+                session.lsp_ready(ProviderSupport::default(), cx);
                 assert_eq!(session.lsp_status, LspStatus::Ready);
                 assert_eq!(
                     session.notice.as_deref(),
@@ -2526,18 +2450,35 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn stopping_clears_the_status_and_the_retry_latch(cx: &mut gpui_kit::TestAppContext) {
+    fn detaching_clears_the_status_and_keeps_no_attachment(cx: &mut gpui_kit::TestAppContext) {
         let (window, session) = mounted_session(cx, "src/app.ts", "const x = 1;\n");
+        let (handle, uri) = shared_handle();
         cx.update_window(window, |_, _, cx| {
             session.update(cx, |session, cx| {
-                session.set_project_root(PathBuf::from("/project"));
-                session.source_view = true;
-                assert!(session.apply_lsp_event(LspEvent::Failed("boom".into()), cx));
+                session.attach_lsp(
+                    handle,
+                    uri.clone(),
+                    LanguageId::TypeScript,
+                    ProviderSupport::default(),
+                    false,
+                    cx,
+                );
+                assert!(session.report_lsp_failure(LspStatus::Failed("boom".into()), false, cx));
 
-                session.stop_lsp(cx);
+                let attachment = session.detach_lsp(cx).expect("the document was attached");
+                assert_eq!(attachment.uri.as_str(), uri.as_str());
+                assert_eq!(attachment.language, LanguageId::TypeScript);
                 assert_eq!(session.lsp_status, LspStatus::Inactive);
-                assert!(!session.lsp_retry_armed);
-                assert!(session.lsp_restart.is_none());
+                assert!(session.lsp_attachment().is_none());
+                assert!(
+                    session.detach_lsp(cx).is_none(),
+                    "detaching twice is a no-op"
+                );
+                assert!(session.notice.is_some(), "the notice outlives the detach");
+                assert!(
+                    session.report_lsp_failure(LspStatus::Failed("again".into()), false, cx),
+                    "detaching clears the failure latch for the next attachment"
+                );
             });
         })
         .expect("the window is open");

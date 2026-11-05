@@ -747,6 +747,14 @@ impl Shell {
             async move {}
         })
         .detach();
+        // Project language servers exit through the same bounded, graceful
+        // shutdown a project switch uses.
+        let lsp_owner = project.downgrade();
+        App::on_app_quit(cx, move |cx| {
+            let _ = lsp_owner.update(cx, |project, cx| project.shutdown_lsp(cx));
+            async move {}
+        })
+        .detach();
         let focus = cx.focus_handle().tab_stop(true);
         focus.focus(window, cx);
         let updates = update::CapabilityState::detect();

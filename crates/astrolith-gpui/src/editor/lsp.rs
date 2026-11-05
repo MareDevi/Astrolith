@@ -15,8 +15,8 @@ use std::{
 };
 
 use astrolith_lsp::{
-    Client, ClientHandle, LanguageId, code_action_params, completion_params, convert_positions,
-    definition_params, hover_params, methods, uri_from_path, utf16_position_to_char,
+    ClientHandle, code_action_params, completion_params, convert_positions, definition_params,
+    hover_params, methods, uri_from_path, utf16_position_to_char,
 };
 use gpui_kit::{
     App, AppContext as _, BackgroundExecutor, Entity, SharedString, Task, Window,
@@ -30,25 +30,6 @@ use lsp_types::{
     CodeAction, CodeActionOrCommand, CompletionContext, CompletionResponse, GotoDefinitionResponse,
     Hover, LocationLink, WorkspaceEdit,
 };
-
-/// One running server bound to one open build-mode document.
-pub(crate) struct LspState {
-    /// Keeps the process and protocol loop alive for as long as the session.
-    pub _client: Client,
-    pub handle: ClientHandle,
-    pub uri: lsp_types::Uri,
-    pub language: LanguageId,
-}
-
-impl LspState {
-    pub fn open(&self, text: String) {
-        self.handle.open(self.uri.clone(), self.language, text);
-    }
-
-    pub fn close(&self) {
-        self.handle.close(self.uri.clone());
-    }
-}
 
 /// How long a server that acknowledged `shutdown` gets to exit on its own.
 pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
@@ -123,10 +104,9 @@ pub(crate) fn install(
     editor: &Entity<EditorState>,
     handle: ClientHandle,
     uri: lsp_types::Uri,
-    capabilities: &lsp_types::ServerCapabilities,
+    support: ProviderSupport,
     cx: &mut App,
 ) {
-    let support = ProviderSupport::from_capabilities(capabilities);
     editor.update(cx, |editor, cx| {
         let provider = Rc::new(LspProvider {
             handle: handle.clone(),
@@ -595,7 +575,7 @@ mod tests {
         let (client, _peer) = runtime.block_on(async {
             let (client_stream, peer) = tokio::io::duplex(1024);
             (
-                Client::connect(client_stream, uri("file:///project"))
+                astrolith_lsp::Client::connect(client_stream, uri("file:///project"))
                     .await
                     .expect("an in-memory client"),
                 peer,
@@ -612,18 +592,12 @@ mod tests {
         });
         let editor = editor_slot.expect("the editor is built with the window");
         let handle = client.handle();
-        let capabilities = lsp_types::ServerCapabilities {
-            hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+        let support = ProviderSupport {
+            hover: true,
             ..Default::default()
         };
         cx.update_window(window, |_, _, cx| {
-            install(
-                &editor,
-                handle,
-                uri("file:///project/file.ts"),
-                &capabilities,
-                cx,
-            );
+            install(&editor, handle, uri("file:///project/file.ts"), support, cx);
             let lsp = editor.read(cx).lsp();
             assert!(
                 lsp.hover_provider.is_some(),

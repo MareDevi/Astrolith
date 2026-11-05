@@ -257,9 +257,6 @@ impl ProjectWorkspace {
                     }
                     let copyedit = this.copyedit.clone();
                     session.update(cx, |session, cx| session.set_copyedit_config(copyedit, cx));
-                    if let Some(root) = this.project_root() {
-                        session.update(cx, |session, _| session.set_project_root(root));
-                    }
                     let key = path.clone();
                     this.watch_session(key.clone(), session.clone(), window, cx);
                     this.sessions.insert(key.clone(), session.clone());
@@ -276,6 +273,7 @@ impl ProjectWorkspace {
                     session.update(cx, |session, cx| {
                         session.set_source_view(source_view, window, cx)
                     });
+                    this.sync_lsp(cx);
                 }
                 tracing::info!(restored, conflicts, "recovered unsaved documents");
                 this.status = if conflicts == 0 {

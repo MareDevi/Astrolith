@@ -78,11 +78,13 @@ use std::{
 
 mod entry_operations;
 mod load;
+mod lsp;
 mod recovery;
 mod save;
 mod watch;
 
 use entry_operations::PendingCreate;
+use lsp::LspRegistry;
 use watch::ServiceWatcher;
 
 use save::PendingAfterSave;
@@ -842,6 +844,11 @@ pub(crate) struct ProjectWorkspace {
     data_references_task: Option<Task<()>>,
     /// Writing modes applied to every retained session.
     writing: WritingModes,
+    /// Language servers shared by every Build document of the open project.
+    lsp: LspRegistry,
+    /// Test seam replacing process discovery and spawning.
+    #[cfg(test)]
+    lsp_start_hook: Option<Arc<lsp::LspStartHook>>,
     /// Build shows complete source in the active session's editor.
     source_view: bool,
     /// Shell view state mirrored for one authoritative availability value.
@@ -1081,6 +1088,9 @@ impl ProjectWorkspace {
             data_references: BTreeMap::new(),
             data_references_task: None,
             writing: WritingModes::default(),
+            lsp: LspRegistry::default(),
+            #[cfg(test)]
+            lsp_start_hook: None,
             source_view: false,
             view_sidebar: true,
             view_inspector: true,
@@ -2455,6 +2465,9 @@ impl ProjectWorkspace {
 
     fn open_project(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         tracing::info!(root = %root.display(), "opening Astro project");
+        // Every server of the outgoing project is generation-scoped: give each
+        // one bounded graceful exit before the new generation replaces them.
+        self.shutdown_lsp(cx);
         self.cancellation.cancel();
         self.cancellation = Cancellation::default();
         let Some(next) = self.generation.checked_add(1) else {
@@ -2690,12 +2703,8 @@ impl ProjectWorkspace {
         {
             self.save_path(outgoing, SaveKind::Automatic, window, cx);
         }
-        // Only the visible Build document keeps a language server process.
-        if let Some(outgoing) = self.active.clone().filter(|outgoing| outgoing != path)
-            && let Some(session) = self.sessions.get(&outgoing).cloned()
-        {
-            session.update(cx, |session, cx| session.suspend_lsp(cx));
-        }
+        // Only the visible Build document keeps a document open on the
+        // project's server; the process itself outlives the switch.
         self.active = Some(path.to_owned());
         self.focus_collection_for(path, cx);
         let source_view = self.source_view;
@@ -2703,6 +2712,7 @@ impl ProjectWorkspace {
             session.set_source_view(source_view, window, cx)
         });
         self.install(path, session, cx);
+        self.sync_lsp(cx);
         self.refresh_entry_selection(cx);
         self.document.read(cx).focus_handle(cx).focus(window, cx);
     }
@@ -2833,6 +2843,10 @@ impl ProjectWorkspace {
             task.detach();
         }
         tracing::debug!(path = %path.display(), "closing a retained document");
+        if let Some(session) = self.sessions.get(path).cloned() {
+            // The server keeps running; only this document leaves it.
+            self.detach_lsp_document(session, cx);
+        }
         self.save_coordinator.forget(path);
         self.save_tasks.remove(path);
         self.sessions.remove(path);
@@ -2851,6 +2865,7 @@ impl ProjectWorkspace {
     }
     pub fn guard_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.has_dirty(cx) {
+            self.shutdown_lsp(cx);
             return true;
         }
         if !window.has_active_dialog(cx) {
@@ -2871,6 +2886,7 @@ impl ProjectWorkspace {
                                     task.detach();
                                 }
                                 this.pending_quit = false;
+                                this.shutdown_lsp(cx);
                                 this.sessions.clear();
                             });
                             window.close_dialog(cx);window.remove_window();
@@ -2926,6 +2942,7 @@ impl ProjectWorkspace {
             return;
         }
         self.pending_quit = false;
+        self.shutdown_lsp(cx);
         window.remove_window();
     }
 }
@@ -3343,14 +3360,17 @@ impl ProjectWorkspace {
             browser.set_active(active, cx);
         });
         let Some(path) = self.active.clone() else {
+            self.sync_lsp(cx);
             return;
         };
         let Some(session) = self.sessions.get(&path).cloned() else {
+            self.sync_lsp(cx);
             return;
         };
         session.update(cx, |session, cx| {
             session.set_source_view(source, window, cx)
         });
+        self.sync_lsp(cx);
     }
 
     /// Apply the persisted writing modes after the shell replaces preferences.
