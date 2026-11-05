@@ -20,7 +20,7 @@
 | 浮层 | pinned `gpui-component/src/popover.rs` 与 `gpui-base/src/popover.rs` | 已核对 controlled `open`、`on_open_change`、`PopoverState`、outside dismissal、焦点恢复；嵌套 Select/DatePicker 仍需交互验证 |
 | 编辑器 | pinned `gpui-base/src/input/editor/`、`input/base/state.rs` | 行号/折叠/诊断接口存在，但应用当前 Writer 关闭代码辅助；API 存在不等于已集成 LSP |
 | Astro 高亮 | pinned Kit Cargo features 有 `tree-sitter-astro` | Build 已显式启用 astro/typescript/tsx/javascript/css/html/svelte/toml/yaml/markdown grammar；Astro injection 依赖的 html/css/js/ts grammar 同时启用 |
-| LSP 客户端 | 本地 crate `astrolith-lsp`：stdio JSON-RPC、Content-Length framing、initialize/didOpen/didChange/didClose、诊断推送与 completion/hover/definition/codeAction 请求 | 仅服务 Build 的完整源；项目内 `node_modules/.bin` 优先发现服务器，不自动安装；GUI provider 只经异步 Task 访问 |
+| LSP 客户端 | 本地 crate `astrolith-lsp`：stdio JSON-RPC、Content-Length framing、initialize/didOpen/didChange/didClose、诊断推送与 completion/hover/definition/codeAction 请求 | 仅服务 Build 的完整源；项目内 `node_modules/.bin` 优先发现服务器，不自动安装；GUI provider 只经异步 Task 访问；每个项目代际按语言共享一个服务器进程（`project_discovery/lsp.rs`），Build 切换标签只 didOpen/didClose，退出或切换项目时按 2 s 宽限关闭 |
 
 本机 pinned source 位于 Cargo registry 的 `gpui-kit-0.8.1`、`gpui-component-0.8.1`、`gpui-base-0.8.1`；可移植审查应通过当前 `CARGO_HOME/registry/src` 定位，不硬编码开发者绝对路径。
 Context7 已 resolve `/longbridge/gpui-kit` 并查询 retained state / Root / overlay focus 文档；当前文档仅为辅证，安装源码优先。参考 [Coding Guides](https://gpui-kit.com/docs/coding-guides.md) 与 [Design Guides](https://gpui-kit.com/docs/design-guides.md)。
