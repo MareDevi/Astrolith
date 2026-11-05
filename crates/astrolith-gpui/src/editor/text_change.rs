@@ -1,15 +1,15 @@
-//! Byte-coordinate mapping while a rich snapshot is being parsed off-thread.
+//! Chunk-wise text changes and coordinates between retained rope snapshots.
 
 use gpui_kit::component::input::Rope;
 use std::ops::Range;
 
 /// One conservative replacement between the displayed and latest snapshots.
 /// Source ranges stay in UTF-8 bytes, including composition text.
-pub(super) struct PendingEdit {
-    old: Range<usize>,
-    new: Range<usize>,
+pub(super) struct TextChange {
+    pub(super) old: Range<usize>,
+    pub(super) new: Range<usize>,
 }
-impl PendingEdit {
+impl TextChange {
     pub(super) fn between(before: &Rope, after: &Rope) -> Option<Self> {
         let mut prefix = common_bytes(before.chunks(), after.chunks(), false, usize::MAX);
         if prefix == before.len() && prefix == after.len() {
@@ -115,7 +115,7 @@ mod tests {
         let mut after = before.clone();
         after.remove(5..10);
         after.insert(5, "日本🦀");
-        let edit = PendingEdit::between(&before, &after).unwrap();
+        let edit = TextChange::between(&before, &after).unwrap();
         assert_eq!(edit.old, 5..10);
         assert_eq!(edit.new, 5..15);
         assert_eq!(edit.to_current(3), Some(3));
@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(edit.to_current(11), Some(16));
         assert_eq!(edit.to_parsed(9), 5);
         assert_eq!(edit.to_parsed(16), 11);
-        assert!(PendingEdit::between(&before, &before.clone()).is_none());
+        assert!(TextChange::between(&before, &before.clone()).is_none());
     }
 
     #[test]
@@ -137,7 +137,7 @@ mod tests {
             .find(|&ix| text.is_char_boundary(ix))
             .unwrap();
         after.insert(at, "日本語");
-        let edit = PendingEdit::between(&before, &after).unwrap();
+        let edit = TextChange::between(&before, &after).unwrap();
         assert_eq!(edit.old, at..at);
         assert_eq!(edit.new, at..at + "日本語".len());
         assert_eq!(edit.to_current(before.len()), Some(after.len()));

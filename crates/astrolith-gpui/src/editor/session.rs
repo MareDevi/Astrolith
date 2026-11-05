@@ -3,7 +3,7 @@ use std::{ops::Range, path::PathBuf, time::Instant};
 
 use astrolith_document::{
     DocumentBuffer, DocumentIdentity, DocumentKind, DocumentRevision, FormatCommand, FormatOutcome,
-    ProjectionSegment, TextEdit, TokenSummary, WriterProjection, apply_visible_edit, diff_visible,
+    ProjectionSegment, TextEdit, TokenSummary, WriterProjection, apply_visible_edit,
     format_document, map_visible_offset, project_writer, token_summary,
 };
 use astrolith_lsp::{ClientHandle, LanguageId};
@@ -20,6 +20,7 @@ use gpui_kit::{
 use crate::editor::component_builder::snippets::PreparedInsertion;
 use crate::editor::lsp::ProviderSupport;
 
+use super::text_change::TextChange;
 use crate::editor::copyedit::{CopyeditConfig, CopyeditPresentation, DEBOUNCE};
 use crate::editor::formatting::external_url;
 use crate::editor::writer_surface::WriterSurface;
@@ -38,6 +39,8 @@ pub(crate) struct DocumentSession {
     /// A selection or mode change cannot create a text edit. Avoid scanning an
     /// unchanged rope at save, command and mode boundaries.
     absorbed_text: Option<(gpui_kit::EntityId, u64)>,
+    /// Previous absorbed input snapshot, used to find only the changed bytes.
+    absorbed_writer_text: Rope,
     /// Rendered writing surface; the editor remains its input model.
     pub(crate) writer: Entity<WriterSurface>,
     /// Authoritative complete source: frontmatter and MDX imports included.
@@ -240,10 +243,10 @@ impl DocumentSession {
 
     /// Bytes this session retains for its document representations.
     ///
-    /// The baseline and current source are independent `String`s even when the
-    /// document is unedited, the writer projection is its own visible buffer, and
-    /// both input models keep rope copies once Build is opened. Count each
-    /// representation once, including the inactive presentation cache.
+    /// Count logical baseline/current rope sizes conservatively even when they
+    /// share chunks. The writer projection and both retained input models also
+    /// count toward load admission; this is text-size accounting, not a complete
+    /// measurement of allocator or rendered-geometry overhead.
     pub(crate) fn retained_bytes(&self, cx: &App) -> usize {
         self.buffer.original_len()
             + self.buffer.len()
@@ -434,6 +437,7 @@ impl DocumentSession {
                 cx.stop_propagation();
             }
         });
+        let absorbed_writer_text = editor.read(cx).text().clone();
         Self {
             writer_editor: editor.clone(),
             source_editor: None,
@@ -441,6 +445,7 @@ impl DocumentSession {
             source_revision: None,
             source_subscriptions: Vec::new(),
             absorbed_text: None,
+            absorbed_writer_text,
             editor,
             writer,
             buffer,
@@ -493,6 +498,9 @@ impl DocumentSession {
             return;
         }
         if self.origin {
+            if !self.source_view {
+                self.absorbed_writer_text = self.editor.read(cx).text().clone();
+            }
             // This session's own projection rewrite; the buffer is already
             // authoritative for exactly this text.
             self.origin = false;
@@ -1567,78 +1575,81 @@ impl DocumentSession {
             // mapped from it until a rebuild resynchronises it.
             return;
         }
-        // Absorb runs at every save and history boundary, not only on a
-        // delivered change. Compare the editor rope with the projection first
-        // so an unchanged document never allocates a copy of itself.
-        let unchanged = {
-            let editor = self.editor.read(cx);
-            let rope = editor.text();
-            rope.len() == self.projection.visible.len()
-                && rope_matches(rope, &self.projection.visible)
-        };
-        if unchanged {
+        let visible = self.editor.read(cx).text().clone();
+        // Projection replacement (reloads, recovery and synthetic layouts)
+        // can precede delivery of its own input event. Such an event is a sync,
+        // not an edit to the authoritative source.
+        if visible == self.projection.visible.as_str() {
+            self.absorbed_writer_text = visible;
             return;
         }
-        let visible = self.editor.read(cx).text().to_string();
+        let previous = if self.absorbed_writer_text == self.projection.visible.as_str() {
+            self.absorbed_writer_text.clone()
+        } else {
+            Rope::from_str(&self.projection.visible)
+        };
+        let Some(change) = TextChange::between(&previous, &visible) else {
+            return;
+        };
+        let replacement = visible.slice(change.new.clone()).to_string();
         let selection_before = self.last_selection.clone();
         let selection_after =
             self.projection_range_to_source(self.editor.read(cx).selected_range());
-        let edit = diff_visible(&self.projection.visible, &visible);
         let before = self.buffer.text_snapshot();
-        let mut recorded_splice = None;
-        // The delivered change is one contiguous visible edit; map that range
-        // through the projection and splice the authoritative source in place.
-        // Anything else keeps the whole-document mapping as the fallback.
-        let mut spliced = false;
-        if let [replacement] = edit.replacements.as_slice()
-            && let Ok(source_range) = self.projection.map_visible_range(&replacement.range)
-        {
+        let mut projected = None;
+        if let Ok(source_range) = self.projection.map_visible_range(&change.old) {
             let removed = before.slice(source_range.clone()).to_string();
-            spliced = self
-                .buffer
-                .splice_text(source_range.clone(), &replacement.replacement)
-                .is_ok();
-            if spliced {
-                recorded_splice = Some((source_range, removed, replacement.replacement.clone()));
+            if let Err(error) = self.buffer.splice_text(source_range.clone(), &replacement) {
+                self.refuse(&error.to_string());
+                return;
             }
+            self.history.record_splice(
+                source_range,
+                removed,
+                replacement.clone(),
+                selection_before.clone(),
+                selection_after.clone(),
+                intent,
+            );
+            // Keep the projection allocation; only move the tail of this local
+            // edit. Parser/string interoperability must not copy the whole body
+            // merely to renew two source-mapping segments.
+            let mut text = std::mem::take(&mut self.projection.visible);
+            text.replace_range(change.old.clone(), &replacement);
+            projected = Some(text);
         }
-        if !spliced {
-            match apply_visible_edit(&before.to_string(), &self.projection, edit) {
-                Ok(source) => {
-                    if let Err(error) = self.buffer.apply_text(source) {
+        let text = match projected {
+            Some(text) => text,
+            None => {
+                // Empty or synthetic projections still use the validated full
+                // mapping boundary; ordinary typing never enters this path.
+                let edit = TextEdit::replace(change.old, replacement);
+                match apply_visible_edit(&before.to_string(), &self.projection, edit) {
+                    Ok(source) => {
+                        if let Err(error) = self.buffer.apply_text(source) {
+                            self.refuse(&error.to_string());
+                            return;
+                        }
+                    }
+                    Err(error) => {
                         self.refuse(&error.to_string());
                         return;
                     }
                 }
-                // Fail closed: the complete source is untouched and the rejected
-                // text is never guessed into it.
-                Err(error) => {
-                    self.refuse(&error.to_string());
-                    return;
-                }
+                self.history.record(
+                    &before.to_string(),
+                    self.buffer.current_text(),
+                    selection_before,
+                    selection_after.clone(),
+                    intent,
+                );
+                visible.to_string()
             }
-        }
-        if let Some((range, removed, inserted)) = recorded_splice {
-            self.history.record_splice(
-                range,
-                removed,
-                inserted,
-                selection_before,
-                selection_after.clone(),
-                intent,
-            );
-        } else {
-            self.history.record(
-                &before.to_string(),
-                self.buffer.current_text(),
-                selection_before,
-                selection_after.clone(),
-                intent,
-            );
-        }
-        match self.projection.renew_visible(visible) {
+        };
+        match self.projection.renew_visible(text) {
             Ok(projection) => {
                 self.projection = projection;
+                self.absorbed_writer_text = visible;
                 self.presentation_dirty = true;
             }
             Err(error) => self.refuse(&error.to_string()),
@@ -1757,6 +1768,9 @@ impl DocumentSession {
             self.source_revision = Some(revision);
         } else {
             self.writer_revision = revision;
+        }
+        if !source {
+            self.absorbed_writer_text = self.editor.read(cx).text().clone();
         }
         self.last_selection = source_selection;
         self.refresh_copyedit(cx);
@@ -2131,6 +2145,7 @@ impl DocumentSession {
                 editor.set_selected_range(caret..caret, cx);
             });
         }
+        self.absorbed_writer_text = self.editor.read(cx).text().clone();
         // The editor text now matches the projection again, so edits are safe to
         // absorb.
         self.refused = false;
@@ -2311,21 +2326,6 @@ fn source_diff(before: &str, after: &str) -> Option<(Range<usize>, String, Strin
 ///
 /// The editor stores a rope, so an unchanged document can be compared without
 /// materialising it into a `String`; only a real edit is copied out.
-fn rope_matches(rope: &gpui_kit::base::input::Rope, text: &str) -> bool {
-    if rope.len() != text.len() {
-        return false;
-    }
-    let mut offset = 0;
-    for chunk in rope.chunks() {
-        let end = offset + chunk.len();
-        if text[offset..end] != *chunk {
-            return false;
-        }
-        offset = end;
-    }
-    true
-}
-
 fn clamp_range(range: Range<usize>, length: usize) -> Range<usize> {
     let start = range.start.min(length);
     let end = range.end.min(length);
@@ -2476,6 +2476,52 @@ mod tests {
             window,
             session.expect("the session is built with the window"),
         )
+    }
+
+    #[gpui_kit::test]
+    fn writing_splice_reuses_visible_storage_and_keeps_hidden_source_undoable(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let body = "中文🦀 ordinary words.\r\n\r\n".repeat(2_000);
+        let source =
+            format!("---\r\ntitle: Exact\r\n---\r\nimport Card from './Card.astro';\r\n\r\n{body}");
+        let (handle, session) = mounted_session(cx, "entry.mdx", &source);
+        let (pointer, snapshot, at) = session.update(cx, |session, _| {
+            session.projection.visible.reserve(1_024);
+            let at = session.projection.visible.find("ordinary").unwrap();
+            (
+                session.projection.visible.as_ptr() as usize,
+                session.buffer.text_snapshot(),
+                at,
+            )
+        });
+        cx.update_window(handle, |_, window, cx| {
+            let editor = session.read(cx).editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(at..at + "ordinary".len(), cx);
+                editor.replace("日本語", window, cx);
+            });
+        })
+        .unwrap();
+        session.read_with(cx, |session, _| {
+            assert_eq!(
+                session.projection.visible.as_ptr() as usize,
+                pointer,
+                "a local edit must not replace the whole visible allocation"
+            );
+            assert_eq!(
+                session.buffer.current_text(),
+                source.replacen("ordinary", "日本語", 1)
+            );
+            assert_eq!(snapshot, source);
+        });
+        cx.update_window(handle, |_, window, cx| {
+            session.update(cx, |session, cx| assert!(session.undo_source(window, cx)));
+        })
+        .unwrap();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.buffer.current_text(), source)
+        });
     }
 
     /// A handle for a shared server the test never talks to.

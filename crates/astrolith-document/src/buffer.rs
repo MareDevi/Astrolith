@@ -207,10 +207,11 @@ impl Clone for DocumentBuffer {
 impl DocumentBuffer {
     /// Create a clean buffer at revision zero from loaded source text.
     pub fn new(identity: DocumentIdentity, source: String) -> Self {
+        let source = Rope::from_str(&source);
         Self {
             identity,
-            original_text: Rope::from_str(&source),
-            current_text: Rope::from_str(&source),
+            original_text: source.clone(),
+            current_text: source,
             original_flat: OnceLock::new(),
             current_flat: OnceLock::new(),
             revision: DocumentRevision::INITIAL,
@@ -233,10 +234,16 @@ impl DocumentBuffer {
         current: String,
         revision: DocumentRevision,
     ) -> Self {
+        let original = Rope::from_str(&original);
+        let current = if original == current.as_str() {
+            original.clone()
+        } else {
+            Rope::from_str(&current)
+        };
         Self {
             identity,
-            original_text: Rope::from_str(&original),
-            current_text: Rope::from_str(&current),
+            original_text: original,
+            current_text: current,
             original_flat: OnceLock::new(),
             current_flat: OnceLock::new(),
             revision,
@@ -309,6 +316,9 @@ impl DocumentBuffer {
     /// Returns [`DocumentError::RevisionOverflow`] without changing the buffer
     /// when changed text would exceed [`DocumentRevision::MAX`].
     pub fn apply_text(&mut self, text: String) -> Result<DocumentRevision, DocumentError> {
+        if self.current_text == text {
+            return Ok(self.revision);
+        }
         self.apply_snapshot(Rope::from_str(&text))
     }
 

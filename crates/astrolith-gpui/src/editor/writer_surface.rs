@@ -12,10 +12,9 @@
 //! geometry for hit-testing and caret placement.
 
 mod input;
-mod snapshot;
 
+use super::text_change::TextChange;
 use gpui_kit::component::input::Rope;
-use snapshot::PendingEdit;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
@@ -56,7 +55,7 @@ pub(crate) struct WriterSurface {
     parsed_source: Rope,
     parsed_text: String,
     requested_revision: Option<u64>,
-    pending_edit: Option<PendingEdit>,
+    pending_edit: Option<TextChange>,
     pending_snapshot: Option<(u64, Rope)>,
     parse_task: Option<gpui_kit::Task<()>>,
     parse_cancel: Arc<AtomicBool>,
@@ -157,7 +156,7 @@ impl WriterSurface {
         }
         self.requested_revision = Some(revision);
         self.parse_cancel.store(true, Ordering::Relaxed);
-        self.pending_edit = PendingEdit::between(&self.parsed_source, &source);
+        self.pending_edit = TextChange::between(&self.parsed_source, &source);
         self.source = source.clone();
         self.pending_snapshot = Some((revision, source));
         self.start_parse(cx);
