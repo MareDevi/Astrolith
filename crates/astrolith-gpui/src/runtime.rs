@@ -1,5 +1,6 @@
 //! Application-owned service execution; UI entities never cross this boundary.
 use gpui_kit::{App, AppContext, Global, Task};
+
 use std::{future::Future, io, sync::Arc};
 use tokio::{
     runtime::{Builder, Handle, Runtime},
@@ -7,12 +8,18 @@ use tokio::{
     task::AbortHandle,
 };
 
-struct ServiceRuntime {
+pub(crate) struct ServiceRuntime {
     owned: Option<Runtime>,
     handle: Handle,
     blocking_slots: Arc<Semaphore>,
 }
 impl Global for ServiceRuntime {}
+
+impl ServiceRuntime {
+    pub(crate) fn handle(&self) -> &Handle {
+        &self.handle
+    }
+}
 
 impl Drop for ServiceRuntime {
     fn drop(&mut self) {
@@ -45,6 +52,9 @@ pub(crate) fn init(cx: &mut App) -> io::Result<()> {
             blocking_jobs = 2,
             "application service runtime started"
         );
+        // Remote document images go through GPUI's asset cache, which uses
+        // this client; the platform default rejects every request.
+        crate::http::install(cx);
     }
     Ok(())
 }

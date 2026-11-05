@@ -7,6 +7,7 @@ mod file;
 mod file_browser;
 pub mod frontmatter;
 mod help;
+mod http;
 mod layout;
 mod preferences;
 mod preview;

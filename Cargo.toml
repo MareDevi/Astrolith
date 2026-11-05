@@ -27,6 +27,7 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt", "js
 tracing-appender = "=0.2.5"
 trash = "=5.2.9"
 chrono = "=0.4.45"
+futures = "=0.3.34"
 image = { version = "=0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 ureq = "=3.5.1"
 ring = "=0.17.14"

@@ -335,6 +335,7 @@ dependencies = [
  "astrolith-workspace",
  "base64 0.22.1",
  "chrono",
+ "futures",
  "gpui-kit",
  "gpui-webview",
  "image",
