@@ -212,6 +212,60 @@ fn preview_image_path(root: &Path, document: &Path, raw: &str) -> Option<PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::test::TestWindowExt;
+
+    #[gpui_kit::test]
+    async fn preview_measures_visible_blocks_and_keeps_the_end_reachable_after_resize(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let source = "A paragraph with **bold** and `code`.\n\n".repeat(2_000);
+        let (handle, preview) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |_, cx| {
+                cx.new(RenderedDocument::new)
+            })
+            .unwrap()
+        });
+        preview.update(cx, |preview, cx| {
+            preview.set_document(None, None, Some((DocumentKind::Markdown, &source)), cx);
+        });
+        let state = preview.read_with(cx, |preview, _| preview.state.clone());
+        cx.condition(&state, |state, _| !state.rendered_text().is_empty())
+            .await;
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        let list = state.read_with(cx, |state, _| state.list_state().clone());
+        let last = list.item_count() - 1;
+        assert!(last > 1_000);
+        assert!(
+            list.bounds_for_item(last).is_none(),
+            "first layout must not measure the document tail"
+        );
+        assert!(
+            list.max_offset_for_scrollbar().y > gpui_kit::px(0.),
+            "estimated blocks keep a usable scroll range"
+        );
+        cx.simulate_window_resize(
+            handle,
+            gpui_kit::size(gpui_kit::px(900.), gpui_kit::px(700.)),
+        );
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        assert!(
+            list.bounds_for_item(last).is_none(),
+            "resize must not measure the document tail"
+        );
+        assert!(list.max_offset_for_scrollbar().y > gpui_kit::px(0.));
+        list.scroll_to_reveal_item(last);
+        preview.update(cx, |_, cx| cx.notify());
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        assert!(
+            list.bounds_for_item(last).is_some(),
+            "the last paragraph remains reachable"
+        );
+    }
 
     #[test]
     fn images_resolve_from_the_document_or_astro_public() {
