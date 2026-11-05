@@ -12,8 +12,8 @@ use std::{
 };
 use yaml_rust2::{
     Yaml, YamlLoader,
-    parser::{Event, Parser},
-    scanner::TScalarStyle,
+    parser::{Event, MarkedEventReceiver, Parser},
+    scanner::{Marker, TScalarStyle},
 };
 
 use crate::slug_ranges::GITHUB_SLUGGER_ALLOWED;
@@ -376,13 +376,14 @@ pub fn scan_collections(
                 }
 
                 let (source, absolute_source) = source_path(&root, &path)?;
+                let modified = metadata.modified().ok();
                 let (declared_slug, mut metadata) = match kind {
                     EntryKind::Yaml => data_metadata(&absolute_source, cancellation)?,
                     EntryKind::Markdown | EntryKind::Mdx => {
                         frontmatter_metadata(&absolute_source, cancellation)?
                     }
                 };
-                metadata.set_modified(metadata_modified(&path));
+                metadata.set_modified(modified);
                 let slug = declared_slug.unwrap_or_else(|| default_logical_id(relative_to_base));
                 let id = EntryId::new(collection.clone(), slug)
                     .map_err(|error| WorkspaceError::Model(error.to_string()))?;
@@ -537,15 +538,8 @@ fn frontmatter_metadata(
         return Ok((None, EntryMetadata::default()));
     };
     check_cancelled(cancellation)?;
-    validate_yaml_events(path, &frontmatter, cancellation)?;
-    check_cancelled(cancellation)?;
-    let documents = YamlLoader::load_from_str(&frontmatter).map_err(|error| {
-        WorkspaceError::InvalidFrontmatter {
-            path: path.to_path_buf(),
-            message: error.to_string(),
-        }
-    })?;
-    slug_and_metadata(path, &documents, "frontmatter")
+    let documents = load_yaml(path, &frontmatter, cancellation)?;
+    slug_and_metadata(path, documents.documents(), "frontmatter")
 }
 
 /// Derive the slug override and scalar metadata from a whole YAML data entry.
@@ -559,14 +553,62 @@ fn data_metadata(
 ) -> Result<(Option<String>, EntryMetadata), WorkspaceError> {
     check_cancelled(cancellation)?;
     let source = read_data_file(path)?;
-    validate_yaml_events(path, &source, cancellation)?;
-    check_cancelled(cancellation)?;
-    let documents =
-        YamlLoader::load_from_str(&source).map_err(|error| WorkspaceError::InvalidFrontmatter {
+    let documents = load_yaml(path, &source, cancellation)?;
+    slug_and_metadata(path, documents.documents(), "YAML data")
+}
+
+/// Loaded YAML documents for one entry.
+///
+/// The normal path returns the loader that composed the documents while the
+/// safety scan consumed the same token stream. The error-path retry returns its
+/// own documents so a loader-only rejection keeps its exact diagnostic.
+enum LoadedYaml {
+    Loader(YamlLoader),
+    Documents(Vec<Yaml>),
+}
+
+impl LoadedYaml {
+    fn documents(&self) -> &[Yaml] {
+        match self {
+            Self::Loader(loader) => loader.documents(),
+            Self::Documents(documents) => documents,
+        }
+    }
+}
+
+/// Parse `source` once for both the safety checks and the composed documents.
+///
+/// [`YamlScan`] validates every event and forwards the same stream to a
+/// [`YamlLoader`], so an entry costs one parse instead of one validation pass
+/// plus one load. The loader reports duplicate mapping keys only through its
+/// private error field, so that error path re-parses to recover the exact
+/// diagnostic; successful documents never parse twice.
+fn load_yaml(
+    path: &Path,
+    source: &str,
+    cancellation: &Cancellation,
+) -> Result<LoadedYaml, WorkspaceError> {
+    let mut parser = Parser::new_from_str(source);
+    let mut scan = YamlScan::new(path, cancellation);
+    let parsed = parser.load(&mut scan, true);
+    if let Some(error) = scan.error {
+        return Err(error);
+    }
+    if let Err(error) = parsed {
+        return Err(WorkspaceError::InvalidFrontmatter {
             path: path.to_path_buf(),
             message: error.to_string(),
-        })?;
-    slug_and_metadata(path, &documents, "YAML data")
+        });
+    }
+    if scan.saw_document && scan.loader.documents().is_empty() {
+        return YamlLoader::load_from_str(source)
+            .map(LoadedYaml::Documents)
+            .map_err(|error| WorkspaceError::InvalidFrontmatter {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            });
+    }
+    Ok(LoadedYaml::Loader(scan.loader))
 }
 
 fn slug_and_metadata(
@@ -631,18 +673,8 @@ fn meta_value(value: &Yaml) -> Option<MetaValue> {
     }
 }
 
-fn metadata_modified(path: &Path) -> Option<std::time::SystemTime> {
-    fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-}
-
 fn read_data_file(path: &Path) -> Result<String, WorkspaceError> {
-    let canonical = fs::canonicalize(path).map_err(|source| WorkspaceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let file = File::open(&canonical).map_err(|source| WorkspaceError::Io {
+    let file = File::open(path).map_err(|source| WorkspaceError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -702,68 +734,78 @@ enum YamlContainer {
     Sequence,
 }
 
-fn validate_yaml_events(
-    path: &Path,
-    source: &str,
-    cancellation: &Cancellation,
-) -> Result<(), WorkspaceError> {
-    let mut parser = Parser::new_from_str(source);
-    let mut stack = Vec::new();
-    let mut documents = 0_usize;
-    let mut events = 0_usize;
+/// Validates frontmatter safety rules and composes the documents in one parse.
+struct YamlScan<'a> {
+    path: &'a Path,
+    cancellation: &'a Cancellation,
+    stack: Vec<YamlContainer>,
+    documents: usize,
+    events: usize,
+    saw_document: bool,
+    error: Option<WorkspaceError>,
+    loader: YamlLoader,
+}
 
-    loop {
-        events += 1;
-        if events > MAX_YAML_EVENTS {
+impl<'a> YamlScan<'a> {
+    fn new(path: &'a Path, cancellation: &'a Cancellation) -> Self {
+        Self {
+            path,
+            cancellation,
+            stack: Vec::new(),
+            documents: 0,
+            events: 0,
+            saw_document: false,
+            error: None,
+            loader: YamlLoader::default(),
+        }
+    }
+
+    fn validate(&mut self, event: &Event) -> Result<(), WorkspaceError> {
+        self.events += 1;
+        if self.events > MAX_YAML_EVENTS {
             return Err(WorkspaceError::InvalidFrontmatter {
-                path: path.to_path_buf(),
+                path: self.path.to_path_buf(),
                 message: format!("YAML frontmatter exceeds {MAX_YAML_EVENTS} parser events"),
             });
         }
-        if events.is_multiple_of(1024) {
-            check_cancelled(cancellation)?;
+        if self.events.is_multiple_of(1024) {
+            check_cancelled(self.cancellation)?;
         }
-        let (event, _) =
-            parser
-                .next_token()
-                .map_err(|error| WorkspaceError::InvalidFrontmatter {
-                    path: path.to_path_buf(),
-                    message: error.to_string(),
-                })?;
 
         match event {
-            Event::StreamEnd => break,
+            Event::StreamEnd => {}
             Event::DocumentStart => {
-                documents += 1;
-                if documents > 1 {
-                    return invalid_yaml(path, "multiple YAML documents are unsupported");
+                self.saw_document = true;
+                self.documents += 1;
+                if self.documents > 1 {
+                    return invalid_yaml(self.path, "multiple YAML documents are unsupported");
                 }
             }
-            Event::Alias(_) => return invalid_yaml(path, "YAML anchor/alias is unsupported"),
+            Event::Alias(_) => return invalid_yaml(self.path, "YAML anchor/alias is unsupported"),
             Event::Scalar(value, style, anchor, tag) => {
-                reject_yaml_attributes(path, anchor, tag.as_ref())?;
-                if let Some(YamlContainer::Mapping { position, root }) = stack.last_mut() {
+                reject_yaml_attributes(self.path, *anchor, tag.as_ref())?;
+                if let Some(YamlContainer::Mapping { position, root }) = self.stack.last_mut() {
                     match *position {
                         YamlMappingPosition::Key => {
-                            if style == TScalarStyle::Plain && value == "<<" {
-                                return invalid_yaml(path, "YAML merge keys are unsupported");
+                            if *style == TScalarStyle::Plain && value == "<<" {
+                                return invalid_yaml(self.path, "YAML merge keys are unsupported");
                             }
                             *position = YamlMappingPosition::Value {
                                 root_slug: *root && value == "slug",
                             };
                         }
                         YamlMappingPosition::Value { root_slug } => {
-                            if root_slug && style == TScalarStyle::Plain {
-                                if is_js_yaml_timestamp(&value) {
+                            if root_slug && *style == TScalarStyle::Plain {
+                                if is_js_yaml_timestamp(value) {
                                     return Err(WorkspaceError::UnsupportedSlug(format!(
                                         "implicit YAML timestamp slug in {} has JS Date semantics; refusing to interpret it as a string",
-                                        path.display()
+                                        self.path.display()
                                     )));
                                 }
-                                if is_ambiguous_plain_slug(&value) {
+                                if is_ambiguous_plain_slug(value) {
                                     return Err(WorkspaceError::UnsupportedSlug(format!(
                                         "ambiguous plain YAML slug in {} resolves differently in JS YAML; quote the slug to preserve string semantics",
-                                        path.display()
+                                        self.path.display()
                                     )));
                                 }
                             }
@@ -773,34 +815,43 @@ fn validate_yaml_events(
                 }
             }
             Event::SequenceStart(anchor, tag) => {
-                reject_yaml_attributes(path, anchor, tag.as_ref())?;
-                reject_complex_mapping_key(path, &stack)?;
-                stack.push(YamlContainer::Sequence);
+                reject_yaml_attributes(self.path, *anchor, tag.as_ref())?;
+                reject_complex_mapping_key(self.path, &self.stack)?;
+                self.stack.push(YamlContainer::Sequence);
             }
             Event::MappingStart(anchor, tag) => {
-                reject_yaml_attributes(path, anchor, tag.as_ref())?;
-                reject_complex_mapping_key(path, &stack)?;
-                stack.push(YamlContainer::Mapping {
+                reject_yaml_attributes(self.path, *anchor, tag.as_ref())?;
+                reject_complex_mapping_key(self.path, &self.stack)?;
+                let root = self.stack.is_empty();
+                self.stack.push(YamlContainer::Mapping {
                     position: YamlMappingPosition::Key,
-                    root: stack.is_empty(),
+                    root,
                 });
             }
             Event::SequenceEnd | Event::MappingEnd => {
-                if stack.pop().is_none() {
-                    return invalid_yaml(path, "unbalanced YAML container events");
+                if self.stack.pop().is_none() {
+                    return invalid_yaml(self.path, "unbalanced YAML container events");
                 }
-                if let Some(YamlContainer::Mapping { position, .. }) = stack.last_mut() {
+                if let Some(YamlContainer::Mapping { position, .. }) = self.stack.last_mut() {
                     *position = YamlMappingPosition::Key;
                 }
             }
             Event::Nothing | Event::StreamStart | Event::DocumentEnd => {}
         }
+        Ok(())
     }
+}
 
-    if !stack.is_empty() {
-        return invalid_yaml(path, "unbalanced YAML container events");
+impl MarkedEventReceiver for YamlScan<'_> {
+    fn on_event(&mut self, event: Event, mark: Marker) {
+        if self.error.is_some() {
+            return;
+        }
+        match self.validate(&event) {
+            Ok(()) => MarkedEventReceiver::on_event(&mut self.loader, event, mark),
+            Err(error) => self.error = Some(error),
+        }
     }
-    Ok(())
 }
 
 fn reject_yaml_attributes(
@@ -944,11 +995,7 @@ fn invalid_yaml<T>(path: &Path, message: &str) -> Result<T, WorkspaceError> {
 }
 
 fn read_frontmatter(path: &Path) -> Result<Option<String>, WorkspaceError> {
-    let canonical = fs::canonicalize(path).map_err(|source| WorkspaceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let file = File::open(&canonical).map_err(|source| WorkspaceError::Io {
+    let file = File::open(path).map_err(|source| WorkspaceError::Io {
         path: path.to_path_buf(),
         source,
     })?;

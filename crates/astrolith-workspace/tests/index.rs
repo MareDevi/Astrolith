@@ -655,3 +655,53 @@ fn ignored_directory_symlinks_do_not_abort_the_scan() {
         !source.contains("/.cache/") && !source.contains("/node_modules/")
     }));
 }
+
+#[test]
+fn single_parse_preserves_frontmatter_free_and_nested_entries() {
+    use astrolith_workspace::MetaValue;
+
+    let (temp, manifest) = project();
+    fs::write(
+        temp.path().join("src/posts/plain.md"),
+        "# Plain without frontmatter\n",
+    )
+    .unwrap();
+
+    let entries = scan_collections(&manifest, &Cancellation::default()).unwrap();
+    let entry = |source: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.entry().source().as_str() == source)
+            .unwrap_or_else(|| panic!("{source} must be indexed"))
+    };
+
+    let nested = entry("src/posts/guides/nested.md");
+    assert_eq!(
+        nested.entry().id().id(),
+        "guides/nested",
+        "nested sources keep their directory segments"
+    );
+    assert_eq!(
+        nested.metadata().field("title"),
+        Some(&MetaValue::String("Nested".to_owned()))
+    );
+    assert!(
+        nested.metadata().modified_unix_millis().is_some(),
+        "the entry timestamps come from the scan stat"
+    );
+    assert_eq!(
+        nested.absolute_source(),
+        fs::canonicalize(temp.path().join("src/posts/guides/nested.md")).unwrap()
+    );
+
+    let plain = entry("src/posts/plain.md");
+    assert_eq!(plain.entry().id().id(), "plain");
+    assert!(
+        plain.metadata().field("title").is_none(),
+        "a source without frontmatter has no metadata"
+    );
+    assert!(plain.metadata().modified_unix_millis().is_some());
+
+    let slugged = entry("src/posts/slugged.md");
+    assert_eq!(slugged.entry().id().id(), "stable-source-slug");
+}
