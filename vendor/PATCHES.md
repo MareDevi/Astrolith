@@ -26,6 +26,20 @@ Changes from the published sources:
   mounting the stock text element, plus text revision and caret visibility.
   Astrolith supplies native input geometry from its visible writing surface.
 
+- `gpui-base/src/text/node.rs`: combine overlapping marks within each child
+  and append disjoint child ranges; never rebuild every preceding child's
+  highlights when rendering a styled paragraph.
+- `gpui-base/src/text/inline_flow.rs`: index overlapping style and link ranges
+  once per item for repeated visual-line queries, preserving input order.
+- `gpui-base/src/input/editor/display_map/{text_wrapper,inline_line}.rs`:
+  bound unwrapped display rows at Unicode grapheme boundaries, without
+  inserting source newlines, and scan whitespace positions with a glyph cursor.
+- `gpui-base/src/input/base/{element,state}.rs`: shape visible display rows
+  and selection/IME endpoints; retain at most 256 shaped rows per input model,
+  keyed by text, full runs, font size and tab width. Bound longest-line
+  measurement to display rows. Keep a resolved focused caret visible on both
+  axes after a viewport shrinks; deliberate scrolling keeps ownership.
+
 The facade, public package versions, image/link handling and text source mapping
 remain unchanged. Application UI integration tests exercise first-frame and
 resize windowing plus reaching the final paragraph. Native development-profile

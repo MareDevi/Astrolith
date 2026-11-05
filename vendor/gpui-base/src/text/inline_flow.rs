@@ -1087,6 +1087,21 @@ fn layout_measured_flow(
         })
         .collect();
 
+    let highlight_indices: Vec<_> = items
+        .iter()
+        .map(|item| match item {
+            MeasureItem::Text { highlights, .. } => Some(RangeIndex::new(highlights)),
+            _ => None,
+        })
+        .collect();
+    let link_indices: Vec<_> = items
+        .iter()
+        .map(|item| match item {
+            MeasureItem::Text { links, .. } => Some(RangeIndex::new(links)),
+            _ => None,
+        })
+        .collect();
+
     for line_range in line_ranges {
         let mut line_fragments = Vec::new();
         let mut line_width = Pixels::ZERO;
@@ -1120,11 +1135,7 @@ fn layout_measured_flow(
             }
 
             match item {
-                MeasureItem::Text {
-                    text,
-                    links,
-                    highlights,
-                } => {
+                MeasureItem::Text { text, .. } => {
                     let local_start = line_range.start.max(item_start) - item_start;
                     let local_end = line_range.end.min(item_end) - item_start;
                     let sizes = &size_ranges[item_ix];
@@ -1140,12 +1151,16 @@ fn layout_measured_flow(
                             continue;
                         }
                         let subtext = SharedString::from(text[start..end].to_string());
-                        let mut highlights =
-                            slice_ranges(highlights, start, end, |range, style| {
-                                (range, style.clone())
-                            });
-                        let links =
-                            slice_ranges(links, start, end, |range, link| (range, link.clone()));
+                        let mut highlights = highlight_indices[item_ix].as_ref().unwrap().slice(
+                            start,
+                            end,
+                            |range, style| (range, style.clone()),
+                        );
+                        let links = link_indices[item_ix].as_ref().unwrap().slice(
+                            start,
+                            end,
+                            |range, link| (range, link.clone()),
+                        );
                         let runs = text_runs(subtext.len(), text_style, &highlights);
                         let segment_font_size = font_size * *scale;
                         let shaped_line =
@@ -1596,6 +1611,7 @@ fn shaped_spans(
                 MeasureItem::Text {
                     text, highlights, ..
                 } => {
+                    let highlight_index = RangeIndex::new(highlights);
                     let local_start = hard_line.start.max(item_start) - item_start;
                     let local_end = hard_line.end.min(item_end) - item_start;
                     for (segment, scale) in
@@ -1606,9 +1622,8 @@ fn shaped_spans(
                         if start >= end {
                             continue;
                         }
-                        let highlights = slice_ranges(highlights, start, end, |range, style| {
-                            (range, style.clone())
-                        });
+                        let highlights = highlight_index
+                            .slice(start, end, |range, style| (range, style.clone()));
                         let runs = text_runs(end - start, text_style, &highlights);
                         let line = Box::new(shape_line(
                             SharedString::from(text[start..end].to_string()),
@@ -1899,6 +1914,43 @@ fn plain_line_height(text_style: &TextStyle, rem_size: Pixels, window: &Window) 
 /// `FontMetrics::descent` exposed by `TextSystem::baseline_offset` here.
 fn centered_baseline(shaped_line: &ShapedLine, line_height: Pixels) -> Pixels {
     (line_height - shaped_line.ascent - shaped_line.descent) / 2. + shaped_line.ascent
+}
+
+/// Keeps arbitrary overlapping ranges correct while bounding repeated queries
+/// to the candidates that can intersect. Unsorted inputs retain their order.
+struct RangeIndex<'a, T> {
+    ranges: &'a [(Range<usize>, T)],
+    prefix_ends: Vec<usize>,
+    sorted: bool,
+}
+impl<'a, T> RangeIndex<'a, T> {
+    fn new(ranges: &'a [(Range<usize>, T)]) -> Self {
+        let mut end = 0;
+        let prefix_ends = ranges
+            .iter()
+            .map(|(range, _)| {
+                end = end.max(range.end);
+                end
+            })
+            .collect();
+        Self {
+            ranges,
+            prefix_ends,
+            sorted: ranges
+                .windows(2)
+                .all(|pair| pair[0].0.start <= pair[1].0.start),
+        }
+    }
+    fn slice<U>(&self, start: usize, end: usize, map: impl Fn(Range<usize>, &T) -> U) -> Vec<U> {
+        let ranges = if self.sorted {
+            let first = self.prefix_ends.partition_point(|&end| end <= start);
+            let last = self.ranges.partition_point(|(range, _)| range.start < end);
+            &self.ranges[first.min(last)..last]
+        } else {
+            self.ranges
+        };
+        slice_ranges(ranges, start, end, map)
+    }
 }
 
 pub(super) fn slice_ranges<T, U>(

@@ -461,6 +461,7 @@ pub struct InputBaseState<M: InputModeKind> {
     /// The marked range is the temporary insert text on IME typing.
     pub(super) ime_marked_range: Option<CursorSelection>,
     pub(super) last_layout: Option<LastLayout>,
+    pub(super) shaped_lines: std::cell::RefCell<Vec<super::element::CachedEditorLine>>,
     /// Fresh caret geometry stashed during prepaint for caret-anchored popups.
     ///
     /// Popups are positioned in their deferred prepaint, which runs after the
@@ -990,6 +991,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             number_max: None,
             mode: LayoutMode::default(),
             last_layout: None,
+            shaped_lines: Default::default(),
             prepaint_caret_geometry: None,
             last_bounds: None,
             revealed_viewport: None,

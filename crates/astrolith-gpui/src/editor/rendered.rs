@@ -215,6 +215,70 @@ mod tests {
     use gpui_kit::test::TestWindowExt;
 
     #[gpui_kit::test]
+    fn source_long_line_keeps_all_unicode_and_edits_at_the_end_after_resize(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::input::{Editor, EditorState};
+        use gpui_kit::{Focusable, IntoElement, Render, Styled};
+        struct SourceHost(gpui_kit::Entity<EditorState>);
+        impl Render for SourceHost {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                Editor::new(&self.0).size_full()
+            }
+        }
+        let source = "中文🦀 é العربية **bold** `code` ".repeat(1_000);
+        let (handle, host) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |window, cx| {
+                let editor = cx.new(|cx| {
+                    EditorState::new(window, cx)
+                        .language("markdown")
+                        .soft_wrap(false)
+                        .default_value(source.clone())
+                });
+                cx.new(|_| SourceHost(editor))
+            })
+            .unwrap()
+        });
+        let editor = host.read_with(cx, |host, _| host.0.clone());
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(source.len()..source.len(), cx);
+                window.focus(&editor.focus_handle(cx), cx);
+            });
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.input("终", cx);
+        })
+        .unwrap();
+        cx.simulate_window_resize(
+            handle,
+            gpui_kit::size(gpui_kit::px(600.), gpui_kit::px(500.)),
+        );
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            let editor = editor.read(cx);
+            assert_eq!(editor.value().as_ref(), format!("{source}终"));
+            assert_eq!(editor.cursor(), source.len() + "终".len());
+            let geometry = editor
+                .prepaint_caret_geometry()
+                .expect("visible native input caret");
+            let mut caret = geometry.cursor_bounds();
+            caret.origin.y += geometry.scroll_offset().y;
+            assert!(
+                editor.input_bounds().intersects(&caret),
+                "input {:?}, caret {:?}, scroll {:?}",
+                editor.input_bounds(),
+                caret,
+                editor.scroll_offset()
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     async fn preview_measures_visible_blocks_and_keeps_the_end_reachable_after_resize(
         cx: &mut gpui_kit::TestAppContext,
     ) {

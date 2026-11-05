@@ -42,6 +42,25 @@ impl InputLine {
             content: Content::Inline(fragments),
         }
     }
+    /// A forward cursor for increasing byte offsets. Unlike independent
+    /// lookups, this visits each glyph at most once, including bidi runs.
+    pub(crate) fn increasing_index_positions(&self) -> impl FnMut(usize) -> Pixels + '_ {
+        let mut glyphs = match &self.content {
+            Content::Text(line) => Some(line.runs.iter().flat_map(|run| &run.glyphs).peekable()),
+            Content::Inline(_) => None,
+        };
+        move |index| {
+            if let Some(glyphs) = &mut glyphs {
+                while glyphs.peek().is_some_and(|glyph| glyph.index < index) {
+                    glyphs.next();
+                }
+                glyphs.peek().map_or(self.width, |glyph| glyph.position.x)
+            } else {
+                self.x_for_index(index)
+            }
+        }
+    }
+
     pub(crate) fn x_for_index(&self, ix: usize) -> Pixels {
         match &self.content {
             Content::Text(line) => line.x_for_index(ix),

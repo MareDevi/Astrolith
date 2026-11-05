@@ -47,6 +47,53 @@ fn diagnostic_highlight_style(
     }
 }
 
+/// The editor owns a bounded glyph cache across hidden modes. Window text
+/// caches only span adjacent frames, so remounting otherwise shapes unchanged
+/// source again. Every shaping input (including IME/theme runs) is compared.
+pub(super) struct CachedEditorLine {
+    text: SharedString,
+    font_size: Pixels,
+    tab_stop: Pixels,
+    runs: Vec<TextRun>,
+    line: ShapedLine,
+}
+fn shape_editor_line<M: InputModeKind>(
+    state: &InputBaseState<M>,
+    text: SharedString,
+    font_size: Pixels,
+    runs: &[TextRun],
+    tab_stop: Pixels,
+    window: &Window,
+) -> ShapedLine {
+    let mut cache = state.shaped_lines.borrow_mut();
+    if let Some(index) = cache.iter().position(|entry| {
+        entry.text == text
+            && entry.font_size == font_size
+            && entry.tab_stop == tab_stop
+            && entry.runs == runs
+    }) {
+        let entry = cache.remove(index);
+        let line = entry.line.clone();
+        cache.push(entry);
+        return line;
+    }
+    let mut line = window
+        .text_system()
+        .shape_line(text.clone(), font_size, runs, None);
+    expand_tabs(&mut line, tab_stop);
+    if cache.len() == 256 {
+        cache.remove(0);
+    }
+    cache.push(CachedEditorLine {
+        text,
+        font_size,
+        tab_stop,
+        runs: runs.to_vec(),
+        line: line.clone(),
+    });
+    line
+}
+
 const BOTTOM_MARGIN_ROWS: usize = 3;
 pub(super) const RIGHT_MARGIN: Pixels = px(10.);
 pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(6.);
@@ -707,9 +754,11 @@ impl<M: InputModeKind> TextElement<M> {
                 let selection_changed = state.last_selected_range != Some(selected_range);
                 let auto_scrolling = state.auto_scroll.is_active();
                 if (selection_changed || reveal_on_resize) && !is_selected_all {
-                    // Resize-follow owns only vertical visibility. An unshaped
-                    // target has no reliable x; retain the existing x offset.
-                    if selection_changed {
+                    // Keep the focused caret visible on either axis when its
+                    // viewport shrinks; unchanged manual scrolling still wins.
+                    if selection_changed
+                        || (reveal_on_resize && visible_buffer_lines.contains(&cursor_row))
+                    {
                         // Right-aligned carets are clamped instead of scrolling.
                         let safety_margin = match last_layout.text_align {
                             TextAlign::Left => RIGHT_MARGIN,
@@ -2208,6 +2257,11 @@ impl<M: InputModeKind> TextElement<M> {
         // only cover visible (non-folded) lines.
         let mut run_offset = 0;
 
+        let mut visual_top = last_layout.visible_top
+            + state
+                .deferred_scroll_offset
+                .unwrap_or_else(|| state.scroll_handle.offset())
+                .y;
         for (vi, &buffer_line) in last_layout.visible_buffer_lines.iter().enumerate() {
             let line_text: String = display_text.slice_line(buffer_line).into();
             let line_item = state
@@ -2220,7 +2274,33 @@ impl<M: InputModeKind> TextElement<M> {
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
             let mut line_has_background = false;
 
-            for range in &line_item.wrapped_lines {
+            for (row_index, range) in line_item.wrapped_lines.iter().enumerate() {
+                let top = visual_top;
+                visual_top += last_layout.line_height;
+                let start = last_layout.visible_line_byte_offsets[vi] + range.start;
+                let end = last_layout.visible_line_byte_offsets[vi] + range.end;
+                let owns_endpoint = state.selections.iter().any(|selection| {
+                    [selection.start, selection.end].into_iter().any(|offset| {
+                        let offset = if state.masked {
+                            masked_display_offset(display_text, offset)
+                        } else {
+                            offset
+                        };
+                        start <= offset && offset <= end
+                    })
+                }) || state
+                    .ime_marked_range
+                    .as_ref()
+                    .is_some_and(|range| start <= range.end && range.end <= end);
+                if !owns_endpoint
+                    && (row_index > 0 || line_item.indent == 0)
+                    && (top + last_layout.line_height < px(0.)
+                        || top > window.content_mask().bounds.size.height + last_layout.line_height)
+                {
+                    // Keep byte/row accounting without shaping offscreen rows.
+                    wrapped_lines.push(ShapedLine::default().with_len(range.len()));
+                    continue;
+                }
                 let line_runs = runs_for_range(runs, run_offset, &range);
                 let line_runs = if bg_segments.is_empty() {
                     line_runs
@@ -2235,10 +2315,8 @@ impl<M: InputModeKind> TextElement<M> {
                 let sub_line: SharedString = line_text[range.clone()].to_string().into();
                 let line_runs =
                     align_runs_to_char_boundaries(&sub_line, &line_runs).unwrap_or(line_runs);
-                let mut shaped_line = window
-                    .text_system()
-                    .shape_line(sub_line, font_size, &line_runs, None);
-                expand_tabs(&mut shaped_line, tab_stop);
+                let shaped_line =
+                    shape_editor_line(state, sub_line, font_size, &line_runs, tab_stop, window);
 
                 line_has_background |= has_background(&line_runs);
                 wrapped_lines.push(shaped_line);
@@ -2936,23 +3014,38 @@ impl<M: InputModeKind> Element for TextElement<M> {
             longest_line_width = match cached {
                 Some((_, width)) => width.max(widest_laid_out_line),
                 None => {
-                    let longest_line: SharedString = longest_line.to_string().into();
-                    let tab_stop =
-                        tab_stop_width(window.text_system(), &key.font, text_size, key.tab_size);
-                    let shaped = window.text_system().shape_line(
-                        longest_line.clone(),
-                        text_size,
-                        &[TextRun {
-                            len: longest_line.len(),
-                            font: key.font.clone(),
-                            color: gpui::black(),
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        }],
-                        wrap_width,
-                    );
-                    expanded_width(&shaped, &longest_line, tab_stop).max(widest_laid_out_line)
+                    let longest_line = longest_line.to_string();
+                    let ranges = &state
+                        .display_map
+                        .line(longest_row)
+                        .expect("longest row exists")
+                        .wrapped_lines;
+                    let mut measured = widest_laid_out_line;
+                    for range in ranges {
+                        let longest_line: SharedString =
+                            longest_line[range.clone()].to_string().into();
+                        let tab_stop = tab_stop_width(
+                            window.text_system(),
+                            &key.font,
+                            text_size,
+                            key.tab_size,
+                        );
+                        let shaped = window.text_system().shape_line(
+                            longest_line.clone(),
+                            text_size,
+                            &[TextRun {
+                                len: longest_line.len(),
+                                font: key.font.clone(),
+                                color: gpui::black(),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            }],
+                            wrap_width,
+                        );
+                        measured = measured.max(expanded_width(&shaped, &longest_line, tab_stop));
+                    }
+                    measured
                 }
             };
             state

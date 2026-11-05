@@ -1657,7 +1657,10 @@ impl Paragraph {
                 }
                 node_highlights.push((inner_range, highlight));
             }
-            highlights = combine_highlights(highlights, node_highlights);
+            // Different inline children occupy disjoint byte ranges. Combine
+            // overlapping marks within this child, then append; rebuilding all
+            // preceding children here makes styled paragraphs quadratic.
+            highlights.extend(combine_highlights([], node_highlights));
             offset += text_len;
         }
         let text = SharedString::from(text);
@@ -2798,7 +2801,10 @@ impl Paragraph {
                     )
                 })
                 .collect::<Vec<_>>();
-            highlights = combine_highlights(highlights, node_highlights);
+            // Different inline children occupy disjoint byte ranges. Combine
+            // overlapping marks within this child, then append; rebuilding all
+            // preceding children here makes styled paragraphs quadratic.
+            highlights.extend(combine_highlights([], node_highlights));
             offset += inline_node.text.len();
         }
         highlights
@@ -2966,7 +2972,10 @@ impl Paragraph {
                     node_highlights.push((inner_range, highlight));
                 }
 
-                highlights = combine_highlights(highlights, node_highlights);
+                // Different inline children occupy disjoint byte ranges. Combine
+                // overlapping marks within this child, then append; rebuilding all
+                // preceding children here makes styled paragraphs quadratic.
+                highlights.extend(combine_highlights([], node_highlights));
                 offset += text_len;
             }
         }
@@ -3158,7 +3167,10 @@ impl Paragraph {
                     node_highlights.push((inner_range, highlight));
                 }
 
-                highlights = combine_highlights(highlights, node_highlights);
+                // Different inline children occupy disjoint byte ranges. Combine
+                // overlapping marks within this child, then append; rebuilding all
+                // preceding children here makes styled paragraphs quadratic.
+                highlights.extend(combine_highlights([], node_highlights));
                 offset += text_len;
             }
         }

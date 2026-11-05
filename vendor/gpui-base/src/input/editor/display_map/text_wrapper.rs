@@ -18,6 +18,8 @@ use crate::input::{
     tab_stops::{expanded_width, tab_stop_width},
 };
 
+pub(crate) const MAX_UNWRAPPED_LINE_BYTES: usize = 1024;
+
 /// Controls how soft-wrapped continuation lines are indented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WrappingIndent {
@@ -601,6 +603,19 @@ impl TextWrapper {
                 }
             }
 
+            // Bound native shaping even with ordinary soft wrapping disabled.
+            // These are display rows only: source bytes and logical rows stay
+            // unchanged, and cuts never split a Unicode grapheme.
+            if wrap_width.is_none() && line.len() > MAX_UNWRAPPED_LINE_BYTES {
+                let line: Cow<str> = line.into();
+                for (offset, _) in line.grapheme_indices(true) {
+                    if offset - prev_boundary_ix >= MAX_UNWRAPPED_LINE_BYTES {
+                        wrapped_lines.push(prev_boundary_ix..offset);
+                        prev_boundary_ix = offset;
+                    }
+                }
+            }
+
             // Reset of the line
             if prev_boundary_ix < line.len() || prev_boundary_ix == 0 {
                 wrapped_lines.push(prev_boundary_ix..line.len());
@@ -838,11 +853,12 @@ impl LineLayout {
         let space_indicator_offset = indicators.space.width.half();
 
         for (line_index, wrapped_line) in self.wrapped_lines.iter().enumerate() {
+            let mut x_for_index = wrapped_line.increasing_index_positions();
             for (relative_offset, c) in wrapped_line.text.char_indices() {
                 if matches!(c, ' ' | '\t') {
                     let is_tab = c == '\t';
-                    let start_x = wrapped_line.x_for_index(relative_offset);
-                    let end_x = wrapped_line.x_for_index(relative_offset + c.len_utf8());
+                    let start_x = x_for_index(relative_offset);
+                    let end_x = x_for_index(relative_offset + c.len_utf8());
                     // Center the indicator in the actual character's space
                     let x_position = if c == ' ' {
                         (start_x + end_x).half() - space_indicator_offset
