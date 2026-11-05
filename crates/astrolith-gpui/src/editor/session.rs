@@ -111,6 +111,9 @@ pub(crate) struct DocumentSession {
     /// Set after a failed discovery/start; retrying on every mode switch would
     /// only repeat the same filesystem search.
     lsp_unavailable: bool,
+    /// Last diagnostics version accepted for this document, so an older
+    /// `publishDiagnostics` cannot overwrite a newer set.
+    lsp_diagnostic_version: Option<i32>,
     _change: Subscription,
     _cursor: Subscription,
     _blur: Subscription,
@@ -446,6 +449,7 @@ impl DocumentSession {
             lsp_change: None,
             lsp_events: None,
             lsp_unavailable: false,
+            lsp_diagnostic_version: None,
             _change: change,
             _cursor: cursor,
             _blur: blur,
@@ -1690,6 +1694,7 @@ impl DocumentSession {
         crate::editor::lsp::install(&self.editor, handle, uri.clone(), cx);
         let weak = cx.weak_entity();
         let own_uri = uri.clone();
+        let diagnostics_uri = uri.clone();
         self.editor.update(cx, |editor, _| {
             editor.lsp_mut().show_document = Some(std::rc::Rc::new(move |params, _window, cx| {
                 if params.uri.as_str() == own_uri.as_str() {
@@ -1709,11 +1714,30 @@ impl DocumentSession {
             }));
         });
         self.lsp = Some(state);
+        self.lsp_diagnostic_version = None;
         self.lsp_events = Some(cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.recv().await {
                 match event {
-                    LspEvent::Diagnostics { diagnostics, .. } => {
+                    LspEvent::Diagnostics {
+                        uri,
+                        version,
+                        diagnostics,
+                    } => {
                         let _ = this.update_in(cx, |session, _, cx| {
+                            if !crate::editor::lsp::accepts_diagnostics(
+                                &diagnostics_uri,
+                                session.lsp_diagnostic_version,
+                                &uri,
+                                version,
+                            ) {
+                                tracing::debug!(
+                                    document = %uri.as_str(),
+                                    ?version,
+                                    "dropping diagnostics for another document or an older version"
+                                );
+                                return;
+                            }
+                            session.lsp_diagnostic_version = version;
                             crate::editor::lsp::apply_diagnostics(
                                 &session.editor,
                                 &diagnostics,
@@ -1752,6 +1776,7 @@ impl DocumentSession {
         // Re-entering Build retries discovery, so a server installed while the
         // app runs is picked up without reopening the project.
         self.lsp_unavailable = false;
+        self.lsp_diagnostic_version = None;
         self.lsp_change = None;
         self.lsp_events = None;
         if let Some(state) = self.lsp.take() {

@@ -80,10 +80,37 @@ pub(crate) fn uninstall(editor: &Entity<EditorState>, cx: &mut App) {
     });
 }
 
+/// Whether two document URIs name the same server-side document.
+pub(crate) fn same_document(document: &lsp_types::Uri, published: &lsp_types::Uri) -> bool {
+    document.as_str() == published.as_str()
+}
+
+/// Whether one `publishDiagnostics` may replace this document's set.
+///
+/// A publish for another project file never paints this editor. Versioned
+/// publishes only move forward; an unversioned publish can be ordered against
+/// nothing, so it is accepted only while no versioned publish has been.
+pub(crate) fn accepts_diagnostics(
+    document: &lsp_types::Uri,
+    last_accepted: Option<i32>,
+    published: &lsp_types::Uri,
+    version: Option<i32>,
+) -> bool {
+    if !same_document(document, published) {
+        return false;
+    }
+    match (last_accepted, version) {
+        (Some(last), Some(version)) => version >= last,
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
 /// Replace the editor's diagnostics with one server publish.
 ///
 /// The server sends UTF-16 positions; the editor counts characters, so every
-/// range is converted against the current document before it is published.
+/// range is converted against the text the editor currently shows (the Build
+/// source view) before it is published.
 pub(crate) fn apply_diagnostics(
     editor: &Entity<EditorState>,
     diagnostics: &[lsp_types::Diagnostic],
@@ -313,5 +340,58 @@ fn apply_workspace_edit(
     }
     if edit.document_changes.is_some() {
         tracing::info!("skipping a documentChanges code action; only plain edits are applied");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uri(text: &str) -> lsp_types::Uri {
+        text.parse().expect("a valid document URI")
+    }
+
+    #[test]
+    fn only_the_same_document_is_accepted() {
+        let document = uri("file:///project/src/index.astro");
+        let other = uri("file:///project/src/other.astro");
+
+        assert!(same_document(
+            &document,
+            &uri("file:///project/src/index.astro")
+        ));
+        assert!(!same_document(&document, &other));
+        assert!(!accepts_diagnostics(&document, None, &other, Some(1)));
+        assert!(
+            !accepts_diagnostics(&document, None, &other, None),
+            "an unversioned publish for another file is still another document"
+        );
+    }
+
+    #[test]
+    fn an_older_publish_is_dropped() {
+        let document = uri("file:///project/src/index.astro");
+
+        assert!(!accepts_diagnostics(&document, Some(3), &document, Some(2)));
+        assert!(!accepts_diagnostics(&document, Some(3), &document, Some(1)));
+    }
+
+    #[test]
+    fn a_newer_or_repeated_publish_is_accepted() {
+        let document = uri("file:///project/src/index.astro");
+
+        assert!(accepts_diagnostics(&document, Some(3), &document, Some(4)));
+        assert!(accepts_diagnostics(&document, Some(3), &document, Some(3)));
+    }
+
+    #[test]
+    fn an_unversioned_publish_is_accepted_until_a_versioned_one() {
+        let document = uri("file:///project/src/index.astro");
+
+        assert!(accepts_diagnostics(&document, None, &document, None));
+        assert!(
+            !accepts_diagnostics(&document, Some(1), &document, None),
+            "an unversioned publish cannot be ordered after a versioned one"
+        );
     }
 }
