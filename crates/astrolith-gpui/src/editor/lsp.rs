@@ -4,7 +4,15 @@
 //! pinned editor's provider traits. Every provider awaits the server on the
 //! background executor, so rendering and typing stay independent of it.
 
-use std::{ops::Range, rc::Rc, time::Duration};
+use std::{
+    ops::Range,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use astrolith_lsp::{
     Client, ClientHandle, LanguageId, code_action_params, completion_params, convert_positions,
@@ -123,6 +131,7 @@ pub(crate) fn install(
         let provider = Rc::new(LspProvider {
             handle: handle.clone(),
             uri: uri.clone(),
+            completions: CompletionGate::default(),
         });
         let actions = Rc::new(CodeActions { handle, uri });
         let lsp = editor.lsp_mut();
@@ -223,9 +232,48 @@ pub(crate) fn uri_for(path: &std::path::Path) -> Option<lsp_types::Uri> {
     uri_from_path(path).ok()
 }
 
+/// Type-ahead completion waits this long so one request serves a burst.
+pub(crate) const COMPLETION_DEBOUNCE: Duration = Duration::from_millis(70);
+
+/// One completion provider's request generations.
+///
+/// Every invocation claims the newest generation; a debounced request only
+/// reaches the server when its claim is still current, so a burst of typed
+/// characters sends one request for the text the user stopped on.
+#[derive(Clone, Default)]
+pub(crate) struct CompletionGate {
+    generation: Arc<AtomicU64>,
+}
+
+impl CompletionGate {
+    /// Claim the newest generation; earlier claims are superseded.
+    pub(crate) fn claim(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Whether `claim` is still the newest generation.
+    pub(crate) fn is_current(&self, claim: u64) -> bool {
+        self.generation.load(Ordering::SeqCst) == claim
+    }
+}
+
+/// Wait out the debounce; `false` means a newer claim superseded this one.
+pub(crate) async fn complete_after_debounce(
+    executor: &BackgroundExecutor,
+    gate: &CompletionGate,
+    claim: u64,
+    debounce: Duration,
+) -> bool {
+    if !debounce.is_zero() {
+        executor.timer(debounce).await;
+    }
+    gate.is_current(claim)
+}
+
 struct LspProvider {
     handle: ClientHandle,
     uri: lsp_types::Uri,
+    completions: CompletionGate,
 }
 
 impl CompletionProvider for LspProvider {
@@ -237,17 +285,30 @@ impl CompletionProvider for LspProvider {
         _window: &mut Window,
         cx: &mut App,
     ) -> Task<anyhow::Result<CompletionResponse>> {
+        let claim = self.completions.claim();
+        let gate = self.completions.clone();
         let handle = self.handle.clone();
         let uri = self.uri.clone();
-        let plain = text.to_string();
+        let text = text.clone();
+        let executor = cx.background_executor().clone();
         let trigger_kind = match trigger.trigger_kind {
             lsp_types::CompletionTriggerKind::INVOKED => 1,
             lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER => 2,
             lsp_types::CompletionTriggerKind::TRIGGER_FOR_INCOMPLETE_COMPLETIONS => 3,
             _ => 1,
         };
+        // The user-pressed chord is explicit intent; typed characters coalesce.
+        let debounce = if trigger_kind == 1 {
+            Duration::ZERO
+        } else {
+            COMPLETION_DEBOUNCE
+        };
         let trigger_character = trigger.trigger_character.clone();
         cx.background_spawn(async move {
+            if !complete_after_debounce(&executor, &gate, claim, debounce).await {
+                return Ok(CompletionResponse::Array(Vec::new()));
+            }
+            let plain = text.to_string();
             let mut params = completion_params(&uri, &plain, offset, trigger_kind);
             if let Some(character) = trigger_character {
                 params["context"]["triggerCharacter"] = serde_json::Value::String(character);
@@ -569,6 +630,62 @@ mod tests {
             assert!(lsp.code_action_providers.is_empty());
         })
         .expect("the window is open");
+    }
+
+    #[gpui_kit::test]
+    async fn rapid_typed_completions_send_only_the_newest_request(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let gate = CompletionGate::default();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let executor = cx.executor();
+        let first = gate.claim();
+        let second = gate.claim();
+        let mut tasks = Vec::new();
+        for claim in [first, second] {
+            let gate = gate.clone();
+            let sent = sent.clone();
+            let executor = executor.clone();
+            let timer = executor.clone();
+            tasks.push(executor.spawn(async move {
+                if complete_after_debounce(&timer, &gate, claim, COMPLETION_DEBOUNCE).await {
+                    sent.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        cx.executor().advance_clock(COMPLETION_DEBOUNCE * 2);
+        cx.run_until_parked();
+        assert_eq!(
+            sent.load(Ordering::SeqCst),
+            1,
+            "a keystroke burst must send one completion request"
+        );
+        drop(tasks);
+    }
+
+    #[gpui_kit::test]
+    async fn an_explicit_completion_sends_without_waiting(cx: &mut gpui_kit::TestAppContext) {
+        let gate = CompletionGate::default();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let claim = gate.claim();
+        let executor = cx.executor();
+        let send = {
+            let gate = gate.clone();
+            let sent = sent.clone();
+            let executor = executor.clone();
+            let timer = executor.clone();
+            executor.spawn(async move {
+                if complete_after_debounce(&timer, &gate, claim, Duration::ZERO).await {
+                    sent.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        };
+        send.await;
+        assert_eq!(
+            sent.load(Ordering::SeqCst),
+            1,
+            "an invoked completion must not wait for the debounce"
+        );
     }
 
     struct FakeHandle(Arc<AtomicUsize>);
