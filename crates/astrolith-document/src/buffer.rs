@@ -175,11 +175,24 @@ impl DocumentBuffer {
     /// Create a buffer whose baseline is the on-disk source but whose current
     /// text differs (used when restoring recovered unsaved content).
     pub fn from_unsaved(identity: DocumentIdentity, original: String, current: String) -> Self {
+        Self::from_unsaved_at_revision(identity, original, current, DocumentRevision::INITIAL)
+    }
+
+    /// Create a recovered buffer at the revision it had when captured.
+    ///
+    /// The revision survives the restart so a restored session's later
+    /// revisions stay comparable with the recorded stale-save semantics.
+    pub fn from_unsaved_at_revision(
+        identity: DocumentIdentity,
+        original: String,
+        current: String,
+        revision: DocumentRevision,
+    ) -> Self {
         Self {
             identity,
             original_text: original,
             current_text: current,
-            revision: DocumentRevision::INITIAL,
+            revision,
         }
     }
 

@@ -161,6 +161,36 @@ impl DocumentSession {
         Self::build(identity, original, current, window, cx)
     }
 
+    /// Build a session from a recovery record that retained its revision.
+    ///
+    /// `original` is the record's baseline (or the current disk for a legacy
+    /// record), `disk` is the content read now, and `current` is the recovered
+    /// unsaved text. When the disk no longer matches the recorded baseline the
+    /// document loads as an external conflict: the first save must report
+    /// [`astrolith_document::SaveOutcome::Conflict`] instead of overwriting it.
+    pub fn from_recovered_at(
+        identity: DocumentIdentity,
+        original: String,
+        current: String,
+        disk: String,
+        revision: DocumentRevision,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let externally_changed = original != disk;
+        let disk_fingerprint = fingerprint(&disk);
+        Self::build_with(
+            identity,
+            original,
+            current,
+            revision,
+            disk_fingerprint,
+            externally_changed,
+            window,
+            cx,
+        )
+    }
+
     fn build(
         identity: DocumentIdentity,
         original: String,
@@ -169,10 +199,33 @@ impl DocumentSession {
         cx: &mut Context<Self>,
     ) -> Self {
         let disk_fingerprint = fingerprint(&original);
+        Self::build_with(
+            identity,
+            original,
+            current,
+            DocumentRevision::INITIAL,
+            disk_fingerprint,
+            false,
+            window,
+            cx,
+        )
+    }
+
+    fn build_with(
+        identity: DocumentIdentity,
+        original: String,
+        current: String,
+        revision: DocumentRevision,
+        disk_fingerprint: u64,
+        externally_changed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let kind = kind_for(identity.canonical_source().as_str());
         let language = editor_language(identity.canonical_source().as_str());
         let (projection, notice) = project_or_complete(&current, kind);
-        let buffer = DocumentBuffer::from_unsaved(identity, original, current);
+        let buffer =
+            DocumentBuffer::from_unsaved_at_revision(identity, original, current, revision);
         let dirty = buffer.is_dirty();
         let counts = token_snapshot(&projection.visible);
         let text_key = fingerprint(&projection.visible);
@@ -193,7 +246,7 @@ impl DocumentSession {
                 crate::theme::prose_font(cx),
                 16.,
                 2.,
-                crate::theme::PROSE_PAGE_WIDTH_PERCENT,
+                crate::theme::default_prose_page_width_percent(),
             );
             cx.new(|cx| WriterSurface::new(weak, style, cx))
         };
@@ -362,7 +415,7 @@ impl DocumentSession {
             next_occurrence: None,
             refused: false,
             notice,
-            externally_changed: false,
+            externally_changed,
             dirty,
             disk_fingerprint,
             kind,

@@ -4265,6 +4265,8 @@ impl ProjectWorkspace {
                     record.identity().clone(),
                     disk,
                     record.content().to_owned(),
+                    record.baseline().map(str::to_owned),
+                    record.revision(),
                 ));
             }
             loaded
@@ -4273,15 +4275,26 @@ impl ProjectWorkspace {
             let loaded = reads.await.unwrap_or_default();
             let _ = this.update_in(cx, |this, window, cx| {
                 let mut restored = 0;
-                for (path, identity, disk, content) in loaded {
+                let mut conflicts = 0;
+                for (path, identity, disk, content, baseline, revision) in loaded {
                     if this.sessions.contains_key(&path) {
                         this.activate_session(&path, window, cx);
                         restored += 1;
                         continue;
                     }
+                    // A record that predates baseline capture falls back to the
+                    // current disk, which is the pre-DOC-03 behaviour. A record
+                    // whose baseline differs from the disk loads as a conflict
+                    // so its first save cannot silently overwrite that edit.
+                    let original = baseline.unwrap_or_else(|| disk.clone());
                     let session = cx.new(|cx| {
-                        DocumentSession::from_recovered(identity, disk, content, window, cx)
+                        DocumentSession::from_recovered_at(
+                            identity, original, content, disk, revision, window, cx,
+                        )
                     });
+                    if session.read(cx).externally_changed {
+                        conflicts += 1;
+                    }
                     let copyedit = this.copyedit.clone();
                     session.update(cx, |session, cx| session.set_copyedit_config(copyedit, cx));
                     if let Some(root) = this.project_root() {
@@ -4304,8 +4317,14 @@ impl ProjectWorkspace {
                         session.set_source_view(source_view, window, cx)
                     });
                 }
-                tracing::info!(restored, "recovered unsaved documents");
-                this.status = format!("Restored {restored} unsaved document(s) from recovery.");
+                tracing::info!(restored, conflicts, "recovered unsaved documents");
+                this.status = if conflicts == 0 {
+                    format!("Restored {restored} unsaved document(s) from recovery.")
+                } else {
+                    format!(
+                        "Restored {restored} unsaved document(s) from recovery. {conflicts} changed on disk since the record; the recovery content is kept and a save will conflict until you resolve it."
+                    )
+                };
                 cx.notify();
             });
         }));
@@ -8371,6 +8390,161 @@ mod tests {
                 1,
                 "manual recover must not duplicate an auto-applied session"
             );
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn recovery_detects_a_newer_disk_and_its_first_save_conflicts(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let path = dir.path().join("src/posts/a.md");
+        // The disk moved on after the record captured the "# A\n" baseline.
+        std::fs::write(&path, "# External\n").unwrap();
+        let recovery_dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(recovery_dir.path());
+        let identity = DocumentIdentity::new(
+            ProjectId::new("workspace-1").unwrap(),
+            1,
+            SourcePath::new("src/posts/a.md").unwrap(),
+        );
+        store
+            .save(&RecoveryRecord::new_with_baseline(
+                identity,
+                DocumentRevision::new(4),
+                "# Recovered\n",
+                Some("# A\n".to_owned()),
+                1,
+            ))
+            .unwrap();
+
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| view.recovery = Some(store.clone()));
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.sessions.contains_key(&path)) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        view.read_with(cx, |view, cx| {
+            let session = view
+                .sessions
+                .get(&path)
+                .expect("the record must restore");
+            let session = session.read(cx);
+            assert_eq!(session.editor.read(cx).value(), "# Recovered\n");
+            assert_eq!(
+                session.buffer.original_text(),
+                "# A\n",
+                "the record's baseline must be restored, not the current disk"
+            );
+            assert_eq!(session.buffer.revision(), DocumentRevision::new(4));
+            assert!(session.buffer.is_dirty());
+            assert!(
+                session.externally_changed,
+                "a newer disk edit is an unresolved conflict"
+            );
+            assert_eq!(
+                session.disk_fingerprint,
+                crate::editor::session::fingerprint("# External\n")
+            );
+            assert!(view.status.contains("changed on disk"), "{}", view.status);
+        });
+
+        // The first save must not overwrite the newer disk bytes.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.status.contains("conflict")) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# External\n");
+        view.read_with(cx, |view, cx| {
+            assert!(view.sessions.get(&path).unwrap().read(cx).buffer.is_dirty());
+            assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Conflict));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn recovery_with_a_matching_baseline_saves_without_a_false_conflict(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let path = dir.path().join("src/posts/a.md");
+        let recovery_dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(recovery_dir.path());
+        let identity = DocumentIdentity::new(
+            ProjectId::new("workspace-1").unwrap(),
+            1,
+            SourcePath::new("src/posts/a.md").unwrap(),
+        );
+        store
+            .save(&RecoveryRecord::new_with_baseline(
+                identity,
+                DocumentRevision::new(2),
+                "# Recovered\n",
+                Some("# A\n".to_owned()),
+                1,
+            ))
+            .unwrap();
+
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| view.recovery = Some(store.clone()));
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.sessions.contains_key(&path)) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert_eq!(session.buffer.original_text(), "# A\n");
+            assert_eq!(session.buffer.revision(), DocumentRevision::new(2));
+            assert!(session.buffer.is_dirty());
+            assert!(
+                !session.externally_changed,
+                "an unchanged disk is not a conflict"
+            );
+        });
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if std::fs::read_to_string(&path).unwrap() == "# Recovered\n" {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Recovered\n");
+        view.read_with(cx, |view, cx| {
+            assert!(!view.status.contains("conflict"), "{}", view.status);
+            assert!(!view.sessions.get(&path).unwrap().read(cx).buffer.is_dirty());
         });
     }
 

@@ -28,6 +28,13 @@ pub struct RecoveryRecord {
     identity: DocumentIdentity,
     revision: DocumentRevision,
     content: String,
+    /// The buffer's source baseline at capture time.
+    ///
+    /// When the disk no longer matches this baseline the record is in conflict
+    /// with a newer on-disk edit and restoring it must not adopt the current
+    /// disk bytes as clean. Records written before this field existed carry
+    /// `None` and fall back to the current disk.
+    baseline: Option<String>,
     modified_unix_secs: u64,
 }
 
@@ -43,16 +50,35 @@ impl RecoveryRecord {
             identity,
             revision,
             content: content.into(),
+            baseline: None,
+            modified_unix_secs,
+        }
+    }
+
+    /// Construct a recovery record that also retains the buffer baseline.
+    pub fn new_with_baseline(
+        identity: DocumentIdentity,
+        revision: DocumentRevision,
+        content: impl Into<String>,
+        baseline: Option<String>,
+        modified_unix_secs: u64,
+    ) -> Self {
+        Self {
+            identity,
+            revision,
+            content: content.into(),
+            baseline,
             modified_unix_secs,
         }
     }
 
     /// Capture `buffer`'s current content as a recovery record.
     pub fn capture(buffer: &DocumentBuffer, modified_unix_secs: u64) -> Self {
-        Self::new(
+        Self::new_with_baseline(
             buffer.identity().clone(),
             buffer.revision(),
             buffer.current_text().to_owned(),
+            Some(buffer.original_text().to_owned()),
             modified_unix_secs,
         )
     }
@@ -70,6 +96,14 @@ impl RecoveryRecord {
     /// Return the recovered unsaved content.
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    /// Return the buffer baseline captured with this record, if any.
+    ///
+    /// `None` means the record predates baseline capture; restore must then
+    /// adopt the current disk content as the baseline.
+    pub fn baseline(&self) -> Option<&str> {
+        self.baseline.as_deref()
     }
 
     /// Return the last-modified time as Unix seconds.
@@ -267,7 +301,7 @@ fn remove_if_present(path: &Path) -> Result<bool, DocumentError> {
 
 fn serialize_record(record: &RecoveryRecord) -> Result<String, DocumentError> {
     let identity = record.identity();
-    let value = json!({
+    let mut value = json!({
         "project": identity.project().as_str(),
         "generation": identity.project_generation(),
         "source": identity.canonical_source().as_str(),
@@ -275,6 +309,9 @@ fn serialize_record(record: &RecoveryRecord) -> Result<String, DocumentError> {
         "content": record.content(),
         "modified": record.modified_unix_secs(),
     });
+    if let Some(baseline) = record.baseline() {
+        value["baseline"] = Value::String(baseline.to_owned());
+    }
     serde_json::to_string(&value).map_err(|error| DocumentError::Io {
         message: format!("cannot serialize recovery record: {error}"),
     })
@@ -298,13 +335,20 @@ fn parse_record(text: &str) -> Result<RecoveryRecord, String> {
         .get("modified")
         .and_then(Value::as_u64)
         .ok_or_else(|| "`modified` must be a non-negative integer".to_owned())?;
+    // Records written before baseline capture must still load: a missing or
+    // non-string `baseline` simply leaves the fallback in place.
+    let baseline = value
+        .get("baseline")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 
     let project = ProjectId::new(project).map_err(|error| error.to_string())?;
     let source = SourcePath::new(source).map_err(|error| error.to_string())?;
-    Ok(RecoveryRecord::new(
+    Ok(RecoveryRecord::new_with_baseline(
         DocumentIdentity::new(project, generation, source),
         DocumentRevision::new(revision),
         content,
+        baseline,
         modified,
     ))
 }
@@ -399,6 +443,52 @@ mod tests {
             recovered.resolve_path(dir.path()),
             dir.path().join("content/doc.md")
         );
+        assert_eq!(
+            recovered.baseline(),
+            None,
+            "a record built without a baseline keeps the legacy fallback"
+        );
+    }
+
+    #[test]
+    fn baseline_survives_a_save_and_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(dir.path());
+        store
+            .save(&RecoveryRecord::new_with_baseline(
+                identity(),
+                DocumentRevision::new(7),
+                "unsaved text",
+                Some("on-disk baseline\n".to_owned()),
+                1_800,
+            ))
+            .unwrap();
+
+        let load = store.load().unwrap();
+        assert!(load.diagnostics().is_empty());
+        assert_eq!(load.records().len(), 1);
+        assert_eq!(
+            load.records()[0].baseline(),
+            Some("on-disk baseline\n"),
+            "the recorded baseline must round-trip"
+        );
+    }
+
+    #[test]
+    fn a_record_without_a_baseline_field_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(dir.path());
+        fs::write(
+            store.record_path(&identity()),
+            r#"{"project":"project-a","generation":3,"source":"content/doc.md","revision":4,"content":"legacy","modified":9}"#,
+        )
+        .unwrap();
+
+        let load = store.load().unwrap();
+        assert!(load.diagnostics().is_empty());
+        assert_eq!(load.records().len(), 1);
+        assert_eq!(load.records()[0].content(), "legacy");
+        assert_eq!(load.records()[0].baseline(), None);
     }
 
     #[test]
