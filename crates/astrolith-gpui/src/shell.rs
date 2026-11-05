@@ -230,6 +230,35 @@ struct RenderedSyncKey {
     revision: Option<DocumentRevision>,
 }
 
+/// The settings and theme inputs that decide the resolved reading typography.
+///
+/// Resolution scans the installed font families and allocates the family
+/// string, so it happens only when one of these inputs changes.
+struct ProseStyleInputs {
+    family: String,
+    font_size: f32,
+    line_height: f32,
+    page_width: f32,
+    ui_family: SharedString,
+}
+
+impl ProseStyleInputs {
+    fn matches(
+        &self,
+        family: &str,
+        font_size: f32,
+        line_height: f32,
+        page_width: f32,
+        ui_family: &SharedString,
+    ) -> bool {
+        self.family == family
+            && self.font_size == font_size
+            && self.line_height == line_height
+            && self.page_width == page_width
+            && &self.ui_family == ui_family
+    }
+}
+
 pub(crate) struct Shell {
     dock: Entity<DockArea>,
     document: Entity<WorkspacePanel>,
@@ -319,6 +348,11 @@ pub(crate) struct Shell {
     typed: TypedCharacters,
     /// Document identity last pushed into the reading pane.
     rendered_sync_key: Option<RenderedSyncKey>,
+    /// Resolved reading typography and the inputs that produced it.
+    prose_style: Option<(ProseStyleInputs, crate::editor::writing_modes::ProseStyle)>,
+    /// Number of typography resolutions, for the per-frame cost test.
+    #[cfg(test)]
+    prose_style_resolutions: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -749,6 +783,9 @@ impl Shell {
             chrome: ChromeVisibility::default(),
             typed: TypedCharacters::default(),
             rendered_sync_key: None,
+            prose_style: None,
+            #[cfg(test)]
+            prose_style_resolutions: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -3193,20 +3230,52 @@ impl Render for Shell {
         }
         let layout = self.settings.layouts.get(self.mode);
         // The document face, size, line height and measure are explicit
-        // preferences; the pane width no longer rescales the prose.
-        let style = crate::editor::writing_modes::ProseStyle::new(
-            theme::configured_prose_font(cx, &self.settings.prose_font_family),
-            self.settings.editor_font_size,
-            self.settings.editor_line_height,
-            self.settings.page_width_percent,
-        );
-        let code_mode = self.mode == WorkspaceMode::Build;
-        self.document.update(cx, |panel, cx| {
-            panel.set_prose_style(style.clone(), cx);
-            panel.set_code(code_mode, cx);
+        // preferences; the pane width no longer rescales the prose. Resolving
+        // the family scans the installed set, so it is cached until one of the
+        // inputs changes.
+        let ui_family = cx.theme().font_family.clone();
+        let style_changed = self.prose_style.as_ref().is_none_or(|(inputs, _)| {
+            !inputs.matches(
+                &self.settings.prose_font_family,
+                self.settings.editor_font_size,
+                self.settings.editor_line_height,
+                self.settings.page_width_percent,
+                &ui_family,
+            )
         });
-        self.rendered
-            .update(cx, |rendered, cx| rendered.set_prose_style(style, cx));
+        if style_changed {
+            #[cfg(test)]
+            {
+                self.prose_style_resolutions += 1;
+            }
+            let style = crate::editor::writing_modes::ProseStyle::new(
+                theme::configured_prose_font(cx, &self.settings.prose_font_family),
+                self.settings.editor_font_size,
+                self.settings.editor_line_height,
+                self.settings.page_width_percent,
+            );
+            self.prose_style = Some((
+                ProseStyleInputs {
+                    family: self.settings.prose_font_family.clone(),
+                    font_size: self.settings.editor_font_size,
+                    line_height: self.settings.editor_line_height,
+                    page_width: self.settings.page_width_percent,
+                    ui_family,
+                },
+                style,
+            ));
+        }
+        let code_mode = self.mode == WorkspaceMode::Build;
+        if style_changed && let Some((_, style)) = self.prose_style.as_ref() {
+            let style = style.clone();
+            self.document.update(cx, |panel, cx| {
+                panel.set_prose_style(style.clone(), cx);
+            });
+            self.rendered
+                .update(cx, |rendered, cx| rendered.set_prose_style(style, cx));
+        }
+        self.document
+            .update(cx, |panel, cx| panel.set_code(code_mode, cx));
         if self.mode == WorkspaceMode::Preview {
             // Only the identity of the active document is compared per frame;
             // the visible body is copied only when that identity changed.
@@ -3698,6 +3767,43 @@ mod tests {
                 .iter()
                 .all(|category| !view.settings.copyedit.enabled(*category))
         }));
+    }
+
+    #[gpui_kit::test]
+    async fn prose_typography_resolves_once_per_settings_change(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let resolved = view.read(cx).prose_style_resolutions;
+            assert_eq!(resolved, 1, "the first frame resolves the typography");
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).prose_style_resolutions,
+                resolved,
+                "an unrelated frame must not scan the installed fonts again"
+            );
+
+            view.update(cx, |shell, _| shell.settings.editor_font_size += 1.);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).prose_style_resolutions,
+                resolved + 1,
+                "a prose preference change resolves exactly once"
+            );
+            let size = view
+                .read(cx)
+                .prose_style
+                .as_ref()
+                .expect("a resolved style is cached")
+                .1
+                .font_size;
+            assert_eq!(size, view.read(cx).settings.editor_font_size);
+
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).prose_style_resolutions, resolved + 1);
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
