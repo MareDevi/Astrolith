@@ -297,6 +297,13 @@ impl DocumentSession {
             );
             cx.new(|cx| WriterSurface::new(weak, style, cx))
         };
+        writer.update(cx, |writer, cx| {
+            writer.set_snapshot(
+                editor.read(cx).text_revision(),
+                editor.read(cx).text().clone(),
+                cx,
+            )
+        });
         let change = cx.subscribe_in(
             &editor,
             window,
@@ -1310,7 +1317,12 @@ impl DocumentSession {
         }
         // Typography, focus dimming and typewriter scrolling belong to the
         // visible rich surface. The input model needs no second prose layer.
-        self.writer.update(cx, |_, cx| cx.notify());
+        let revision = self.writer_editor.read(cx).text_revision();
+        let text = self.writer_editor.read(cx).text().clone();
+        self.writer.update(cx, |writer, cx| {
+            writer.set_snapshot(revision, text, cx);
+            cx.notify();
+        });
     }
 
     /// Refresh only what follows the caret.
@@ -1325,7 +1337,12 @@ impl DocumentSession {
             .cursor()
             .min(self.projection.visible.len());
         self.copyedit.refresh_cursor(&self.editor, cursor, cx);
-        self.writer.update(cx, |_, cx| cx.notify());
+        let revision = self.writer_editor.read(cx).text_revision();
+        let text = self.writer_editor.read(cx).text().clone();
+        self.writer.update(cx, |writer, cx| {
+            writer.set_snapshot(revision, text, cx);
+            cx.notify();
+        });
     }
 
     pub fn is_dirty(&self) -> bool {

@@ -113,7 +113,7 @@ impl EntityInputHandler for WriterSurface {
     ) -> Option<Bounds<Pixels>> {
         let editor = self.input_model(cx)?;
         let source = editor.read(cx).text().offset_utf16_to_offset(range.start);
-        let (block, rendered) = self.document.caret_location(source)?;
+        let (block, rendered) = self.document.caret_location(self.parsed_offset(source))?;
         let geometry = self.geometry.borrow();
         let leaf = geometry.leaves.get(&block_key(block))?;
         let origin = leaf.position_for_index(rendered);

@@ -12,12 +12,18 @@
 //! geometry for hit-testing and caret placement.
 
 mod input;
+mod snapshot;
 
+use gpui_kit::component::input::Rope;
+use snapshot::PendingEdit;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use astrolith_document::{BlockKind, WysiwygDocument, cursor_sentence};
 use gpui_kit::base::text::editor_host::{
@@ -46,7 +52,14 @@ struct FrameGeometry {
 pub(crate) struct WriterSurface {
     session: gpui_kit::WeakEntity<DocumentSession>,
     document: Arc<WysiwygDocument>,
-    source: String,
+    source: Rope,
+    parsed_source: Rope,
+    parsed_text: String,
+    requested_revision: Option<u64>,
+    pending_edit: Option<PendingEdit>,
+    pending_snapshot: Option<(u64, Rope)>,
+    parse_task: Option<gpui_kit::Task<()>>,
+    parse_cancel: Arc<AtomicBool>,
     style: ProseStyle,
     geometry: Rc<RefCell<FrameGeometry>>,
     scroll: ScrollHandle,
@@ -78,6 +91,12 @@ pub(crate) struct WriterSurface {
     dimmed_blocks: Vec<usize>,
 }
 
+impl Drop for WriterSurface {
+    fn drop(&mut self) {
+        self.parse_cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 impl WriterSurface {
     pub(crate) fn new(
         session: gpui_kit::WeakEntity<DocumentSession>,
@@ -87,7 +106,14 @@ impl WriterSurface {
         Self {
             session,
             document: Arc::new(WysiwygDocument::default()),
-            source: String::new(),
+            source: Rope::new(),
+            parsed_source: Rope::new(),
+            parsed_text: String::new(),
+            requested_revision: None,
+            pending_edit: None,
+            pending_snapshot: None,
+            parse_task: None,
+            parse_cancel: Arc::new(AtomicBool::new(false)),
             style,
             geometry: Rc::new(RefCell::new(FrameGeometry::default())),
             scroll: ScrollHandle::new(),
@@ -123,15 +149,70 @@ impl WriterSurface {
         cx.notify();
     }
 
-    /// Re-parse when the buffer revision changed.
-    fn sync_document(&mut self, revision: u64, source: &str) {
-        if self.document_revision == Some(revision) {
+    /// Snapshot input changes outside rendering. At most one parse runs and
+    /// one latest snapshot waits; intermediate preedit revisions never queue.
+    pub(crate) fn set_snapshot(&mut self, revision: u64, source: Rope, cx: &mut Context<Self>) {
+        if self.requested_revision == Some(revision) {
             return;
         }
+        self.requested_revision = Some(revision);
+        self.parse_cancel.store(true, Ordering::Relaxed);
+        self.pending_edit = PendingEdit::between(&self.parsed_source, &source);
+        self.source = source.clone();
+        self.pending_snapshot = Some((revision, source));
+        self.start_parse(cx);
+    }
+
+    fn start_parse(&mut self, cx: &mut Context<Self>) {
+        if self.parse_task.is_some() {
+            return;
+        }
+        let Some((revision, source)) = self.pending_snapshot.take() else {
+            return;
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.parse_cancel = cancel.clone();
+        let work = cx.background_spawn(async move {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            let started = std::time::Instant::now();
+            let text = source.to_string();
+            let document =
+                WysiwygDocument::parse_cancellable(&text, || cancel.load(Ordering::Relaxed))?;
+            tracing::debug!(revision, bytes = source.len(), parse_ms = started.elapsed().as_secs_f64() * 1_000.,
+                thread = ?std::thread::current().id(), "parsed writer snapshot off thread");
+            Some((source, text, document))
+        });
+        self.parse_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |this, cx| {
+                this.parse_task = None;
+                if this.requested_revision == Some(revision)
+                    && let Some((source, text, document)) = result
+                {
+                    this.install_document(revision, source, text, document);
+                    cx.notify();
+                }
+                this.start_parse(cx);
+            });
+        }));
+    }
+
+    fn install_document(
+        &mut self,
+        revision: u64,
+        source: Rope,
+        text: String,
+        document: WysiwygDocument,
+    ) {
         self.document_revision = Some(revision);
-        self.source.clear();
-        self.source.push_str(source);
-        self.document = Arc::new(WysiwygDocument::parse(source));
+        self.parsed_source = source;
+        self.parsed_text = text;
+        self.pending_edit = None;
+        self.document = Arc::new(document);
+        self.geometry.borrow_mut().leaves.clear();
+        self.last_cursor = None;
         // Keep the measured heights across an edit: clearing them would make
         // the first frame after every keystroke render the whole document
         // again. The vector only grows or shrinks; blocks that moved keep an
@@ -147,17 +228,32 @@ impl WriterSurface {
     /// Source offset under a window position.
     pub(crate) fn source_at(&self, position: Point<Pixels>) -> Option<usize> {
         let (block, rendered) = self.location_at(position)?;
-        self.document.source_at(block, rendered)
+        let source = self.document.source_at(block, rendered)?;
+        self.pending_edit
+            .as_ref()
+            .map_or(Some(source), |edit| edit.to_current(source))
+    }
+
+    pub(super) fn parsed_offset(&self, offset: usize) -> usize {
+        self.pending_edit
+            .as_ref()
+            .map_or(offset, |edit| edit.to_parsed(offset))
     }
 
     /// Link destination under a window position.
     pub(crate) fn url_at(&self, position: Point<Pixels>) -> Option<String> {
+        if self.pending_edit.is_some() {
+            return None;
+        }
         let (block, rendered) = self.location_at(position)?;
         self.document.link_at(block, rendered).map(str::to_owned)
     }
 
     /// Image destination under a window position.
     pub(crate) fn image_at(&self, position: Point<Pixels>) -> Option<String> {
+        if self.pending_edit.is_some() {
+            return None;
+        }
         let (block, rendered) = self.location_at(position)?;
         self.document.image_at(block, rendered).map(str::to_owned)
     }
@@ -167,6 +263,9 @@ impl WriterSurface {
         &self,
         selection: &Range<usize>,
     ) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        if self.pending_edit.is_some() {
+            return None;
+        }
         let geometry = self.geometry.borrow();
         let bounds = Self::selection_bounds(&self.document, selection, &geometry.leaves)?;
         Some((bounds, geometry.viewport))
@@ -192,8 +291,15 @@ impl WriterSurface {
             let editor = session.editor.read(cx);
             (editor.cursor(), editor.selected_range())
         };
+        if self
+            .pending_edit
+            .as_ref()
+            .is_some_and(|edit| edit.contains_current(focus))
+        {
+            return false;
+        }
         let document = self.document.clone();
-        let Some((block, rendered)) = document.caret_location(focus) else {
+        let Some((block, rendered)) = document.caret_location(self.parsed_offset(focus)) else {
             return false;
         };
         let anchor = if shift {
@@ -221,6 +327,13 @@ impl WriterSurface {
             return false;
         };
         let Some(source) = document.source_at(next_block, next_rendered) else {
+            return false;
+        };
+        let Some(source) = self
+            .pending_edit
+            .as_ref()
+            .map_or(Some(source), |edit| edit.to_current(source))
+        else {
             return false;
         };
         let anchor = if shift { anchor } else { source };
@@ -378,9 +491,19 @@ impl WriterSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let offset = self.source_at(position).unwrap_or(self.source.len());
         let Some(session) = self.session.upgrade() else {
             return;
+        };
+        let offset = match self.source_at(position) {
+            Some(offset) => offset,
+            None if self.pending_edit.is_some() && self.document_revision.is_some() => {
+                // The displayed text here has been replaced. Keep its live
+                // selection instead of interpreting obsolete geometry as EOF.
+                let focus = session.read(cx).editor.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+                return;
+            }
+            None => self.source.len(),
         };
         let anchor = if extend {
             self.drag_anchor.or_else(|| {
@@ -628,14 +751,6 @@ impl Render for WriterSurface {
         let Some(session) = self.session.upgrade() else {
             return div().size_full().into_any_element();
         };
-        // The visible text is copied only when the buffer revision changed;
-        // unrelated frames never materialise the document.
-        let revision = session.read(cx).editor.read(cx).text_revision();
-        if self.document_revision != Some(revision) {
-            // The editing snapshot includes IME preedit before source commits it.
-            let visible = session.read(cx).editor.read(cx).text().to_string();
-            self.sync_document(revision, &visible);
-        }
         let (cursor, selection, focused, modes, placeholders) = {
             let session = session.read(cx);
             let editor = session.editor.read(cx);
@@ -647,7 +762,18 @@ impl Render for WriterSurface {
                 session.placeholder_ranges().to_vec(),
             )
         };
-        let copyedit = session.read(cx).copyedit.render_ranges(cursor);
+        let copyedit = if self.pending_edit.is_none() {
+            session.read(cx).copyedit.render_ranges(cursor)
+        } else {
+            Vec::new()
+        };
+        let cursor = self.parsed_offset(cursor);
+        let selection = self.parsed_offset(selection.start)..self.parsed_offset(selection.end);
+        let placeholders = if self.pending_edit.is_none() {
+            placeholders
+        } else {
+            Vec::new()
+        };
         let document = self.document.clone();
         let viewport_height = self.effective_viewport_height(window);
         let content_width = f32::from(self.geometry.borrow().viewport.size.width);
@@ -667,8 +793,10 @@ impl Render for WriterSurface {
         {
             self.rendered_blocks = rendered.len();
             self.rendered_range = rendered.clone();
-            self.first_rendered_range
-                .get_or_insert_with(|| rendered.clone());
+            if self.document_revision.is_some() {
+                self.first_rendered_range
+                    .get_or_insert_with(|| rendered.clone());
+            }
         }
         let style = self.style.clone();
         let mut decorations: HashMap<u64, Vec<(Range<usize>, Hsla)>> = HashMap::new();
@@ -678,7 +806,7 @@ impl Render for WriterSurface {
         // is only scanned when the mode is on; the rendered window is all that
         // needs the predicate.
         let focus_sentence = if modes.focus {
-            cursor_sentence(&self.source, cursor)
+            cursor_sentence(&self.parsed_text, cursor)
         } else {
             None
         };
@@ -1137,7 +1265,7 @@ mod tests {
         cx: &mut TestAppContext,
         source: &str,
     ) -> (WindowHandle<Root>, Entity<DocumentSession>) {
-        cx.update(|cx| {
+        let mounted = cx.update(|cx| {
             gpui_kit::init(cx);
             let mut session = None;
             let (handle, _) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
@@ -1160,7 +1288,42 @@ mod tests {
                 handle.downcast::<Root>().unwrap(),
                 session.expect("the writer session must exist"),
             )
-        })
+        });
+        cx.run_until_parked();
+        mounted
+    }
+
+    #[gpui_kit::test]
+    fn parsing_coalesces_revisions_and_never_installs_an_obsolete_snapshot(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, session) = mount_writer(cx, "# Original\n");
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let observed = seen.clone();
+        let _subscription = cx.update(|cx| {
+            cx.observe(&writer, move |writer, cx| {
+                observed
+                    .borrow_mut()
+                    .push(writer.read(cx).document_revision);
+            })
+        });
+        writer.update(cx, |writer, cx| {
+            writer.set_snapshot(100, Rope::from_str(&"Old paragraph.\n\n".repeat(2_000)), cx);
+            writer.set_snapshot(101, Rope::from_str("intermediate に"), cx);
+            writer.set_snapshot(102, Rope::from_str("# New 日本語🦀\n"), cx);
+            assert_eq!(
+                writer.parsed_text, "# Original\n",
+                "input does not synchronously parse"
+            );
+        });
+        cx.run_until_parked();
+        writer.read_with(cx, |writer, _| {
+            assert_eq!(writer.document_revision, Some(102));
+            assert_eq!(writer.document.blocks[0].text.text, "New 日本語🦀");
+            assert!(writer.parse_task.is_none() && writer.pending_snapshot.is_none());
+        });
+        assert_eq!(*seen.borrow(), [Some(102)]);
     }
 
     #[gpui_kit::test]
@@ -1211,12 +1374,15 @@ mod tests {
             input.compose_text(None, "に🦀", Some(3..3), cx);
             assert_eq!(input.marked_text_range(cx), Some(2..5));
             drop(input);
-            assert!(
-                writer.read(cx).source.contains("に🦀"),
-                "preedit is visible before commit"
-            );
         })
         .unwrap();
+        cx.run_until_parked();
+        writer.read_with(cx, |writer, _| {
+            assert!(
+                writer.parsed_text.contains("に🦀"),
+                "preedit is rendered before commit"
+            )
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             let bounds = writer.read(cx).geometry.borrow().viewport;
             let mut input =

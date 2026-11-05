@@ -268,10 +268,23 @@ impl WysiwygDocument {
     /// Blank lines separate blocks and are not rendered; all other bytes stay
     /// represented either in a block's text or in the block's source range.
     pub fn parse(source: &str) -> Self {
+        Self::parse_cancellable(source, || false).unwrap_or_default()
+    }
+
+    /// Parse a background snapshot, stopping between blocks when obsolete.
+    /// Returns `None` rather than exposing a partially mapped document.
+    /// A single block's parsing is not interrupted midway.
+    pub fn parse_cancellable(source: &str, mut cancelled: impl FnMut() -> bool) -> Option<Self> {
+        if cancelled() {
+            return None;
+        }
         let lines = lines(source);
         let mut blocks = Vec::new();
         let mut index = 0;
         while index < lines.len() {
+            if cancelled() {
+                return None;
+            }
             let line = &lines[index];
             let content = &source[line.start..line.content_end];
             if content.trim().is_empty() {
@@ -354,7 +367,10 @@ impl WysiwygDocument {
                 depth: 0,
             });
         }
-        Self { blocks }
+        if cancelled() {
+            return None;
+        }
+        Some(Self { blocks })
     }
 
     /// The block that owns `source`, or the nearest block by distance.
@@ -1048,6 +1064,24 @@ mod tests {
             .iter()
             .map(|block| (block.kind.clone(), block.text.text.clone()))
             .collect()
+    }
+
+    #[test]
+    fn cancelled_parse_never_returns_a_partially_mapped_document() {
+        let source = "# First
+
+Second paragraph.
+
+# Third
+";
+        assert!(WysiwygDocument::parse_cancellable(source, || true).is_none());
+        let mut checks = 0;
+        let result = WysiwygDocument::parse_cancellable(source, || {
+            checks += 1;
+            checks >= 3
+        });
+        assert!(result.is_none());
+        assert_eq!(checks, 3);
     }
 
     #[test]
