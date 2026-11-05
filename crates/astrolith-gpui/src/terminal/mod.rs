@@ -283,6 +283,11 @@ impl TerminalPanel {
         self.running_state()
     }
 
+    /// Whether terminal input currently owns the keyboard.
+    pub(crate) fn has_focus(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+
     /// A session that has not recorded an exit or reader EOF.
     fn running_state(&self) -> bool {
         self.session

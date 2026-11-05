@@ -503,12 +503,12 @@ impl Shell {
             project: None,
         }));
         let mut subscriptions = vec![
-            cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, _, cx| {
+            cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, window, cx| {
                 if matches!(event, DockEvent::LayoutChanged) {
                     // Dock events already carry the new geometry. Clamping here
                     // would mutate the dock on every splitter move.
                     this.capture_layout(cx);
-                    this.sync_terminal_activity(cx);
+                    this.sync_terminal_activity(window, cx);
                 }
             }),
             cx.observe_window_bounds(window, |this, window, cx| {
@@ -552,7 +552,7 @@ impl Shell {
                 this.open_project_scope(root.clone(), window, cx);
                 this.terminal
                     .update(cx, |terminal, cx| terminal.attach(&root, cx));
-                this.sync_terminal_activity(cx);
+                this.sync_terminal_activity(window, cx);
                 this.finish_pending_entry(window, cx);
             },
         ));
@@ -1788,18 +1788,38 @@ impl Shell {
             self.note_preview_fallback(cx);
         }
         self.sync_embedded(window, cx);
-        self.sync_terminal_activity(cx);
+        self.sync_terminal_activity(window, cx);
     }
 
     /// The terminal polls at frame rate only while Build shows its dock.
     ///
     /// Hiding the dock, or leaving Build, drops it to the slow cadence so a
     /// hidden shell is not a repaint source; the exit is still noticed.
-    fn sync_terminal_activity(&mut self, cx: &mut Context<Self>) {
+    fn sync_terminal_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active =
             self.mode == WorkspaceMode::Build && self.dock.read(cx).has_dock(DockPlacement::Bottom);
+        let terminal_focused = self.terminal.read(cx).has_focus(window);
         self.terminal
             .update(cx, |terminal, cx| terminal.set_active(active, cx));
+        // gpui focus is pure handle equality: removing the dock does not move
+        // it, so a hidden terminal would keep every keystroke.
+        if !active && terminal_focused {
+            self.focus_document_surface(window, cx);
+        }
+    }
+
+    /// Move focus to the active editor, or the document when none is open.
+    fn focus_document_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self.project.read(cx).active_session(cx) {
+            session
+                .read(cx)
+                .editor
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx);
+        } else {
+            self.document.read(cx).focus_handle(cx).focus(window, cx);
+        }
     }
 
     /// Record the active document as the open project's last entry.
@@ -2001,6 +2021,28 @@ impl Shell {
         }
         self.refresh_menus(window, cx);
         cx.notify();
+    }
+
+    /// `ToggleTerminal` from another mode enters Build and *shows* the dock.
+    ///
+    /// Entering Build applies its remembered layout, which may have the bottom
+    /// dock hidden; the command must not then toggle it closed. Inside Build
+    /// the command is the ordinary bottom-dock toggle, with no mode change.
+    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != WorkspaceMode::Build {
+            self.set_mode(WorkspaceMode::Build, window, cx);
+            if !self.dock.read(cx).has_dock(DockPlacement::Bottom) {
+                let height = self.settings.layouts.get(self.mode).preview_height;
+                self.set_preview_visible(true, height, window, cx);
+            }
+            return;
+        }
+        self.toggle_bottom_dock(window, cx);
+    }
+
+    /// Toggle Build's bottom dock (the terminal) without touching the mode.
+    fn toggle_bottom_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_panel(PanelKind::Preview, window, cx);
     }
 
     fn toggle_panel(&mut self, kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -2287,13 +2329,14 @@ impl Shell {
             }
             CommandId::ToggleSidebar => self.toggle_panel(PanelKind::Sidebar, window, cx),
             CommandId::ToggleInspector => self.toggle_panel(PanelKind::Inspector, window, cx),
-            CommandId::TogglePreview => self.toggle_panel(PanelKind::Preview, window, cx),
-            CommandId::ToggleTerminal => {
-                if self.mode != WorkspaceMode::Build {
-                    self.set_mode(WorkspaceMode::Build, window, cx);
-                }
-                self.toggle_panel(PanelKind::Preview, window, cx);
+            // In Build the bottom dock is the terminal, so "toggle preview"
+            // there would silently toggle the terminal. Target what the label
+            // names: preview elsewhere, terminal in Build.
+            CommandId::TogglePreview if self.mode == WorkspaceMode::Build => {
+                self.toggle_bottom_dock(window, cx)
             }
+            CommandId::TogglePreview => self.toggle_panel(PanelKind::Preview, window, cx),
+            CommandId::ToggleTerminal => self.toggle_terminal(window, cx),
             CommandId::StartPreview => self.preview.update(cx, |preview, cx| preview.start(cx)),
             CommandId::StopPreview => self.preview.update(cx, |preview, cx| preview.stop(cx)),
             CommandId::RestartPreview => self.preview.update(cx, |preview, cx| preview.restart(cx)),
@@ -2465,7 +2508,9 @@ impl Shell {
                 .map(|key| Kbd::format(&key).into())
                 .unwrap_or_default();
             let entry = PaletteEntry {
-                label: command.label_with(&copyedit).into(),
+                label: command
+                    .label_in(&copyedit, availability.workspace_mode)
+                    .into(),
                 shortcut,
                 icon: command_icon(command),
                 action: PaletteAction::Command(command),
@@ -4861,6 +4906,117 @@ mod tests {
             }
             assert!(gone, "the previous project's shell must be terminated");
         }
+    }
+
+    /// Build's remembered layout may have the bottom dock hidden; entering
+    /// Build through `ToggleTerminal` must still show it.
+    #[gpui_kit::test]
+    async fn toggle_terminal_enters_build_and_shows_the_dock(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.set_mode(WorkspaceMode::Build, window, cx);
+                if shell.dock.read(cx).has_dock(DockPlacement::Bottom) {
+                    shell.execute(CommandId::ToggleTerminal, window, cx);
+                }
+                assert!(
+                    !shell.dock.read(cx).has_dock(DockPlacement::Bottom),
+                    "the fixture starts with Build's terminal hidden"
+                );
+                shell.set_mode(WorkspaceMode::Writing, window, cx);
+                shell.execute(CommandId::ToggleTerminal, window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(shell.mode, WorkspaceMode::Build);
+            assert!(
+                shell.dock.read(cx).has_dock(DockPlacement::Bottom),
+                "ToggleTerminal must show the terminal, not toggle it closed"
+            );
+        });
+
+        // Idempotent show path: calling it again from Build closes the dock,
+        // but does not churn the mode or reapply a layout.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.execute(CommandId::ToggleTerminal, window, cx)
+            });
+        })
+        .unwrap();
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(shell.mode, WorkspaceMode::Build);
+            assert!(!shell.dock.read(cx).has_dock(DockPlacement::Bottom));
+        });
+    }
+
+    /// In Build the bottom dock is the terminal, so `TogglePreview` must
+    /// target the terminal instead of silently toggling a preview panel.
+    #[gpui_kit::test]
+    async fn toggle_preview_in_build_targets_the_terminal(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.set_mode(WorkspaceMode::Build, window, cx);
+                if !shell.dock.read(cx).has_dock(DockPlacement::Bottom) {
+                    shell.execute(CommandId::ToggleTerminal, window, cx);
+                }
+                assert!(shell.dock.read(cx).has_dock(DockPlacement::Bottom));
+                shell.execute(CommandId::TogglePreview, window, cx);
+            });
+        })
+        .unwrap();
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(shell.mode, WorkspaceMode::Build);
+            assert!(
+                !shell.dock.read(cx).has_dock(DockPlacement::Bottom),
+                "TogglePreview in Build toggles the terminal dock"
+            );
+        });
+        assert_eq!(
+            CommandId::TogglePreview.label_in(
+                &astrolith_core::preferences::CopyeditPreferences::default(),
+                WorkspaceMode::Build
+            ),
+            "Toggle terminal"
+        );
+        assert_eq!(
+            CommandId::TogglePreview.label_in(
+                &astrolith_core::preferences::CopyeditPreferences::default(),
+                WorkspaceMode::Writing
+            ),
+            "Toggle preview"
+        );
+    }
+
+    /// Leaving Build while the terminal owns the keyboard must hand focus to
+    /// the document; otherwise every keystroke still reaches the hidden shell.
+    #[gpui_kit::test]
+    async fn leaving_build_moves_focus_off_the_terminal(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.set_mode(WorkspaceMode::Build, window, cx);
+                if !shell.dock.read(cx).has_dock(DockPlacement::Bottom) {
+                    shell.execute(CommandId::ToggleTerminal, window, cx);
+                }
+                let focus = shell.terminal.read(cx).focus_handle(cx);
+                focus.focus(window, cx);
+            });
+            assert!(
+                view.read(cx).terminal.read(cx).has_focus(window),
+                "the fixture must start with terminal focus"
+            );
+            view.update(cx, |shell, cx| {
+                shell.set_mode(WorkspaceMode::Writing, window, cx)
+            });
+            assert!(
+                !view.read(cx).terminal.read(cx).has_focus(window),
+                "focus must leave the terminal when its dock leaves the screen"
+            );
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

@@ -282,6 +282,17 @@ impl CommandId {
         }
     }
 
+    /// The label under the live mode.
+    ///
+    /// In Build the bottom dock is the terminal, so "Toggle preview" there
+    /// must be named for what it actually toggles.
+    pub fn label_in(self, copyedit: &CopyeditPreferences, mode: WorkspaceMode) -> &'static str {
+        match (self, mode) {
+            (Self::TogglePreview, WorkspaceMode::Build) => "Toggle terminal",
+            _ => self.label_with(copyedit),
+        }
+    }
+
     /// Whether this command can run in the given application state.
     pub fn is_available(self, state: CommandAvailability) -> bool {
         match self {
@@ -1094,9 +1105,12 @@ fn menu_item(
         CommandId::ToggleFullscreen => availability.fullscreen,
         _ => false,
     };
-    gpui_kit::MenuItem::action(command.label_with(copyedit), command)
-        .checked(checked)
-        .disabled(!command.is_available(availability))
+    gpui_kit::MenuItem::action(
+        command.label_in(copyedit, availability.workspace_mode),
+        command,
+    )
+    .checked(checked)
+    .disabled(!command.is_available(availability))
 }
 
 #[cfg(test)]
