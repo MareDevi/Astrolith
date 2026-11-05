@@ -307,9 +307,9 @@ pub(crate) struct Shell {
     preview_sync_key: Option<(u64, Option<PathBuf>, astrolith_preview::RouteMapping)>,
     last_viewport: gpui_kit::Size<gpui_kit::Pixels>,
     _skin: Rc<DockSkin>,
+    /// Global preferences; `settings.layouts` is the global layout authority and
+    /// the only layout source when no project is open.
     settings: GlobalPreferencesV2,
-    /// Per-mode layouts last written to (or loaded from) the global scope.
-    global_layouts: ModeLayouts,
     /// Active workspace mode; state and services are independent of it.
     mode: WorkspaceMode,
     /// Project scope currently open, if any; absorbs layout and last-entry writes.
@@ -320,6 +320,9 @@ pub(crate) struct Shell {
     /// The dock is being set programmatically; its intermediate events are not
     /// user changes and must not be persisted.
     applying_layout: bool,
+    /// A dock change whose layout event must not be persisted; revealing the
+    /// navigator before the open-project prompt is transient.
+    ignoring_layout_event: bool,
     store: Option<Arc<PreferencesStore>>,
     latest: LatestSettings,
     revision: u64,
@@ -378,7 +381,6 @@ impl Shell {
         settings
             .layouts
             .clamp(f32::from(window.viewport_size().width));
-        let global_layouts = settings.layouts.clone();
         let mode = settings.default_mode;
         let layout = settings.layouts.get(mode).clone();
         theme::apply(&settings, window.appearance(), cx);
@@ -796,11 +798,11 @@ impl Shell {
             last_viewport: window.viewport_size(),
             _skin: skin,
             settings,
-            global_layouts,
             mode,
             project_scope: None,
             scope_loading: None,
             applying_layout: false,
+            ignoring_layout_event: false,
             store,
             latest,
             revision: 0,
@@ -1519,8 +1521,28 @@ impl Shell {
         }
     }
 
+    /// The layout in force for one mode.
+    ///
+    /// The open project's override wins where it recorded one; otherwise the
+    /// global preference applies. Clamping here keeps a stored layout inside
+    /// the current viewport, exactly as the dock is sized.
+    fn active_layout(&self, mode: WorkspaceMode) -> LayoutState {
+        let mut layout = match self.project_scope.as_ref() {
+            Some(scope) => scope
+                .preferences
+                .layout_overrides
+                .get(mode)
+                .unwrap_or_else(|| self.settings.layouts.get(mode)),
+            None => self.settings.layouts.get(mode),
+        }
+        .clone();
+        layout.clamp(f32::from(self.last_viewport.width));
+        layout
+    }
+
     /// The layout the dock currently reports.
     fn read_dock_layout(&self, cx: &App) -> LayoutState {
+        let current = self.active_layout(self.mode);
         let dock = self.dock.read(cx);
         LayoutState {
             sidebar_visible: dock.is_dock_open(DockPlacement::Left),
@@ -1533,8 +1555,8 @@ impl Shell {
             preview_height: dock
                 .dock_size(DockPlacement::Bottom)
                 .map(f32::from)
-                .filter(|_| self.settings.layouts.get(self.mode).preview_visible)
-                .unwrap_or(self.settings.layouts.get(self.mode).preview_height),
+                .filter(|_| current.preview_visible)
+                .unwrap_or(current.preview_height),
         }
     }
 
@@ -1544,16 +1566,19 @@ impl Shell {
         if self.scope_loading.is_some() || self.applying_layout {
             return;
         }
+        // A reveal that only serves the next command is not a preference.
+        if std::mem::take(&mut self.ignoring_layout_event) {
+            return;
+        }
         let layout = self.read_dock_layout(cx);
-        let current = self.settings.layouts.get(self.mode).clone();
+        let current = self.active_layout(self.mode);
         let visibility_changed = layout.sidebar_visible != current.sidebar_visible
             || layout.preview_visible != current.preview_visible;
         if layout == current {
             return;
         }
-        self.settings.layouts.set(self.mode, layout.clone());
-        // With a project open the dock belongs to that project's scope; a
-        // project file records both visibility and the live widths.
+        // The dock belongs to the open project's scope when there is one,
+        // otherwise to the global preference; it never reaches both.
         if let Some(scope) = self.project_scope.as_mut() {
             scope
                 .preferences
@@ -1561,6 +1586,7 @@ impl Shell {
                 .set(self.mode, Some(layout));
             self.persist_project(cx);
         } else {
+            self.settings.layouts.set(self.mode, layout);
             self.persist_global(cx);
         }
         // Width-only changes are carried by the dock itself. Notifying here
@@ -1590,19 +1616,14 @@ impl Shell {
         self.persist_global(cx);
     }
 
-    /// Persist the global scope, keeping a project layout out of the global file.
+    /// Persist the global scope.
     fn persist_global(&mut self, cx: &mut Context<Self>) {
         if self.resetting.load(Ordering::SeqCst) {
             return;
         }
         self.revision += 1;
         let revision = self.revision;
-        let mut settings = self.settings.clone();
-        if self.project_scope.is_some() || self.scope_loading.is_some() {
-            settings.layouts = self.global_layouts.clone();
-        } else {
-            self.global_layouts = settings.layouts.clone();
-        }
+        let settings = self.settings.clone();
         self.record_latest(|latest| latest.global = (revision, settings.clone()));
         let Some(store) = self.store.clone() else {
             return;
@@ -1714,7 +1735,7 @@ impl Shell {
                 self.warning = Some(format!("Could not load project preferences: {error}"));
                 // The scope is global again; make the visible layout match it
                 // so later changes are persisted where they belong.
-                let layout = self.global_layouts.get(self.mode).clone();
+                let layout = self.active_layout(self.mode);
                 self.apply_layout(layout, window, cx);
                 cx.notify();
                 return;
@@ -1724,11 +1745,7 @@ impl Shell {
             tracing::warn!(%warning, "project preferences loaded with a warning");
             self.warning = Some(warning);
         }
-        let global = GlobalPreferencesV2 {
-            layouts: self.global_layouts.clone(),
-            ..self.settings.clone()
-        };
-        let resolved = resolve(&global, Some(&preferences), None);
+        let resolved = resolve(&self.settings, Some(&preferences), None);
         self.project_scope = Some(ProjectScope {
             root,
             preferences: preferences.clone(),
@@ -1737,15 +1754,11 @@ impl Shell {
         self.sync_project_preferences(cx);
         self.mode = resolved.last_mode.unwrap_or(resolved.default_mode);
         self.sync_document_empty_copy(cx);
-        self.settings.layouts = resolved.layouts;
-        self.settings
-            .layouts
-            .clamp(f32::from(window.viewport_size().width));
         let source_view = self.mode == WorkspaceMode::Build;
         self.project.update(cx, |project, cx| {
             project.set_source_view(source_view, window, cx)
         });
-        let layout = self.settings.layouts.get(self.mode).clone();
+        let layout = self.active_layout(self.mode);
         self.apply_layout(layout, window, cx);
         self.sync_center(window, cx);
         self.project.update(cx, |project, cx| {
@@ -1767,7 +1780,11 @@ impl Shell {
         });
     }
 
-    /// Apply a resolved layout to the dock without persisting it back.
+    /// Apply a layout to the dock without touching either layout authority.
+    ///
+    /// The applied layout is what [`Self::active_layout`] derives, so the
+    /// deferred layout event compares equal and a restore never becomes a
+    /// write.
     fn apply_layout(
         &mut self,
         mut layout: LayoutState,
@@ -1775,9 +1792,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         layout.clamp(f32::from(window.viewport_size().width));
-        // Set the model first: dock events arrive afterwards and must not look
-        // like a user change.
-        self.settings.layouts.set(self.mode, layout.clone());
         self.applying_layout = true;
         self.dock.update(cx, |dock, cx| {
             if dock.is_dock_open(DockPlacement::Left) != layout.sidebar_visible {
@@ -2038,7 +2052,7 @@ impl Shell {
         self.project.update(cx, |project, cx| {
             project.set_source_view(mode == WorkspaceMode::Build, window, cx)
         });
-        let layout = self.settings.layouts.get(mode).clone();
+        let layout = self.active_layout(mode);
         self.apply_layout(layout, window, cx);
         if let Some(scope) = self.project_scope.as_mut()
             && scope.preferences.last_mode != Some(mode)
@@ -2076,7 +2090,7 @@ impl Shell {
         if self.mode != WorkspaceMode::Build {
             self.set_mode(WorkspaceMode::Build, window, cx);
             if !self.dock.read(cx).has_dock(DockPlacement::Bottom) {
-                let height = self.settings.layouts.get(self.mode).preview_height;
+                let height = self.active_layout(self.mode).preview_height;
                 self.set_preview_visible(true, height, window, cx);
             }
             return;
@@ -2104,7 +2118,7 @@ impl Shell {
             // Presence, not open state: a closed bottom dock would leave its
             // collapsed strip on screen.
             let visible = !self.dock.read(cx).has_dock(DockPlacement::Bottom);
-            let height = self.settings.layouts.get(self.mode).preview_height;
+            let height = self.active_layout(self.mode).preview_height;
             self.set_preview_visible(visible, height, window, cx);
             // LayoutChanged also captures the new visibility.
             cx.notify();
@@ -2216,7 +2230,7 @@ impl Shell {
     /// a Writing/Preview capability; Preview mode itself only decides that the
     /// centre shows the rendered document.
     fn astro_preview_visible(&self) -> bool {
-        self.mode != WorkspaceMode::Build && self.settings.layouts.get(self.mode).preview_visible
+        self.mode != WorkspaceMode::Build && self.active_layout(self.mode).preview_visible
     }
 
     /// Put the panel the current mode reads into the centre.
@@ -2330,13 +2344,11 @@ impl Shell {
             }
             CommandId::OpenProject => {
                 if !self.dock.read(cx).is_dock_open(DockPlacement::Left) {
-                    self.toggle_panel(PanelKind::Sidebar, window, cx);
                     // Revealing the navigator is a transient UI action for the
-                    // project about to open. Mirror the dock so the deferred
-                    // layout event compares equal, but never persist it into
+                    // project about to open: its layout event must never reach
                     // the outgoing project's or the global scope.
-                    let layout = self.read_dock_layout(cx);
-                    self.settings.layouts.set(self.mode, layout);
+                    self.ignoring_layout_event = true;
+                    self.toggle_panel(PanelKind::Sidebar, window, cx);
                 }
                 self.project
                     .update(cx, |project, cx| project.prompt(window, cx));
@@ -2502,16 +2514,17 @@ impl Shell {
             CommandId::ResetLayout => {
                 let mut layout = ModeLayouts::default().get(self.mode).clone();
                 layout.clamp(f32::from(window.viewport_size().width));
-                self.apply_layout(layout.clone(), window, cx);
                 if let Some(scope) = self.project_scope.as_mut() {
                     scope
                         .preferences
                         .layout_overrides
-                        .set(self.mode, Some(layout));
+                        .set(self.mode, Some(layout.clone()));
                     self.persist_project(cx);
                 } else {
+                    self.settings.layouts.set(self.mode, layout.clone());
                     self.persist_global(cx);
                 }
+                self.apply_layout(layout, window, cx);
             }
         }
         cx.notify();
@@ -2719,7 +2732,6 @@ impl Shell {
             .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
         let context = PreferencesContext {
             global: self.settings.clone(),
-            global_layouts: self.global_layouts.clone(),
             project: self
                 .project_scope
                 .as_ref()
@@ -2773,7 +2785,7 @@ impl Shell {
         // The dock may have been resized while the sheet was open; the live
         // global layouts stay authoritative unless the draft requested an
         // explicit per-mode reset.
-        global.layouts = self.global_layouts.clone();
+        global.layouts = self.settings.layouts.clone();
         let defaults = ModeLayouts::default();
         for mode in &edits.layout_resets.global {
             global.layouts.set(*mode, defaults.get(*mode).clone());
@@ -2782,7 +2794,6 @@ impl Shell {
             .layouts
             .clamp(f32::from(window.viewport_size().width));
         global.window = self.settings.window;
-        self.global_layouts = global.layouts.clone();
         self.settings = global;
         if let Some(preferences) = edits.project
             && let Some(scope) = self.project_scope.as_mut()
@@ -2792,15 +2803,6 @@ impl Shell {
                 scope.preferences.layout_overrides = Default::default();
             }
         }
-        self.settings.layouts = match self.project_scope.as_ref() {
-            Some(scope) => self
-                .global_layouts
-                .resolve_with(&scope.preferences.layout_overrides),
-            None => self.global_layouts.clone(),
-        };
-        self.settings
-            .layouts
-            .clamp(f32::from(window.viewport_size().width));
         theme::apply(&self.settings, window.appearance(), cx);
         self.sync_project_preferences(cx);
         let (focus, typewriter) = (self.settings.focus_mode, self.settings.typewriter_mode);
@@ -2815,7 +2817,7 @@ impl Shell {
         // Only an explicit reset changes the authoritative layout; a plain
         // Apply leaves the live dock (and its retained bottom panel) untouched.
         if !edits.layout_resets.global.is_empty() || edits.layout_resets.project {
-            let layout = self.settings.layouts.get(self.mode).clone();
+            let layout = self.active_layout(self.mode);
             self.apply_layout(layout, window, cx);
         }
         self.persist_global(cx);
@@ -3371,7 +3373,7 @@ impl Render for Shell {
         if self.inspector_open && self.frontmatter_key.is_none() {
             self.set_inspector_open(false, cx);
         }
-        let layout = self.settings.layouts.get(self.mode);
+        let layout = self.active_layout(self.mode);
         // The document face, size, line height and measure are explicit
         // preferences; the pane width no longer rescales the prose. Resolving
         // the family scans the installed set, so it is cached until one of the
@@ -5826,14 +5828,14 @@ mod tests {
         .await;
 
         view.read_with(cx, |shell, cx| {
-            assert_eq!(shell.settings.layouts.writing, saved);
+            assert_eq!(shell.active_layout(WorkspaceMode::Writing), saved);
             let dock = shell.dock.read(cx);
             assert!(dock.is_dock_open(DockPlacement::Left));
             assert!(dock.is_dock_open(DockPlacement::Bottom));
             assert_eq!(dock.dock_size(DockPlacement::Left), Some(px(200.)));
             assert_eq!(dock.dock_size(DockPlacement::Bottom), Some(px(220.)));
             assert_eq!(
-                shell.global_layouts.writing,
+                shell.settings.layouts.writing,
                 ModeLayouts::default().writing,
                 "restoring a project layout must not rewrite the global layout"
             );
@@ -5922,7 +5924,7 @@ mod tests {
         })
         .await;
         view.read_with(cx, |shell, cx| {
-            assert_eq!(shell.settings.layouts.writing, first_layout);
+            assert_eq!(shell.active_layout(WorkspaceMode::Writing), first_layout);
             assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
         });
 
@@ -5935,7 +5937,7 @@ mod tests {
         })
         .await;
         view.read_with(cx, |shell, cx| {
-            assert_eq!(shell.settings.layouts.writing, second_layout);
+            assert_eq!(shell.active_layout(WorkspaceMode::Writing), second_layout);
             assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Left));
             assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
             assert_eq!(
@@ -5953,7 +5955,7 @@ mod tests {
         })
         .await;
         view.read_with(cx, |shell, cx| {
-            assert_eq!(shell.settings.layouts.writing, first_layout);
+            assert_eq!(shell.active_layout(WorkspaceMode::Writing), first_layout);
             assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
         });
     }
@@ -6011,7 +6013,7 @@ mod tests {
                 scope.preferences.project_id, id,
                 "a moved project keeps its registry identity and preferences"
             );
-            assert_eq!(shell.settings.layouts.writing, saved);
+            assert_eq!(shell.active_layout(WorkspaceMode::Writing), saved);
             assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
             assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
         });
@@ -6041,7 +6043,8 @@ mod tests {
         .await;
         view.read_with(cx, |shell, _| {
             assert_eq!(
-                shell.settings.layouts.writing, shell.global_layouts.writing,
+                shell.active_layout(WorkspaceMode::Writing),
+                shell.settings.layouts.writing,
                 "a project without a saved layout inherits the global layout"
             );
             assert!(
@@ -6099,6 +6102,145 @@ mod tests {
             global.layouts.writing.sidebar_width, 224.,
             "a project width must never be written to the global file"
         );
+    }
+
+    #[gpui_kit::test]
+    async fn scoped_layout_change_leaves_the_global_layout_untouched(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let preferences_root = workspace.path().join("preferences");
+        let global_path = preferences_root.join("global.json");
+        let global_layout = LayoutState {
+            sidebar_visible: true,
+            preview_visible: false,
+            sidebar_width: 300.,
+            preview_height: 160.,
+        };
+        let second_layout = LayoutState {
+            sidebar_visible: true,
+            preview_visible: false,
+            sidebar_width: 190.,
+            preview_height: 140.,
+        };
+        let first = project_fixture("first-scope-site");
+        let second = project_fixture("second-scope-site");
+        let (store, mut settings, _) = PreferencesStore::load(global_path.clone());
+        settings.layouts.writing = global_layout.clone();
+        store.save_global(1, &settings).unwrap();
+        let second_id = {
+            let layout = second_layout.clone();
+            seed_project(&store, second.path(), |preferences| {
+                preferences
+                    .layout_overrides
+                    .set(WorkspaceMode::Writing, Some(layout));
+            })
+        };
+        let (store, settings, _) = PreferencesStore::load(global_path.clone());
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+
+        open_project(cx, handle, &view, first.path().to_path_buf());
+        let first_id = wait_for_project_scope(cx, &view, first.path()).await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let start = window.find("resize-handle-left").bounds().center();
+            window.drag(start, point(start.x + px(36.), start.y), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(300));
+        let first_file = preferences_root
+            .join("projects")
+            .join(format!("{first_id}.json"));
+        let written = first_file.clone();
+        cx.condition(&view, move |_, _| {
+            std::fs::read(&written)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value["layout_overrides"]["writing"]["sidebar_width"].as_f64())
+                .is_some_and(|width| width > 250.)
+        })
+        .await;
+
+        // The change belongs to the open project alone: the global preference
+        // and its file are untouched.
+        view.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.settings.layouts.writing, global_layout,
+                "a project layout must never reach the global preference"
+            );
+            assert!(shell.active_layout(WorkspaceMode::Writing).sidebar_width > 250.);
+        });
+        let (_, global, _) = PreferencesStore::load(global_path.clone());
+        assert_eq!(global.layouts.writing, global_layout);
+
+        // The next project restores only its own file, on the same global.
+        open_project(cx, handle, &view, second.path().to_path_buf());
+        wait_for_project_scope(cx, &view, second.path()).await;
+        view.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.project_scope.as_ref().unwrap().preferences.project_id,
+                second_id
+            );
+            assert_eq!(shell.active_layout(WorkspaceMode::Writing), second_layout);
+            assert_eq!(shell.settings.layouts.writing, global_layout);
+            assert_eq!(
+                shell.dock.read(cx).dock_size(DockPlacement::Left),
+                Some(px(190.))
+            );
+        });
+        let (_, global, _) = PreferencesStore::load(global_path);
+        assert_eq!(global.layouts.writing, global_layout);
+    }
+
+    #[gpui_kit::test]
+    fn active_layout_prefers_the_project_override(cx: &mut TestAppContext) {
+        let mut settings = GlobalPreferencesV2::default();
+        settings.layouts.writing = LayoutState {
+            sidebar_visible: true,
+            preview_visible: false,
+            sidebar_width: 300.,
+            preview_height: 180.,
+        };
+        let (_handle, view) = mount(cx, settings.clone());
+        let override_layout = LayoutState {
+            sidebar_visible: false,
+            preview_visible: true,
+            sidebar_width: 200.,
+            preview_height: 220.,
+        };
+        view.update(cx, |shell, _| {
+            assert_eq!(
+                shell.active_layout(WorkspaceMode::Writing),
+                settings.layouts.writing,
+                "without a project the global layout applies"
+            );
+            shell.project_scope = Some(ProjectScope {
+                root: PathBuf::from("/layout-lookup"),
+                preferences: ProjectPreferencesV1::default(),
+                revision: 0,
+            });
+            assert_eq!(
+                shell.active_layout(WorkspaceMode::Writing),
+                settings.layouts.writing,
+                "a project without an override still inherits the global layout"
+            );
+            shell
+                .project_scope
+                .as_mut()
+                .unwrap()
+                .preferences
+                .layout_overrides
+                .set(WorkspaceMode::Writing, Some(override_layout.clone()));
+            assert_eq!(shell.active_layout(WorkspaceMode::Writing), override_layout);
+            assert_eq!(
+                shell.active_layout(WorkspaceMode::Build),
+                settings.layouts.build,
+                "modes without an override keep the global layout"
+            );
+        });
     }
 
     #[gpui_kit::test]
@@ -6362,7 +6504,8 @@ mod tests {
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
                 .and_then(|value| value["layouts"]["writing"]["sidebar_width"].as_f64());
-            shell.global_layouts.writing.sidebar_width > 250. && persisted.is_some_and(|w| w > 250.)
+            shell.settings.layouts.writing.sidebar_width > 250.
+                && persisted.is_some_and(|w| w > 250.)
         })
         .await;
         let (_, global, warning) = PreferencesStore::load(global_path);
@@ -7215,7 +7358,7 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(400));
         cx.condition(&view, |shell, _| {
             shell.settings.default_mode == WorkspaceMode::Build
-                && shell.global_layouts.writing == ModeLayouts::default().writing
+                && shell.settings.layouts.writing == ModeLayouts::default().writing
         })
         .await;
         view.read_with(cx, |shell, cx| {
@@ -7276,7 +7419,7 @@ mod tests {
         open_project(cx, handle, &view, project.path().to_path_buf());
         wait_for_project_scope(cx, &view, project.path()).await;
         view.read_with(cx, |shell, cx| {
-            assert_eq!(shell.settings.layouts.writing, override_layout);
+            assert_eq!(shell.active_layout(WorkspaceMode::Writing), override_layout);
             assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
         });
 
@@ -7301,7 +7444,8 @@ mod tests {
         .await;
         view.read_with(cx, |shell, _| {
             assert_eq!(
-                shell.settings.layouts.writing, shell.global_layouts.writing,
+                shell.active_layout(WorkspaceMode::Writing),
+                shell.settings.layouts.writing,
                 "the project now inherits every global layout"
             );
         });

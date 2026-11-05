@@ -139,7 +139,7 @@ impl PreferencesSheet {
         let mut layouts = Vec::new();
         if let Some(context) = self.context.as_ref() {
             for mode in WorkspaceMode::ALL {
-                let layout = context.global_layouts.get(mode);
+                let layout = context.global.layouts.get(mode);
                 let pending = self.layout_resets.global.contains(&mode);
                 layouts.push(self.field(
                     match mode {

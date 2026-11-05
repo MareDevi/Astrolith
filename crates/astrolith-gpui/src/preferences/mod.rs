@@ -24,7 +24,7 @@ use std::{
 use astrolith_astro::schema::{CollectionSchema, FieldKind};
 use astrolith_core::preferences::{
     AutosaveDelay, BrowserCommand, CollectionPreferencesV1, FieldMappings, FileExtension,
-    GlobalPreferencesV2, HeadingColors, IdeCommand, ImagePathMode, ModeLayouts, PreviewPreferences,
+    GlobalPreferencesV2, HeadingColors, IdeCommand, ImagePathMode, PreviewPreferences,
     PreviewPresentation, ProjectPreferencesV1, ThemePreference, WorkspaceMode,
 };
 use gpui_kit::component::{
@@ -127,10 +127,9 @@ pub(crate) struct CollectionEntry {
 /// Snapshots and project data the sheet needs when it opens.
 #[derive(Clone)]
 pub(crate) struct PreferencesContext {
-    /// Global scope as persisted.
+    /// Global scope as persisted; `global.layouts` is the global layout
+    /// authority, including changes made while the sheet is open.
     pub global: GlobalPreferencesV2,
-    /// Global layout defaults, including changes made while the sheet is open.
-    pub global_layouts: ModeLayouts,
     /// Open project scope; `None` hides the project and collection panes.
     pub project: Option<ProjectPreferencesV1>,
     /// Project collections with their schemas.
