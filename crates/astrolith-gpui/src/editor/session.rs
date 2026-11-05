@@ -1794,7 +1794,11 @@ impl DocumentSession {
             }
             LspEvent::Ready(capabilities) => {
                 self.lsp_status = LspStatus::Ready;
-                self.clear_lsp_notice();
+                if self.take_lsp_notice() {
+                    // Replace the failure the status line copied with recovery.
+                    self.notice = Some(SharedString::from("Language server ready."));
+                    cx.emit(SessionChanged);
+                }
                 self.install_lsp_providers(*capabilities, cx);
                 false
             }
@@ -1847,15 +1851,16 @@ impl DocumentSession {
         retry
     }
 
-    /// Drop an LSP notice the status line may have copied, leaving other notices.
-    fn clear_lsp_notice(&mut self) {
-        if self
+    /// Take an LSP notice, leaving notices that belong to other features.
+    fn take_lsp_notice(&mut self) -> bool {
+        let was_lsp = self
             .notice
             .as_ref()
-            .is_some_and(|notice| notice.starts_with("Language server"))
-        {
+            .is_some_and(|notice| notice.starts_with("Language server"));
+        if was_lsp {
             self.notice = None;
         }
+        was_lsp
     }
 
     /// Install only the providers the server advertised in its handshake.
@@ -2493,9 +2498,10 @@ mod tests {
                 ));
                 assert!(!session.apply_lsp_event(LspEvent::Ready(Box::default()), cx,));
                 assert_eq!(session.lsp_status, LspStatus::Ready);
-                assert!(
-                    session.notice.is_none(),
-                    "the retry notice must not outlive a successful handshake"
+                assert_eq!(
+                    session.notice.as_deref(),
+                    Some("Language server ready."),
+                    "the retry notice must be replaced by the recovery"
                 );
             });
         })
