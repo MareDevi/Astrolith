@@ -515,13 +515,15 @@ impl TerminalPanel {
         }
         if (modifiers.control || modifiers.platform) && key.eq_ignore_ascii_case("v") {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                let _ = session.write(text.as_bytes());
+                let bracketed = session.with_screen(|screen| screen.bracketed_paste());
+                let _ = session.write(&paste_payload(&text, bracketed));
                 session.scroll_to_bottom();
                 return true;
             }
             return false;
         }
-        let bytes = translate_key(event);
+        let application_cursor = session.with_screen(|screen| screen.application_cursor());
+        let bytes = translate_key(event, application_cursor);
         if let Some(bytes) = bytes {
             if session.write(&bytes).is_ok() {
                 session.scroll_to_bottom();
@@ -861,8 +863,54 @@ impl Render for TerminalPanel {
     }
 }
 
+/// Cursor-key sequence for the terminal's DECCKM state.
+///
+/// Applications that enable the application cursor mode (`vim`, `less`,
+/// `fzf`) expect SS3 sequences; normal mode uses the CSI forms.
+fn cursor_sequence(key: &str, application_cursor: bool) -> Option<&'static str> {
+    if !matches!(key, "home" | "end" | "up" | "down" | "right" | "left") {
+        return None;
+    }
+    let application = match key {
+        "home" => "\x1bOH",
+        "end" => "\x1bOF",
+        "up" => "\x1bOA",
+        "down" => "\x1bOB",
+        "right" => "\x1bOC",
+        "left" => "\x1bOD",
+        _ => return None,
+    };
+    let normal = match key {
+        "home" => "\x1b[H",
+        "end" => "\x1b[F",
+        "up" => "\x1b[A",
+        "down" => "\x1b[B",
+        "right" => "\x1b[C",
+        "left" => "\x1b[D",
+        _ => return None,
+    };
+    Some(if application_cursor {
+        application
+    } else {
+        normal
+    })
+}
+
+/// Clipboard payload, bracketed when the child enabled paste mode.
+fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len() + 12);
+    if bracketed {
+        bytes.extend_from_slice(b"\x1b[200~");
+    }
+    bytes.extend_from_slice(text.as_bytes());
+    if bracketed {
+        bytes.extend_from_slice(b"\x1b[201~");
+    }
+    bytes
+}
+
 /// Key translation from GPUI keystrokes to terminal byte sequences.
-fn translate_key(event: &gpui_kit::KeystrokeEvent) -> Option<Vec<u8>> {
+fn translate_key(event: &gpui_kit::KeystrokeEvent, application_cursor: bool) -> Option<Vec<u8>> {
     let key = event.keystroke.key.as_str();
     let modifiers = event.keystroke.modifiers;
     let control = modifiers.control;
@@ -893,14 +941,12 @@ fn translate_key(event: &gpui_kit::KeystrokeEvent) -> Option<Vec<u8>> {
         "escape" => return Some(vec![0x1b]),
         "delete" => return Some(b"\x1b[3~".to_vec()),
         "insert" => return Some(b"\x1b[2~".to_vec()),
-        "home" => return Some(b"\x1b[H".to_vec()),
-        "end" => return Some(b"\x1b[F".to_vec()),
         "pageup" => return Some(b"\x1b[5~".to_vec()),
         "pagedown" => return Some(b"\x1b[6~".to_vec()),
-        "up" => return Some(b"\x1b[A".to_vec()),
-        "down" => return Some(b"\x1b[B".to_vec()),
-        "right" => return Some(b"\x1b[C".to_vec()),
-        "left" => return Some(b"\x1b[D".to_vec()),
+        "home" | "end" | "up" | "down" | "right" | "left" => {
+            return cursor_sequence(key, application_cursor)
+                .map(|sequence| sequence.as_bytes().to_vec());
+        }
         "space" if control => return Some(vec![0]),
         "[" if control => return Some(vec![0x1b]),
         _ => {}
@@ -989,6 +1035,28 @@ mod tests {
             wide: false,
             highlight: false,
         }
+    }
+
+    #[test]
+    fn application_cursor_mode_changes_arrow_and_home_end_bytes() {
+        assert_eq!(cursor_sequence("up", false), Some("\x1b[A"));
+        assert_eq!(cursor_sequence("up", true), Some("\x1bOA"));
+        assert_eq!(cursor_sequence("left", false), Some("\x1b[D"));
+        assert_eq!(cursor_sequence("left", true), Some("\x1bOD"));
+        assert_eq!(cursor_sequence("home", false), Some("\x1b[H"));
+        assert_eq!(cursor_sequence("home", true), Some("\x1bOH"));
+        assert_eq!(cursor_sequence("end", true), Some("\x1bOF"));
+        assert_eq!(cursor_sequence("pageup", true), None);
+        assert_eq!(cursor_sequence("a", true), None);
+    }
+
+    #[test]
+    fn paste_is_bracketed_only_when_the_child_enabled_it() {
+        assert_eq!(paste_payload("hello", false), b"hello".to_vec());
+        assert_eq!(
+            paste_payload("hello", true),
+            b"\x1b[200~hello\x1b[201~".to_vec()
+        );
     }
 
     #[test]
