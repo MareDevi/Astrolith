@@ -102,15 +102,13 @@ jobs:
           page="${RELEASE_PAGE:-https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}}"
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
           appimage="$(ls dist/Astrolith-*.AppImage)"
-          deb="$(ls dist/*.deb)"
-          rpm="$(ls dist/*.rpm)"
+          # The client resolves exactly one artifact (update.rs PLATFORM), so the
+          # manifest carries only that AppImage; deb/rpm rows would be dead payload.
           node packaging/linux/sign-manifest.mjs \
             --version "$version" \
             --notes "Astrolith $version release artifacts are available on the release page." \
             --page "$page" \
             --artifact linux-x86_64-appimage "$appimage" "$base/$(basename "$appimage")" \
-            --artifact linux-x86_64-deb "$deb" "$base/$(basename "$deb")" \
-            --artifact linux-x86_64-rpm "$rpm" "$base/$(basename "$rpm")" \
             --out dist/astrolith-update-manifest.json
       - name: Explain skipped signing
         if: env.ASTROLITH_UPDATE_SIGNING_KEY == ''
