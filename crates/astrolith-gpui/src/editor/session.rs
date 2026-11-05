@@ -2491,10 +2491,7 @@ mod tests {
                 session.notice = Some(SharedString::from(
                     "Language server failed: boom. Retrying once.",
                 ));
-                assert!(!session.apply_lsp_event(
-                    LspEvent::Ready(Box::new(lsp_types::ServerCapabilities::default())),
-                    cx,
-                ));
+                assert!(!session.apply_lsp_event(LspEvent::Ready(Box::default()), cx,));
                 assert_eq!(session.lsp_status, LspStatus::Ready);
                 assert!(
                     session.notice.is_none(),
