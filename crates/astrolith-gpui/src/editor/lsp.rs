@@ -258,15 +258,19 @@ impl CompletionGate {
 }
 
 /// Wait out the debounce; `false` means a newer claim superseded this one.
+///
+/// A zero debounce is the explicit invocation: it never waits and never
+/// yields to a claim, because the user asked for this menu directly.
 pub(crate) async fn complete_after_debounce(
     executor: &BackgroundExecutor,
     gate: &CompletionGate,
     claim: u64,
     debounce: Duration,
 ) -> bool {
-    if !debounce.is_zero() {
-        executor.timer(debounce).await;
+    if debounce.is_zero() {
+        return true;
     }
+    executor.timer(debounce).await;
     gate.is_current(claim)
 }
 
