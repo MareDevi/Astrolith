@@ -5,6 +5,7 @@ members = [
     "crates/astrolith-core",
     "crates/astrolith-astro",
     "crates/astrolith-document",
+    "crates/astrolith-lsp",
     "crates/astrolith-workspace",
     "crates/astrolith-preview",
     "crates/astrolith-terminal",
@@ -20,7 +21,7 @@ publish = false
 
 [workspace.dependencies]
 gpui-kit = "=0.8.1"
-tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "sync", "time", "net", "process", "io-util"] }
+tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "sync", "time", "net", "process", "io-util", "macros"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt", "json", "registry", "tracing-log"] }
 tracing-appender = "=0.2.5"
