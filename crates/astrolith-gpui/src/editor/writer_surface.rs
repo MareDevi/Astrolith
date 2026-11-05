@@ -17,7 +17,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use astrolith_document::{BlockKind, WysiwygDocument, cursor_sentence, other_sentences};
+use astrolith_document::{BlockKind, WysiwygDocument, cursor_sentence};
 use gpui_kit::base::text::editor_host::{
     BlockNode, CodeBlock, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph,
     RenderContext, Span, TextMark, collect_leaf_geometry,
@@ -54,6 +54,27 @@ pub(crate) struct WriterSurface {
     selection_bounds: Option<Bounds<Pixels>>,
     /// Last rendered text viewport, for the floating toolbar.
     viewport: Option<Bounds<Pixels>>,
+    /// Measured leaf height of every block the last frame rendered.
+    ///
+    /// `None` means the block has not been laid out since the document last
+    /// changed; its height is estimated from the block kind, text length and
+    /// the prose style instead.
+    heights: Rc<RefCell<Vec<Option<f32>>>>,
+    /// Prefix sum of the estimated heights, in content pixels.
+    prefix: Vec<f32>,
+    /// Buffer revision the parsed document was built from.
+    document_revision: Option<u64>,
+    /// Content width from the last laid-out frame, for the line estimate.
+    content_width: Option<f32>,
+    /// Number of blocks the last frame laid out, for the windowing tests.
+    #[cfg(test)]
+    rendered_blocks: usize,
+    /// Global block range the last frame laid out, for the windowing tests.
+    #[cfg(test)]
+    rendered_range: Range<usize>,
+    /// The block range of the very first layout, for the windowing tests.
+    #[cfg(test)]
+    first_rendered_range: Option<Range<usize>>,
 }
 
 impl WriterSurface {
@@ -72,6 +93,16 @@ impl WriterSurface {
             drag_anchor: None,
             selection_bounds: None,
             viewport: None,
+            heights: Rc::new(RefCell::new(Vec::new())),
+            prefix: Vec::new(),
+            document_revision: None,
+            content_width: None,
+            #[cfg(test)]
+            rendered_blocks: 0,
+            #[cfg(test)]
+            rendered_range: 0..0,
+            #[cfg(test)]
+            first_rendered_range: None,
         }
     }
 
@@ -81,17 +112,30 @@ impl WriterSurface {
             return;
         }
         self.style = style;
+        // Line metrics changed, so every measured height is stale.
+        self.heights.borrow_mut().fill(None);
         cx.notify();
     }
 
-    /// Re-parse when the visible text changed.
-    fn sync_document(&mut self, source: &str) {
-        if self.source == source {
+    /// Re-parse when the buffer revision changed.
+    fn sync_document(&mut self, revision: u64, source: &str) {
+        if self.document_revision == Some(revision) {
             return;
         }
+        self.document_revision = Some(revision);
         self.source.clear();
         self.source.push_str(source);
         self.document = Arc::new(WysiwygDocument::parse(source));
+        // Keep the measured heights across an edit: clearing them would make
+        // the first frame after every keystroke render the whole document
+        // again. The vector only grows or shrinks; blocks that moved keep an
+        // approximate height until they are laid out and remeasured.
+        let blocks = self.document.blocks.len();
+        let mut heights = self.heights.borrow_mut();
+        heights.truncate(blocks);
+        heights.resize(blocks, None);
+        drop(heights);
+        self.prefix.clear();
     }
 
     /// Source offset under a window position.
@@ -220,6 +264,102 @@ impl WriterSurface {
         Some(((*key as usize).saturating_sub(1), rendered))
     }
 
+    /// The viewport height the visible window is derived from.
+    ///
+    /// The flow's own layout bounds are the fallback, but a scrolled child can
+    /// report its full content height; the window can never be taller than the
+    /// window it paints into, so the two are intersected.
+    fn effective_viewport_height(&self, window: &Window) -> f32 {
+        let geometry = f32::from(self.geometry.borrow().viewport.size.height);
+        let window_height = f32::from(window.viewport_size().height);
+        if geometry > 0. {
+            geometry.min(window_height)
+        } else {
+            window_height
+        }
+    }
+
+    /// Prefix sum of every block's height, estimated or measured.
+    ///
+    /// Height zero is the content top; the last entry is the total content
+    /// height the spacers and rendered blocks add up to.
+    fn build_prefix(&mut self, document: &WysiwygDocument) {
+        let width = self.content_width.unwrap_or(640.);
+        let line_height = self.style.font_size * self.style.line_height;
+        let gap = paragraph_gap_px(self.style.font_size);
+        self.prefix.clear();
+        self.prefix.reserve(document.blocks.len() + 1);
+        self.prefix.push(0.);
+        let mut y = 0.;
+        for (index, block) in document.blocks.iter().enumerate() {
+            y += match self.heights.borrow().get(index).copied().flatten() {
+                Some(measured) => measured + gap,
+                None => estimate_block_height(block, width, self.style.font_size, line_height, gap),
+            };
+            self.prefix.push(y);
+        }
+    }
+
+    /// The block range worth laying out for the current scroll position.
+    ///
+    /// The first laid-out frame has no geometry to derive a viewport from, so
+    /// it renders everything once; later frames render only the visible run and
+    /// its overscan, always including the caret block and one neighbour on each
+    /// side. A caret far outside the window (a programmatic jump) moves the
+    /// scroll to its estimated position instead of rendering every block in
+    /// between.
+    fn visible_block_range(
+        &mut self,
+        document: &WysiwygDocument,
+        cursor: usize,
+        viewport_height: f32,
+    ) -> Range<usize> {
+        let total = document.blocks.len();
+        if total == 0 || viewport_height <= 0. || self.heights.borrow().iter().all(Option::is_none)
+        {
+            return 0..total;
+        }
+        if self.content_width.is_none() {
+            return 0..total;
+        }
+        if total <= FULL_RENDER_BLOCKS {
+            return 0..total;
+        }
+        self.build_prefix(document);
+        let overscan = WINDOW_OVERSCAN_PX + 2. * self.style.font_size * self.style.line_height;
+        let scroll = (-f32::from(self.scroll.offset().y)).max(0.);
+        let top = (scroll - overscan).max(0.);
+        let bottom = scroll + viewport_height + overscan;
+        let start = self.prefix.partition_point(|y| *y <= top).saturating_sub(1);
+        let mut end = self.prefix.partition_point(|y| *y < bottom).min(total);
+        let mut start = start.min(total);
+        end = end.max(start + 1).min(total);
+
+        let Some((caret, _)) = document.caret_location(cursor) else {
+            return start..end;
+        };
+        if (start..end).contains(&caret) {
+            start = start.min(caret.saturating_sub(1));
+            end = end.max((caret + 2).min(total));
+            return start..end;
+        }
+        let caret_y = self.prefix.get(caret).copied().unwrap_or(0.);
+        let window_start = caret.saturating_sub(1);
+        let limit = caret_y + viewport_height + overscan;
+        let window_end = self
+            .prefix
+            .partition_point(|y| *y < limit)
+            .max(window_start + 1)
+            .min(total);
+        let max = f32::from(self.scroll.max_offset().y);
+        let target = clamp_scroll_offset(-(caret_y - viewport_height * 0.3), max);
+        if px(target) != self.scroll.offset().y {
+            self.scroll
+                .set_offset(point(self.scroll.offset().x, px(target)));
+        }
+        window_start..window_end
+    }
+
     /// Map a pointer position to a source offset and update the selection.
     fn select(
         &mut self,
@@ -261,7 +401,13 @@ impl WriterSurface {
     }
 
     /// Keep the caret in view; typewriter mode centres it.
-    fn adjust_scroll(&mut self, document: &WysiwygDocument, cursor: usize, typewriter: bool) {
+    fn adjust_scroll(
+        &mut self,
+        document: &WysiwygDocument,
+        cursor: usize,
+        typewriter: bool,
+        viewport_height: f32,
+    ) {
         let geometry = self.geometry.borrow();
         let Some((block, rendered)) = document.caret_location(cursor) else {
             return;
@@ -272,14 +418,13 @@ impl WriterSurface {
         let caret = leaf.position_for_index(rendered);
         let height = leaf.caret_height();
         let viewport = geometry.viewport;
-        if viewport.size.height <= px(0.) {
+        if viewport.size.height <= px(0.) || viewport_height <= 0. {
             return;
         }
         let offset = self.scroll.offset();
         // Child content coordinates: window position minus the viewport origin
         // minus the current scroll translation.
         let content_y = f32::from(caret.y) - f32::from(viewport.origin.y) - f32::from(offset.y);
-        let viewport_height = f32::from(viewport.size.height);
         let mut target = f32::from(offset.y);
         if typewriter {
             let centre = (viewport_height - f32::from(height)) / 2.;
@@ -305,13 +450,20 @@ impl WriterSurface {
         document: &WysiwygDocument,
         selection: &Range<usize>,
         geometry: &HashMap<u64, LeafGeometry>,
+        rendered: Range<usize>,
     ) {
         if selection.is_empty() {
             self.selection_bounds = None;
             return;
         }
         let mut bounds: Option<Bounds<Pixels>> = None;
-        for (index, block) in document.blocks.iter().enumerate() {
+        for (index, block) in document
+            .blocks
+            .iter()
+            .enumerate()
+            .skip(rendered.start)
+            .take(rendered.len())
+        {
             if block.source.end < selection.start || block.source.start > selection.end {
                 continue;
             }
@@ -351,6 +503,54 @@ impl WriterSurface {
 
 fn block_key(index: usize) -> u64 {
     index as u64 + 1
+}
+
+/// Documents at or below this block count always render whole.
+const FULL_RENDER_BLOCKS: usize = 64;
+
+/// Extra pixels rendered above and below the viewport.
+const WINDOW_OVERSCAN_PX: f32 = 400.;
+
+/// Gap the block renderer leaves below a paragraph, at the default 0.75 rem.
+fn paragraph_gap_px(font_size: f32) -> f32 {
+    font_size * 0.75
+}
+
+/// A deterministic height estimate for a block that has not been laid out.
+///
+/// The estimate only has to keep the scroll range and the rendered window
+/// consistent; measured heights replace it as soon as the block is visible.
+/// Line counts come from the byte length and an average glyph width, which
+/// overestimates CJK text (safe: it renders a little more, never less).
+fn estimate_block_height(
+    block: &astrolith_document::RichBlock,
+    width: f32,
+    font_size: f32,
+    line_height: f32,
+    gap: f32,
+) -> f32 {
+    let characters_per_line = (width / (font_size * 0.55)).max(8.);
+    let (scale, extra) = match block.kind {
+        BlockKind::Heading(level) => (heading_scale(level), 0.),
+        BlockKind::Rule => (1., 1. + 12.),
+        BlockKind::Code { .. } => (1., 12.),
+        BlockKind::ListItem { .. } | BlockKind::Quote | BlockKind::Paragraph => (1., 0.),
+    };
+    let lines = (block.text.text.len() as f32 / characters_per_line)
+        .ceil()
+        .max(1.);
+    lines * line_height * scale + gap + extra
+}
+
+fn heading_scale(level: u8) -> f32 {
+    match level {
+        1 => 2.0,
+        2 => 1.6,
+        3 => 1.4,
+        4 => 1.2,
+        5 => 1.1,
+        _ => 1.05,
+    }
 }
 
 /// Clamp a scroll translation to GPUI's convention: 0 at the top, negative
@@ -433,11 +633,17 @@ impl Render for WriterSurface {
         let Some(session) = self.session.upgrade() else {
             return div().size_full();
         };
-        let (visible, cursor, selection, focused, modes, placeholders) = {
+        // The visible text is copied only when the buffer revision changed;
+        // unrelated frames never materialise the document.
+        let revision = session.read(cx).buffer.revision().get();
+        if self.document_revision != Some(revision) {
+            let visible = session.read(cx).projection.visible.clone();
+            self.sync_document(revision, &visible);
+        }
+        let (cursor, selection, focused, modes, placeholders) = {
             let session = session.read(cx);
             let editor = session.editor.read(cx);
             (
-                session.projection.visible.clone(),
                 editor.cursor().min(session.projection.visible.len()),
                 editor.selected_range(),
                 editor.focus_handle(cx).is_focused(window),
@@ -446,28 +652,40 @@ impl Render for WriterSurface {
             )
         };
         let copyedit = session.read(cx).copyedit.render_ranges(cursor);
-        self.sync_document(&visible);
         let document = self.document.clone();
-        self.adjust_scroll(&document, cursor, focused && modes.typewriter);
+        let viewport_height = self.effective_viewport_height(window);
+        let content_width = f32::from(self.geometry.borrow().viewport.size.width);
+        self.content_width = (content_width > 0.).then_some(content_width);
+        self.adjust_scroll(
+            &document,
+            cursor,
+            focused && modes.typewriter,
+            viewport_height,
+        );
+        let rendered = self.visible_block_range(&document, cursor, viewport_height);
+        #[cfg(test)]
+        {
+            self.rendered_blocks = rendered.len();
+            self.rendered_range = rendered.clone();
+            self.first_rendered_range
+                .get_or_insert_with(|| rendered.clone());
+        }
         let style = self.style.clone();
         let mut decorations: HashMap<u64, Vec<(Range<usize>, Hsla)>> = HashMap::new();
         let selection_color = cx.theme().selection.opacity(0.35);
         let placeholder_color = cx.theme().primary.opacity(0.18);
-
-        let focus_ranges = if modes.focus {
-            cursor_sentence(&visible, cursor)
-                .map(|sentence| other_sentences(&visible, sentence.start))
-                .unwrap_or_default()
+        // Focus mode dims every block outside the cursor sentence. The sentence
+        // is only scanned when the mode is on; the rendered window is all that
+        // needs the predicate.
+        let focus_sentence = if modes.focus {
+            cursor_sentence(&self.source, cursor)
         } else {
-            Vec::new()
+            None
         };
 
-        let mut nodes = Vec::with_capacity(document.blocks.len());
-        for (index, block) in document.blocks.iter().enumerate() {
-            if block.text.text.is_empty() && !matches!(block.kind, BlockKind::Rule) {
-                // Empty trailing lines still need a leaf so a caret can be
-                // placed on them.
-            }
+        let mut nodes = Vec::with_capacity(rendered.len());
+        for index in rendered.clone() {
+            let block = &document.blocks[index];
             let key = block_key(index);
             let paragraph = paragraph_for(block, key);
             let node = match &block.kind {
@@ -515,26 +733,41 @@ impl Render for WriterSurface {
 
         let refs: Vec<&BlockNode> = nodes.iter().collect();
         let render_context = RenderContext::from_app(cx).with_body_font_size(px(style.font_size));
-        let mut blocks = Vec::with_capacity(nodes.len());
-        for (index, block) in document.blocks.iter().enumerate() {
-            let element = nodes[index].render(
-                index,
-                FlowPosition::at(&refs, index, index + 1 == refs.len()),
+        let mut blocks: Vec<AnyElement> = Vec::with_capacity(rendered.len() + 2);
+        // The omitted blocks keep their scroll range through spacers whose
+        // heights are the same estimates the window was computed from.
+        let total = document.blocks.len();
+        let prefix = &self.prefix;
+        if rendered.start > 0 && prefix.len() == total + 1 {
+            blocks.push(
+                div()
+                    .w_full()
+                    .h(px(prefix[rendered.start]))
+                    .into_any_element(),
+            );
+        }
+        for (local, index) in rendered.clone().enumerate() {
+            let block = &document.blocks[index];
+            let element = nodes[local].render(
+                local,
+                FlowPosition::at(&refs, local, local + 1 == refs.len()),
                 &render_context,
                 window,
                 cx,
             );
             let dimmed = modes.focus
-                && !focus_ranges
-                    .iter()
-                    .any(|range| range.start < block.source.end && range.end > block.source.start);
-            let element = block_wrapper(block, element, dimmed, cx);
-            blocks.push(element);
+                && focus_sentence.as_ref().is_none_or(|sentence| {
+                    !(sentence.start < block.source.end && sentence.end > block.source.start)
+                });
+            blocks.push(block_wrapper(block, element, dimmed, cx));
+        }
+        if rendered.end < total && prefix.len() == total + 1 {
+            let omitted = prefix[total] - prefix[rendered.end];
+            blocks.push(div().w_full().h(px(omitted.max(0.))).into_any_element());
         }
 
         let caret = (focused && selection.is_empty()).then_some(cursor);
         let caret_color = cx.theme().caret;
-        let geometry_for_frame = self.geometry.clone();
         let flow = RichFlow {
             child: Some(
                 div()
@@ -546,7 +779,8 @@ impl Render for WriterSurface {
                     .into_any_element(),
             ),
             decorations,
-            geometry: geometry_for_frame,
+            geometry: self.geometry.clone(),
+            heights: self.heights.clone(),
             document: document.clone(),
             caret,
             caret_color,
@@ -581,11 +815,15 @@ impl Render for WriterSurface {
 
         self.viewport = Some(self.geometry.borrow().viewport);
         let leaves = self.geometry.borrow().leaves.clone();
-        self.update_selection_geometry(&document, &selection, &leaves);
+        self.update_selection_geometry(&document, &selection, &leaves, rendered);
 
         div()
             .size_full()
             .relative()
+            // The editor stays mounted although it is invisible: it owns native
+            // input, IME and the focus handle the writer focuses on click, and a
+            // focus handle only works while its element is in the tree. Its own
+            // paint is row-windowed, so this costs O(viewport), not O(document).
             .child(
                 div()
                     .absolute()
@@ -739,6 +977,8 @@ struct RichFlow {
     child: Option<AnyElement>,
     decorations: HashMap<u64, Vec<(Range<usize>, Hsla)>>,
     geometry: Rc<RefCell<FrameGeometry>>,
+    /// Per-block measured heights, owned by the surface across frames.
+    heights: Rc<RefCell<Vec<Option<f32>>>>,
     document: Arc<WysiwygDocument>,
     caret: Option<usize>,
     caret_color: Hsla,
@@ -791,6 +1031,16 @@ impl Element for RichFlow {
     ) -> Prepaint {
         let decorations = std::mem::take(&mut self.decorations);
         let (_, leaves) = collect_leaf_geometry(decorations, || child.prepaint(window, cx));
+        // Leaf height is independent of the scroll position, so a frame that
+        // laid a block out is enough to measure it for later windows.
+        {
+            let mut heights = self.heights.borrow_mut();
+            for (key, leaf) in &leaves {
+                if let Some(slot) = heights.get_mut((*key as usize).saturating_sub(1)) {
+                    *slot = Some(f32::from(leaf.bounds().size.height));
+                }
+            }
+        }
         *self.geometry.borrow_mut() = FrameGeometry {
             leaves: leaves.clone(),
             viewport: bounds,
@@ -827,6 +1077,173 @@ impl Element for RichFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use astrolith_core::{ProjectId, SourcePath};
+    use astrolith_document::DocumentIdentity;
+    use gpui_kit::{
+        Entity, TestAppContext, WindowHandle, WindowOptions, base::Root, test::TestWindowExt,
+    };
+
+    struct WriterHost {
+        writer: Entity<WriterSurface>,
+    }
+
+    impl Render for WriterHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.writer.clone())
+        }
+    }
+
+    fn mount_writer(
+        cx: &mut TestAppContext,
+        source: &str,
+    ) -> (WindowHandle<Root>, Entity<DocumentSession>) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let mut session = None;
+            let (handle, _) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let identity = DocumentIdentity::new(
+                    ProjectId::new("window").unwrap(),
+                    1,
+                    SourcePath::new("src/posts/entry.md").unwrap(),
+                );
+                let created =
+                    cx.new(|cx| DocumentSession::new(identity, source.to_owned(), window, cx));
+                let writer = created.read(cx).writer.clone();
+                session = Some(created);
+                cx.new(|_| WriterHost { writer })
+            })
+            .unwrap();
+            (
+                handle.downcast::<Root>().unwrap(),
+                session.expect("the writer session must exist"),
+            )
+        })
+    }
+
+    fn window_source(paragraphs: usize) -> String {
+        let mut source = String::new();
+        for index in 0..paragraphs {
+            source.push_str(&format!(
+                "Paragraph {index} with a handful of ordinary words for the window test.\n\n"
+            ));
+        }
+        source
+    }
+
+    #[gpui_kit::test]
+    fn writer_windows_after_the_first_layout_and_keeps_the_caret_block(cx: &mut TestAppContext) {
+        let (handle, session) = mount_writer(cx, &window_source(2_000));
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let (total, first) = writer.read_with(cx, |writer, _| {
+            (
+                writer.document.blocks.len(),
+                writer
+                    .first_rendered_range
+                    .clone()
+                    .expect("a frame has been laid out"),
+            )
+        });
+        assert_eq!(
+            first,
+            0..total,
+            "the first laid-out frame measures the whole document once"
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        writer.read_with(cx, |writer, _| {
+            assert!(
+                writer.rendered_blocks < total,
+                "later frames render a window, not all {total} blocks"
+            );
+            assert!(
+                writer.rendered_range.contains(&0),
+                "the caret block stays rendered: {:?}",
+                writer.rendered_range
+            );
+        });
+
+        // An edit keeps the measured heights, so the first frame after a
+        // keystroke stays windowed instead of rendering the whole document.
+        cx.update_window(handle.into(), |_, window, cx| {
+            let editor = session.read_with(cx, |session, _| session.editor.clone());
+            editor.update(cx, |editor, cx| {
+                let mut value = editor.value().to_string();
+                value.push_str("A trailing sentence after the edit.\n\n");
+                editor.set_value(value, window, cx);
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        writer.read_with(cx, |writer, _| {
+            assert!(
+                writer.rendered_blocks < writer.document.blocks.len(),
+                "an edit must not fall back to a full render"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn scrolling_keeps_the_caret_block_and_hit_testing_aligned(cx: &mut TestAppContext) {
+        let (handle, session) = mount_writer(cx, &window_source(2_000));
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let target = 1_000;
+        let offset = writer.read_with(cx, |writer, _| writer.document.blocks[target].content.start);
+        // Move the caret into the middle: no rendered geometry exists for that
+        // block yet, so the window must follow the caret's estimated position.
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session.set_writer_selection(offset, offset, window, cx);
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        writer.read_with(cx, |writer, _| {
+            assert!(
+                writer.rendered_range.contains(&target),
+                "the caret block is rendered after the jump: {:?}",
+                writer.rendered_range
+            );
+            assert!(
+                writer.rendered_range.start > 0,
+                "a mid-document caret must not fall back to the top"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let (range, index, hit) = writer.read_with(cx, |writer, _| {
+            let range = writer.rendered_range.clone();
+            let index = range.start + range.len() / 2;
+            let bounds = writer
+                .geometry
+                .borrow()
+                .leaves
+                .get(&block_key(index))
+                .expect("a rendered block reports geometry")
+                .bounds();
+            let position = bounds.center();
+            (range.clone(), index, writer.source_at(position))
+        });
+        assert!(range.contains(&target), "the caret stays in the window");
+        let hit = hit.expect("hit testing maps a rendered leaf");
+        let source = writer.read_with(cx, |writer, _| writer.document.blocks[index].source.clone());
+        assert!(
+            source.start <= hit && hit <= source.end,
+            "hit {hit} must land in the rendered block's source range {source:?}"
+        );
+    }
 
     #[test]
     fn pointer_distance_prefers_the_containing_block() {
