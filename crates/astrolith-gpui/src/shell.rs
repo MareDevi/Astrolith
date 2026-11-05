@@ -2039,7 +2039,6 @@ impl Shell {
         }
         // Fold any pending splitter movement into the outgoing mode first.
         self.capture_layout(cx);
-        let previous = self.mode;
         let inspector_open = self.inspector_open;
         self.set_inspector_open(false, cx);
         self.mode = mode;
@@ -2067,9 +2066,7 @@ impl Shell {
         } else if mode == WorkspaceMode::Preview {
             let focus = self.rendered.read(cx).focus_handle(cx);
             focus.focus(window, cx);
-        } else if previous == WorkspaceMode::Preview
-            && let Some(session) = self.project.read(cx).active_session(cx)
-        {
+        } else if let Some(session) = self.project.read(cx).active_session(cx) {
             session
                 .read(cx)
                 .editor
@@ -4524,12 +4521,17 @@ mod tests {
         let typed = editor.read_with(cx, |editor, _| editor.value().to_string());
         assert_ne!(typed, original);
         let entity = editor.entity_id();
+        let mut build_entity = None;
 
         for mode in [
             WorkspaceMode::Build,
             WorkspaceMode::Preview,
             WorkspaceMode::Writing,
-        ] {
+        ]
+        .into_iter()
+        .cycle()
+        .take(6)
+        {
             cx.update_window(handle.into(), |_, window, cx| {
                 view.update(cx, |view, cx| view.set_mode(mode, window, cx));
             })
@@ -4544,10 +4546,25 @@ mod tests {
                     .expect("the session stays open");
                 let current_editor = current.read(cx).editor.clone();
                 assert_eq!(
-                    current_editor.entity_id(),
-                    entity,
-                    "mode switch must not rebuild the editor"
+                    current.entity_id(),
+                    session,
+                    "all modes share the document session and history"
                 );
+                if mode == WorkspaceMode::Build {
+                    let expected = *build_entity.get_or_insert(current_editor.entity_id());
+                    assert_eq!(
+                        current_editor.entity_id(),
+                        expected,
+                        "Build retains its display state"
+                    );
+                    assert_ne!(current_editor.entity_id(), entity);
+                } else {
+                    assert_eq!(
+                        current_editor.entity_id(),
+                        entity,
+                        "Writing retains its input model"
+                    );
+                }
                 assert_eq!(current_editor.read(cx).value(), typed);
                 assert_eq!(current_editor.read(cx).selected_range(), 0..3);
             });

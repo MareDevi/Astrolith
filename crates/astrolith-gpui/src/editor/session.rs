@@ -27,8 +27,17 @@ use crate::editor::writing_modes::{ProseStyle, SessionPresentation, WritingModes
 use crate::runtime;
 
 pub(crate) struct DocumentSession {
-    /// The editor displays the writer projection, never the complete source.
+    /// Active input model. Complete source and writer projection retain their
+    /// own display state so changing modes does not reinstall the document.
     pub editor: Entity<EditorState>,
+    writer_editor: Entity<EditorState>,
+    source_editor: Option<Entity<EditorState>>,
+    writer_revision: DocumentRevision,
+    source_revision: Option<DocumentRevision>,
+    source_subscriptions: Vec<Subscription>,
+    /// A selection or mode change cannot create a text edit. Avoid scanning an
+    /// unchanged rope at save, command and mode boundaries.
+    absorbed_text: Option<(gpui_kit::EntityId, u64)>,
     /// Rendered writing surface; the editor remains its input model.
     pub(crate) writer: Entity<WriterSurface>,
     /// Authoritative complete source: frontmatter and MDX imports included.
@@ -50,7 +59,7 @@ pub(crate) struct DocumentSession {
     history: SourceHistory,
     /// Selection captured before the next source transaction, in source bytes.
     last_selection: Range<usize>,
-    /// Build shows the complete source in the same editor; Writer shows the projection.
+    /// Build selects the source model; Writing selects the projected model.
     source_view: bool,
     /// Syntax language the complete-source view highlights.
     language: SharedString,
@@ -236,12 +245,17 @@ impl DocumentSession {
     ///
     /// The baseline and current source are independent `String`s even when the
     /// document is unedited, the writer projection is its own visible buffer, and
-    /// the editor keeps a rope copy, so each representation is counted once.
+    /// both input models keep rope copies once Build is opened. Count each
+    /// representation once, including the inactive presentation cache.
     pub(crate) fn retained_bytes(&self, cx: &App) -> usize {
         self.buffer.original_text().len()
             + self.buffer.current_text().len()
             + self.projection.visible.len()
-            + self.editor.read(cx).text().len()
+            + self.writer_editor.read(cx).text().len()
+            + self
+                .source_editor
+                .as_ref()
+                .map_or(0, |editor| editor.read(cx).text().len())
     }
 
     fn build(
@@ -269,6 +283,7 @@ impl DocumentSession {
         // guides, folding or automatic bracket insertion.
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
+                .language("text")
                 .line_number(false)
                 .indent_guides(false)
                 .folding(false)
@@ -290,42 +305,9 @@ impl DocumentSession {
             &editor,
             window,
             |this, _editor, event: &InputEvent, window, cx| {
-                if !matches!(event, InputEvent::Change) {
-                    return;
+                if _editor.entity_id() == this.editor.entity_id() {
+                    this.on_editor_change(event, window, cx);
                 }
-                if this.origin {
-                    // This session's own projection rewrite; the buffer is already
-                    // authoritative for exactly this text.
-                    this.origin = false;
-                    this.writing_self = false;
-                    this.programmatic_change = true;
-                    return;
-                }
-                // The editor reports that *some* text changed, so the whole visible
-                // text is diffed at this boundary and mapped back before anything
-                // reads the buffer.
-                this.programmatic_change = std::mem::take(&mut this.writing_self);
-                let intent = if this.programmatic_change {
-                    HistoryIntent::Atomic
-                } else {
-                    HistoryIntent::Typing
-                };
-                this.absorb_with_intent(cx, intent);
-                if this.refused {
-                    // Fail closed: the refused text never reached the source, so put
-                    // the editor back on the authoritative projection (and clear the
-                    // latch) instead of letting the next Change overwrite it.
-                    this.rebuild_projection(window, cx);
-                }
-                this.sync_placeholders(cx);
-                this.refresh_copyedit(cx);
-                this.refresh_writer(cx);
-                if this.source_view {
-                    this.sync_lsp_change(cx);
-                }
-                this.dirty = this.buffer.is_dirty();
-                cx.emit(SessionChanged);
-                cx.notify();
             },
         );
         // Cursor moves notify the editor without changing text; focus dimming and
@@ -333,8 +315,10 @@ impl DocumentSession {
         // near the render path.
         let cursor = cx.observe_in(&editor, window, |this, _editor, window, cx| {
             let _ = window;
-            this.last_selection = this.current_source_selection(cx);
-            this.refresh_cursor(cx);
+            if _editor.entity_id() == this.editor.entity_id() {
+                this.last_selection = this.current_source_selection(cx);
+                this.refresh_cursor(cx);
+            }
         });
         // Losing focus is the writer's save trigger: the workspace turns it into
         // an immediate guarded save when the buffer is dirty.
@@ -351,12 +335,15 @@ impl DocumentSession {
         // editor consumes those keys. Interceptors run before key bindings, so
         // an active placeholder set owns them; an empty set passes through.
         let placeholder_weak = cx.weak_entity();
-        let placeholder_focus = editor.read(cx).focus_handle(cx);
         let placeholder_keys = cx.intercept_keystrokes({
             let weak = placeholder_weak;
-            let focus = placeholder_focus;
             move |event, window, cx| {
-                if !focus.is_focused(window) {
+                if !weak
+                    .read_with(cx, |session, cx| {
+                        session.editor.read(cx).focus_handle(cx).is_focused(window)
+                    })
+                    .unwrap_or(false)
+                {
                     return;
                 }
                 let step = match event.keystroke.key.as_str() {
@@ -381,9 +368,13 @@ impl DocumentSession {
             }
         });
         let history_weak = cx.weak_entity();
-        let history_focus = editor.read(cx).focus_handle(cx);
         let history_keys = cx.intercept_keystrokes(move |event, window, cx| {
-            if !history_focus.is_focused(window) {
+            if !history_weak
+                .read_with(cx, |session, cx| {
+                    session.editor.read(cx).focus_handle(cx).is_focused(window)
+                })
+                .unwrap_or(false)
+            {
                 return;
             }
             let modifiers = event.keystroke.modifiers;
@@ -408,9 +399,13 @@ impl DocumentSession {
             cx.stop_propagation();
         });
         let writer_weak = cx.weak_entity();
-        let writer_focus = editor.read(cx).focus_handle(cx);
         let writer_keys = cx.intercept_keystrokes(move |event, window, cx| {
-            if !writer_focus.is_focused(window) {
+            if !writer_weak
+                .read_with(cx, |session, cx| {
+                    session.editor.read(cx).focus_handle(cx).is_focused(window)
+                })
+                .unwrap_or(false)
+            {
                 return;
             }
             let modifiers = event.keystroke.modifiers;
@@ -437,6 +432,12 @@ impl DocumentSession {
             }
         });
         Self {
+            writer_editor: editor.clone(),
+            source_editor: None,
+            writer_revision: revision,
+            source_revision: None,
+            source_subscriptions: Vec::new(),
+            absorbed_text: None,
             editor,
             writer,
             buffer,
@@ -478,6 +479,83 @@ impl DocumentSession {
             _history_keys: history_keys,
             _writer_keys: writer_keys,
         }
+    }
+
+    fn on_editor_change(
+        &mut self,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(event, InputEvent::Change) {
+            return;
+        }
+        if self.origin {
+            // This session's own projection rewrite; the buffer is already
+            // authoritative for exactly this text.
+            self.origin = false;
+            self.writing_self = false;
+            self.programmatic_change = true;
+            return;
+        }
+        // The editor reports that *some* text changed, so the whole visible
+        // text is diffed at this boundary and mapped back before anything
+        // reads the buffer.
+        self.programmatic_change = std::mem::take(&mut self.writing_self);
+        let intent = if self.programmatic_change {
+            HistoryIntent::Atomic
+        } else {
+            HistoryIntent::Typing
+        };
+        self.absorb_with_intent(cx, intent);
+        if self.refused {
+            // Fail closed: the refused text never reached the source, so put
+            // the editor back on the authoritative projection (and clear the
+            // latch) instead of letting the next Change overwrite it.
+            self.rebuild_projection(window, cx);
+        }
+        self.sync_placeholders(cx);
+        self.refresh_copyedit(cx);
+        self.refresh_writer(cx);
+        if self.source_view {
+            self.sync_lsp_change(cx);
+        }
+        self.dirty = self.buffer.is_dirty();
+        cx.emit(SessionChanged);
+        cx.notify();
+    }
+
+    fn watch_source_editor(
+        &mut self,
+        editor: &Entity<EditorState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.source_subscriptions.push(cx.subscribe_in(
+            editor,
+            window,
+            |this, editor, event: &InputEvent, window, cx| {
+                if editor.entity_id() == this.editor.entity_id() {
+                    this.on_editor_change(event, window, cx);
+                }
+            },
+        ));
+        self.source_subscriptions
+            .push(cx.observe_in(editor, window, |this, editor, _, cx| {
+                if editor.entity_id() == this.editor.entity_id() {
+                    this.last_selection = this.current_source_selection(cx);
+                    this.refresh_cursor(cx);
+                }
+            }));
+        self.source_subscriptions.push(cx.on_blur(
+            &editor.read(cx).focus_handle(cx),
+            window,
+            |this, _, cx| {
+                if this.buffer.is_dirty() {
+                    cx.emit(SaveOnBlur);
+                }
+            },
+        ));
     }
 
     /// Whether the editor currently shows complete source rather than prose.
@@ -1470,6 +1548,14 @@ impl DocumentSession {
 
     /// Map the whole visible text back into the complete source and absorb it.
     fn absorb_with_intent(&mut self, cx: &App, intent: HistoryIntent) {
+        let text_key = (
+            self.editor.entity_id(),
+            self.editor.read(cx).text_revision(),
+        );
+        if self.absorbed_text == Some(text_key) {
+            return;
+        }
+        self.absorbed_text = Some(text_key);
         if self.source_view {
             self.absorb_source(cx, intent);
             return;
@@ -1587,39 +1673,75 @@ impl DocumentSession {
         }
         self.absorb(cx);
         let source_selection = self.current_source_selection(cx);
+        let revision = self.buffer.revision();
+        if self.source_view {
+            self.source_revision = Some(revision);
+        } else {
+            self.writer_revision = revision;
+        }
         self.source_view = source;
-        let (text, selection) = if source {
-            (
-                self.buffer.current_text().to_owned(),
-                clamp_range(source_selection.clone(), self.buffer.current_text().len()),
-            )
+        let selection = if source {
+            source_selection.clone()
         } else {
-            let selection = self.source_range_to_projection(&source_selection);
-            (self.projection.visible.clone(), selection)
+            self.source_range_to_projection(&source_selection)
         };
-        let language = if source {
-            self.language.clone()
+        self.editor = if source {
+            match self.source_editor.clone() {
+                Some(editor) => editor,
+                None => {
+                    let text = self.buffer.current_text().to_owned();
+                    let language = self.language.clone();
+                    let editor = cx.new(|cx| {
+                        EditorState::new(window, cx)
+                            .language(language)
+                            .line_number(true)
+                            .indent_guides(true)
+                            .folding(true)
+                            .auto_close(true)
+                            .smart_indent(true)
+                            .soft_wrap(false)
+                            .default_value(text)
+                    });
+                    self.watch_source_editor(&editor, window, cx);
+                    self.source_editor = Some(editor.clone());
+                    self.source_revision = Some(revision);
+                    editor
+                }
+            }
         } else {
-            SharedString::from("text")
+            self.writer_editor.clone()
         };
+        let stale = if source {
+            self.source_revision != Some(revision)
+        } else {
+            self.writer_revision != revision
+        };
+        if stale {
+            let target = if source {
+                self.buffer.current_text()
+            } else {
+                &self.projection.visible
+            };
+            // Synchronize only the changed range. Cached syntax, scroll and
+            // unchanged text survive mode switches and edits in the other view.
+            let old = self.editor.read(cx).text().to_string();
+            if let Some((range, _, replacement)) = source_diff(&old, target) {
+                self.origin = true;
+                self.editor.update(cx, |editor, cx| {
+                    editor.set_selected_range(range, cx);
+                    editor.replace(replacement, window, cx);
+                });
+            }
+        }
         self.editor.update(cx, |editor, cx| {
-            // One retained editor, two presentations: the writer has no gutter,
-            // folding or code indentation; Build reads as a source editor.
-            editor.set_line_number(source, window, cx);
-            editor.set_indent_guides(source, window, cx);
-            editor.set_folding(source, window, cx);
-            editor.set_auto_close(source, window, cx);
-            editor.set_smart_indent(source, window, cx);
-            editor.set_soft_wrap(!source, window, cx);
-            editor.set_highlighter(language, cx);
-            editor.set_value(text, window, cx);
-            editor.set_selected_range(selection.clone(), cx);
+            editor.set_selected_range(selection.clone(), cx)
         });
-        self.last_selection = if source {
-            selection
+        if source {
+            self.source_revision = Some(revision);
         } else {
-            self.projection_range_to_source(selection)
-        };
+            self.writer_revision = revision;
+        }
+        self.last_selection = source_selection;
         self.refresh_copyedit(cx);
         self.refresh_writer(cx);
         // The workspace owns the project's language servers: it attaches this

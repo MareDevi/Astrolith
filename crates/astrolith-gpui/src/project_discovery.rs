@@ -3352,6 +3352,9 @@ impl ProjectWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.source_view == source {
+            return;
+        }
         self.source_view = source;
         let root = self.project_root();
         let active = self.active.clone();
@@ -3370,6 +3373,7 @@ impl ProjectWorkspace {
         session.update(cx, |session, cx| {
             session.set_source_view(source, window, cx)
         });
+        self.install(&path, session, cx);
         self.sync_lsp(cx);
     }
 
@@ -6317,6 +6321,68 @@ export const collections = {blog, dataAuthors};
             assert!(window.try_find("file-browser").is_none());
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn mode_switches_retain_both_models_and_sync_only_real_edits(cx: &mut TestAppContext) {
+        let source = "---\ntitle: Keep\n---\n# Body\n";
+        let (handle, _view) = mount(cx);
+        let session = bare_session(cx, handle, "src/posts/cached.md", source);
+        let writer = session.read_with(cx, |session, _| session.editor.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| session.set_source_view(true, window, cx))
+        })
+        .unwrap();
+        let build = session.read_with(cx, |session, _| session.editor.clone());
+        assert_ne!(
+            writer.entity_id(),
+            build.entity_id(),
+            "source and projection retain separate display state"
+        );
+        let writer_revision = writer.read_with(cx, |editor, _| editor.text_revision());
+        let build_revision = build.read_with(cx, |editor, _| editor.text_revision());
+        for _ in 0..3 {
+            cx.update_window(handle.into(), |_, window, cx| {
+                session.update(cx, |session, cx| session.set_source_view(false, window, cx));
+                assert_eq!(session.read(cx).editor.entity_id(), writer.entity_id());
+                session.update(cx, |session, cx| session.set_source_view(true, window, cx));
+                assert_eq!(session.read(cx).editor.entity_id(), build.entity_id());
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            writer.read_with(cx, |editor, _| editor.text_revision()),
+            writer_revision
+        );
+        assert_eq!(
+            build.read_with(cx, |editor, _| editor.text_revision()),
+            build_revision
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| session.set_source_view(false, window, cx))
+        })
+        .unwrap();
+        replace_visible(cx, handle, &session, "# Body edited\n");
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| session.set_source_view(true, window, cx))
+        })
+        .unwrap();
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.editor.entity_id(), build.entity_id());
+            assert_eq!(
+                session.editor.read(cx).value(),
+                "---\ntitle: Keep\n---\n# Body edited\n"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                assert!(session.undo_source(window, cx));
+            });
+        })
+        .unwrap();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.buffer.current_text(), source)
+        });
     }
 
     #[gpui_kit::test]
