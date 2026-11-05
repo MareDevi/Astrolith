@@ -8,7 +8,6 @@ publish.workspace = true
 [dependencies]
 portable-pty = "=0.9.0"
 vt100 = "=0.18.1"
-tracing.workspace = true
 
 [lints]
 workspace = true

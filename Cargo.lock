@@ -356,7 +356,6 @@ name = "astrolith-lsp"
 version = "0.1.0"
 dependencies = [
  "lsp-types",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -394,7 +393,6 @@ name = "astrolith-terminal"
 version = "0.1.0"
 dependencies = [
  "portable-pty",
- "tracing",
  "vt100",
 ]
 
