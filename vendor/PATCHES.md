@@ -17,6 +17,10 @@ Changes from the published sources:
   through borrowed wrap fragments, and index shaped-span widths. Visual-line
   layout no longer repeatedly copies or scans the remaining hard line.
 
+- `gpui-base/src/input/base/state.rs`: expose shared command binding without
+  mounting the stock text element, plus text revision and caret visibility.
+  Astrolith supplies native input geometry from its visible writing surface.
+
 The facade, public package versions, image/link handling and text source mapping
 remain unchanged. Application UI integration tests exercise first-frame and
 resize windowing plus reaching the final paragraph. Native development-profile

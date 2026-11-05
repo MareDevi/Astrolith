@@ -1137,7 +1137,9 @@ impl DocumentSession {
         gpui_kit::Bounds<gpui_kit::Pixels>,
         gpui_kit::Bounds<gpui_kit::Pixels>,
     )> {
-        self.writer.read(cx).selection_geometry()
+        self.writer
+            .read(cx)
+            .selection_geometry(&self.editor.read(cx).selected_range())
     }
 
     /// Install the writing modes for this session.

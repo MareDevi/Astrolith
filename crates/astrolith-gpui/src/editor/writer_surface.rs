@@ -11,8 +11,10 @@
 //! `editor_host` seam: the host builds `BlockNode`s and receives per-leaf
 //! geometry for hit-testing and caret placement.
 
+mod input;
+
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -22,7 +24,6 @@ use gpui_kit::base::text::editor_host::{
     BlockNode, CodeBlock, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph,
     RenderContext, Span, TextMark, collect_leaf_geometry,
 };
-use gpui_kit::component::input::Editor;
 use gpui_kit::component::{ActiveTheme, StyledExt};
 use gpui_kit::{
     AnyElement, App, Bounds, Context, Element, ElementId, Focusable, GlobalElementId, Hsla,
@@ -51,10 +52,6 @@ pub(crate) struct WriterSurface {
     scroll: ScrollHandle,
     /// Source offset where the current drag began.
     drag_anchor: Option<usize>,
-    /// Last rendered selection rectangle, for the floating toolbar.
-    selection_bounds: Option<Bounds<Pixels>>,
-    /// Last rendered text viewport, for the floating toolbar.
-    viewport: Option<Bounds<Pixels>>,
     /// Measured leaf height of every block the last frame rendered.
     ///
     /// `None` means the block has not been laid out since the document last
@@ -65,6 +62,7 @@ pub(crate) struct WriterSurface {
     prefix: Vec<f32>,
     /// Buffer revision the parsed document was built from.
     document_revision: Option<u64>,
+    last_cursor: Option<usize>,
     /// Content width from the last laid-out frame, for the line estimate.
     content_width: Option<f32>,
     /// Number of blocks the last frame laid out, for the windowing tests.
@@ -92,11 +90,10 @@ impl WriterSurface {
             geometry: Rc::new(RefCell::new(FrameGeometry::default())),
             scroll: ScrollHandle::new(),
             drag_anchor: None,
-            selection_bounds: None,
-            viewport: None,
             heights: Rc::new(RefCell::new(Vec::new())),
             prefix: Vec::new(),
             document_revision: None,
+            last_cursor: None,
             content_width: None,
             #[cfg(test)]
             rendered_blocks: 0,
@@ -158,8 +155,13 @@ impl WriterSurface {
     }
 
     /// The rendered selection rectangle and viewport from the last frame.
-    pub(crate) fn selection_geometry(&self) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
-        Some((self.selection_bounds?, self.viewport?))
+    pub(crate) fn selection_geometry(
+        &self,
+        selection: &Range<usize>,
+    ) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        let geometry = self.geometry.borrow();
+        let bounds = Self::selection_bounds(&self.document, selection, &geometry.leaves)?;
+        Some((bounds, geometry.viewport))
     }
 
     /// Move the editor selection along the rendered layout.
@@ -306,10 +308,9 @@ impl WriterSurface {
 
     /// The block range worth laying out for the current scroll position.
     ///
-    /// The first laid-out frame has no geometry to derive a viewport from, so
-    /// it renders everything once; later frames render only the visible run and
-    /// its overscan, always including the caret block and one neighbour on each
-    /// side. A caret far outside the window (a programmatic jump) moves the
+    /// The first frame uses height estimates just like a resized frame. Only
+    /// the visible run and its overscan are laid out. A changed caret includes
+    /// its block and one neighbour on each side. A caret far outside the window (a programmatic jump) moves the
     /// scroll to its estimated position instead of rendering every block in
     /// between.
     fn visible_block_range(
@@ -317,17 +318,11 @@ impl WriterSurface {
         document: &WysiwygDocument,
         cursor: usize,
         viewport_height: f32,
+        follow_cursor: bool,
     ) -> Range<usize> {
         let total = document.blocks.len();
-        if total == 0 || viewport_height <= 0. || self.heights.borrow().iter().all(Option::is_none)
-        {
-            return 0..total;
-        }
-        if self.content_width.is_none() {
-            return 0..total;
-        }
-        if total <= FULL_RENDER_BLOCKS {
-            return 0..total;
+        if total == 0 {
+            return 0..0;
         }
         self.build_prefix(document);
         let overscan = WINDOW_OVERSCAN_PX + 2. * self.style.font_size * self.style.line_height;
@@ -339,6 +334,9 @@ impl WriterSurface {
         let mut start = start.min(total);
         end = end.max(start + 1).min(total);
 
+        if !follow_cursor {
+            return start..end;
+        }
         let Some((caret, _)) = document.caret_location(cursor) else {
             return start..end;
         };
@@ -424,13 +422,12 @@ impl WriterSurface {
             return;
         }
         let offset = self.scroll.offset();
-        // Child content coordinates: window position minus the viewport origin
-        // minus the current scroll translation.
-        let content_y = f32::from(caret.y) - f32::from(viewport.origin.y) - f32::from(offset.y);
+        // Both positions are from the same laid-out frame and include scrolling.
+        let content_y = f32::from(caret.y) - f32::from(viewport.origin.y);
         let mut target = f32::from(offset.y);
         if typewriter {
             let centre = (viewport_height - f32::from(height)) / 2.;
-            target = -(content_y - centre);
+            target += centre - content_y;
         } else {
             let top = 20.;
             let bottom = viewport_height - 28.;
@@ -447,25 +444,19 @@ impl WriterSurface {
         }
     }
 
-    fn update_selection_geometry(
-        &mut self,
+    fn selection_bounds(
         document: &WysiwygDocument,
         selection: &Range<usize>,
         geometry: &HashMap<u64, LeafGeometry>,
-        rendered: Range<usize>,
-    ) {
+    ) -> Option<Bounds<Pixels>> {
         if selection.is_empty() {
-            self.selection_bounds = None;
-            return;
+            return None;
         }
         let mut bounds: Option<Bounds<Pixels>> = None;
-        for (index, block) in document
-            .blocks
-            .iter()
-            .enumerate()
-            .skip(rendered.start)
-            .take(rendered.len())
-        {
+        for (key, leaf) in geometry {
+            let Some(block) = document.blocks.get((*key as usize).saturating_sub(1)) else {
+                continue;
+            };
             if block.source.end < selection.start || block.source.start > selection.end {
                 continue;
             }
@@ -478,9 +469,6 @@ impl WriterSurface {
                 block.text.text.len()
             } else {
                 block.text.nearest_rendered_offset(selection.end)
-            };
-            let Some(leaf) = geometry.get(&block_key(index)) else {
-                continue;
             };
             let start_point = leaf.position_for_index(start);
             let end_point = leaf.position_for_index(end);
@@ -499,16 +487,13 @@ impl WriterSurface {
                 None => leaf_bounds,
             });
         }
-        self.selection_bounds = bounds;
+        bounds
     }
 }
 
 fn block_key(index: usize) -> u64 {
     index as u64 + 1
 }
-
-/// Documents at or below this block count always render whole.
-const FULL_RENDER_BLOCKS: usize = 64;
 
 /// Extra pixels rendered above and below the viewport.
 const WINDOW_OVERSCAN_PX: f32 = 400.;
@@ -633,20 +618,21 @@ fn distance(bounds: Bounds<Pixels>, position: Point<Pixels>) -> f32 {
 impl Render for WriterSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(session) = self.session.upgrade() else {
-            return div().size_full();
+            return div().size_full().into_any_element();
         };
         // The visible text is copied only when the buffer revision changed;
         // unrelated frames never materialise the document.
-        let revision = session.read(cx).buffer.revision().get();
+        let revision = session.read(cx).editor.read(cx).text_revision();
         if self.document_revision != Some(revision) {
-            let visible = session.read(cx).projection.visible.clone();
+            // The editing snapshot includes IME preedit before source commits it.
+            let visible = session.read(cx).editor.read(cx).text().to_string();
             self.sync_document(revision, &visible);
         }
         let (cursor, selection, focused, modes, placeholders) = {
             let session = session.read(cx);
             let editor = session.editor.read(cx);
             (
-                editor.cursor().min(session.projection.visible.len()),
+                editor.cursor().min(editor.text().len()),
                 editor.selected_range(),
                 editor.focus_handle(cx).is_focused(window),
                 session.presentation.modes,
@@ -658,13 +644,17 @@ impl Render for WriterSurface {
         let viewport_height = self.effective_viewport_height(window);
         let content_width = f32::from(self.geometry.borrow().viewport.size.width);
         self.content_width = (content_width > 0.).then_some(content_width);
-        self.adjust_scroll(
-            &document,
-            cursor,
-            focused && modes.typewriter,
-            viewport_height,
-        );
-        let rendered = self.visible_block_range(&document, cursor, viewport_height);
+        let follow_cursor = self.last_cursor != Some(cursor);
+        self.last_cursor = Some(cursor);
+        if follow_cursor {
+            self.adjust_scroll(
+                &document,
+                cursor,
+                focused && modes.typewriter,
+                viewport_height,
+            );
+        }
+        let rendered = self.visible_block_range(&document, cursor, viewport_height, follow_cursor);
         #[cfg(test)]
         {
             self.rendered_blocks = rendered.len();
@@ -768,7 +758,14 @@ impl Render for WriterSurface {
             blocks.push(div().w_full().h(px(omitted.max(0.))).into_any_element());
         }
 
-        let caret = (focused && selection.is_empty()).then_some(cursor);
+        let caret = (focused
+            && selection.is_empty()
+            && session
+                .read(cx)
+                .editor
+                .read(cx)
+                .is_cursor_visible(window, cx))
+        .then_some(cursor);
         let caret_color = cx.theme().caret;
         let flow = RichFlow {
             child: Some(
@@ -786,6 +783,7 @@ impl Render for WriterSurface {
             document: document.clone(),
             caret,
             caret_color,
+            input: cx.entity(),
         };
         let content = div()
             .id("writer-wysiwyg-content")
@@ -818,27 +816,15 @@ impl Render for WriterSurface {
                 }),
             );
 
-        self.viewport = Some(self.geometry.borrow().viewport);
-        let leaves = self.geometry.borrow().leaves.clone();
-        self.update_selection_geometry(&document, &selection, &leaves, rendered);
-
-        div()
+        let editor = session.read(cx).editor.clone();
+        let root = div()
+            .id(("input", editor.entity_id()))
             .size_full()
-            .relative()
-            // The editor stays mounted although it is invisible: it owns native
-            // input, IME and the focus handle the writer focuses on click, and a
-            // focus handle only works while its element is in the tree. Its own
-            // paint is row-windowed, so this costs O(viewport), not O(document).
-            .child(
-                div()
-                    .absolute()
-                    .left(px(0.))
-                    .top(px(0.))
-                    .size_full()
-                    .opacity(0.)
-                    .child(Editor::new(&session.read(cx).editor)),
-            )
-            .child(content)
+            .child(content);
+        editor
+            .update(cx, |editor, cx| editor.bind_input_actions(root, window, cx))
+            .test_support()
+            .into_any_element()
     }
 }
 
@@ -854,10 +840,18 @@ fn paragraph_for(block: &astrolith_document::RichBlock, key: u64) -> Paragraph {
 
 fn mark_runs(text: &astrolith_document::RichText) -> Vec<(Range<usize>, TextMark)> {
     let mut cuts = vec![0, text.text.len()];
-    for mark in &text.marks {
-        cuts.push(mark.range.start.min(text.text.len()));
-        cuts.push(mark.range.end.min(text.text.len()));
+    let mut events = Vec::with_capacity(text.marks.len() * 2);
+    for (index, mark) in text.marks.iter().enumerate() {
+        let start = mark.range.start.min(text.text.len());
+        let end = mark.range.end.min(text.text.len());
+        if start < end {
+            cuts.extend([start, end]);
+            events.extend([(start, true, index), (end, false, index)]);
+        }
     }
+    events.sort_unstable();
+    let mut event_index = 0;
+    let mut active = BTreeSet::new();
     cuts.sort_unstable();
     cuts.dedup();
     let mut runs = Vec::new();
@@ -867,9 +861,21 @@ fn mark_runs(text: &astrolith_document::RichText) -> Vec<(Range<usize>, TextMark
         if start >= end {
             continue;
         }
+        while let Some(&(offset, entering, index)) = events.get(event_index) {
+            if offset > start {
+                break;
+            }
+            if entering {
+                active.insert(index);
+            } else {
+                active.remove(&index);
+            }
+            event_index += 1;
+        }
         let mut style = TextMark::default();
-        for mark in &text.marks {
-            if mark.range.start <= start && mark.range.end >= end {
+        for index in &active {
+            let mark = &text.marks[*index];
+            {
                 match &mark.kind {
                     astrolith_document::InlineMarkKind::Bold => style.bold = true,
                     astrolith_document::InlineMarkKind::Italic => style.italic = true,
@@ -987,6 +993,7 @@ struct RichFlow {
     document: Arc<WysiwygDocument>,
     caret: Option<usize>,
     caret_color: Hsla,
+    input: gpui_kit::Entity<WriterSurface>,
 }
 
 struct Prepaint {
@@ -1048,7 +1055,7 @@ impl Element for RichFlow {
         }
         *self.geometry.borrow_mut() = FrameGeometry {
             leaves: leaves.clone(),
-            viewport: bounds,
+            viewport: bounds.intersect(&window.content_mask().bounds),
         };
         Prepaint { leaves }
     }
@@ -1063,6 +1070,10 @@ impl Element for RichFlow {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let input = self.input.clone();
+        input.update(cx, |input, cx| {
+            input.register_input(input.geometry.borrow().viewport, window, cx)
+        });
         child.paint(window, cx);
         let Some(source) = self.caret else {
             return;
@@ -1153,6 +1164,93 @@ mod tests {
         });
     }
 
+    #[gpui_kit::test]
+    fn writer_native_composition_uses_visible_geometry_and_keeps_hidden_source(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui_kit::{ElementInputHandler, EntityInputHandler, test::TestInput};
+        let source = "---\ntitle: Exact\n---\n# Hello\n";
+        let (handle, session) = mount_writer(cx, source);
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            session.update(cx, |session, cx| {
+                session.set_writer_selection(2, 2, window, cx)
+            });
+            window.render_frame(cx);
+            let bounds = writer.read(cx).geometry.borrow().viewport;
+            let caret = writer.update(cx, |writer, cx| {
+                writer.bounds_for_range(2..2, bounds, window, cx)
+            });
+            assert!(
+                caret.is_some(),
+                "IME candidate geometry comes from the visible heading"
+            );
+            let mut input =
+                TestInput::new(ElementInputHandler::new(bounds, writer.clone()), window);
+            input.compose_text(None, "に🦀", Some(3..3), cx);
+            assert_eq!(input.marked_text_range(cx), Some(2..5));
+            drop(input);
+            assert!(
+                writer.read(cx).source.contains("に🦀"),
+                "preedit is visible before commit"
+            );
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            let bounds = writer.read(cx).geometry.borrow().viewport;
+            let mut input =
+                TestInput::new(ElementInputHandler::new(bounds, writer.clone()), window);
+            input.compose_text(None, "日本", Some(2..2), cx);
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            let bounds = writer.read(cx).geometry.borrow().viewport;
+            let mut input =
+                TestInput::new(ElementInputHandler::new(bounds, writer.clone()), window);
+            input.commit_text("日本語", cx);
+            assert_eq!(input.marked_text_range(cx), None);
+        })
+        .unwrap();
+        session.read_with(cx, |session, _| {
+            assert_eq!(
+                session.buffer.current_text(),
+                "---\ntitle: Exact\n---\n# 日本語Hello\n"
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session.undo_source(window, cx);
+            });
+        })
+        .unwrap();
+        session.read_with(cx, |session, _| {
+            assert_eq!(
+                session.buffer.current_text(),
+                source,
+                "one undo removes the whole composition"
+            )
+        });
+    }
+
+    #[gpui_kit::test]
+    fn writer_scrolling_does_not_snap_back_to_an_unchanged_caret(cx: &mut TestAppContext) {
+        let (handle, session) = mount_writer(cx, &window_source(2_000));
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        writer.update(cx, |writer, cx| {
+            writer.scroll.set_offset(point(px(0.), px(-20_000.)));
+            cx.notify();
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        writer.read_with(cx, |writer, _| {
+            assert!(writer.rendered_range.start > 0);
+            assert!(writer.scroll.offset().y < px(-1_000.));
+        });
+    }
+
     fn window_source(paragraphs: usize) -> String {
         let mut source = String::new();
         for index in 0..paragraphs {
@@ -1164,7 +1262,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn writer_windows_after_the_first_layout_and_keeps_the_caret_block(cx: &mut TestAppContext) {
+    fn writer_windows_from_the_first_layout_and_keeps_the_caret_block(cx: &mut TestAppContext) {
         let (handle, session) = mount_writer(cx, &window_source(2_000));
         let writer = session.read_with(cx, |session, _| session.writer.clone());
         cx.update_window(handle.into(), |_, window, cx| {
@@ -1180,11 +1278,11 @@ mod tests {
                     .expect("a frame has been laid out"),
             )
         });
-        assert_eq!(
-            first,
-            0..total,
-            "the first laid-out frame measures the whole document once"
+        assert!(
+            first.len() < total,
+            "the first frame must also stay windowed"
         );
+        assert!(first.contains(&0));
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
         })

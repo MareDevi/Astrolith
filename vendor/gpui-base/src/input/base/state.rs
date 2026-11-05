@@ -4947,71 +4947,21 @@ impl<M: InputModeKind> Focusable for InputBaseState<M> {
     }
 }
 
-impl<M: InputModeKind> Render for InputBaseState<M> {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Before anything reads it: the element resolves this style during
-        // layout and paint, and both happen after this call in the same frame.
-        self.editor_style = self
-            .projected_editor_style
-            .resolved(&crate::Theme::global(cx).tokens);
+impl<M: InputModeKind> InputBaseState<M> {
+    /// Attach the shared editing commands to a host-owned surface.
+    ///
+    /// A rich editor can reuse input, clipboard, composition and editing behavior
+    /// without mounting TextElement or computing a second text layout. The host
+    /// registers its own native input geometry and pointer handlers.
+    pub fn bind_input_actions(
+        &self,
+        element: gpui::Stateful<gpui::Div>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let entity = cx.entity();
-        if self._pending_update {
-            self.mode.update_highlighter::<M>(
-                super::mode::HighlighterUpdate {
-                    selected_range: &(0..0),
-                    old_text: &self.text,
-                    new_text: &self.text,
-                    change_text: "",
-                    force: false,
-                },
-                window,
-                cx,
-            );
-
-            self.update_fold_candidates();
-            M::refresh_language_features(self, window, cx);
-            self._pending_update = false;
-        }
-
-        let element = div()
-            .id(EDITOR_ELEMENT_ID)
+        let element = element
             .key_context(CONTEXT)
-            .when_some(self.accessibility.as_ref(), |this, accessibility| {
-                this.when_some(accessibility.role, |this, role| this.role(role))
-                    .when_some(accessibility.label.clone(), |this, label| {
-                        this.aria_label(label)
-                    })
-                    .when_some(accessibility.placeholder.clone(), |this, placeholder| {
-                        this.aria_placeholder(placeholder)
-                    })
-                    .when_some(accessibility.accessibility_id.clone(), |this, id| {
-                        this.accessibility_id(id)
-                    })
-                    .when(
-                        accessibility.value_exposed
-                            && !self.masked
-                            && (window.is_a11y_active() || cfg!(feature = "test-support")),
-                        |this| this.aria_value(self.text.to_string()),
-                    )
-                    .on_a11y_action(gpui::AccessibleAction::Focus, {
-                        let entity = entity.clone();
-                        move |_, window, cx| {
-                            entity.update(cx, |state, cx| {
-                                state.handle_accessibility_focus(window, cx)
-                            });
-                        }
-                    })
-                    .when(self.is_editable(), |this| {
-                        this.on_a11y_action(gpui::AccessibleAction::SetValue, {
-                            let entity = entity.clone();
-                            move |data, window, cx| {
-                                entity.update(cx, |state, cx| {
-                                    state.handle_accessibility_set_value(data, window, cx)
-                                });
-                            }
-                        })
-                    })
-            })
             .when(self.is_editable(), |this| {
                 this.on_action(window.listener_for(&entity, InputBaseState::backspace))
                     .on_action(window.listener_for(&entity, InputBaseState::delete))
@@ -5089,7 +5039,89 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
             })
             .on_action(window.listener_for(&entity, InputBaseState::copy))
             .on_action(window.listener_for(&entity, InputBaseState::on_action_search))
-            .on_action(window.listener_for(&entity, InputBaseState::on_action_replace))
+            .on_action(window.listener_for(&entity, InputBaseState::on_action_replace));
+        M::register_actions(element, &entity, window).track_focus(&self.focus_handle)
+    }
+
+    /// Revision of text edits, including an uncommitted native composition.
+    /// Selection, focus and caret blinks do not change this revision.
+    pub fn text_revision(&self) -> u64 {
+        self.document_revision
+    }
+
+    /// Whether the retained input model currently paints its insertion caret.
+    pub fn is_cursor_visible(&self, window: &Window, cx: &App) -> bool {
+        self.show_cursor(window, cx)
+    }
+}
+
+impl<M: InputModeKind> Render for InputBaseState<M> {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Before anything reads it: the element resolves this style during
+        // layout and paint, and both happen after this call in the same frame.
+        self.editor_style = self
+            .projected_editor_style
+            .resolved(&crate::Theme::global(cx).tokens);
+        let entity = cx.entity();
+        if self._pending_update {
+            self.mode.update_highlighter::<M>(
+                super::mode::HighlighterUpdate {
+                    selected_range: &(0..0),
+                    old_text: &self.text,
+                    new_text: &self.text,
+                    change_text: "",
+                    force: false,
+                },
+                window,
+                cx,
+            );
+
+            self.update_fold_candidates();
+            M::refresh_language_features(self, window, cx);
+            self._pending_update = false;
+        }
+
+        let element = div().id(EDITOR_ELEMENT_ID).key_context(CONTEXT).when_some(
+            self.accessibility.as_ref(),
+            |this, accessibility| {
+                this.when_some(accessibility.role, |this, role| this.role(role))
+                    .when_some(accessibility.label.clone(), |this, label| {
+                        this.aria_label(label)
+                    })
+                    .when_some(accessibility.placeholder.clone(), |this, placeholder| {
+                        this.aria_placeholder(placeholder)
+                    })
+                    .when_some(accessibility.accessibility_id.clone(), |this, id| {
+                        this.accessibility_id(id)
+                    })
+                    .when(
+                        accessibility.value_exposed
+                            && !self.masked
+                            && (window.is_a11y_active() || cfg!(feature = "test-support")),
+                        |this| this.aria_value(self.text.to_string()),
+                    )
+                    .on_a11y_action(gpui::AccessibleAction::Focus, {
+                        let entity = entity.clone();
+                        move |_, window, cx| {
+                            entity.update(cx, |state, cx| {
+                                state.handle_accessibility_focus(window, cx)
+                            });
+                        }
+                    })
+                    .when(self.is_editable(), |this| {
+                        this.on_a11y_action(gpui::AccessibleAction::SetValue, {
+                            let entity = entity.clone();
+                            move |data, window, cx| {
+                                entity.update(cx, |state, cx| {
+                                    state.handle_accessibility_set_value(data, window, cx)
+                                });
+                            }
+                        })
+                    })
+            },
+        );
+        let element = self
+            .bind_input_actions(element, window, cx)
             .on_mouse_down(
                 MouseButton::Left,
                 window.listener_for(&entity, InputBaseState::on_mouse_down),
@@ -5146,9 +5178,7 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
 
         // Actions only one mode handles are registered by that mode, where
         // `Self` is concrete enough to name its own entity type.
-        M::register_actions(element, &entity, window)
-            .test_support()
-            .track_focus(&self.focus_handle)
+        element.test_support().track_focus(&self.focus_handle)
     }
 }
 

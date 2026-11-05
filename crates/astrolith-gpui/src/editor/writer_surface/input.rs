@@ -1,0 +1,158 @@
+//! Native input uses the retained editing model and the visible rich geometry.
+//! No invisible source editor is mounted or measured for Writing.
+
+use std::ops::Range;
+
+use gpui_kit::component::input::{EditorState, RopeExt};
+use gpui_kit::{
+    Bounds, ClipboardItem, Context, ElementInputHandler, Entity, EntityInputHandler, Focusable,
+    Pixels, Point, UTF16Selection, Window, px, size,
+};
+
+use super::{WriterSurface, block_key};
+
+impl WriterSurface {
+    fn input_model(&self, cx: &Context<Self>) -> Option<Entity<EditorState>> {
+        Some(self.session.upgrade()?.read(cx).editor.clone())
+    }
+
+    pub(super) fn register_input(
+        &self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.input_model(cx) else {
+            return;
+        };
+        let focus = editor.read(cx).focus_handle(cx);
+        window.handle_input(&focus, ElementInputHandler::new(bounds, cx.entity()), cx);
+    }
+}
+
+impl EntityInputHandler for WriterSurface {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        adjusted: &mut Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        self.input_model(cx)?.update(cx, |editor, cx| {
+            editor.text_for_range(range, adjusted, window, cx)
+        })
+    }
+
+    fn selected_text_range(
+        &mut self,
+        ignore_disabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        self.input_model(cx)?.update(cx, |editor, cx| {
+            editor.selected_text_range(ignore_disabled, window, cx)
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.input_model(cx)?
+            .update(cx, |editor, cx| editor.marked_text_range(window, cx))
+    }
+
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.input_model(cx) {
+            editor.update(cx, |editor, cx| editor.unmark_text(window, cx));
+        }
+    }
+
+    fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.input_model(cx) {
+            editor.update(cx, |editor, cx| editor.paste(item, window, cx));
+        }
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.input_model(cx) {
+            editor.update(cx, |editor, cx| {
+                editor.replace_text_in_range(range, text, window, cx)
+            });
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        selected: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.input_model(cx) {
+            editor.update(cx, |editor, cx| {
+                editor.replace_and_mark_text_in_range(range, text, selected, window, cx)
+            });
+        }
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range: Range<usize>,
+        _: Bounds<Pixels>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let editor = self.input_model(cx)?;
+        let source = editor.read(cx).text().offset_utf16_to_offset(range.start);
+        let (block, rendered) = self.document.caret_location(source)?;
+        let geometry = self.geometry.borrow();
+        let leaf = geometry.leaves.get(&block_key(block))?;
+        let origin = leaf.position_for_index(rendered);
+        Some(Bounds::new(
+            origin,
+            size(px(1.5), leaf.caret_height().max(px(2.))),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        position: Point<Pixels>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let source = self.source_at(position)?;
+        let editor = self.input_model(cx)?;
+        Some(editor.read(cx).text().offset_to_offset_utf16(source))
+    }
+
+    fn text_length_utf16(&mut self, _: &mut Window, cx: &mut Context<Self>) -> Option<usize> {
+        let editor = self.input_model(cx)?;
+        let text = editor.read(cx).text();
+        Some(text.offset_to_offset_utf16(text.len()))
+    }
+
+    fn set_selected_text_range(
+        &mut self,
+        range: Range<usize>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.input_model(cx) {
+            editor.update(cx, |editor, cx| {
+                let text = editor.text();
+                let range = text.offset_utf16_to_offset(range.start)
+                    ..text.offset_utf16_to_offset(range.end);
+                editor.set_selected_range(range, cx);
+            });
+        }
+    }
+}
