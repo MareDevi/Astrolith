@@ -27,8 +27,8 @@ use std::{cell::RefCell, collections::HashMap, ops::Range, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ElementId, HighlightStyle, Hsla, ImageSource,
-    InteractiveElement as _, IntoElement as _, ParentElement as _, Pixels, Point, SharedString,
-    SharedUri, TextLayout, Window, WrappedLineLayout, div, point, px,
+    InteractiveElement as _, IntoElement as _, ParentElement as _, Pixels, Point, ShapedLine,
+    SharedString, SharedUri, TextLayout, Window, WrappedLineLayout, div, point, px,
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
@@ -298,6 +298,34 @@ impl EditorSink for Collector {
             .push(Piece::Text {
                 start,
                 layout: LayoutSnapshot::new(layout),
+            });
+    }
+
+    fn report_shaped_piece(
+        &self,
+        key: u64,
+        start: usize,
+        line: &ShapedLine,
+        bounds: Bounds<Pixels>,
+        line_height: Pixels,
+    ) {
+        self.pieces
+            .borrow_mut()
+            .entry(key)
+            .or_default()
+            .push(Piece::Text {
+                start,
+                layout: LayoutSnapshot {
+                    bounds,
+                    len: line.len(),
+                    line_height,
+                    text: line.text.clone(),
+                    lines: vec![Arc::new(WrappedLineLayout {
+                        unwrapped_layout: line.unwrapped_layout(),
+                        wrap_boundaries: Default::default(),
+                        wrap_width: None,
+                    })],
+                },
             });
     }
 

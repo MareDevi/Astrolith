@@ -17,6 +17,11 @@ Changes from the published sources:
   through borrowed wrap fragments, and index shaped-span widths. Visual-line
   layout no longer repeatedly copies or scans the remaining hard line.
 
+- `gpui-base/src/text/inline_flow.rs`, `text/editor_seam.rs`,
+  `text/editor_host.rs`, and `gpui-pre/src/text_system/line.rs`: prepaint only
+  visible text fragments. Offscreen fragments share immutable shaped glyphs
+  for complete hit-testing, caret and scroll geometry without native elements.
+
 - `gpui-base/src/input/base/state.rs`: expose shared command binding without
   mounting the stock text element, plus text revision and caret visibility.
   Astrolith supplies native input geometry from its visible writing surface.

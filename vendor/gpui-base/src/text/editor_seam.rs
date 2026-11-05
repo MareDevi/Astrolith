@@ -12,7 +12,7 @@
 
 use std::{cell::RefCell, ops::Range, rc::Rc};
 
-use gpui::{Bounds, Hsla, Pixels, TextLayout};
+use gpui::{Bounds, Hsla, Pixels, ShapedLine, TextLayout};
 
 pub(crate) trait EditorSink {
     /// The leaf `key` was laid out this frame as one `TextLayout`.
@@ -24,6 +24,15 @@ pub(crate) trait EditorSink {
     /// One single-line text fragment of `key`, whose index 0 is the leaf's
     /// byte `start`.
     fn report_text_piece(&self, key: u64, start: usize, layout: &TextLayout);
+    /// Geometry for a culled fragment, using the flow's already shaped glyphs.
+    fn report_shaped_piece(
+        &self,
+        key: u64,
+        start: usize,
+        line: &ShapedLine,
+        bounds: Bounds<Pixels>,
+        line_height: Pixels,
+    );
     /// An inline atom (image, custom node) of `key` covering the leaf bytes
     /// `range`, drawn in `bounds`.
     fn report_box_piece(&self, key: u64, range: Range<usize>, bounds: Bounds<Pixels>);
@@ -65,6 +74,15 @@ mod tests {
         fn report(&self, _: u64, _: &TextLayout) {}
         fn begin_pieces(&self, _: u64) {}
         fn report_text_piece(&self, _: u64, _: usize, _: &TextLayout) {}
+        fn report_shaped_piece(
+            &self,
+            _: u64,
+            _: usize,
+            _: &ShapedLine,
+            _: Bounds<Pixels>,
+            _: Pixels,
+        ) {
+        }
         fn report_box_piece(&self, _: u64, _: Range<usize>, _: Bounds<Pixels>) {}
         fn report_empty_piece(&self, _: u64, _: usize, _: Bounds<Pixels>) {}
         fn backgrounds(&self, _: u64) -> Vec<(Range<usize>, Hsla)> {

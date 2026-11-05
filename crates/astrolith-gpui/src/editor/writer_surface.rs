@@ -1234,6 +1234,48 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn long_paragraph_keeps_offscreen_caret_geometry_after_resize(cx: &mut TestAppContext) {
+        let source = "中文日本語🦀 **bold** `code` ".repeat(1_000);
+        let (handle, session) = mount_writer(cx, &source);
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        let end = source.len();
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session.set_writer_selection(end, end, window, cx)
+            });
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        writer.read_with(cx, |writer, _| {
+            assert!(writer.scroll.offset().y < px(-1_000.));
+            let geometry = writer.geometry.borrow();
+            let leaf = geometry.leaves.get(&block_key(0)).unwrap();
+            assert!(leaf.bounds().size.height > px(1_000.));
+            let rendered_end = writer.document.blocks[0].text.text.len();
+            let caret = leaf.position_for_index(rendered_end);
+            assert!(geometry.viewport.contains(&caret));
+        });
+        cx.simulate_window_resize(handle.into(), size(px(900.), px(700.)));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        writer.read_with(cx, |writer, _| {
+            let geometry = writer.geometry.borrow();
+            let leaf = geometry.leaves.get(&block_key(0)).unwrap();
+            assert!(
+                leaf.position_for_index(writer.document.blocks[0].text.text.len())
+                    .y
+                    >= leaf.bounds().top()
+            );
+        });
+    }
+
+    #[gpui_kit::test]
     fn writer_scrolling_does_not_snap_back_to_an_unchanged_caret(cx: &mut TestAppContext) {
         let (handle, session) = mount_writer(cx, &window_source(2_000));
         let writer = session.read_with(cx, |session, _| session.writer.clone());

@@ -50,6 +50,11 @@ pub struct ShapedLine {
 }
 
 impl ShapedLine {
+    /// Shares the immutable glyph layout, without decorations or painting state.
+    pub fn unwrapped_layout(&self) -> Arc<LineLayout> {
+        self.layout.clone()
+    }
+
     /// Returns a forward-only cursor for this shaped line.
     pub fn cursor(&self) -> ShapedLineCursor<'_> {
         assert_eq!(

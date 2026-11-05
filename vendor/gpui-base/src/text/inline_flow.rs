@@ -93,7 +93,7 @@ struct InlineFlowFrameState {
     /// the state has to be the same one next frame for the text to be
     /// found; a fresh state per frame shaped every fragment again and left
     /// an entry in the table that nobody would take.
-    fragment_states: Vec<Arc<Mutex<InlineState>>>,
+    fragment_states: Vec<Option<Arc<Mutex<InlineState>>>>,
     /// What `layouts` were laid out from. A frame whose items or typography
     /// differ starts over.
     key: Option<FlowLayoutKey>,
@@ -113,7 +113,9 @@ impl InlineFlowFrameState {
             self.fragment_states
                 .resize_with(fragment_ix + 1, Default::default);
         }
-        self.fragment_states[fragment_ix].clone()
+        self.fragment_states[fragment_ix]
+            .get_or_insert_with(Default::default)
+            .clone()
     }
 
     /// Makes `key` the current one, dropping the layouts of another key.
@@ -196,6 +198,7 @@ enum PositionedFragment {
         size: Size<Pixels>,
         source_range: Range<usize>,
         font_size: Pixels,
+        shaped_line: ShapedLine,
         text: SharedString,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, InlineHighlight)>,
@@ -241,6 +244,7 @@ enum LineFragmentKind {
     Object(Box<MeasuredInlineObject>),
     Text {
         font_size: Pixels,
+        shaped_line: ShapedLine,
         text: SharedString,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, InlineHighlight)>,
@@ -631,6 +635,7 @@ impl Element for InlineFlow {
                     size: fragment_size,
                     source_range,
                     font_size,
+                    shaped_line,
                     text,
                     links,
                     highlights,
@@ -647,8 +652,40 @@ impl Element for InlineFlow {
                         continue;
                     };
                     let (origin, fragment_size, font_size) = (*origin, *fragment_size, *font_size);
-                    let state = frame_state.borrow_mut().fragment_state(text_fragment_count);
+                    let state_index = text_fragment_count;
                     text_fragment_count += 1;
+                    let fragment_bounds = Bounds::new(bounds.origin + origin, fragment_size);
+                    if !fragment_bounds.intersects(&window.content_mask().bounds)
+                        && reveal_fragment != Some(fragment_ix)
+                    {
+                        if let Some((key, sink)) = &editor {
+                            let insets = code_insets(highlights, font_size, window.rem_size());
+                            let line_height = fragment_size.height - insets.top - insets.bottom;
+                            sink.report_shaped_piece(
+                                *key,
+                                item_starts[*item_ix] + source_range.start,
+                                shaped_line,
+                                Bounds::new(
+                                    fragment_bounds.origin + point(insets.left, insets.top),
+                                    size(
+                                        fragment_size.width - insets.left - insets.right,
+                                        line_height,
+                                    ),
+                                ),
+                                line_height,
+                            );
+                        }
+                        // Release retained native layouts after they leave the viewport.
+                        if let Some(state) = frame_state
+                            .borrow_mut()
+                            .fragment_states
+                            .get_mut(state_index)
+                        {
+                            *state = None;
+                        }
+                        continue;
+                    }
+                    let state = frame_state.borrow_mut().fragment_state(state_index);
                     if let Ok(mut state) = state.lock() {
                         state.set_text(text.clone());
                     }
@@ -1149,6 +1186,7 @@ fn layout_measured_flow(
                             item_ix,
                             kind: LineFragmentKind::Text {
                                 font_size: segment_font_size,
+                                shaped_line,
                                 text: subtext,
                                 links,
                                 highlights,
@@ -1236,6 +1274,7 @@ fn layout_measured_flow(
                 },
                 LineFragmentKind::Text {
                     font_size,
+                    shaped_line,
                     text,
                     links,
                     highlights,
@@ -1247,6 +1286,7 @@ fn layout_measured_flow(
                     source_range: fragment.source_range,
                     selection_bounds,
                     font_size,
+                    shaped_line,
                     text,
                     links,
                     highlights,
