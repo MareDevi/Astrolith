@@ -24,6 +24,19 @@ workspace_version() {
   node "$PACKAGING_DIR/generate-metadata.mjs" --print-version
 }
 
+# Commit-derived build identity. CI stamps ASTROLITH_BUILD_ID from the workflow
+# run; a local packaging run derives the same shape here so About and
+# save-failure artifacts never claim a generic development build.
+build_identity() {
+  local sha
+  sha="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || true)"
+  [[ -n "$sha" ]] || sha="unknown"
+  if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no 2>/dev/null || true)" ]]; then
+    sha="$sha-dirty"
+  fi
+  printf '%s\n' "$sha"
+}
+
 generate_metadata() {
   node "$PACKAGING_DIR/generate-metadata.mjs" --output "$GENERATED_DIR"
 }
@@ -34,6 +47,10 @@ build_binary() {
   require_tool cargo "Install the pinned Rust toolchain with mise."
   require_tool node "Install the pinned Node.js toolchain with mise."
   generate_metadata
+  # option_env! reads this while compiling; an already-built binary keeps the
+  # identity it was compiled with, so packaging from a pristine tree is required.
+  export ASTROLITH_BUILD_ID="${ASTROLITH_BUILD_ID:-$(build_identity)}"
+  echo "packaging: build identity $ASTROLITH_BUILD_ID"
   cargo build --release --locked -p astrolith-desktop
   BINARY="$REPO_ROOT/target/release/astrolith-desktop"
   [[ -x "$BINARY" ]] || fail "the release binary was not built at $BINARY"

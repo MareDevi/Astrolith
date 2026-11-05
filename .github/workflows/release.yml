@@ -57,6 +57,11 @@ jobs:
           else
             echo "No update manifest URL/public key configured; building a capability-disabled binary."
           fi
+      - name: Stamp build identity
+        run: |
+          # About and save-failure artifacts read this at compile time; keep it
+          # commit-derived so a release build is identifiable.
+          echo "ASTROLITH_BUILD_ID=${GITHUB_SHA:0:12}" >>"$GITHUB_ENV"
       - name: Install AppImage tooling
         if: matrix.artifact == 'appimage'
         run: |
