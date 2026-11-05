@@ -10,9 +10,11 @@ use std::{fs, path::Path, time::Duration};
 use astrolith_core::ProjectId;
 use tempfile::TempDir;
 
+use url::Url;
+
 use crate::{
     process::OUTPUT_CAP,
-    server::{DevServer, DevServerConfig, DevServerError, ServerStatus},
+    server::{DevServer, DevServerConfig, DevServerError, ServerStatus, probe_ready},
     test_support::{block_on, write_script},
 };
 
@@ -33,9 +35,20 @@ fn project() -> ProjectId {
     ProjectId::new("test-project").unwrap()
 }
 
-fn direct_server(program: &Path, root: &Path) -> DevServer {
+/// Bind a loopback listener the readiness probe can connect to.
+///
+/// The shell fixtures announce a URL without binding it; production requires a
+/// real accept, so the test owns the listener for the configured port.
+fn ready_listener() -> (std::net::TcpListener, u16) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
+}
+
+fn direct_server(program: &Path, root: &Path, port: u16) -> DevServer {
     let config = DevServerConfig::new(root)
         .with_script_runner("/bin/sh", program.to_path_buf())
+        .with_port(port)
         .with_startup_timeout(Duration::from_secs(5))
         .with_stop_grace(Duration::from_secs(2));
     DevServer::new(project(), config)
@@ -50,12 +63,27 @@ fn process_alive(pid: i32) -> bool {
 }
 
 #[test]
+fn readiness_probe_requires_an_accepting_listener() {
+    block_on(async {
+        let (listener, port) = ready_listener();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+        assert!(probe_ready(&url).await, "a bound loopback listener accepts");
+        drop(listener);
+        assert!(
+            !probe_ready(&url).await,
+            "a parsed URL without a listener is not ready"
+        );
+    });
+}
+
+#[test]
 fn startup_reaches_ready_then_stops() {
     block_on(async {
         let dir = TempDir::new().unwrap();
         let body = format!("{PRELUDE}\n{READY}\nwhile true; do sleep 0.1; done\n");
         let script = write_script(dir.path(), "astro.sh", &body);
-        let mut server = direct_server(&script, dir.path());
+        let (_listener, port) = ready_listener();
+        let mut server = direct_server(&script, dir.path(), port);
 
         assert_eq!(server.status(), &ServerStatus::Stopped);
         let url = server.start().await.expect("server should become ready");
@@ -88,8 +116,10 @@ fn resolves_project_local_astro_entry() {
         // in for the Astro CLI while the real node_modules resolution runs.
         write_script(&astro, "cli.sh", &body);
 
+        let (_listener, port) = ready_listener();
         let config = DevServerConfig::new(dir.path())
             .with_node("/bin/sh")
+            .with_port(port)
             .with_startup_timeout(Duration::from_secs(5))
             .with_stop_grace(Duration::from_secs(2));
         let mut server = DevServer::new(project(), config);
@@ -127,7 +157,8 @@ fn bad_exit_transitions_to_failed_with_stderr() {
         let dir = TempDir::new().unwrap();
         let body = format!("{PRELUDE}\nprintf 'boom: cannot start\\n' >&2\nexit 1\n");
         let script = write_script(dir.path(), "astro.sh", &body);
-        let mut server = direct_server(&script, dir.path());
+        let (_listener, port) = ready_listener();
+        let mut server = direct_server(&script, dir.path(), port);
 
         let error = server.start().await.expect_err("bad exit must fail");
         assert!(matches!(error, DevServerError::Exited(_)), "got {error:?}");
@@ -183,16 +214,17 @@ fn auto_incremented_port_warning_is_not_a_failure() {
         // Astro warns, then binds the next port a moment later. The warning alone
         // must not terminate a server that is still starting.
         let body = format!(
-            "{PRELUDE}\nprintf 'Port %s is in use, trying another one...\\n' \"$PORT\" >&2\nsleep 0.2\nprintf '  ┃ Local    http://127.0.0.1:45679/\\n'\nwhile true; do sleep 0.1; done\n"
+            "{PRELUDE}\nprintf 'Port %s is in use, trying another one...\\n' \"$PORT\" >&2\nsleep 0.2\n{READY}\nwhile true; do sleep 0.1; done\n"
         );
         let script = write_script(dir.path(), "astro.sh", &body);
-        let mut server = direct_server(&script, dir.path());
+        let (_listener, port) = ready_listener();
+        let mut server = direct_server(&script, dir.path(), port);
 
         let url = server
             .start()
             .await
             .expect("an auto-incremented port must still start");
-        assert_eq!(url.port(), Some(45679));
+        assert_eq!(url.port(), Some(port));
         server.stop().await.expect("stop");
     });
 }
@@ -212,8 +244,10 @@ fn astro7_starts_foreground_with_ignore_lock() {
             format!("printf '%s\\n' \"$@\" > args.txt\n{READY}\nwhile true; do sleep 0.1; done\n");
         write_script(&astro, "cli.sh", &body);
 
+        let (_listener, port) = ready_listener();
         let config = DevServerConfig::new(dir.path())
             .with_node("/bin/sh")
+            .with_port(port)
             .with_startup_timeout(Duration::from_secs(5))
             .with_stop_grace(Duration::from_secs(1));
         let mut server = DevServer::new(project(), config);
@@ -243,8 +277,10 @@ fn astro5_has_no_astro7_only_flag() {
             format!("printf '%s\\n' \"$@\" > args.txt\n{READY}\nwhile true; do sleep 0.1; done\n");
         write_script(&astro, "cli.sh", &body);
 
+        let (_listener, port) = ready_listener();
         let config = DevServerConfig::new(dir.path())
             .with_node("/bin/sh")
+            .with_port(port)
             .with_startup_timeout(Duration::from_secs(5))
             .with_stop_grace(Duration::from_secs(1));
         let mut server = DevServer::new(project(), config);
@@ -283,7 +319,8 @@ fn cancellation_during_startup_stops_and_reaps_child() {
         let pidfile = dir.path().join("child.pid");
         let body = format!("{PRELUDE}\necho $$ > \"{}\"\nsleep 30\n", pidfile.display());
         let script = write_script(dir.path(), "astro.sh", &body);
-        let mut server = direct_server(&script, dir.path());
+        let (_listener, port) = ready_listener();
+        let mut server = direct_server(&script, dir.path(), port);
 
         let cancellation = astrolith_astro::Cancellation::default();
         let trigger = cancellation.clone();
@@ -318,7 +355,8 @@ fn process_exit_is_observed() {
         let dir = TempDir::new().unwrap();
         let body = format!("{PRELUDE}\n{READY}\nsleep 0.8\nexit 0\n");
         let script = write_script(dir.path(), "astro.sh", &body);
-        let mut server = direct_server(&script, dir.path());
+        let (_listener, port) = ready_listener();
+        let mut server = direct_server(&script, dir.path(), port);
 
         server.start().await.expect("becomes ready");
         let status = server.wait_for_exit().await.expect("wait for exit");
@@ -335,7 +373,8 @@ fn grandchild_is_killed_with_the_process_group() {
             "{PRELUDE}\nsleep 300 &\necho \"GRANDCHILD:$!\"\n{READY}\nwhile true; do sleep 0.1; done\n"
         );
         let script = write_script(dir.path(), "astro.sh", &body);
-        let mut server = direct_server(&script, dir.path());
+        let (_listener, port) = ready_listener();
+        let mut server = direct_server(&script, dir.path(), port);
 
         server.start().await.expect("becomes ready");
 
@@ -381,7 +420,8 @@ fn output_flooding_stays_under_cap_and_never_deadlocks() {
             "{PRELUDE}\n{READY}\ndd if=/dev/zero bs=65536 count=64 2>/dev/null | tr '\\0' 'a'\nsleep 2\n"
         );
         let script = write_script(dir.path(), "astro.sh", &body);
-        let mut server = direct_server(&script, dir.path());
+        let (_listener, port) = ready_listener();
+        let mut server = direct_server(&script, dir.path(), port);
 
         server.start().await.expect("becomes ready while flooding");
 

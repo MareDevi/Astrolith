@@ -114,9 +114,25 @@ impl OutputCapture {
         self.lock().bytes.clone()
     }
 
+    /// Retained bytes after `offset`, plus the retained length.
+    ///
+    /// Readiness polling walks only the newly appended tail; the prefix is
+    /// never copied again.
+    pub fn bytes_from(&self, offset: usize) -> (Vec<u8>, usize) {
+        let state = self.lock();
+        let start = offset.min(state.bytes.len());
+        (state.bytes[start..].to_vec(), state.bytes.len())
+    }
+
     /// Retained bytes decoded lossily as UTF-8.
     pub fn text_lossy(&self) -> String {
         String::from_utf8_lossy(&self.lock().bytes).into_owned()
+    }
+
+    /// Append bytes without a drain task, for readiness-scan tests.
+    #[cfg(test)]
+    pub(crate) fn push_bytes(&self, chunk: &[u8]) {
+        self.push(chunk);
     }
 }
 
