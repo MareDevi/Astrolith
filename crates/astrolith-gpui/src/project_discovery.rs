@@ -3485,7 +3485,7 @@ impl ProjectWorkspace {
                         {
                             return false;
                         }
-                        this.apply_watcher_scan(token, result, cx);
+                        this.apply_watcher_scan(generation, token, result, cx);
                         true
                     })
                     .unwrap_or(false);
@@ -3496,19 +3496,26 @@ impl ProjectWorkspace {
         }));
     }
 
-    /// Publish one watcher scan unless a newer index request already won.
+    /// Publish one watcher scan unless a newer project generation or index
+    /// request already won.
     ///
-    /// External-change flags and session reconciliation follow the same ordering:
-    /// an older scan never overwrites the newest published index, so it can never
-    /// close a clean session that the newer index still contains.
+    /// The generation check is repeated here, after the scan returns, because a
+    /// project switch resets [`Self::published_index_request`] to zero: an old
+    /// loop's token then compares as "not older" and would otherwise publish the
+    /// outgoing project's entries into the incoming one. External-change flags
+    /// and session reconciliation follow the same ordering, so a superseded scan
+    /// can never close a clean session that the newer index still contains.
     fn apply_watcher_scan(
         &mut self,
+        generation: u64,
         token: u64,
         scan: Result<WatcherScan, String>,
         cx: &mut Context<Self>,
     ) {
-        if !self.accepts_index_result(token) {
+        if self.generation != generation || !self.accepts_index_result(token) {
             tracing::debug!(
+                generation,
+                current_generation = self.generation,
                 token,
                 published = self.published_index_request,
                 "dropping a stale watcher scan"
@@ -8617,6 +8624,7 @@ mod tests {
             let manifest = view.manifest.as_ref().unwrap().as_ref().clone();
             let entries = view.entries.as_ref().clone();
             view.apply_watcher_scan(
+                view.generation,
                 token,
                 Ok(WatcherScan {
                     index: Ok((manifest, entries)),
@@ -8651,6 +8659,7 @@ mod tests {
             let manifest = view.manifest.as_ref().unwrap().as_ref().clone();
             let entries = view.entries.as_ref().clone();
             view.apply_watcher_scan(
+                view.generation,
                 token,
                 Ok(WatcherScan {
                     index: Ok((manifest, entries)),
@@ -10549,6 +10558,117 @@ export const collections = {blog, dataAuthors};
                 "a schema batch reconciles exactly once"
             );
         });
+    }
+
+    #[gpui_kit::test]
+    async fn superseded_watcher_generation_publishes_nothing(cx: &mut TestAppContext) {
+        let outgoing = fixture();
+        let incoming = fixture();
+        std::fs::write(
+            incoming.path().join("src/posts/c.md"),
+            "---\ntitle: Incoming\n---\n# C\n",
+        )
+        .unwrap();
+
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.start(outgoing.path().into(), window, cx)
+            })
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        let (stale_generation, stale_manifest, stale_entries) = view.read_with(cx, |view, _| {
+            (
+                view.generation,
+                view.manifest
+                    .as_ref()
+                    .expect("the first project is open")
+                    .as_ref()
+                    .clone(),
+                view.entries.clone(),
+            )
+        });
+
+        // Queue a batch for the outgoing watcher, then switch before the loop
+        // can drain it. The old loop must never publish into the new project.
+        std::fs::write(
+            outgoing.path().join("src/posts/queued.md"),
+            "---\ntitle: Queued\n---\n# Queued\n",
+        )
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.start(incoming.path().into(), window, cx)
+            })
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        let (current_generation, entries, revision) = view.read_with(cx, |view, _| {
+            (view.generation, view.entries.clone(), view.index_revision)
+        });
+        assert_ne!(current_generation, stale_generation);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.entry().source().as_str() == "src/posts/c.md"),
+            "the incoming project owns the published index"
+        );
+
+        view.update(cx, |view, cx| {
+            view.apply_watcher_scan(
+                stale_generation,
+                1,
+                Ok(WatcherScan {
+                    index: Ok((stale_manifest, (*stale_entries).clone())),
+                    fingerprints: Vec::new(),
+                }),
+                cx,
+            );
+        });
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.generation, current_generation,
+                "the outgoing loop cannot replace the project generation"
+            );
+            assert_eq!(
+                view.index_revision, revision,
+                "a superseded watcher generation must not publish"
+            );
+            assert!(
+                view.entries
+                    .iter()
+                    .all(|entry| entry.entry().source().as_str() != "src/posts/queued.md"),
+                "the outgoing project's queued entry never appears"
+            );
+        });
+
+        // The same publication path stays live for the owning generation.
+        let (manifest, entries) = view.read_with(cx, |view, _| {
+            (
+                view.manifest
+                    .as_ref()
+                    .expect("the second project is open")
+                    .as_ref()
+                    .clone(),
+                view.entries.clone(),
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.apply_watcher_scan(
+                current_generation,
+                2,
+                Ok(WatcherScan {
+                    index: Ok((manifest, (*entries).clone())),
+                    fingerprints: Vec::new(),
+                }),
+                cx,
+            );
+        });
+        assert!(
+            view.read_with(cx, |view, _| view.index_revision) > revision,
+            "the current generation still publishes watcher scans"
+        );
     }
 
     #[gpui_kit::test]
@@ -13818,7 +13938,8 @@ export const collections = {blog, dataAuthors};
             view.manifest.as_ref().unwrap().as_ref().clone()
         });
         // A watcher scan claimed its request before the operation started.
-        let stale_token = view.update(cx, |view, _| view.begin_index_request());
+        let (stale_generation, stale_token) =
+            view.update(cx, |view, _| (view.generation, view.begin_index_request()));
 
         std::fs::write(dir.path().join("src/posts/new.md"), "# New\n").unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
@@ -13859,6 +13980,7 @@ export const collections = {blog, dataAuthors};
         // The older watcher scan lands last and must be dropped.
         view.update(cx, |view, cx| {
             view.apply_watcher_scan(
+                stale_generation,
                 stale_token,
                 Ok(WatcherScan {
                     index: Ok((stale_manifest, stale_entries)),
@@ -13884,6 +14006,7 @@ export const collections = {blog, dataAuthors};
         let in_flight = view.update(cx, |view, _| view.begin_index_request());
         view.update(cx, |view, cx| {
             view.apply_watcher_scan(
+                stale_generation,
                 stale_token,
                 Ok(WatcherScan {
                     index: Ok((view.manifest.as_ref().unwrap().as_ref().clone(), Vec::new())),
