@@ -27,7 +27,8 @@ use gpui_kit::component::{ActiveTheme, StyledExt};
 use gpui_kit::{
     AnyElement, App, Bounds, Context, Element, ElementId, Focusable, GlobalElementId, Hsla,
     IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    ScrollHandle, SharedString, Window, div, fill, point, prelude::*, px, relative, size,
+    ScrollHandle, SharedString, TestSupportExt, Window, div, fill, point, prelude::*, px, relative,
+    size,
 };
 
 use crate::editor::session::DocumentSession;
@@ -260,8 +261,11 @@ impl WriterSurface {
                 .partial_cmp(&distance(right.bounds(), position))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })?;
-        let rendered = leaf.index_for_position(position);
-        Some(((*key as usize).saturating_sub(1), rendered))
+        let block = (*key as usize).saturating_sub(1);
+        let rendered = leaf
+            .index_for_position(position)
+            .min(self.document.blocks.get(block)?.text.text.len());
+        Some((block, rendered))
     }
 
     /// The viewport height the visible window is derived from.
@@ -368,9 +372,7 @@ impl WriterSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(offset) = self.source_at(position) else {
-            return;
-        };
+        let offset = self.source_at(position).unwrap_or(self.source.len());
         let Some(session) = self.session.upgrade() else {
             return;
         };
@@ -787,6 +789,7 @@ impl Render for WriterSurface {
         };
         let content = div()
             .id("writer-wysiwyg-content")
+            .test_support()
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
@@ -797,6 +800,8 @@ impl Render for WriterSurface {
                     this.drag_anchor = None;
                     let extend = event.modifiers.shift;
                     this.select(event.position, extend, window, cx);
+                    // The writer chose its input model; ancestors must not steal focus.
+                    window.prevent_default();
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
@@ -1085,11 +1090,15 @@ mod tests {
 
     struct WriterHost {
         writer: Entity<WriterSurface>,
+        focus: gpui_kit::FocusHandle,
     }
 
     impl Render for WriterHost {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(self.writer.clone())
+            div()
+                .size_full()
+                .track_focus(&self.focus)
+                .child(self.writer.clone())
         }
     }
 
@@ -1110,7 +1119,10 @@ mod tests {
                     cx.new(|cx| DocumentSession::new(identity, source.to_owned(), window, cx));
                 let writer = created.read(cx).writer.clone();
                 session = Some(created);
-                cx.new(|_| WriterHost { writer })
+                cx.new(|cx| WriterHost {
+                    writer,
+                    focus: cx.focus_handle(),
+                })
             })
             .unwrap();
             (
@@ -1118,6 +1130,27 @@ mod tests {
                 session.expect("the writer session must exist"),
             )
         })
+    }
+
+    #[gpui_kit::test]
+    fn writer_click_keeps_native_input_focus_inside_a_focusable_panel(cx: &mut TestAppContext) {
+        let (handle, session) = mount_writer(cx, "# Heading\n\nEditable paragraph.\n");
+        let editor = session.read_with(cx, |session, _| session.editor.clone());
+        let before = editor.read_with(cx, |editor, _| editor.value().len());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("writer-wysiwyg-content", cx);
+            assert!(editor.read(cx).focus_handle(cx).is_focused(window));
+            window.input("中", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.value().len()),
+            before + "中".len()
+        );
+        session.read_with(cx, |session, _| {
+            assert!(session.buffer.current_text().contains('中'));
+        });
     }
 
     fn window_source(paragraphs: usize) -> String {
