@@ -305,7 +305,9 @@ fn size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
-#[cfg(test)]
+// These tests drive a real PTY through `sh`; the service itself is
+// platform-neutral but the fixtures are POSIX shell scripts.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use portable_pty::CommandBuilder;

@@ -474,9 +474,8 @@ mod tests {
     }
 
     #[test]
-    fn local_loading_rejects_traversal_symlinks_and_oversized_files() {
+    fn local_loading_rejects_traversal_and_oversized_files() {
         let project = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
         let root = project.path();
         let image = root.join("img.png");
         fs::write(&image, png(2, 2)).unwrap();
@@ -488,6 +487,18 @@ mod tests {
             Err(PreviewError::OutsideProject)
         );
 
+        let large = root.join("large.png");
+        let file = fs::File::create(&large).unwrap();
+        file.set_len(MAX_PREVIEW_BYTES + 1).unwrap();
+        assert_eq!(load_local(root, &large), Err(PreviewError::TooLarge));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_loading_rejects_symlinks() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = project.path();
         fs::write(outside.path().join("secret.png"), png(1, 1)).unwrap();
         std::os::unix::fs::symlink(outside.path().join("secret.png"), root.join("link.png"))
             .unwrap();
@@ -495,11 +506,6 @@ mod tests {
             load_local(root, &root.join("link.png")),
             Err(PreviewError::Symlink)
         );
-
-        let large = root.join("large.png");
-        let file = fs::File::create(&large).unwrap();
-        file.set_len(MAX_PREVIEW_BYTES + 1).unwrap();
-        assert_eq!(load_local(root, &large), Err(PreviewError::TooLarge));
     }
 
     #[test]
