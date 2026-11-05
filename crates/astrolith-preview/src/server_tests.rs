@@ -69,8 +69,13 @@ fn readiness_probe_requires_an_accepting_listener() {
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
         assert!(probe_ready(&url).await, "a bound loopback listener accepts");
         drop(listener);
+        // Probe a different loopback address with the same port. Reusing
+        // 127.0.0.1 would race another test that binds the just-freed ephemeral
+        // port; no test binds 127.0.0.2, so this deterministically has no
+        // listener while still exercising a real `connect` refusal.
+        let absent = Url::parse(&format!("http://127.0.0.2:{port}/")).unwrap();
         assert!(
-            !probe_ready(&url).await,
+            !probe_ready(&absent).await,
             "a parsed URL without a listener is not ready"
         );
     });
