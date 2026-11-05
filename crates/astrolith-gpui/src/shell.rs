@@ -4991,10 +4991,36 @@ mod tests {
     }
 
     /// Leaving Build while the terminal owns the keyboard must hand focus to
-    /// the document; otherwise every keystroke still reaches the hidden shell.
+    /// the editor; otherwise every keystroke still reaches the hidden shell.
     #[gpui_kit::test]
     async fn leaving_build_moves_focus_off_the_terminal(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.executor().allow_parking();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_path = workspace.path().join("preferences/global.json");
+        let (store, settings, _) = PreferencesStore::load(global_path);
+        let project = project_fixture("terminal-first");
+        let (handle, view) = mount(cx, settings);
+        view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
+        open_project(cx, handle, &view, project.path().to_path_buf());
+        let canonical = std::fs::canonicalize(project.path()).unwrap();
+        cx.condition(&view, |shell, _| {
+            shell
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| scope.root == canonical)
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.project.update(cx, |project, cx| {
+                    project.open_first_entry_for_tests(window, cx)
+                })
+            });
+        })
+        .unwrap();
+        let project_entity = view.read_with(cx, |shell, _| shell.project.clone());
+        wait_for_active_session(cx, &project_entity).await;
+
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |shell, cx| {
                 shell.set_mode(WorkspaceMode::Build, window, cx);
@@ -5014,6 +5040,33 @@ mod tests {
             assert!(
                 !view.read(cx).terminal.read(cx).has_focus(window),
                 "focus must leave the terminal when its dock leaves the screen"
+            );
+            let before = view.read_with(cx, |shell, cx| {
+                shell
+                    .project
+                    .read(cx)
+                    .active_session(cx)
+                    .expect("the entry stays open")
+                    .read(cx)
+                    .editor
+                    .read(cx)
+                    .value()
+            });
+            window.input("zz", cx);
+            let after = view.read_with(cx, |shell, cx| {
+                shell
+                    .project
+                    .read(cx)
+                    .active_session(cx)
+                    .expect("the entry stays open")
+                    .read(cx)
+                    .editor
+                    .read(cx)
+                    .value()
+            });
+            assert_ne!(
+                before, after,
+                "keystrokes must reach the editor after the terminal hides"
             );
         })
         .unwrap();
