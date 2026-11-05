@@ -13,6 +13,13 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
+#[cfg(unix)]
+use nix::{
+    sys::signal::{Signal, killpg},
+    unistd::Pid,
 };
 
 pub use vt100;
@@ -27,12 +34,21 @@ pub const DEFAULT_COLS: u16 = 80;
 pub const SCROLLBACK_CAPACITY: usize = 2_000;
 /// Maximum bytes parsed per reader batch.
 const READ_BUFFER: usize = 16 * 1024;
+/// Grace between `SIGHUP` and `SIGKILL` for the child's process group.
+#[cfg(unix)]
+const KILL_GRACE: Duration = Duration::from_millis(150);
+/// Upper bound for reaping the child after the group was signalled.
+const REAP_TIMEOUT: Duration = Duration::from_millis(800);
+/// Upper bound for the reader to drain after the process tree is gone.
+const READER_TIMEOUT: Duration = Duration::from_millis(400);
 
 /// One terminal session bound to a project root.
 pub struct TerminalSession {
     root: PathBuf,
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// Master side of the PTY; taken (and closed) before shutdown signals the
+    /// child so no new input can reach a dying shell.
+    master: Option<Box<dyn MasterPty + Send>>,
+    writer: Option<Box<dyn Write + Send>>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     screen: Arc<Mutex<vt100::Parser>>,
     revision: Arc<AtomicU64>,
@@ -53,10 +69,13 @@ pub struct ExitInfo {
 }
 
 impl ExitInfo {
+    /// A signal death carries no exit code: `portable-pty` fabricates one, and
+    /// reporting it would make `SIGINT` look like "exited with code 1".
     fn from_status(status: portable_pty::ExitStatus) -> Self {
+        let detail = status.signal().map(str::to_owned);
         Self {
-            code: Some(status.exit_code()),
-            detail: status.signal().map(str::to_owned),
+            code: detail.is_none().then(|| status.exit_code()),
+            detail,
         }
     }
 
@@ -73,6 +92,12 @@ impl ExitInfo {
 
 impl TerminalSession {
     /// Spawn the user's shell in `root`.
+    ///
+    /// On Unix the shell starts as a login, interactive shell (`-l -i`) so it
+    /// reads the user's profile and enables job control, matching a normal
+    /// terminal window. The child is a session and process-group leader
+    /// (`portable-pty` calls `setsid` and `TIOCSCTTY`), which is what lets
+    /// [`TerminalSession::kill`] signal the whole foreground tree.
     pub fn spawn(root: &Path, cols: u16, rows: u16) -> io::Result<Self> {
         let shell = std::env::var_os("SHELL")
             .filter(|shell| !shell.is_empty())
@@ -84,6 +109,11 @@ impl TerminalSession {
                 }
             });
         let mut command = CommandBuilder::new(shell);
+        #[cfg(unix)]
+        {
+            command.arg("-l");
+            command.arg("-i");
+        }
         command.cwd(root);
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
@@ -142,8 +172,8 @@ impl TerminalSession {
             .map_err(io::Error::other)?;
         Ok(Self {
             root: root.to_path_buf(),
-            master: pair.master,
-            writer,
+            master: Some(pair.master),
+            writer: Some(writer),
             child: Arc::new(Mutex::new(child)),
             screen,
             revision,
@@ -185,8 +215,14 @@ impl TerminalSession {
 
     /// Send bytes to the child.
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()
+        let Some(writer) = self.writer.as_mut() else {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "terminal session is shut down",
+            ));
+        };
+        writer.write_all(bytes)?;
+        writer.flush()
     }
 
     /// Resize both the pseudo-terminal and the parsed screen.
@@ -196,9 +232,13 @@ impl TerminalSession {
         if (cols, rows) == (self.cols, self.rows) {
             return Ok(());
         }
-        self.master
-            .resize(size(cols, rows))
-            .map_err(io::Error::other)?;
+        let Some(master) = self.master.as_ref() else {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "terminal session is shut down",
+            ));
+        };
+        master.resize(size(cols, rows)).map_err(io::Error::other)?;
         if let Ok(mut screen) = self.screen.lock() {
             screen.set_size(nonzero(rows), nonzero(cols));
         }
@@ -273,16 +313,94 @@ impl TerminalSession {
         self.exit.lock().ok().and_then(|exit| exit.clone())
     }
 
-    /// Terminate the child and stop the reader.
+    /// Terminate the child's process group and stop the reader.
+    ///
+    /// The child is a session and group leader, so its pid is also its group
+    /// id: `SIGHUP` reaches the foreground job and every descendant that did
+    /// not create its own session, and `SIGKILL` follows after [`KILL_GRACE`]
+    /// so a job that ignores the hangup cannot outlive the terminal. The
+    /// grace, the reap and the reader handoff all run on a short-lived reaper
+    /// thread; the caller only closes the master handles and posts the first
+    /// signal, so this is safe from `Drop` and from the UI thread.
     pub fn kill(&mut self) {
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
+        // Closing our handles first lets the child notice the terminal went
+        // away and keeps new input from reaching a dying shell.
+        self.writer = None;
+        self.master = None;
+        let child = self.child.clone();
+        let fallback_child = child.clone();
+        let exit_slot = self.exit.clone();
+        let revision = self.revision.clone();
+        let reader = self.reader.take();
+
+        #[cfg(unix)]
+        let pgid = child
+            .lock()
+            .ok()
+            .and_then(|child| child.process_id())
+            .map(|pid| pid as i32);
+        #[cfg(unix)]
+        if let Some(pgid) = pgid {
+            // A group that already disappeared is not an error.
+            let _ = killpg(Pid::from_raw(pgid), Signal::SIGHUP);
         }
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+        #[cfg(not(unix))]
+        {
+            if let Ok(mut child) = child.lock() {
+                let _ = child.kill();
+            }
         }
+
         self.exited.store(true, Ordering::Release);
         self.revision.fetch_add(1, Ordering::Release);
+
+        let reaper = thread::Builder::new()
+            .name("astrolith-terminal-reaper".into())
+            .spawn(move || {
+                #[cfg(unix)]
+                if let Some(pgid) = pgid {
+                    thread::sleep(KILL_GRACE);
+                    let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
+                }
+                let deadline = Instant::now() + REAP_TIMEOUT;
+                loop {
+                    let status = child
+                        .lock()
+                        .ok()
+                        .and_then(|mut child| child.try_wait().ok().flatten());
+                    if let Some(status) = status {
+                        if let Ok(mut slot) = exit_slot.lock()
+                            && slot.is_none()
+                        {
+                            *slot = Some(ExitInfo::from_status(status));
+                        }
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                if let Some(reader) = reader {
+                    let deadline = Instant::now() + READER_TIMEOUT;
+                    while !reader.is_finished() && Instant::now() < deadline {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    if reader.is_finished() {
+                        let _ = reader.join();
+                    }
+                    // Otherwise the reader is detached instead of pinning
+                    // shutdown on a descendant that still holds the pty.
+                }
+                revision.fetch_add(1, Ordering::Release);
+            });
+        if reaper.is_err() {
+            // Without a reaper no `SIGKILL` is ever sent: fall back to the
+            // platform kill so the child still dies.
+            if let Ok(mut child) = fallback_child.lock() {
+                let _ = child.kill();
+            }
+        }
     }
 }
 
@@ -418,6 +536,88 @@ mod tests {
         session.kill();
         assert!(session.is_exited());
         assert!(session.reader.is_none());
+    }
+
+    #[test]
+    fn signal_death_is_reported_without_a_fabricated_exit_code() {
+        let session =
+            TerminalSession::spawn_command(&std::env::temp_dir(), 40, 8, command("kill -TERM $$"))
+                .unwrap();
+        let exit = wait_for_exit(&session);
+        assert_eq!(
+            exit.code, None,
+            "signal death must not report portable-pty's placeholder code"
+        );
+        assert!(
+            exit.detail.is_some(),
+            "signal death must name the signal, got {exit:?}"
+        );
+        assert!(exit.message().contains("terminated"), "{}", exit.message());
+    }
+
+    /// A descendant that ignores `SIGHUP` must not survive the session: the
+    /// group is signalled again with `SIGKILL` after the grace period.
+    #[test]
+    fn killing_the_session_terminates_descendants_that_ignore_sighup() {
+        let mut session = TerminalSession::spawn_command(
+            &std::env::temp_dir(),
+            60,
+            8,
+            command("trap '' HUP; sh -c 'trap \"\" HUP; sleep 60' & echo child:$!; wait"),
+        )
+        .unwrap();
+        let text = wait_for_text(&session, "child:");
+        let child_pid: i32 = text
+            .split("child:")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split(|character: char| !character.is_ascii_digit())
+                    .next()
+            })
+            .and_then(|digits| digits.parse().ok())
+            .expect("the fixture prints its descendant pid");
+        session.kill();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while nix::sys::signal::kill(Pid::from_raw(child_pid), None).is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "descendant {child_pid} survived the process-group kill"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// `kill` must never join the reader on the caller: a descendant that
+    /// keeps the pty open would otherwise freeze the UI thread.
+    #[test]
+    fn kill_returns_before_the_reader_can_drain() {
+        let mut session = TerminalSession::spawn_command(
+            &std::env::temp_dir(),
+            40,
+            8,
+            command("sh -c 'sleep 60' & echo ready; wait"),
+        )
+        .unwrap();
+        wait_for_text(&session, "ready");
+        let started = Instant::now();
+        session.kill();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "kill blocked for {elapsed:?}"
+        );
+        assert!(session.reader.is_none());
+    }
+
+    fn wait_for_exit(session: &TerminalSession) -> ExitInfo {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(exit) = session.poll_exit() {
+                return exit;
+            }
+            assert!(Instant::now() < deadline, "terminal did not exit");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

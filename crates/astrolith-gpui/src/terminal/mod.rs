@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use astrolith_terminal::TerminalSession;
+use astrolith_terminal::{ExitInfo, TerminalSession};
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, StyledExt,
     button::{Button, ButtonVariants},
@@ -86,6 +86,9 @@ pub(crate) struct TerminalPanel {
     last_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     selection: Option<Selection>,
     selecting: bool,
+    /// Last recorded exit, kept separate from the live session so the header
+    /// keeps reporting a dead shell after the reader reached EOF.
+    exit: Option<ExitInfo>,
     status: Option<String>,
     failure: Option<String>,
     poll_task: Option<Task<()>>,
@@ -119,6 +122,7 @@ impl TerminalPanel {
             last_bounds: Rc::new(Cell::new(None)),
             selection: None,
             selecting: false,
+            exit: None,
             status: None,
             failure: None,
             poll_task: None,
@@ -142,10 +146,17 @@ impl TerminalPanel {
         self.root.as_deref()
     }
 
-    /// Whether a live session exists.
+    /// Whether the recorded state is a live shell.
     #[cfg(test)]
     pub(crate) fn is_running(&self) -> bool {
-        self.session.is_some()
+        self.running_state()
+    }
+
+    /// A session that has not recorded an exit or reader EOF.
+    fn running_state(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| self.exit.is_none() && !session.is_exited())
     }
 
     /// Write raw bytes to the child (service-level tests through the view).
@@ -203,11 +214,24 @@ impl TerminalPanel {
         true
     }
 
+    /// Explicit shutdown used before a project switch and at quit.
+    ///
+    /// The session's child is signalled immediately; the panel does not rely
+    /// on `Drop` during window teardown.
+    pub(crate) fn shutdown(&mut self, cx: &mut Context<Self>) {
+        self.stop();
+        cx.notify();
+    }
+
     fn stop(&mut self) {
-        self.session = None;
+        if let Some(mut session) = self.session.take() {
+            session.kill();
+        }
         self.selection = None;
+        self.exit = None;
         self.status = None;
         self.failure = None;
+        self.poll_task = None;
     }
 
     fn spawn(&mut self, cx: &mut Context<Self>) {
@@ -247,24 +271,31 @@ impl TerminalPanel {
 
     fn poll(&mut self, cx: &mut Context<Self>) -> bool {
         let (cols, rows) = self.grid_size();
-        let Some(session) = &mut self.session else {
+        let Some(session) = self.session.as_mut() else {
             return false;
         };
         let mut changed = false;
+        let mut resize_failed = false;
         if session.size() != (cols, rows) && session.resize(cols, rows).is_err() {
-            self.failure = Some("Could not resize the terminal.".into());
+            resize_failed = true;
             changed = true;
         }
-        if let Some(exit) = session.poll_exit() {
-            self.status = Some(exit.message());
-            changed = true;
-        }
+        let exit = session.poll_exit();
         let revision = session.revision();
+        let reader_exited = session.is_exited();
+        if resize_failed {
+            self.failure = Some("Could not resize the terminal.".into());
+        }
+        if let Some(exit) = exit {
+            self.status = Some(exit.message());
+            self.exit = Some(exit);
+            changed = true;
+        }
         if revision != self.last_revision {
             self.last_revision = revision;
             changed = true;
         }
-        let exited = session.is_exited();
+        let exited = self.exit.is_some() || reader_exited;
         if changed {
             cx.notify();
         }
@@ -425,19 +456,8 @@ impl Render for TerminalPanel {
         let mono = SharedString::from("monospace");
         let rows = self.render_rows(_window, cx);
         let bounds_cell = self.last_bounds.clone();
-        let running = self.session.is_some();
-        let exit = self
-            .session
-            .as_ref()
-            .and_then(|session| session.exit())
-            .or_else(|| {
-                self.status
-                    .clone()
-                    .map(|message| astrolith_terminal::ExitInfo {
-                        code: None,
-                        detail: Some(message),
-                    })
-            });
+        let running = self.running_state();
+        let exit = self.exit.clone();
         let status = self
             .failure
             .clone()

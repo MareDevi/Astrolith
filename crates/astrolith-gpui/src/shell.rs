@@ -718,6 +718,14 @@ impl Shell {
             async move {}
         })
         .detach();
+        // The terminal child is a process group; drop it through its explicit
+        // shutdown path rather than relying on window teardown to run `Drop`.
+        let terminal_owner = terminal.downgrade();
+        App::on_app_quit(cx, move |cx| {
+            let _ = terminal_owner.update(cx, |terminal, cx| terminal.shutdown(cx));
+            async move {}
+        })
+        .detach();
         let focus = cx.focus_handle().tab_stop(true);
         focus.focus(window, cx);
         let updates = update::CapabilityState::detect();
