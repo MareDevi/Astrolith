@@ -7,7 +7,8 @@ only; nothing reads it to send data anywhere.
 
 ## Network use
 
-In a normal session Astrolith itself makes no network request except one case:
+In a normal session Astrolith itself makes network requests only for these
+cases:
 
 - **Update check.** When a release build was compiled with both
   `ASTROLITH_UPDATE_MANIFEST_URL` (HTTPS) and `ASTROLITH_UPDATE_PUBLIC_KEY`, the
@@ -19,9 +20,14 @@ In a normal session Astrolith itself makes no network request except one case:
   payload. As with any HTTPS request, the server sees ordinary connection
   metadata such as your IP address. A build without the URL and key has no
   update capability and makes no update request.
+- **Remote document images.** When the active document references an absolute
+  `http`/`https` image, Preview and the `Alt`-hover image preview fetch that URL
+  so it can be shown. The remote server sees ordinary connection metadata such
+  as your IP address; no document content or identifier is sent. Project-local
+  images are read from disk and make no request.
 
-Everything else stays local. Opening a project, editing, saving, previewing and
-checking for recovery are filesystem and process operations. Two qualifications:
+Everything else stays local. Opening a project, editing, saving and checking
+for recovery are filesystem and process operations. Two qualifications:
 
 - The project's own Astro tooling is started for schema generation and preview.
   That tooling is part of your project and may perform its own network access

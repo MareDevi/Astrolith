@@ -400,7 +400,8 @@ Exact locations are in [Privacy and local data](privacy.md).
 
 **Preview mode** renders the active Markdown or MDX entry with a native
 rich-text view. Frontmatter and MDX imports are not shown; headings, links,
-lists, code blocks, tables, quotes and project-local images are. The pane is
+lists, code blocks, tables, quotes, project-local images and absolute
+`http`/`https` images are. The pane is
 read-only and follows the document font, size, line height and page width
 preferences. Typing in Preview does not modify the document. Other file types
 show a short notice instead of a rendering.
