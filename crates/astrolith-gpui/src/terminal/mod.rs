@@ -23,14 +23,72 @@ use gpui_kit::{
 use crate::theme::METRICS;
 use astrolith_terminal::vt100;
 
-/// Terminal font size in logical pixels.
-const FONT_SIZE: f32 = METRICS.type_scale.mono;
-/// Monospace advance used for the cell grid; PTY columns follow this width.
-const CELL_WIDTH: f32 = 7.8;
-/// Row height in logical pixels.
-const LINE_HEIGHT: f32 = 17.;
+/// Advance used for the cell grid until the mono face has been measured.
+const FALLBACK_CELL_WIDTH: f32 = 7.8;
+/// Row height used until the mono face has been measured.
+const FALLBACK_LINE_HEIGHT: f32 = 17.;
 /// Scroll rows per wheel line.
 const WHEEL_ROWS: i32 = 3;
+
+/// Measured geometry of one terminal cell.
+///
+/// gpui draws by exact family: a fontconfig generic such as `monospace` is not
+/// a family, so the grid has to use the theme's resolved mono face and the
+/// advance that face actually reports.
+#[derive(Clone, Debug)]
+struct CellMetrics {
+    family: SharedString,
+    size: f32,
+    /// Advance width of one cell in logical pixels.
+    col_width: f32,
+    /// Height of one terminal row in logical pixels.
+    row_height: f32,
+}
+
+impl CellMetrics {
+    fn fallback() -> Self {
+        Self {
+            family: SharedString::default(),
+            size: METRICS.type_scale.mono,
+            col_width: FALLBACK_CELL_WIDTH,
+            row_height: FALLBACK_LINE_HEIGHT,
+        }
+    }
+
+    /// Measure the advance and row height once per (family, size).
+    fn measure(family: SharedString, size: f32, window: &Window) -> Self {
+        let text_system = window.text_system();
+        let font_id = text_system.resolve_font(&gpui_kit::font(family.clone()));
+        let size_px = px(size);
+        let col_width = text_system
+            .advance(font_id, size_px, 'M')
+            .map(|size| f32::from(size.width))
+            .unwrap_or(FALLBACK_CELL_WIDTH);
+        let row_height =
+            f32::from(text_system.ascent(font_id, size_px) + text_system.descent(font_id, size_px));
+        Self {
+            family,
+            size,
+            col_width: if col_width > 0.5 {
+                col_width
+            } else {
+                FALLBACK_CELL_WIDTH
+            },
+            row_height: if row_height > 0.5 {
+                row_height.ceil()
+            } else {
+                FALLBACK_LINE_HEIGHT
+            },
+        }
+    }
+
+    /// Visible `(columns, rows)` for a measured viewport.
+    fn grid(&self, bounds: Bounds<Pixels>) -> (u16, u16) {
+        let cols = (f32::from(bounds.size.width) / self.col_width).floor() as u16;
+        let rows = (f32::from(bounds.size.height) / self.row_height).floor() as u16;
+        (cols.clamp(20, 500), rows.clamp(3, 200))
+    }
+}
 
 /// One rendered cell.
 struct CellView {
@@ -84,6 +142,8 @@ pub(crate) struct TerminalPanel {
     focus: FocusHandle,
     last_revision: u64,
     last_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Measured cell geometry, recomputed only when the mono face changes.
+    metrics: Option<CellMetrics>,
     selection: Option<Selection>,
     selecting: bool,
     /// Last recorded exit, kept separate from the live session so the header
@@ -120,6 +180,7 @@ impl TerminalPanel {
             focus,
             last_revision: 0,
             last_bounds: Rc::new(Cell::new(None)),
+            metrics: None,
             selection: None,
             selecting: false,
             exit: None,
@@ -305,13 +366,31 @@ impl TerminalPanel {
         !exited
     }
 
+    /// Cached measurements, or the fallback before the first frame.
+    fn cell_metrics(&self) -> CellMetrics {
+        self.metrics.clone().unwrap_or_else(CellMetrics::fallback)
+    }
+
+    /// Re-measure when the theme's mono face or size changes.
+    fn ensure_metrics(&mut self, window: &Window, cx: &App) -> CellMetrics {
+        let family = cx.theme().mono_font_family.clone();
+        let size = f32::from(cx.theme().mono_font_size);
+        if let Some(metrics) = &self.metrics
+            && metrics.family == family
+            && metrics.size == size
+        {
+            return metrics.clone();
+        }
+        let metrics = CellMetrics::measure(family, size, window);
+        self.metrics = Some(metrics.clone());
+        metrics
+    }
+
     fn grid_size(&self) -> (u16, u16) {
         let Some(bounds) = self.last_bounds.get() else {
             return (80, 24);
         };
-        let cols = (f32::from(bounds.size.width) / CELL_WIDTH).floor() as u16;
-        let rows = (f32::from(bounds.size.height) / LINE_HEIGHT).floor() as u16;
-        (cols.clamp(20, 500), rows.clamp(3, 200))
+        self.cell_metrics().grid(bounds)
     }
 
     fn point_at(&self, position: gpui_kit::Point<Pixels>) -> Option<GridPoint> {
@@ -325,10 +404,11 @@ impl TerminalPanel {
         {
             return None;
         }
-        let (cols, rows) = self.grid_size();
+        let metrics = self.cell_metrics();
+        let (cols, rows) = metrics.grid(bounds);
         Some(GridPoint {
-            row: ((y / LINE_HEIGHT).floor() as u16).min(rows.saturating_sub(1)),
-            col: ((x / CELL_WIDTH).floor() as u16).min(cols.saturating_sub(1)),
+            row: ((y / metrics.row_height).floor() as u16).min(rows.saturating_sub(1)),
+            col: ((x / metrics.col_width).floor() as u16).min(cols.saturating_sub(1)),
         })
     }
 
@@ -453,7 +533,10 @@ impl Focusable for TerminalPanel {
 
 impl Render for TerminalPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mono = SharedString::from("monospace");
+        let metrics = self.ensure_metrics(_window, cx);
+        let mono = metrics.family.clone();
+        let row_height = metrics.row_height;
+        let col_width = metrics.col_width;
         let rows = self.render_rows(_window, cx);
         let bounds_cell = self.last_bounds.clone();
         let running = self.running_state();
@@ -554,7 +637,7 @@ impl Render for TerminalPanel {
                     .min_h_0()
                     .overflow_hidden()
                     .font_family(mono.clone())
-                    .text_size(px(FONT_SIZE))
+                    .text_size(px(metrics.size))
                     .track_focus(&self.focus)
                     .key_context("Terminal")
                     .on_mouse_down(
@@ -590,25 +673,27 @@ impl Render for TerminalPanel {
                             cx.notify();
                         }),
                     )
-                    .on_scroll(cx.listener(|this, event: &gpui_kit::ScrollEvent, _, cx| {
-                        let lines = match event.delta {
-                            gpui_kit::ScrollDelta::Lines(lines) => lines.y,
-                            gpui_kit::ScrollDelta::Pixels(pixels) => {
-                                f32::from(pixels.y) / LINE_HEIGHT
+                    .on_scroll(
+                        cx.listener(move |this, event: &gpui_kit::ScrollEvent, _, cx| {
+                            let lines = match event.delta {
+                                gpui_kit::ScrollDelta::Lines(lines) => lines.y,
+                                gpui_kit::ScrollDelta::Pixels(pixels) => {
+                                    f32::from(pixels.y) / row_height
+                                }
+                            };
+                            if lines.abs() < f32::EPSILON {
+                                return;
                             }
-                        };
-                        if lines.abs() < f32::EPSILON {
-                            return;
-                        }
-                        let delta = -(lines.round() as i32) * WHEEL_ROWS;
-                        if let Some(session) = &this.session
-                            && session.scroll(delta)
-                        {
-                            this.selection = None;
-                            this.last_revision = session.revision();
-                            cx.notify();
-                        }
-                    }))
+                            let delta = -(lines.round() as i32) * WHEEL_ROWS;
+                            if let Some(session) = &this.session
+                                && session.scroll(delta)
+                            {
+                                this.selection = None;
+                                this.last_revision = session.revision();
+                                cx.notify();
+                            }
+                        }),
+                    )
                     .child(
                         canvas(
                             move |bounds, _, _| {
@@ -626,14 +711,14 @@ impl Render for TerminalPanel {
                             .v_flex()
                             .children(rows.into_iter().map(|row| {
                                 div()
-                                    .h(px(LINE_HEIGHT))
+                                    .h(px(row_height))
                                     .w_full()
                                     .flex()
                                     .flex_shrink_0()
                                     .children(row.cells.into_iter().map(|cell| {
                                         div()
                                             .h_full()
-                                            .w(px(CELL_WIDTH * f32::from(cell.width_cells)))
+                                            .w(px(col_width * f32::from(cell.width_cells)))
                                             .flex_shrink_0()
                                             .flex()
                                             .items_center()
@@ -771,4 +856,70 @@ fn indexed_color(index: u8) -> gpui_kit::Rgba {
         }
     };
     gpui_kit::rgb(rgb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::{TestAppContext, WindowOptions, base::Root, size};
+
+    fn metrics(col_width: f32, row_height: f32) -> CellMetrics {
+        CellMetrics {
+            family: "Measured Mono".into(),
+            size: 13.,
+            col_width,
+            row_height,
+        }
+    }
+
+    #[test]
+    fn grid_follows_the_measured_advance_instead_of_the_fallback() {
+        let bounds = Bounds::new(gpui_kit::Point::default(), size(px(800.), px(480.)));
+        assert_eq!(
+            metrics(FALLBACK_CELL_WIDTH, FALLBACK_LINE_HEIGHT).grid(bounds),
+            (102, 28)
+        );
+        assert_eq!(metrics(8., 16.).grid(bounds), (100, 30));
+        assert_eq!(
+            metrics(10., 20.).grid(bounds),
+            (80, 24),
+            "a wider advance must reduce the column count"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn painted_font_family_is_the_resolved_mono_face(cx: &mut TestAppContext) {
+        let mut panel = None;
+        let (handle, _host) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                panel = Some(cx.new(|cx| TerminalPanel::new(window, cx)));
+                cx.new(|_| Host)
+            })
+            .unwrap()
+        });
+        let handle = handle.downcast::<Root>().unwrap();
+        let panel = panel.expect("the panel is built with the window");
+        cx.update_window(handle.into(), |_, window, cx| {
+            panel.update(cx, |panel, cx| {
+                let metrics = panel.ensure_metrics(window, cx);
+                assert_eq!(metrics.family, cx.theme().mono_font_family);
+                assert_ne!(
+                    metrics.family.as_ref(),
+                    "monospace",
+                    "fontconfig generics are not families gpui can resolve"
+                );
+                assert!(metrics.col_width > 0. && metrics.row_height > 0.);
+            });
+        })
+        .unwrap();
+    }
+
+    struct Host;
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
 }
