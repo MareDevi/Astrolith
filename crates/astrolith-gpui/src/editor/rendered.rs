@@ -131,7 +131,7 @@ impl Render for RenderedDocument {
                 crate::theme::prose_font(cx),
                 16.,
                 2.,
-                crate::theme::PROSE_PAGE_WIDTH_PERCENT,
+                crate::theme::default_prose_page_width_percent(),
             )
         });
         let root = self.root.clone();

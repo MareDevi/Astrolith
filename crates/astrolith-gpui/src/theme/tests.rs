@@ -173,7 +173,7 @@ fn theme_adapter_projects_complete_semantic_roles_in_both_modes(cx: &mut TestApp
             assert_eq!(cx.theme().list_active_border, tokens.focus);
             assert_eq!(cx.theme().window_border, tokens.border_variant);
             assert_eq!(cx.theme().caret, tokens.caret);
-            assert_eq!(cx.theme().font_size, gpui_kit::px(METRICS.type_scale.ui));
+            assert_eq!(cx.theme().font_size, gpui_kit::px(settings.ui_font_size));
             assert_eq!(cx.theme().radius, gpui_kit::px(METRICS.radius.control));
             assert_eq!(cx.theme().radius_lg, gpui_kit::px(METRICS.radius.surface));
             assert_ne!(tokens.background, tokens.foreground);

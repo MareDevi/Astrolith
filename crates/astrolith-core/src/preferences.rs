@@ -671,8 +671,6 @@ pub struct GlobalPreferencesV2 {
     pub copyedit: CopyeditPreferences,
     /// Preview presentation, preferred browser and entry behaviour.
     pub preview: PreviewPreferences,
-    /// Local telemetry consent; disabled by default and never sent anywhere.
-    pub telemetry_enabled: bool,
     /// Release version the user chose to skip in the update check.
     pub skipped_update_version: Option<String>,
 }
@@ -699,7 +697,6 @@ impl Default for GlobalPreferencesV2 {
             ide: IdeCommand::default(),
             copyedit: CopyeditPreferences::default(),
             preview: PreviewPreferences::default(),
-            telemetry_enabled: false,
             skipped_update_version: None,
         }
     }
@@ -729,10 +726,6 @@ pub struct ProjectPreferencesV1 {
     pub project_id: String,
     /// Canonical project root at the last open.
     pub path: String,
-    /// User-facing project name.
-    pub display_name: String,
-    /// Unix timestamp in seconds of the last open.
-    pub last_opened_at: Option<u64>,
     /// Mode restored for this project before the global default.
     pub last_mode: Option<WorkspaceMode>,
     /// Layout overrides for this project; absent modes inherit global values.
@@ -763,8 +756,6 @@ impl Default for ProjectPreferencesV1 {
             version: PROJECT_PREFERENCES_VERSION,
             project_id: String::new(),
             path: String::new(),
-            display_name: String::new(),
-            last_opened_at: None,
             last_mode: None,
             layout_overrides: ModeLayoutOverrides::default(),
             last_entry: None,
@@ -782,17 +773,10 @@ impl Default for ProjectPreferencesV1 {
 
 impl ProjectPreferencesV1 {
     /// Create the empty preferences for a newly registered project.
-    pub fn for_project(
-        project_id: impl Into<String>,
-        path: impl Into<String>,
-        display_name: impl Into<String>,
-        last_opened_at: u64,
-    ) -> Self {
+    pub fn for_project(project_id: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
             project_id: project_id.into(),
             path: path.into(),
-            display_name: display_name.into(),
-            last_opened_at: Some(last_opened_at),
             ..Self::default()
         }
     }
@@ -876,8 +860,6 @@ pub struct ResolvedPreferences {
     pub copyedit: CopyeditPreferences,
     /// Preview presentation, preferred browser and entry behaviour.
     pub preview: PreviewPreferences,
-    /// Local telemetry consent.
-    pub telemetry_enabled: bool,
     /// Effective content directory, if configured.
     pub content_directory: Option<String>,
     /// Effective assets directory, if configured.
@@ -934,7 +916,6 @@ pub fn resolve(
         ide: global.ide.clone(),
         copyedit: global.copyedit.clone(),
         preview: global.preview.clone(),
-        telemetry_enabled: global.telemetry_enabled,
         content_directory: collection
             .and_then(|collection| collection.content_directory.clone())
             .or_else(|| project.and_then(|project| project.content_directory.clone())),

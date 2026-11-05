@@ -8,10 +8,16 @@
 
 use std::sync::OnceLock;
 
+use astrolith_core::preferences::GlobalPreferencesV2;
 use gpui_kit::{App, SharedString, component::ActiveTheme};
 
-/// Default prose column width as a percentage of the editor pane.
-pub(crate) const PROSE_PAGE_WIDTH_PERCENT: f32 = 64.;
+/// Prose column width for a surface created before preferences are resolved.
+///
+/// This is the only fallback: everything else derives the width from the
+/// resolved [`GlobalPreferencesV2::page_width_percent`].
+pub(crate) fn default_prose_page_width_percent() -> f32 {
+    GlobalPreferencesV2::default().page_width_percent
+}
 
 /// Horizontal inset inside the prose column.
 pub(crate) const PROSE_INSET: f32 = 32.;

@@ -387,7 +387,7 @@ impl Render for WorkspacePanel {
                 let page_width_percent = style
                     .as_ref()
                     .map(|style| style.page_width_percent)
-                    .unwrap_or(crate::theme::PROSE_PAGE_WIDTH_PERCENT);
+                    .unwrap_or(crate::theme::default_prose_page_width_percent());
                 let wiring = self.wiring.clone();
                 let overlay = wiring.as_ref().and_then(|wiring| {
                     // Focus on the document, the toolbar or one of its buttons

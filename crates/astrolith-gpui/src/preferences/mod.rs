@@ -336,7 +336,7 @@ impl PreferencesSheet {
                 heading_light: input!("#1f2328"),
                 heading_dark: input!("#e6edf3"),
                 ui_font_family: input!("System UI font"),
-                ui_font_size: input!("14"),
+                ui_font_size: input!(format_number(GlobalPreferencesV2::default().ui_font_size)),
                 prose_font_family: input!("Inter / system sans"),
                 font_size: input!("16"),
                 line_height: input!("2"),

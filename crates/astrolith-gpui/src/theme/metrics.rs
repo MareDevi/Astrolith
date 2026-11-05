@@ -43,12 +43,6 @@ pub(crate) struct SpaceScale {
 pub(crate) struct TypeScale {
     /// 12 px metadata, labels and captions; never used for required prose.
     pub caption: f32,
-    /// 14 px default interface size; the window rem base.
-    pub ui: f32,
-    /// 16 px document body.
-    pub body: f32,
-    /// 32 px document body line height (16/32).
-    pub body_line: f32,
     /// 24 px second-level heading.
     pub heading: f32,
     /// 36 px document title at the narrow breakpoint.
@@ -121,9 +115,6 @@ pub(crate) const METRICS: ThemeMetrics = ThemeMetrics {
     },
     type_scale: TypeScale {
         caption: 12.,
-        ui: 18.,
-        body: 16.,
-        body_line: 32.,
         heading: 24.,
         title: 36.,
         display: 48.,
@@ -178,8 +169,6 @@ mod tests {
             [2, 4, 6, 8, 12, 16, 20, 24, 32, 48, 64, 96]
         );
         assert_eq!(METRICS.type_scale.caption, 12.);
-        assert_eq!(METRICS.type_scale.body, 16.);
-        assert_eq!(METRICS.type_scale.body_line, 32.);
         assert_eq!(METRICS.type_scale.title, 36.);
         assert_eq!(METRICS.type_scale.display, 48.);
         assert_eq!(METRICS.radius.control, 10.);

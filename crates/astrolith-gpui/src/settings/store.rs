@@ -755,18 +755,11 @@ impl PreferencesStore {
             .entry(open.id.clone())
             .or_insert_with(|| Stored::load(project_path, PROJECT_PREFERENCES_VERSION));
         let mut preferences = if stored.value.project_id.is_empty() {
-            ProjectPreferencesV1::for_project(
-                open.id.clone(),
-                open.path.clone(),
-                open.display_name.clone(),
-                opened_at,
-            )
+            ProjectPreferencesV1::for_project(open.id.clone(), open.path.clone())
         } else {
             stored.value.clone()
         };
         preferences.path = open.path.clone();
-        preferences.display_name = open.display_name.clone();
-        preferences.last_opened_at = Some(opened_at);
         stored.value = preferences;
         stored.save_current()?;
         registry.save_current()?;
