@@ -391,10 +391,10 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - Writing 不再绘制 Markdown 标记：ATX 标题字号由 `BlockNode::Heading` 提供，`**`/`*`/`~~`/行内代码/链接目标/列表符号/引用符号/围栏均隐藏；粗体、斜体、删除线、行内代码背景、链接文字、预算代码块、列表和引用按排版呈现。
   - retained `EditorState` 仍是唯一输入模型；光标、选区、IME、复制粘贴、格式化命令、撤销/重做与保存沿用原 session 事务。`WysiwygDocument` 只从 `WriterProjection.visible` 解析，渲染面不读取磁盘，也不越过可见字节边界。
   - 点击/拖选通过 `LeafGeometry` 映射回 source 字节；左/右导航跳过隐藏标记，上/下导航按渲染行框移动；浮动格式工具条使用渲染选区矩形定位。
-  - Focus 按渲染块与当前句子范围降低非活动块透明度；Typewriter 用渲染光标位置滚动居中，并在普通模式下保证光标可见。
+  - Focus 按渲染块与当前句子范围降低非活动块透明度；Typewriter 用渲染光标位置滚动居中，并在普通模式下保证光标可见。滚动目标按 GPUI 的 0 在顶部、向下为负的约定 clamp 到 `-max..0`，大文档打开不会再产生非法 `clamp(min > max)`。
 - 回归：
   - `astrolith-document`：8 个 WYSIWYG 用例覆盖标题/强调/代码/链接/图片/列表/引用/围栏、隐藏标记的 source 映射、尾随空行、畸形语法保留与 UTF-8 边界。
   - `astrolith-gpui`：新增 `writing_surface_click_moves_the_caret_and_keeps_typing_working`，点击渲染页后光标进入文档且键入回到 buffer；原 384 个 GPUI 用例全部通过。
-- 验证：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试 **914 passed、0 failed、8 ignored**；fixture 单元 6 passed，Astro fixture compatibility PASS。
-- 原生证据：Hyprland / Wayland，`fixtures/parity-project`，`work-in-progress.md`，截图 `/tmp/wysiwyg-native.png`。确认标题按标题字号渲染、正文不显示 `#`/反引号、行内代码有背景、页面保持居中与留白。
+- 验证：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试 **915 passed、0 failed、8 ignored**；fixture 单元 6 passed，Astro fixture compatibility PASS。
+- 原生证据：Hyprland / Wayland，`fixtures/parity-project`，`work-in-progress.md`，截图 `/tmp/wysiwyg-native.png`。确认标题按标题字号渲染、正文不显示 `#`/反引号、行内代码有背景、页面保持居中与留白。随后用 `/home/maredevi/Projects/Blog` 的 7544 字节文档复测大文档滚动，截图 `/tmp/wysiwyg-blog.png`；进程无 panic，代码块语言标签与正文排版正常。
 - 限制：setext 标题、表格、缩进代码块、HTML/MDX 组件与引用链定义仍按普通文本/源码显示；图片显示 alt 文本而非内嵌图片；原生 IME 组合、150%/200% 缩放与 macOS/Windows 未在本轮重验。
