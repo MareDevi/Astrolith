@@ -31,6 +31,8 @@ under the **Help** menu.
   configuration.
 - [Concurrency and responsiveness](../technical/concurrency-and-responsiveness.md)
   — execution boundaries and measured performance.
+- [E2E artifacts](../technical/e2e-artifacts.md) — the `artifacts/e2e/<test-id>/`
+  layout, required manifest fields and what stays out of version control.
 
 The repository [README](../../README.md) summarizes the product and links back
 here.

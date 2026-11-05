@@ -8,3 +8,8 @@
 /.env.*
 !/.env.example
 **/node_modules/
+
+# E2E artifacts: keep the evidence (manifests, logs), drop machine state.
+artifacts/e2e/*/screenshot-*.png
+artifacts/e2e/*/core.*
+artifacts/e2e/*/trace-*
