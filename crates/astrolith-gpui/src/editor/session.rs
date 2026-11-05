@@ -114,6 +114,8 @@ pub(crate) struct DocumentSession {
     /// Last diagnostics version accepted for this document, so an older
     /// `publishDiagnostics` cannot overwrite a newer set.
     lsp_diagnostic_version: Option<i32>,
+    /// Capabilities the running server advertised, once its handshake landed.
+    lsp_capabilities: Option<lsp_types::ServerCapabilities>,
     _change: Subscription,
     _cursor: Subscription,
     _blur: Subscription,
@@ -450,6 +452,7 @@ impl DocumentSession {
             lsp_events: None,
             lsp_unavailable: false,
             lsp_diagnostic_version: None,
+            lsp_capabilities: None,
             _change: change,
             _cursor: cursor,
             _blur: blur,
@@ -1691,7 +1694,6 @@ impl DocumentSession {
             language,
         };
         state.open(self.buffer.current_text().to_owned());
-        crate::editor::lsp::install(&self.editor, handle, uri.clone(), cx);
         let weak = cx.weak_entity();
         let own_uri = uri.clone();
         let diagnostics_uri = uri.clone();
@@ -1760,10 +1762,34 @@ impl DocumentSession {
                     LspEvent::Exited(code) => {
                         tracing::info!(?code, "language server exited");
                     }
-                    LspEvent::Ready(_) => {}
+                    LspEvent::Ready(capabilities) => {
+                        let _ = this.update_in(cx, |session, _, cx| {
+                            session.install_lsp_providers(*capabilities, cx);
+                        });
+                    }
                 }
             }
         }));
+    }
+
+    /// Install only the providers the server advertised in its handshake.
+    fn install_lsp_providers(
+        &mut self,
+        capabilities: lsp_types::ServerCapabilities,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.lsp.as_ref() else {
+            return;
+        };
+        crate::editor::lsp::install(
+            &self.editor,
+            state.handle.clone(),
+            state.uri.clone(),
+            &capabilities,
+            cx,
+        );
+        self.lsp_capabilities = Some(capabilities);
+        cx.notify();
     }
 
     /// Release the language server for a retained but inactive document.
@@ -1777,6 +1803,7 @@ impl DocumentSession {
         // app runs is picked up without reopening the project.
         self.lsp_unavailable = false;
         self.lsp_diagnostic_version = None;
+        self.lsp_capabilities = None;
         self.lsp_change = None;
         self.lsp_events = None;
         self.release_lsp(cx);

@@ -78,13 +78,47 @@ where
     })
 }
 
-/// Install completion, hover, definition and code-action providers on `editor`.
+/// The providers a server advertised in its `initialize` result.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProviderSupport {
+    pub completion: bool,
+    pub hover: bool,
+    pub definition: bool,
+    pub code_actions: bool,
+}
+
+impl ProviderSupport {
+    pub(crate) fn from_capabilities(capabilities: &lsp_types::ServerCapabilities) -> Self {
+        Self {
+            completion: capabilities.completion_provider.is_some(),
+            hover: match capabilities.hover_provider {
+                Some(lsp_types::HoverProviderCapability::Simple(advertised)) => advertised,
+                Some(lsp_types::HoverProviderCapability::Options(_)) => true,
+                None => false,
+            },
+            definition: match &capabilities.definition_provider {
+                Some(lsp_types::OneOf::Left(advertised)) => *advertised,
+                Some(lsp_types::OneOf::Right(_)) => true,
+                None => false,
+            },
+            code_actions: match &capabilities.code_action_provider {
+                Some(lsp_types::CodeActionProviderCapability::Simple(advertised)) => *advertised,
+                Some(lsp_types::CodeActionProviderCapability::Options(_)) => true,
+                None => false,
+            },
+        }
+    }
+}
+
+/// Install the providers the server advertises on `editor`.
 pub(crate) fn install(
     editor: &Entity<EditorState>,
     handle: ClientHandle,
     uri: lsp_types::Uri,
+    capabilities: &lsp_types::ServerCapabilities,
     cx: &mut App,
 ) {
+    let support = ProviderSupport::from_capabilities(capabilities);
     editor.update(cx, |editor, cx| {
         let provider = Rc::new(LspProvider {
             handle: handle.clone(),
@@ -92,10 +126,26 @@ pub(crate) fn install(
         });
         let actions = Rc::new(CodeActions { handle, uri });
         let lsp = editor.lsp_mut();
-        lsp.completion_provider = Some(provider.clone());
-        lsp.hover_provider = Some(provider.clone());
-        lsp.definition_provider = Some(provider);
-        lsp.code_action_providers = vec![actions];
+        lsp.completion_provider = if support.completion {
+            Some(provider.clone())
+        } else {
+            None
+        };
+        lsp.hover_provider = if support.hover {
+            Some(provider.clone())
+        } else {
+            None
+        };
+        lsp.definition_provider = if support.definition {
+            Some(provider.clone())
+        } else {
+            None
+        };
+        lsp.code_action_providers = if support.code_actions {
+            vec![actions]
+        } else {
+            Vec::new()
+        };
         editor.refresh(cx);
     });
 }
@@ -437,6 +487,88 @@ mod tests {
             !accepts_diagnostics(&document, Some(1), &document, None),
             "an unversioned publish cannot be ordered after a versioned one"
         );
+    }
+
+    #[test]
+    fn capabilities_enable_exactly_the_advertised_providers() {
+        let capabilities = lsp_types::ServerCapabilities {
+            hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+            completion_provider: Some(lsp_types::CompletionOptions::default()),
+            definition_provider: Some(lsp_types::OneOf::Left(false)),
+            code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(false)),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            ProviderSupport::from_capabilities(&capabilities),
+            ProviderSupport {
+                completion: true,
+                hover: true,
+                definition: false,
+                code_actions: false,
+            }
+        );
+    }
+
+    #[gpui_kit::test]
+    fn only_advertised_providers_are_installed_on_the_editor(cx: &mut gpui_kit::TestAppContext) {
+        struct Host;
+        impl gpui_kit::Render for Host {
+            fn render(
+                &mut self,
+                _: &mut gpui_kit::Window,
+                _: &mut gpui_kit::Context<Self>,
+            ) -> impl gpui_kit::IntoElement {
+                gpui_kit::div()
+            }
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a test runtime");
+        let (client, _peer) = runtime.block_on(async {
+            let (client_stream, peer) = tokio::io::duplex(1024);
+            (
+                Client::connect(client_stream, uri("file:///project"))
+                    .await
+                    .expect("an in-memory client"),
+                peer,
+            )
+        });
+        let mut editor_slot = None;
+        let (window, _host) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |window, cx| {
+                editor_slot = Some(cx.new(|cx| EditorState::new(window, cx)));
+                cx.new(|_| Host)
+            })
+            .expect("a test window")
+        });
+        let editor = editor_slot.expect("the editor is built with the window");
+        let handle = client.handle();
+        let capabilities = lsp_types::ServerCapabilities {
+            hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+            ..Default::default()
+        };
+        cx.update_window(window, |_, _, cx| {
+            install(
+                &editor,
+                handle,
+                uri("file:///project/file.ts"),
+                &capabilities,
+                cx,
+            );
+            let lsp = editor.read(cx).lsp();
+            assert!(
+                lsp.hover_provider.is_some(),
+                "the advertised hover provider is installed"
+            );
+            assert!(lsp.completion_provider.is_none());
+            assert!(lsp.definition_provider.is_none());
+            assert!(lsp.code_action_providers.is_empty());
+        })
+        .expect("the window is open");
     }
 
     struct FakeHandle(Arc<AtomicUsize>);
