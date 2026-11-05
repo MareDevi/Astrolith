@@ -16,6 +16,9 @@ astrolith-workspace = { path = "../astrolith-workspace" }
 astrolith-core = { path = "../astrolith-core" }
 astrolith-astro = { path = "../astrolith-astro" }
 astrolith-document = { path = "../astrolith-document" }
+astrolith-lsp = { path = "../astrolith-lsp" }
+lsp-types = "=0.97.0"
+anyhow = "1.0.104"
 astrolith-preview = { path = "../astrolith-preview" }
 astrolith-terminal = { path = "../astrolith-terminal" }
 astrolith-observability = { path = "../astrolith-observability" }
@@ -23,6 +26,13 @@ gpui-kit = { workspace = true, features = [
     "tree-sitter-markdown",
     "tree-sitter-markdown-inline",
     "tree-sitter-astro",
+    "tree-sitter-css",
+    "tree-sitter-html",
+    "tree-sitter-javascript",
+    "tree-sitter-svelte",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
     "tree-sitter-yaml",
 ] }
 gpui-webview = { version = "=0.8.1", optional = true }

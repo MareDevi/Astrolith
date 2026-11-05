@@ -1,5 +1,8 @@
 use astrolith_core::preferences::{CopyeditCategory, CopyeditPreferences, WorkspaceMode};
-use gpui_kit::{App, KeyBinding};
+use gpui_kit::{
+    App, KeyBinding,
+    component::input::{GoToDefinition, ShowCompletions},
+};
 
 use crate::recent_projects::RecentEntry;
 
@@ -696,6 +699,13 @@ pub(crate) fn bind_keys(cx: &mut App) {
         ContentFinderInsert,
         Some("ContentFinder"),
     )]);
+    // Build mode's language-server actions. Base binds code actions itself but
+    // leaves these two to the application, so a plain editor context gets the
+    // IDE keys users expect.
+    cx.bind_keys([
+        KeyBinding::new("ctrl-space", ShowCompletions, Some("Input")),
+        KeyBinding::new("f12", GoToDefinition, Some("Input")),
+    ]);
 }
 
 /// The kind-dependent `Mod+/` key: a comment in `.md`, the builder in `.mdx`.

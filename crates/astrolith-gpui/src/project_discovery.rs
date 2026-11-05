@@ -15,7 +15,7 @@ use crate::{
             SaveCompletion, SaveCoordinator, SaveKind, SaveRequest, SaveResult, SaveStatus,
         },
         save_failure::SaveFailureArtifact,
-        session::{DocumentSession, HistoryChanged, SaveOnBlur, SessionChanged},
+        session::{DefinitionTarget, DocumentSession, HistoryChanged, SaveOnBlur, SessionChanged},
         writing_modes::WritingModes,
     },
     file_browser::{FileBrowser, FileBrowserEvent},
@@ -820,6 +820,8 @@ pub(crate) struct ProjectWorkspace {
     component_task: Option<Task<()>>,
     /// Build's project file explorer; Writing and Preview keep the library list.
     file_browser: Entity<FileBrowser>,
+    /// A language-server definition waiting for its file to load.
+    pending_reveal: Option<(PathBuf, Option<lsp_types::Position>)>,
 }
 
 /// What to do after a dirty session has been saved through the guarded path.
@@ -885,6 +887,19 @@ pub struct ActiveFrontmatter {
     /// Live editor text, including unsaved changes.
     pub text: String,
 }
+/// Project file extensions Build edits as retained text documents.
+const EDITABLE_SOURCE_EXTENSIONS: &[&str] = &[
+    "astro", "ts", "mts", "cts", "tsx", "jsx", "js", "mjs", "cjs", "json", "jsonc", "css", "scss",
+    "less", "html", "htm", "svelte", "vue", "md", "mdx", "yaml", "yml", "toml",
+];
+
+fn is_editable_extension(extension: &str) -> bool {
+    let extension = extension.to_ascii_lowercase();
+    EDITABLE_SOURCE_EXTENSIONS
+        .iter()
+        .any(|candidate| *candidate == extension)
+}
+
 /// Upper bound on indexed entries scanned for corroborated imports.
 const MAX_COMPONENT_IMPORT_FILES: usize = 256;
 /// Upper bound on one scanned entry source.
@@ -1065,6 +1080,7 @@ impl ProjectWorkspace {
             component_imports: Arc::new(Vec::new()),
             component_task: None,
             file_browser,
+            pending_reveal: None,
         }
     }
     /// Save status of the active document, for the tab strip status text.
@@ -1253,6 +1269,13 @@ impl ProjectWorkspace {
                 this.save_on_blur(&blur_path, window, cx);
             },
         );
+        let navigation = cx.subscribe_in(
+            &session,
+            window,
+            |this, _, event: &DefinitionTarget, window, cx| {
+                this.open_definition_target(event.clone(), window, cx);
+            },
+        );
         // Register the initial state so a clean document already has a status and
         // a recovered one is tracked as dirty. Registration never arms the timer:
         // recovered content waits for an edit, a blur or an explicit save before
@@ -1264,7 +1287,7 @@ impl ProjectWorkspace {
         self.save_coordinator
             .observe(&path, revision, dirty, cx.background_executor().now());
         self.session_subscriptions
-            .insert(path, vec![changed, blur, history]);
+            .insert(path, vec![changed, blur, history, navigation]);
     }
 
     /// Feed one session's revision into the save coordinator.
@@ -2638,6 +2661,48 @@ impl ProjectWorkspace {
         Ok(())
     }
 
+    /// Open the file a language server named as a definition target.
+    fn open_definition_target(
+        &mut self,
+        event: DefinitionTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(path) = event.path.canonicalize() else {
+            tracing::info!(path = %event.path.display(), "definition target is gone");
+            return;
+        };
+        if let Some(session) = self.sessions.get(&path).cloned() {
+            self.activate_session(&path, window, cx);
+            session.update(cx, |session, cx| {
+                session.reveal_source_position(event.selection, window, cx)
+            });
+            return;
+        }
+        self.pending_reveal = Some((path.clone(), event.selection));
+        self.open_browser_path(path, window, cx);
+    }
+
+    /// Apply a pending definition selection once its file is loaded.
+    fn reveal_pending(
+        &mut self,
+        path: &std::path::Path,
+        session: &Entity<DocumentSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((target, selection)) = self.pending_reveal.clone() else {
+            return;
+        };
+        if target != path {
+            return;
+        }
+        self.pending_reveal = None;
+        session.update(cx, |session, cx| {
+            session.reveal_source_position(selection, window, cx)
+        });
+    }
+
     /// Open a Build explorer selection.
     ///
     /// Content entries and project `.astro` sources keep their retained,
@@ -2667,13 +2732,6 @@ impl ProjectWorkspace {
             cx.notify();
             return;
         }
-        if self.is_editable_project_source(&canonical) {
-            if let Err(error) = self.open_project_source(canonical, window, cx) {
-                self.status = error;
-                cx.notify();
-            }
-            return;
-        }
         if let Some(index) = self
             .entries
             .iter()
@@ -2682,23 +2740,33 @@ impl ProjectWorkspace {
             self.open_entry(index, window, cx);
             return;
         }
+        if self.is_editable_project_source(&canonical) {
+            if let Err(error) = self.open_project_source(canonical, window, cx) {
+                self.status = error;
+                cx.notify();
+            }
+            return;
+        }
         cx.emit(ReadonlyFileRequested { path: canonical });
     }
 
-    /// Whether `path` is a project-owned `.astro` source this workspace may edit.
+    /// Whether `path` is a project-owned text source this workspace may edit.
+    ///
+    /// Build mode edits the Astro stack in place: templates, scripts, styles,
+    /// data files and configuration. Assets and files outside the project stay
+    /// readonly.
     pub(crate) fn is_editable_project_source(&self, path: &std::path::Path) -> bool {
         let Some(root) = self.project_root() else {
             return false;
         };
-        let extension = path
-            .extension()
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or_default();
-        extension.eq_ignore_ascii_case("astro")
-            && path.starts_with(&root)
+        path.starts_with(&root)
             && !path
                 .components()
                 .any(|part| part.as_os_str() == "node_modules" || part.as_os_str() == ".git")
+            && path
+                .extension()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(is_editable_extension)
     }
 
     /// Open one project `.astro` source as a retained, editable document.
@@ -2718,7 +2786,7 @@ impl ProjectWorkspace {
             .ok_or_else(|| format!("{} is outside the open project.", canonical.display()))?;
         if !self.is_editable_project_source(&canonical) {
             return Err(format!(
-                "{} is not an editable project .astro source.",
+                "{} is not an editable project source file.",
                 canonical.display()
             ));
         }
@@ -3543,7 +3611,12 @@ impl ProjectWorkspace {
                 session.update(cx, |session, cx| {
                     session.set_writing_modes(modes, window, cx)
                 });
-                let source_view = self.source_view;
+                if let Some(root) = self.project_root() {
+                    session.update(cx, |session, _| session.set_project_root(root));
+                }
+                // Only the visible document presents complete source; other
+                // retained buffers switch when they are activated.
+                let source_view = self.source_view && self.active.as_ref() == Some(&key);
                 session.update(cx, |session, cx| {
                     session.set_source_view(source_view, window, cx)
                 });
@@ -3557,7 +3630,8 @@ impl ProjectWorkspace {
                 self.sync_tabs(cx);
                 if self.active.as_ref() == Some(&key) {
                     self.focus_collection_for(&key, cx);
-                    self.install(&key, session, cx);
+                    self.install(&key, session.clone(), cx);
+                    self.reveal_pending(&key, &session, window, cx);
                     self.document.read(cx).focus_handle(cx).focus(window, cx);
                 }
             }
@@ -3588,6 +3662,12 @@ impl ProjectWorkspace {
             && self.save_coordinator.is_dirty(&outgoing)
         {
             self.save_path(outgoing, SaveKind::Automatic, window, cx);
+        }
+        // Only the visible Build document keeps a language server process.
+        if let Some(outgoing) = self.active.clone().filter(|outgoing| outgoing != path)
+            && let Some(session) = self.sessions.get(&outgoing).cloned()
+        {
+            session.update(cx, |session, cx| session.suspend_lsp(cx));
         }
         self.active = Some(path.to_owned());
         self.focus_collection_for(path, cx);
@@ -4205,12 +4285,25 @@ impl ProjectWorkspace {
                     });
                     let copyedit = this.copyedit.clone();
                     session.update(cx, |session, cx| session.set_copyedit_config(copyedit, cx));
+                    if let Some(root) = this.project_root() {
+                        session.update(cx, |session, _| session.set_project_root(root));
+                    }
                     let key = path.clone();
                     this.watch_session(key.clone(), session.clone(), window, cx);
                     this.sessions.insert(key.clone(), session.clone());
                     this.active = Some(key.clone());
                     this.install(&key, session.clone(), cx);
                     restored += 1;
+                }
+                // Only the document left active gets the Build presentation and
+                // its language server; the others switch when activated.
+                if let Some(path) = this.active.clone()
+                    && let Some(session) = this.sessions.get(&path).cloned()
+                {
+                    let source_view = this.source_view;
+                    session.update(cx, |session, cx| {
+                        session.set_source_view(source_view, window, cx)
+                    });
                 }
                 tracing::info!(restored, "recovered unsaved documents");
                 this.status = format!("Restored {restored} unsaved document(s) from recovery.");
@@ -6994,6 +7087,23 @@ async fn open_directory(directory: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn build_edits_text_sources_but_not_assets() {
+        use super::is_editable_extension;
+        for extension in [
+            "astro", "ts", "tsx", "js", "jsx", "mjs", "json", "css", "scss", "html", "svelte",
+            "vue", "md", "mdx", "yaml", "toml",
+        ] {
+            assert!(is_editable_extension(extension), "{extension}");
+        }
+        for extension in ["png", "jpg", "woff2", "wasm", "svg", "exe"] {
+            assert!(!is_editable_extension(extension), "{extension}");
+        }
+        assert!(
+            is_editable_extension("ASTRO"),
+            "extensions are case-insensitive"
+        );
+    }
     use super::*;
     use astrolith_core::SourcePath;
     use astrolith_core::preferences::{
@@ -9835,14 +9945,7 @@ export const collections = {blog, dataAuthors};
         .unwrap();
         wait_for_session(cx, &view, &entry).await;
 
-        // Everything else is requested as a readonly snapshot from the shell.
-        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let recorded = seen.clone();
-        let _subscription = cx.update(|cx| {
-            cx.subscribe(&view, move |_, event: &ReadonlyFileRequested, _| {
-                recorded.borrow_mut().push(event.path.clone());
-            })
-        });
+        // Configuration scripts are editable text sources too.
         let config = std::fs::canonicalize(dir.path().join("astro.config.mjs")).unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
@@ -9850,7 +9953,27 @@ export const collections = {blog, dataAuthors};
             });
         })
         .unwrap();
-        assert_eq!(*seen.borrow(), vec![config]);
+        wait_for_session(cx, &view, &config).await;
+
+        // Non-text files are requested as a readonly snapshot from the shell.
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = seen.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &ReadonlyFileRequested, _| {
+                recorded.borrow_mut().push(event.path.clone());
+            })
+        });
+        let binary = dir.path().join("public/asset.bin");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, [0u8, 1, 2, 3]).unwrap();
+        let binary = std::fs::canonicalize(&binary).unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.open_browser_path(binary.clone(), window, cx)
+            });
+        })
+        .unwrap();
+        assert_eq!(*seen.borrow(), vec![binary]);
 
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| view.set_source_view(false, window, cx));

@@ -1,11 +1,12 @@
 //! One retained editor/history for each canonical source, independent of selection.
-use std::{ops::Range, time::Instant};
+use std::{ops::Range, path::PathBuf, time::Instant};
 
 use astrolith_document::{
     DocumentBuffer, DocumentIdentity, DocumentKind, DocumentRevision, FormatCommand, FormatOutcome,
     ProjectionSegment, TextEdit, TokenSnapshot, WriterProjection, apply_visible_edit, diff_visible,
     format_document, map_visible_offset, project_writer, token_snapshot,
 };
+use astrolith_lsp::{Client as LspClient, Event as LspEvent, LanguageId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::input::{
     EditorState, InputEvent, Position, RangeDecoration, RangeDecorationCollection,
@@ -13,10 +14,11 @@ use gpui_kit::component::input::{
 };
 use gpui_kit::{
     App, AppContext, Context, Entity, EventEmitter, Focusable, Pixels, Point, SharedString,
-    Subscription, Window,
+    Subscription, Task, Window,
 };
 
 use crate::editor::component_builder::snippets::PreparedInsertion;
+use crate::editor::lsp::LspState;
 
 use crate::editor::copyedit::{CopyeditConfig, CopyeditPresentation, DEBOUNCE};
 use crate::editor::formatting::external_url;
@@ -90,6 +92,19 @@ pub(crate) struct DocumentSession {
     /// An edit that grows the text without moving an anchor happened at that
     /// anchor's edge, so the caret offset advances by the inserted length.
     placeholder_text_len: usize,
+    /// Canonical project root, the language server's workspace folder.
+    project_root: Option<PathBuf>,
+    /// The running language server for this document, while Build is active.
+    lsp: Option<LspState>,
+    /// In-flight server discovery/start.
+    lsp_start: Option<Task<()>>,
+    /// In-flight debounced full-text document sync.
+    lsp_change: Option<Task<()>>,
+    /// Applies server events (diagnostics, logs) to this session.
+    lsp_events: Option<Task<()>>,
+    /// Set after a failed discovery/start; retrying on every mode switch would
+    /// only repeat the same filesystem search.
+    lsp_unavailable: bool,
     _change: Subscription,
     _cursor: Subscription,
     _blur: Subscription,
@@ -98,6 +113,17 @@ pub(crate) struct DocumentSession {
 }
 pub(crate) struct SessionChanged;
 impl EventEmitter<SessionChanged> for DocumentSession {}
+
+/// A language server asked the editor to reveal a location in another file.
+#[derive(Clone, Debug)]
+pub(crate) struct DefinitionTarget {
+    /// Canonical file path from the server's document URI.
+    pub path: PathBuf,
+    /// UTF-16 selection start within that file, when the server supplied one.
+    pub selection: Option<lsp_types::Position>,
+}
+
+impl EventEmitter<DefinitionTarget> for DocumentSession {}
 
 /// Emitted when undo/redo changed the complete source outside an editor change.
 pub(crate) struct HistoryChanged;
@@ -191,6 +217,9 @@ impl DocumentSession {
                 this.sync_placeholders(cx);
                 this.refresh_copyedit(cx);
                 this.refresh_writer(cx);
+                if this.source_view {
+                    this.sync_lsp_change(cx);
+                }
                 this.dirty = this.buffer.is_dirty();
                 cx.emit(SessionChanged);
                 cx.notify();
@@ -303,6 +332,12 @@ impl DocumentSession {
             placeholder_offsets: Vec::new(),
             placeholder_collection: None,
             placeholder_text_len: 0,
+            project_root: None,
+            lsp: None,
+            lsp_start: None,
+            lsp_change: None,
+            lsp_events: None,
+            lsp_unavailable: false,
             _change: change,
             _cursor: cursor,
             _blur: blur,
@@ -1278,6 +1313,9 @@ impl DocumentSession {
         cx: &mut Context<Self>,
     ) {
         if self.source_view == source {
+            if source {
+                self.start_lsp(window, cx);
+            }
             return;
         }
         self.absorb(cx);
@@ -1317,9 +1355,207 @@ impl DocumentSession {
         };
         self.refresh_copyedit(cx);
         self.refresh_writer(cx);
+        if source {
+            self.start_lsp(window, cx);
+        } else {
+            self.stop_lsp(cx);
+        }
         // The mode owner notifies the shell; emitting SessionChanged here would
         // run project subscriptions reentrantly from inside a project update.
         cx.notify();
+    }
+
+    /// Point this session at the project whose language servers it should use.
+    pub(crate) fn set_project_root(&mut self, root: PathBuf) {
+        self.project_root = Some(root);
+        self.lsp_unavailable = false;
+    }
+
+    /// Start the document's language server once Build mode has a project root.
+    fn start_lsp(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.lsp.is_some() || self.lsp_start.is_some() || self.lsp_unavailable {
+            return;
+        }
+        let Some(root) = self.project_root.clone() else {
+            return;
+        };
+        let path = root.join(self.canonical_source());
+        let Some(language) = LanguageId::from_path(&path) else {
+            return;
+        };
+        if language.server().is_none() {
+            return;
+        }
+        let document = path.clone();
+        self.lsp_start = Some(cx.spawn_in(window, async move |this, cx| {
+            let search_root = root.clone();
+            let started = runtime::spawn(cx, async move {
+                let spec = astrolith_lsp::discover(&search_root, language)
+                    .map_err(|error| error.to_string())?;
+                LspClient::spawn_process(spec.into())
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await;
+            match started {
+                Ok(Ok(client)) => {
+                    let _ = this.update_in(cx, |session, window, cx| {
+                        session.attach_lsp(client, path, language, window, cx)
+                    });
+                }
+                Ok(Err(error)) | Err(error) => {
+                    tracing::info!(
+                        document = %document.display(),
+                        %error,
+                        "language server unavailable for this document"
+                    );
+                    let _ = this.update_in(cx, |session, _, cx| {
+                        session.lsp_start = None;
+                        session.lsp_unavailable = true;
+                        cx.notify();
+                    });
+                }
+            }
+        }));
+    }
+
+    fn attach_lsp(
+        &mut self,
+        mut client: LspClient,
+        path: PathBuf,
+        language: LanguageId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.lsp_start = None;
+        if !self.source_view {
+            return;
+        }
+        let Some(uri) = crate::editor::lsp::uri_for(&path) else {
+            tracing::warn!(document = %path.display(), "could not build a document URI");
+            return;
+        };
+        let handle = client.handle();
+        let mut events = client.take_events();
+        let state = LspState {
+            _client: client,
+            handle: handle.clone(),
+            uri: uri.clone(),
+            language,
+        };
+        state.open(self.buffer.current_text().to_owned());
+        crate::editor::lsp::install(&self.editor, handle, uri.clone(), cx);
+        let weak = cx.weak_entity();
+        let own_uri = uri.clone();
+        self.editor.update(cx, |editor, _| {
+            editor.lsp_mut().show_document = Some(std::rc::Rc::new(move |params, _window, cx| {
+                if params.uri.as_str() == own_uri.as_str() {
+                    return false;
+                }
+                let Ok(url) = url::Url::parse(params.uri.as_str()) else {
+                    return false;
+                };
+                let Ok(path) = url.to_file_path() else {
+                    return false;
+                };
+                let selection = params.selection.map(|range| range.start);
+                weak.update(cx, |_, cx| {
+                    cx.emit(DefinitionTarget { path, selection });
+                })
+                .is_ok()
+            }));
+        });
+        self.lsp = Some(state);
+        self.lsp_events = Some(cx.spawn_in(window, async move |this, cx| {
+            while let Some(event) = events.recv().await {
+                match event {
+                    LspEvent::Diagnostics { diagnostics, .. } => {
+                        let _ = this.update_in(cx, |session, _, cx| {
+                            crate::editor::lsp::apply_diagnostics(
+                                &session.editor,
+                                &diagnostics,
+                                cx,
+                            );
+                        });
+                    }
+                    LspEvent::Log { level, message } => match level {
+                        astrolith_lsp::client::LogLevel::Error => {
+                            tracing::error!(%message, "language server")
+                        }
+                        astrolith_lsp::client::LogLevel::Warning => {
+                            tracing::warn!(%message, "language server")
+                        }
+                        _ => tracing::info!(%message, "language server"),
+                    },
+                    LspEvent::Failed(error) => {
+                        tracing::warn!(%error, "language server failed");
+                    }
+                    LspEvent::Exited(code) => {
+                        tracing::info!(?code, "language server exited");
+                    }
+                    LspEvent::Ready(_) => {}
+                }
+            }
+        }));
+    }
+
+    /// Release the language server for a retained but inactive document.
+    pub(crate) fn suspend_lsp(&mut self, cx: &mut Context<Self>) {
+        self.stop_lsp(cx);
+    }
+
+    fn stop_lsp(&mut self, cx: &mut Context<Self>) {
+        self.lsp_start = None;
+        // Re-entering Build retries discovery, so a server installed while the
+        // app runs is picked up without reopening the project.
+        self.lsp_unavailable = false;
+        self.lsp_change = None;
+        self.lsp_events = None;
+        if let Some(state) = self.lsp.take() {
+            state.close();
+            drop(state);
+            crate::editor::lsp::uninstall(&self.editor, cx);
+        }
+    }
+
+    /// Focus this document at a language-server selection.
+    pub(crate) fn reveal_source_position(
+        &mut self,
+        selection: Option<lsp_types::Position>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selection) = selection else {
+            return;
+        };
+        if !self.source_view {
+            self.set_source_view(true, window, cx);
+        }
+        // Provider responses are converted to the editor's character-based
+        // coordinates at the protocol boundary, so this is already a character
+        // position, not a UTF-16 one.
+        let text = self.buffer.current_text();
+        let offset = astrolith_lsp::char_position_to_offset(text, selection).min(text.len());
+        self.editor.update(cx, |editor, cx| {
+            editor.set_selected_range(offset..offset, cx);
+        });
+        self.last_selection = offset..offset;
+        cx.notify();
+    }
+
+    /// Push the latest complete source to the server, coalescing keystrokes.
+    fn sync_lsp_change(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.lsp.as_ref() else {
+            return;
+        };
+        let handle = state.handle.clone();
+        let uri = state.uri.clone();
+        let text = self.buffer.current_text().to_owned();
+        let executor = cx.background_executor().clone();
+        self.lsp_change = Some(cx.background_spawn(async move {
+            executor.timer(std::time::Duration::from_millis(150)).await;
+            handle.change(uri, text);
+        }));
     }
 
     /// Current editor selection expressed in complete-source bytes.
@@ -1428,6 +1664,7 @@ impl DocumentSession {
             self.editor
                 .update(cx, |editor, cx| editor.set_selected_range(caret..caret, cx));
             self.refused = false;
+            self.sync_lsp_change(cx);
             return;
         }
         let current = self.editor.read(cx).text();
@@ -1658,7 +1895,15 @@ fn editor_language(path: &str) -> SharedString {
     match extension.as_str() {
         "md" | "mdx" => "markdown",
         "astro" => "astro",
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" | "jsx" => "tsx",
+        "js" | "mjs" | "cjs" => "javascript",
+        "json" | "jsonc" => "json",
+        "css" => "css",
+        "html" | "htm" => "html",
+        "svelte" => "svelte",
         "yaml" | "yml" => "yaml",
+        "toml" => "toml",
         _ => "text",
     }
     .into()
@@ -1690,4 +1935,40 @@ pub(crate) fn fingerprint(text: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod language_tests {
+    use super::editor_language;
+
+    #[test]
+    fn build_highlights_the_astro_stack() {
+        for (path, language) in [
+            ("src/pages/index.astro", "astro"),
+            ("src/lib/a.ts", "typescript"),
+            ("src/lib/a.mts", "typescript"),
+            ("src/lib/a.cts", "typescript"),
+            ("src/components/A.tsx", "tsx"),
+            ("src/components/A.jsx", "tsx"),
+            ("src/scripts/a.js", "javascript"),
+            ("src/scripts/a.mjs", "javascript"),
+            ("src/scripts/a.cjs", "javascript"),
+            ("package.json", "json"),
+            ("tsconfig.jsonc", "json"),
+            ("src/styles/a.css", "css"),
+            ("src/index.html", "html"),
+            ("src/components/A.svelte", "svelte"),
+            ("src/content/post.md", "markdown"),
+            ("src/content/post.mdx", "markdown"),
+            ("astro.config.yaml", "yaml"),
+            ("netlify.toml", "toml"),
+        ] {
+            assert_eq!(editor_language(path), language, "{path}");
+        }
+        assert_eq!(
+            editor_language("assets/logo.svg"),
+            "text",
+            "unsupported formats stay readable instead of guessing"
+        );
+    }
 }
