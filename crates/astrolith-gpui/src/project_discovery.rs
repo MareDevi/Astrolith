@@ -5510,16 +5510,17 @@ mod tests {
         cx: &mut TestAppContext,
         mut ready: impl FnMut(&mut TestAppContext) -> bool,
     ) {
-        for _ in 0..300 {
+        for _ in 0..600 {
+            // Advance virtual time and pump the foreground executor without
+            // taking one of the application's two blocking permits: a test
+            // that sleeps on that lane can starve the work it is waiting on.
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(10));
             cx.run_until_parked();
             if ready(cx) {
                 return;
             }
-            runtime::blocking(cx, || {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            })
-            .await
-            .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
         panic!("condition did not become true");
     }
