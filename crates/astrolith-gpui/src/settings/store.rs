@@ -53,6 +53,12 @@ where
         let bytes = match read_existing(&path) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return stored,
+            // An oversized file is quarantined like any other unreadable
+            // configuration, so the application stays writable.
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                stored.quarantine(&error);
+                return stored;
+            }
             Err(error) => {
                 stored.writable = false;
                 stored.warning = Some(format!(
@@ -797,10 +803,10 @@ fn read_existing(path: &Path) -> io::Result<Option<Vec<u8>>> {
             file.take(MAX_PREFERENCE_BYTES + 1)
                 .read_to_end(&mut bytes)?;
             if bytes.len() as u64 > MAX_PREFERENCE_BYTES {
-                return Err(io::Error::other(format!(
-                    "Preferences exceed {} KiB.",
-                    MAX_PREFERENCE_BYTES / 1024
-                )));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Preferences exceed {} KiB.", MAX_PREFERENCE_BYTES / 1024),
+                ));
             }
             Ok(Some(bytes))
         }
@@ -819,6 +825,11 @@ pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
+    // Make the rename itself durable; the file contents were synced above.
+    #[cfg(unix)]
+    {
+        fs::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 

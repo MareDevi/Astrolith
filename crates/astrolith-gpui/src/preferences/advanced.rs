@@ -58,15 +58,34 @@ impl Versions {
 }
 
 /// Entries Reset All removes. Nothing outside this list is touched.
+///
+/// Upgrade backups, quarantine copies and legacy imports are removed too, so a
+/// reset leaves no configuration artefact behind.
 pub(crate) fn reset_paths(folder: &Path) -> Vec<PathBuf> {
-    vec![
+    let mut paths = vec![
         folder.join("global.json"),
         folder.join("projects.json"),
         folder.join("projects"),
         // The one-time version-1 import and its preserved original.
         folder.join("preferences.json"),
         folder.join("preferences.v1.migrated.json"),
-    ]
+    ];
+    if let Ok(entries) = fs::read_dir(folder) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let artifact = name.contains(".pre-")
+                || name.ends_with(".bak")
+                || name.ends_with(".corrupt")
+                || name.starts_with("preferences.v1.ignored");
+            if artifact {
+                paths.push(entry.path());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 /// Delete preferences and the registry, keeping recovery, save failures and logs.
