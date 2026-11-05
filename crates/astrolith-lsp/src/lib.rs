@@ -17,8 +17,9 @@ pub mod language;
 pub mod position;
 
 pub use client::{
-    Client, ClientError, ClientHandle, Event, SpawnSpec, code_action_params, completion_params,
-    definition_params, hover_params, methods, range_offsets, uri_from_path,
+    Client, ClientError, ClientHandle, DEFAULT_REQUEST_TIMEOUT, Event, SpawnSpec,
+    code_action_params, completion_params, definition_params, hover_params, methods, range_offsets,
+    uri_from_path,
 };
 pub use discovery::{DiscoveryError, ServerSpec, discover};
 pub use language::{LanguageId, ServerDef};

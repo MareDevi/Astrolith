@@ -3,15 +3,20 @@
 //! One [`Client`] owns one server process. Commands arrive on an unbounded
 //! channel from the UI; decoded server messages leave on a separate event
 //! channel, so a slow renderer never blocks the protocol loop. Requests from
-//! providers await a one-shot reply; notifications (diagnostics, logs) are
-//! pushed as events.
+//! providers await a one-shot reply with a bounded budget; a request that
+//! outlives it is cancelled locally and the server is told through
+//! `$/cancelRequest`. Notifications (diagnostics, logs) are pushed as events.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ffi::OsString,
     path::PathBuf,
     process::Stdio,
-    sync::atomic::{AtomicI32, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicI32, AtomicI64, Ordering},
+    },
+    time::Duration,
 };
 
 use lsp_types::{Diagnostic, InitializeResult, PublishDiagnosticsParams, ServerCapabilities, Uri};
@@ -22,7 +27,22 @@ use tokio::{
     process::{Child, Command as ProcessCommand},
     sync::{mpsc, oneshot},
     task::AbortHandle,
+    time::Instant,
 };
+
+/// How long a provider waits for a server answer before giving up.
+///
+/// The actor keeps the matching pending entry until the same budget has
+/// elapsed, so a caller that is dropped without answering is still reaped and
+/// cancelled on the server side.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Extra time the actor waits past the caller's budget before reaping.
+///
+/// A caller that times out sends its cancel command before the actor's own
+/// deadline, so the grace keeps a timed-out request from being cancelled on
+/// the wire twice while still reaping callers that simply went away.
+const REAP_GRACE: Duration = Duration::from_millis(500);
 
 use crate::{
     discovery::ServerSpec,
@@ -35,6 +55,10 @@ use crate::{
 pub enum ClientError {
     /// The client task or its command channel is gone.
     Closed,
+    /// The request outlived its budget.
+    Timeout { method: String },
+    /// The request was cancelled before the server answered.
+    Cancelled,
     /// The server process or its pipes failed.
     Io(String),
     /// The stream carried something this client could not interpret.
@@ -47,6 +71,10 @@ impl std::fmt::Display for ClientError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(formatter, "the language server client is closed"),
+            Self::Timeout { method } => {
+                write!(formatter, "language server request `{method}` timed out")
+            }
+            Self::Cancelled => write!(formatter, "the language server request was cancelled"),
             Self::Io(message) => write!(formatter, "language server I/O failed: {message}"),
             Self::Protocol(message) => {
                 write!(formatter, "language server protocol error: {message}")
@@ -91,9 +119,13 @@ enum Command {
         uri: Uri,
     },
     Request {
+        id: i64,
         method: String,
         params: Value,
         response: oneshot::Sender<Result<Value, ClientError>>,
+    },
+    Cancel {
+        id: i64,
     },
     Shutdown {
         done: oneshot::Sender<()>,
@@ -144,7 +176,10 @@ enum Incoming {
 }
 
 enum Pending {
-    Request(oneshot::Sender<Result<Value, ClientError>>),
+    Request {
+        method: String,
+        response: oneshot::Sender<Result<Value, ClientError>>,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -179,12 +214,35 @@ impl From<ServerSpec> for SpawnSpec {
     }
 }
 
+/// Request bookkeeping shared by the handle and the actor.
+#[derive(Clone)]
+struct Requests {
+    /// Ids allocated by callers, so a timed-out call can name its own id.
+    next_id: Arc<AtomicI64>,
+    /// Per-request budget; the actor reaps at the same deadline.
+    timeout: Duration,
+}
+
+impl Requests {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            next_id: Arc::new(AtomicI64::new(1)),
+            timeout,
+        }
+    }
+
+    fn allocate(&self) -> i64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
 /// Cloneable handle used by editor providers.
 #[derive(Clone)]
 pub struct ClientHandle {
     commands: mpsc::UnboundedSender<Command>,
     /// Document version shared by every provider for this open file.
-    version: std::sync::Arc<AtomicI32>,
+    version: Arc<AtomicI32>,
+    requests: Requests,
 }
 
 impl ClientHandle {
@@ -208,23 +266,45 @@ impl ClientHandle {
     }
 
     /// Ask the server for `method` and await its result.
+    ///
+    /// The wait is bounded by [`DEFAULT_REQUEST_TIMEOUT`]; on expiry the actor
+    /// drops the pending entry and sends `$/cancelRequest`.
     pub fn request(
         &self,
         method: &str,
         params: Value,
     ) -> impl Future<Output = Result<Value, ClientError>> + use<> {
+        self.request_within(method, params, self.requests.timeout)
+    }
+
+    fn request_within(
+        &self,
+        method: &str,
+        params: Value,
+        budget: Duration,
+    ) -> impl Future<Output = Result<Value, ClientError>> + use<> {
         let commands = self.commands.clone();
+        let id = self.requests.allocate();
         let method = method.to_owned();
         async move {
             let (response, receiver) = oneshot::channel();
             commands
                 .send(Command::Request {
-                    method,
+                    id,
+                    method: method.clone(),
                     params,
                     response,
                 })
                 .map_err(|_| ClientError::Closed)?;
-            receiver.await.map_err(|_| ClientError::Closed)?
+            match tokio::time::timeout(budget, receiver).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(ClientError::Closed),
+                Err(_) => {
+                    // The server may still be computing; both sides drop it.
+                    let _ = commands.send(Command::Cancel { id });
+                    Err(ClientError::Timeout { method })
+                }
+            }
         }
     }
 
@@ -285,7 +365,13 @@ impl Client {
             }
         });
 
-        Ok(Self::start(stdin, stdout, Some(child), root_uri))
+        Ok(Self::start(
+            stdin,
+            stdout,
+            Some(child),
+            root_uri,
+            DEFAULT_REQUEST_TIMEOUT,
+        ))
     }
 
     /// Connect over an arbitrary duplex stream. Used by tests and adapters.
@@ -293,19 +379,41 @@ impl Client {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let (reader, writer) = tokio::io::split(stream);
-        Ok(Self::start(writer, reader, None, root_uri))
+        Self::connect_with_budget(stream, root_uri, DEFAULT_REQUEST_TIMEOUT).await
     }
 
-    fn start<R, W>(writer: W, reader: R, child: Option<Child>, root_uri: Uri) -> Self
+    async fn connect_with_budget<S>(
+        stream: S,
+        root_uri: Uri,
+        request_timeout: Duration,
+    ) -> Result<Self, ClientError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (reader, writer) = tokio::io::split(stream);
+        Ok(Self::start(writer, reader, None, root_uri, request_timeout))
+    }
+
+    fn start<R, W>(
+        writer: W,
+        reader: R,
+        child: Option<Child>,
+        root_uri: Uri,
+        request_timeout: Duration,
+    ) -> Self
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (event_sender, events) = mpsc::unbounded_channel();
-        let version = std::sync::Arc::new(AtomicI32::new(0));
-        let handle = ClientHandle { commands, version };
+        let version = Arc::new(AtomicI32::new(0));
+        let requests = Requests::new(request_timeout);
+        let handle = ClientHandle {
+            commands,
+            version,
+            requests: requests.clone(),
+        };
         let actor = tokio::spawn(run(
             reader,
             writer,
@@ -313,6 +421,7 @@ impl Client {
             command_receiver,
             event_sender,
             root_uri,
+            requests,
         ));
         let abort = AbortOnDrop(actor.abort_handle());
         Self {
@@ -354,17 +463,21 @@ impl Drop for AbortOnDrop {
 
 struct Connection<W> {
     writer: BufWriter<W>,
-    next_id: i64,
+    /// Ids and budget shared with [`ClientHandle`].
+    requests: Requests,
     pending: HashMap<i64, Pending>,
+    /// Issue times of live requests, oldest first: the next reap candidate.
+    issued: VecDeque<(Instant, i64)>,
     shutdown: bool,
 }
 
 impl<W: AsyncWrite + Unpin> Connection<W> {
-    fn new(writer: W) -> Self {
+    fn new(writer: W, requests: Requests) -> Self {
         Self {
             writer: BufWriter::new(writer),
-            next_id: 1,
+            requests,
             pending: HashMap::new(),
+            issued: VecDeque::new(),
             shutdown: false,
         }
     }
@@ -384,8 +497,20 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
         params: Value,
         pending: Pending,
     ) -> Result<(), ClientError> {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.requests.allocate();
+        self.send_request_with_id(id, method, params, pending).await
+    }
+
+    async fn send_request_with_id(
+        &mut self,
+        id: i64,
+        method: &str,
+        params: Value,
+        pending: Pending,
+    ) -> Result<(), ClientError> {
+        if matches!(pending, Pending::Request { .. }) {
+            self.issued.push_back((Instant::now(), id));
+        }
         self.pending.insert(id, pending);
         self.write(json!({
             "jsonrpc": "2.0",
@@ -394,6 +519,38 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
             "params": params,
         }))
         .await
+    }
+
+    /// Deadline of the oldest live request, if any.
+    fn next_reap_deadline(&self) -> Option<Instant> {
+        self.issued
+            .front()
+            .map(|(issued, _)| *issued + self.requests.timeout + REAP_GRACE)
+    }
+
+    /// Drop and cancel requests that outlived the budget.
+    ///
+    /// Entries are queued in issue order, so the scan stops at the first
+    /// request that is still fresh and every entry is visited once: O(1)
+    /// amortised per request.
+    async fn reap_expired(&mut self) -> Result<(), ClientError> {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        while let Some(&(issued, id)) = self.issued.front() {
+            if now.saturating_duration_since(issued) < self.requests.timeout + REAP_GRACE {
+                break;
+            }
+            self.issued.pop_front();
+            if let Some(Pending::Request { method, response }) = self.pending.remove(&id) {
+                let _ = response.send(Err(ClientError::Timeout { method }));
+                expired.push(id);
+            }
+        }
+        for id in expired {
+            self.send_notification("$/cancelRequest", json!({"id": id}))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn respond(
@@ -429,8 +586,8 @@ impl<W: AsyncWrite + Unpin> Connection<W> {
         result: Result<Value, ClientError>,
     ) -> Option<oneshot::Sender<()>> {
         match self.pending.remove(&id) {
-            Some(Pending::Request(sender)) => {
-                let _ = sender.send(result);
+            Some(Pending::Request { response, .. }) => {
+                let _ = response.send(result);
                 None
             }
             // The caller of shutdown only needs to know the server acknowledged.
@@ -450,6 +607,7 @@ async fn run<R, W>(
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedSender<Event>,
     root_uri: Uri,
+    requests: Requests,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -457,7 +615,7 @@ async fn run<R, W>(
     let (incoming_sender, mut incoming) = mpsc::unbounded_channel();
     tokio::spawn(read_loop(reader, incoming_sender));
 
-    let mut connection = Connection::new(writer);
+    let mut connection = Connection::new(writer, requests);
     match handshake(&mut connection, &mut incoming, &events, &root_uri).await {
         Ok(capabilities) => {
             let _ = events.send(Event::Ready(Box::new(capabilities)));
@@ -600,7 +758,10 @@ async fn handshake(
         .send_request(
             "initialize",
             initialize_params(root_uri),
-            Pending::Request(sender),
+            Pending::Request {
+                method: "initialize".into(),
+                response: sender,
+            },
         )
         .await?;
 
@@ -646,7 +807,13 @@ async fn serve(
     events: &mpsc::UnboundedSender<Event>,
 ) {
     loop {
+        let reap_at = connection.next_reap_deadline();
         tokio::select! {
+            () = sleep_until(reap_at) => {
+                if connection.reap_expired().await.is_err() {
+                    return;
+                }
+            }
             message = incoming.recv() => {
                 let Some(message) = message else {
                     return;
@@ -733,12 +900,31 @@ async fn handle_command(
                 .await
         }
         Command::Request {
+            id,
             method,
             params,
             response,
         } => {
             connection
-                .send_request(&method, params, Pending::Request(response))
+                .send_request_with_id(
+                    id,
+                    &method,
+                    params,
+                    Pending::Request {
+                        method: method.clone(),
+                        response,
+                    },
+                )
+                .await
+        }
+        Command::Cancel { id } => {
+            // The caller may have stopped waiting long ago; the server is told
+            // regardless, because it is the one still doing the work.
+            if let Some(Pending::Request { response, .. }) = connection.pending.remove(&id) {
+                let _ = response.send(Err(ClientError::Cancelled));
+            }
+            connection
+                .send_notification("$/cancelRequest", json!({"id": id}))
                 .await
         }
         Command::Shutdown { done } => {
@@ -746,6 +932,14 @@ async fn handle_command(
                 .send_request("shutdown", Value::Null, Pending::Shutdown(done))
                 .await
         }
+    }
+}
+
+/// Wait for the reaper deadline, or forever when nothing is pending.
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending::<()>().await,
     }
 }
 
@@ -910,28 +1104,53 @@ mod tests {
         Uri::from_str(value).unwrap()
     }
 
+    fn take_frame(buffer: &mut Vec<u8>) -> Option<Value> {
+        let (header_end, header_len) = find_headers(buffer)?;
+        let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+        let length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .unwrap()
+            .trim()
+            .parse::<usize>()
+            .unwrap();
+        let start = header_end + header_len;
+        if buffer.len() < start + length {
+            return None;
+        }
+        let body = buffer[start..start + length].to_vec();
+        buffer.drain(..start + length);
+        serde_json::from_slice(&body).unwrap()
+    }
+
     async fn read_frame(stream: &mut (impl AsyncRead + Unpin), buffer: &mut Vec<u8>) -> Value {
         loop {
-            if let Some((header_end, header_len)) = find_headers(buffer) {
-                let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
-                let length = headers
-                    .lines()
-                    .find_map(|line| line.strip_prefix("Content-Length: "))
-                    .unwrap()
-                    .trim()
-                    .parse::<usize>()
-                    .unwrap();
-                let start = header_end + header_len;
-                if buffer.len() >= start + length {
-                    let body = buffer[start..start + length].to_vec();
-                    buffer.drain(..start + length);
-                    return serde_json::from_slice(&body).unwrap();
-                }
+            if let Some(frame) = take_frame(buffer) {
+                return frame;
             }
             let mut chunk = [0u8; 4096];
             let read = stream.read(&mut chunk).await.unwrap();
             assert!(read > 0, "server stream ended early");
             buffer.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    /// Read one frame, or report that the client stayed silent for `wait`.
+    async fn read_frame_within(
+        stream: &mut (impl AsyncRead + Unpin),
+        buffer: &mut Vec<u8>,
+        wait: Duration,
+    ) -> Option<Value> {
+        if let Some(frame) = take_frame(buffer) {
+            return Some(frame);
+        }
+        let mut chunk = [0u8; 4096];
+        match tokio::time::timeout(wait, stream.read(&mut chunk)).await {
+            Ok(Ok(read)) if read > 0 => {
+                buffer.extend_from_slice(&chunk[..read]);
+                take_frame(buffer)
+            }
+            _ => None,
         }
     }
 
@@ -1141,5 +1360,195 @@ mod tests {
             ),
             4.."let 🎉".len()
         );
+    }
+
+    /// Complete the handshake and leave the server reading commands.
+    async fn handshake(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), buffer: &mut Vec<u8>) {
+        let initialize = read_frame(stream, buffer).await;
+        write_frame(
+            stream,
+            json!({
+                "jsonrpc": "2.0",
+                "id": initialize["id"],
+                "result": {"capabilities": {"hoverProvider": true}},
+            }),
+        )
+        .await;
+        let initialized = read_frame(stream, buffer).await;
+        assert_eq!(initialized["method"], "initialized");
+    }
+
+    #[tokio::test]
+    async fn reports_only_the_capabilities_the_server_declared() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(64 * 1024);
+        let mut client = Client::connect(client_stream, uri("file:///tmp/p"))
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            handshake(&mut server_stream, &mut buffer).await;
+        });
+
+        let Event::Ready(capabilities) = client.next_event().await.unwrap() else {
+            panic!("expected the initialize result");
+        };
+        assert_eq!(
+            capabilities.hover_provider,
+            Some(lsp_types::HoverProviderCapability::Simple(true))
+        );
+        assert!(capabilities.completion_provider.is_none());
+        assert!(capabilities.definition_provider.is_none());
+        assert!(capabilities.code_action_provider.is_none());
+        assert!(capabilities.text_document_sync.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn times_out_and_cancels_an_unanswered_request() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(64 * 1024);
+        let mut client = Client::connect(client_stream, uri("file:///tmp/p"))
+            .await
+            .unwrap();
+        let handle = client.handle();
+        let server = tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            handshake(&mut server_stream, &mut buffer).await;
+
+            let hover = read_frame(&mut server_stream, &mut buffer).await;
+            assert_eq!(hover["method"], methods::HOVER);
+            let cancel = read_frame_within(&mut server_stream, &mut buffer, Duration::from_secs(2))
+                .await
+                .expect("an abandoned request must be cancelled");
+            assert_eq!(cancel["method"], "$/cancelRequest");
+            assert_eq!(cancel["params"]["id"], hover["id"]);
+
+            // The pending entry is gone, so the only frame left is the next
+            // provider request — never a second cancellation.
+            let next = read_frame(&mut server_stream, &mut buffer).await;
+            assert_eq!(next["method"], methods::DEFINITION);
+            write_frame(
+                &mut server_stream,
+                json!({"jsonrpc": "2.0", "id": next["id"], "result": {"ok": true}}),
+            )
+            .await;
+
+            let shutdown = read_frame(&mut server_stream, &mut buffer).await;
+            assert_eq!(shutdown["method"], "shutdown");
+            write_frame(
+                &mut server_stream,
+                json!({"jsonrpc": "2.0", "id": shutdown["id"], "result": null}),
+            )
+            .await;
+            let exit = read_frame(&mut server_stream, &mut buffer).await;
+            assert_eq!(exit["method"], "exit");
+        });
+
+        assert!(matches!(
+            client.next_event().await.unwrap(),
+            Event::Ready(_)
+        ));
+        let error = handle
+            .request_within(methods::HOVER, json!({}), Duration::from_millis(60))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ClientError::Timeout { method } if method == methods::HOVER),
+            "unexpected error: {error}"
+        );
+        let value = handle
+            .request(methods::DEFINITION, json!({}))
+            .await
+            .unwrap();
+        assert_eq!(value["ok"], true);
+        handle.shutdown();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_one_of_two_requests_leaves_the_other() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(64 * 1024);
+        let mut client = Client::connect(client_stream, uri("file:///tmp/p"))
+            .await
+            .unwrap();
+        let handle = client.handle();
+        let server = tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            handshake(&mut server_stream, &mut buffer).await;
+
+            let first = read_frame(&mut server_stream, &mut buffer).await;
+            let second = read_frame(&mut server_stream, &mut buffer).await;
+            assert_eq!(first["method"], methods::HOVER);
+            assert_eq!(second["method"], methods::COMPLETION);
+
+            let cancel = read_frame_within(&mut server_stream, &mut buffer, Duration::from_secs(2))
+                .await
+                .expect("the timed-out request must be cancelled");
+            assert_eq!(cancel["method"], "$/cancelRequest");
+            assert_eq!(cancel["params"]["id"], first["id"]);
+            assert_ne!(cancel["params"]["id"], second["id"]);
+
+            write_frame(
+                &mut server_stream,
+                json!({"jsonrpc": "2.0", "id": second["id"], "result": {"items": []}}),
+            )
+            .await;
+            assert!(
+                read_frame_within(&mut server_stream, &mut buffer, Duration::from_millis(300))
+                    .await
+                    .is_none()
+            );
+        });
+
+        assert!(matches!(
+            client.next_event().await.unwrap(),
+            Event::Ready(_)
+        ));
+        let (first, second) = tokio::join!(
+            handle.request_within(methods::HOVER, json!({}), Duration::from_millis(60)),
+            handle.request_within(methods::COMPLETION, json!({}), Duration::from_secs(5)),
+        );
+        assert!(matches!(first, Err(ClientError::Timeout { .. })));
+        assert_eq!(second.unwrap()["items"], json!([]));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reaps_requests_whose_caller_went_away() {
+        let budget = Duration::from_millis(60);
+        let (client_stream, mut server_stream) = tokio::io::duplex(64 * 1024);
+        let mut client = Client::connect_with_budget(client_stream, uri("file:///tmp/p"), budget)
+            .await
+            .unwrap();
+        let handle = client.handle();
+        let server = tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            handshake(&mut server_stream, &mut buffer).await;
+
+            let hover = read_frame(&mut server_stream, &mut buffer).await;
+            assert_eq!(hover["method"], methods::HOVER);
+            let cancel = read_frame_within(&mut server_stream, &mut buffer, Duration::from_secs(2))
+                .await
+                .expect("a request whose caller dropped must still be cancelled");
+            assert_eq!(cancel["method"], "$/cancelRequest");
+            assert_eq!(cancel["params"]["id"], hover["id"]);
+            assert!(
+                read_frame_within(&mut server_stream, &mut buffer, Duration::from_millis(300))
+                    .await
+                    .is_none()
+            );
+        });
+
+        assert!(matches!(
+            client.next_event().await.unwrap(),
+            Event::Ready(_)
+        ));
+        // Poll once so the request is sent, then drop it like a cancelled task.
+        let abandoned = tokio::time::timeout(
+            Duration::from_millis(5),
+            handle.request(methods::HOVER, json!({})),
+        )
+        .await;
+        assert!(abandoned.is_err(), "the request should still be pending");
+        server.await.unwrap();
     }
 }
