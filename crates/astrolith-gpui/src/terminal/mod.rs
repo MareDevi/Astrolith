@@ -141,6 +141,32 @@ struct RowView {
     runs: Vec<RunView>,
 }
 
+/// A copy of the visible screen taken under the parser lock.
+///
+/// The reader thread parses under the same mutex, so the render side must not
+/// hold it while it allocates strings and converts colours. Copying the cells
+/// is a flat clone of the visible screen; everything expensive happens after
+/// the lock is released.
+struct ScreenSnapshot {
+    cells: Vec<Option<vt100::Cell>>,
+    cols: u16,
+    rows: u16,
+    cursor: (u16, u16),
+    cursor_hidden: bool,
+    live: bool,
+}
+
+impl ScreenSnapshot {
+    fn cell(&self, row: u16, col: u16) -> Option<&vt100::Cell> {
+        if row >= self.rows || col >= self.cols {
+            return None;
+        }
+        self.cells
+            .get(usize::from(row) * usize::from(self.cols) + usize::from(col))
+            .and_then(Option::as_ref)
+    }
+}
+
 /// A grid position inside the visible terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GridPoint {
@@ -535,103 +561,125 @@ impl TerminalPanel {
         }
     }
 
+    /// Copy the visible screen under the parser lock, once per frame.
+    fn snapshot(&self) -> Option<ScreenSnapshot> {
+        let session = self.session.as_ref()?;
+        let (cols, rows) = session.size();
+        Some(session.with_screen(|screen| {
+            let mut cells = Vec::with_capacity(usize::from(cols) * usize::from(rows));
+            for row in 0..rows {
+                for col in 0..cols {
+                    cells.push(screen.cell(row, col).cloned());
+                }
+            }
+            ScreenSnapshot {
+                cells,
+                cols,
+                rows,
+                cursor: screen.cursor_position(),
+                cursor_hidden: screen.hide_cursor(),
+                live: screen.scrollback() == 0,
+            }
+        }))
+    }
+
     fn render_rows(&self, window: &Window, cx: &App) -> Vec<RowView> {
-        let Some(session) = &self.session else {
+        let Some(snapshot) = self.snapshot() else {
             return Vec::new();
         };
         let foreground: Hsla = cx.theme().foreground;
         let background: Hsla = cx.theme().background;
         let cursor_color: Hsla = cx.theme().foreground;
         let selection_color: Hsla = cx.theme().selection;
-        let cursor_hidden = session.with_screen(|screen| screen.hide_cursor());
-        let cursor = session.with_screen(|screen| screen.cursor_position());
-        let live = session.with_screen(|screen| screen.scrollback() == 0);
+        let cursor = snapshot.cursor;
         let selection = self.selection;
         let focused = self.focus.is_focused(window);
-        let (cols, rows) = session.size();
-        session.with_screen(|screen| {
-            let mut output = Vec::with_capacity(usize::from(rows));
-            for row in 0..rows {
-                // Find the last cell that paints something: trailing blanks
-                // on the default background need no element at all.
-                let mut end = 0;
-                let mut col = cols;
-                while col > 0 {
-                    col -= 1;
-                    let Some(cell) = screen.cell(row, col) else {
-                        continue;
-                    };
-                    if cell.is_wide_continuation() {
-                        continue;
-                    }
-                    let point = GridPoint { row, col };
-                    let padding = cell.contents().is_empty()
-                        && matches!(cell.bgcolor(), vt100::Color::Default)
-                        && !cell.inverse()
-                        && !selection.is_some_and(|selection| selection.contains(point))
-                        && !(live && !cursor_hidden && cursor == (row, col) && focused);
-                    if !padding {
-                        end = col + if cell.is_wide() { 2 } else { 1 };
-                        break;
-                    }
+        let (cols, rows) = (snapshot.cols, snapshot.rows);
+        let mut output = Vec::with_capacity(usize::from(rows));
+        for row in 0..rows {
+            // Find the last cell that paints something: trailing blanks
+            // on the default background need no element at all.
+            let mut end = 0;
+            let mut col = cols;
+            while col > 0 {
+                col -= 1;
+                let Some(cell) = snapshot.cell(row, col) else {
+                    continue;
+                };
+                if cell.is_wide_continuation() {
+                    continue;
                 }
-
-                let mut runs = Vec::new();
-                let mut col = 0;
-                while col < end {
-                    let Some(cell) = screen.cell(row, col) else {
-                        break;
-                    };
-                    if cell.is_wide_continuation() {
-                        col += 1;
-                        continue;
-                    }
-                    let point = GridPoint { row, col };
-                    let selected = selection.is_some_and(|selection| selection.contains(point));
-                    let is_cursor = live && !cursor_hidden && cursor == (row, col) && focused;
-                    let mut fg = ansi_color(cell.fgcolor(), foreground);
-                    let mut bg = ansi_color(cell.bgcolor(), background);
-                    if cell.inverse() {
-                        std::mem::swap(&mut fg, &mut bg);
-                    }
-                    if selected {
-                        bg = selection_color;
-                        fg = foreground;
-                    }
-                    if is_cursor {
-                        std::mem::swap(&mut fg, &mut bg);
-                        bg = cursor_color;
-                        fg = background;
-                    }
-                    if cell.dim() {
-                        fg = fg.opacity(0.65);
-                    }
-                    let text = if cell.contents().is_empty() {
-                        " "
-                    } else {
-                        cell.contents()
-                    };
-                    let wide = cell.is_wide();
-                    let width_cells = if wide { 2 } else { 1 };
-                    RunView::push(
-                        &mut runs,
-                        text,
-                        width_cells,
-                        RunStyle {
-                            foreground: fg,
-                            background: bg,
-                            bold: cell.bold(),
-                            underline: cell.underline(),
-                            wide,
-                            highlight: selected || is_cursor,
-                        },
-                    );
-                    col += width_cells;
+                let point = GridPoint { row, col };
+                let padding = cell.contents().is_empty()
+                    && matches!(cell.bgcolor(), vt100::Color::Default)
+                    && !cell.inverse()
+                    && !selection.is_some_and(|selection| selection.contains(point))
+                    && !(snapshot.live
+                        && !snapshot.cursor_hidden
+                        && cursor == (row, col)
+                        && focused);
+                if !padding {
+                    end = col + if cell.is_wide() { 2 } else { 1 };
+                    break;
                 }
-                output.push(RowView { runs });
             }
-            output
-        })
+
+            let mut runs = Vec::new();
+            let mut col = 0;
+            while col < end {
+                let Some(cell) = snapshot.cell(row, col) else {
+                    break;
+                };
+                if cell.is_wide_continuation() {
+                    col += 1;
+                    continue;
+                }
+                let point = GridPoint { row, col };
+                let selected = selection.is_some_and(|selection| selection.contains(point));
+                let is_cursor =
+                    snapshot.live && !snapshot.cursor_hidden && cursor == (row, col) && focused;
+                let mut fg = ansi_color(cell.fgcolor(), foreground);
+                let mut bg = ansi_color(cell.bgcolor(), background);
+                if cell.inverse() {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                if selected {
+                    bg = selection_color;
+                    fg = foreground;
+                }
+                if is_cursor {
+                    std::mem::swap(&mut fg, &mut bg);
+                    bg = cursor_color;
+                    fg = background;
+                }
+                if cell.dim() {
+                    fg = fg.opacity(0.65);
+                }
+                let text = if cell.contents().is_empty() {
+                    " "
+                } else {
+                    cell.contents()
+                };
+                let wide = cell.is_wide();
+                let width_cells = if wide { 2 } else { 1 };
+                RunView::push(
+                    &mut runs,
+                    text,
+                    width_cells,
+                    RunStyle {
+                        foreground: fg,
+                        background: bg,
+                        bold: cell.bold(),
+                        underline: cell.underline(),
+                        wide,
+                        highlight: selected || is_cursor,
+                    },
+                );
+                col += width_cells;
+            }
+            output.push(RowView { runs });
+        }
+        output
     }
 }
 
