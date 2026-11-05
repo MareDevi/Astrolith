@@ -88,7 +88,7 @@ flowchart TD
 
 1. 在现有 `astrolith-core::preferences`/GPUI `layout` seam 增加 `WorkspaceMode`（Writing/Build/Preview）和每模式布局偏好。纯布局策略不持有文档文本或 EditorState。
 2. Shell 保留全局 chrome、mode、transient inspector open 与所有长期实体。ProjectWorkspace 继续管理 session registry、路径与服务上下文。模式只改变组合和 editor presentation；不走文件切换或项目重开路径。
-3. Writing 隐藏 Dock chrome，中心列使用 token measure；Build 复用导航、session、命令与 Dock，并以代码呈现打开行号/折叠/语法高亮；Preview 用 rich-text 渲染正文投影，Astro preview 只在打开底部 Dock 时出现。
+3. Writing 隐藏 Dock chrome，中心列使用 token measure，并以 WYSIWYG 渲染 Markdown 正文（同一 EditorState 作为输入模型）；Build 复用导航、session、命令与 Dock，并以代码呈现打开行号/折叠/语法高亮；Preview 用 rich-text 渲染正文投影，Astro preview 只在打开底部 Dock 时出现。
 4. 显示完整源码不能新建独立 buffer。先设计 WriterProjection 与 complete-source 的单一事务边界；可见坐标和源码坐标分开，保留 caret/selection 映射。仅改 `.line_number(true)` 不能完成 Build 源码模式。
 5. FrontmatterForm 从 right Dock 移到 controlled Popover，保留实体与 subscription；临时可见性不落盘。字段 ID 用文档身份与 schema path；不以列表下标替代身份。
 6. 统一 history 的 owner 应在 DocumentSession/文档事务 seam，覆盖 body 与 FM；不能维护两个可分叉 undo 栈。先做失败回归：body edit、hidden FM edit、undo/redo、并发保存与 schema refresh。具体桥接方案在 M4a 针对 pinned editor history 实证后确定。

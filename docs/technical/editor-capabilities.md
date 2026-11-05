@@ -2,7 +2,11 @@
 
 实际编辑所有权为 `astrolith-gpui/src/editor/session.rs::DocumentSession`：完整源 DocumentBuffer、WriterProjection 与 retained EditorState。正文 undo/redo 来自 pinned 编辑器；隐藏 Frontmatter-only 补丁尚缺统一 history 集成证据。
 
-Kit 固定为 0.8.1，GPUI engine 为 gpui-pre 0.3.10。Writing 关闭行号、folding、自动括号与 smart indent，保留正文装饰与 Focus/Typewriter；Build 在同一个 EditorState 上打开行号、缩进参考线、folding、自动括号/智能缩进和语法高亮（Markdown/MDX、Astro、TypeScript/TSX、JavaScript/JSX、JSON/JSONC、CSS、HTML、Svelte、YAML、TOML；未知扩展名回退 text），并关闭软换行。
+Kit 固定为 0.8.1，GPUI engine 为 gpui-pre 0.3.10。Writing 使用 WYSIWYG 渲染面：Markdown 标题、强调、行内代码、链接文字、列表、引用、围栏代码与分隔线按排版呈现，标题井号、强调星号、列表符号、链接目标、代码围栏不绘制；段落换行、标题字号、代码背景和 Focus/Typewriter 均来自渲染层。Build 在同一个 EditorState 上打开行号、缩进参考线、folding、自动括号/智能缩进和语法高亮（Markdown/MDX、Astro、TypeScript/TSX、JavaScript/JSX、JSON/JSONC、CSS、HTML、Svelte、YAML、TOML；未知扩展名回退 text），并关闭软换行。
+
+WYSIWYG 的数据所有权没有分叉：retained `EditorState` 仍是输入模型，负责光标、选区、IME、复制粘贴和编辑器内部行为；`astrolith-document::wysiwyg::WysiwygDocument` 从 writer projection 解析渲染块并保留每个可见字节到源字节的映射。`astrolith-gpui/src/editor/writer_surface.rs` 用 pinned `editor_host` seam 渲染 `BlockNode`、收集每个 leaf 的 `LeafGeometry`，据此绘制光标、处理点击/拖选和上下左右导航；输入、撤销和保存仍走原有 session 事务。鼠标点击与键入、模式往返和隐藏 frontmatter/imports 的完整源映射有 headless 回归。
+
+WYSIWYG 的限制：setext 标题、表格、缩进代码块、HTML/MDX 组件和引用链接定义仍按普通文本或原始源码显示，不伪造富文本结构；图片显示 alt 文本而不是内嵌图片；行内标记只在可解析成对分隔符时隐藏，畸形语法保持可见。渲染面不读取磁盘，也不绕过 `WriterProjection` 的可见字节边界。
 
 Build 的工程文件导航把 Astro 常用文本源打开为同一个 retained `DocumentSession`：`.astro`、`.ts/.mts/.cts/.tsx/.jsx/.js/.mjs/.cjs`、`.json/.jsonc`、`.css/.scss/.less`、`.html`、`.svelte`、`.vue`、`.md/.mdx`、`.yaml/.yml` 与 `.toml` 可编辑；二进制/资源文件与项目外文件仍走 readonly 快照。内容集合条目仍优先使用其 collection session，frontmatter 表单与 schema 只作用于这些条目。
 

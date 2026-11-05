@@ -191,13 +191,20 @@ document, its collection, save state and save action; closing and switching
 other open documents remain in its overflow menu.
 
 The three modes present the same document differently. **Writing** is the
-centred writing page described here. **Build** turns the same retained editor
-into a source view with line numbers, indent guides, folding and syntax
-highlighting, keeping the real file tabs, project explorer and terminal.
-**Preview** replaces the editor with a read-only rendering of the body,
-frontmatter and MDX imports excluded, like a Markdown preview in a code
-editor; the Astro preview remains a separate bottom panel opened from the
-Panels menu. The **Details** inspector exists only in Writing.
+centred writing page described here, and it is what-you-see-is-what-you-get:
+headings, bold and italic text, inline code, link text, lists, quotes, fenced
+code and rules are rendered, while their Markdown punctuation is hidden.
+Clicking anywhere on the page places the caret in the source at that position;
+typing, selection, IME, undo and save continue to use the same retained editor.
+Tabs, indentation, Setext headings, tables, HTML/MDX blocks and image
+embeds keep their source form rather than being guessed into rich text.
+**Build** turns the same retained editor into a source view with line numbers,
+indent guides, folding and syntax highlighting, keeping the real file tabs,
+project explorer and terminal. **Preview** replaces the editor with a
+read-only rendering of the body, frontmatter and MDX imports excluded, like a
+Markdown preview in a code editor; the Astro preview remains a separate bottom
+panel opened from the Panels menu. The **Details** inspector exists only in
+Writing.
 
 Build also speaks the Astro toolchain's language servers when the project has
 installed them: syntax highlighting for `.astro`, TypeScript/TSX,

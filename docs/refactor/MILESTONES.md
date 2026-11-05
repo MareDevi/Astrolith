@@ -29,6 +29,7 @@
 | M7-UI | 完成（用户反馈后的界面放大与 Preferences 重设计） | 默认界面 18 px，旧 14/16 一次性迁移并备份；Preferences 去掉重复标题、dialog 放大、分区卡片与固定动作栏；记录见 ACCEPTANCE §17 |
 | M9 | 完成（协议层自动化与 headless smoke；真实服务器原生交互待验收） | Build 语法高亮覆盖 Astro 常用技术栈；`astrolith-lsp` 客户端支持诊断/补全/悬停/定义/code action 与项目内服务器发现；记录见 ACCEPTANCE §20 |
 | M8 | 完成（自动化与原生截图） | Writing 保留写作页；Build 单一 session 切换为 IDE 源码呈现（行号、缩进参考线、折叠、语法高亮、等宽铺满）；Preview 渲染 Markdown/MDX 正文；Inspector 仅 Writing；记录见 ACCEPTANCE §19 |
+| M10 | 完成（headless 回归与原生截图） | Writing 使用 WYSIWYG 渲染正文，Markdown 标记隐藏；EditorState 仍为输入/历史模型；点击、拖选、导航、Focus/Typewriter 与完整源映射；记录见 ACCEPTANCE §21 |
 
 M1 的退出只覆盖主题与共享控件本身；mock 的模式切换器、Build 标签条等区域属于 M2 及后续里程碑，未在 M1 提前实现。
 

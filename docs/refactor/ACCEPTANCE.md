@@ -383,3 +383,18 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - 一次性真机式 smoke（未提交）：临时项目内 `node_modules/.bin/astro-ls` 假服务器 + headless GPUI 打开 `.astro` → Build → 服务器收到 didOpen → 编辑器 `DiagnosticSet` 得到 1 条诊断；`Client::spawn_process` 也以真实子进程验证 initialize/诊断/shutdown/exit。
 - 限制：未实现 rename、workspace symbol、signature help、diagnostics 面板、inlay hints、semantic tokens、snippet 补全与跨文件/`documentChanges` code action；服务器未安装时仅记录日志并保留高亮，不下载/提示安装。Markdown 无内置服务器。原生 Wayland 上的真实 `astro-ls`/TS server 交互、IME、150%/200% 缩放未在本轮重验。
 - 验证：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试合计 734 passed、0 failed、7 ignored（含 `astrolith-lsp` 24 个）；fixture 单元 6 passed，Astro fixture compatibility PASS。`Cargo.lock` 随新 crate 与 grammar 依赖提交。
+
+## 21. Writing WYSIWYG 执行记录
+
+- 范围：`astrolith-document/src/wysiwyg.rs`（纯渲染块解析、行内标记与源映射）、`astrolith-gpui/src/editor/writer_surface.rs`（GPUI Kit `editor_host` 渲染、光标/选区绘制、点击/拖选、上下左右导航、Focus/Typewriter 滚动）、`editor/session.rs`（writer entity、点击选区、导航拦截、copyedit/占位符转发）、`layout/panels.rs`（Writing 渲染 writer surface）、`editor/selection_toolbar.rs`（用渲染选区定位）。
+- 行为：
+  - Writing 不再绘制 Markdown 标记：ATX 标题字号由 `BlockNode::Heading` 提供，`**`/`*`/`~~`/行内代码/链接目标/列表符号/引用符号/围栏均隐藏；粗体、斜体、删除线、行内代码背景、链接文字、预算代码块、列表和引用按排版呈现。
+  - retained `EditorState` 仍是唯一输入模型；光标、选区、IME、复制粘贴、格式化命令、撤销/重做与保存沿用原 session 事务。`WysiwygDocument` 只从 `WriterProjection.visible` 解析，渲染面不读取磁盘，也不越过可见字节边界。
+  - 点击/拖选通过 `LeafGeometry` 映射回 source 字节；左/右导航跳过隐藏标记，上/下导航按渲染行框移动；浮动格式工具条使用渲染选区矩形定位。
+  - Focus 按渲染块与当前句子范围降低非活动块透明度；Typewriter 用渲染光标位置滚动居中，并在普通模式下保证光标可见。
+- 回归：
+  - `astrolith-document`：8 个 WYSIWYG 用例覆盖标题/强调/代码/链接/图片/列表/引用/围栏、隐藏标记的 source 映射、尾随空行、畸形语法保留与 UTF-8 边界。
+  - `astrolith-gpui`：新增 `writing_surface_click_moves_the_caret_and_keeps_typing_working`，点击渲染页后光标进入文档且键入回到 buffer；原 384 个 GPUI 用例全部通过。
+- 验证：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试 **914 passed、0 failed、8 ignored**；fixture 单元 6 passed，Astro fixture compatibility PASS。
+- 原生证据：Hyprland / Wayland，`fixtures/parity-project`，`work-in-progress.md`，截图 `/tmp/wysiwyg-native.png`。确认标题按标题字号渲染、正文不显示 `#`/反引号、行内代码有背景、页面保持居中与留白。
+- 限制：setext 标题、表格、缩进代码块、HTML/MDX 组件与引用链定义仍按普通文本/源码显示；图片显示 alt 文本而非内嵌图片；原生 IME 组合、150%/200% 缩放与 macOS/Windows 未在本轮重验。
