@@ -95,19 +95,50 @@ impl CellMetrics {
     }
 }
 
-/// One rendered cell.
-struct CellView {
-    text: SharedString,
+/// Paint state shared by a run of adjacent cells.
+#[derive(Clone, Copy, PartialEq)]
+struct RunStyle {
     foreground: Hsla,
     background: Hsla,
     bold: bool,
     underline: bool,
+    /// Kept in the key so a wide glyph never shares a run with narrow ones.
+    wide: bool,
+    /// Selection and cursor cells split runs even if their colours coincide.
+    highlight: bool,
+}
+
+/// Adjacent cells that share one paint state, painted as one text run.
+struct RunView {
+    text: String,
+    style: RunStyle,
+    /// Columns covered, so wide cells and padding keep their exact extent.
     width_cells: u16,
+}
+
+impl RunView {
+    /// Append a cell to `runs`, merging with the previous run when the paint
+    /// state matches. The cell text is copied into the run instead of
+    /// allocating one string per cell.
+    fn push(runs: &mut Vec<Self>, text: &str, width_cells: u16, style: RunStyle) {
+        if let Some(run) = runs.last_mut()
+            && run.style == style
+        {
+            run.text.push_str(text);
+            run.width_cells = run.width_cells.saturating_add(width_cells);
+            return;
+        }
+        runs.push(Self {
+            text: text.to_owned(),
+            style,
+            width_cells,
+        });
+    }
 }
 
 /// One rendered row.
 struct RowView {
-    cells: Vec<CellView>,
+    runs: Vec<RunView>,
 }
 
 /// A grid position inside the visible terminal.
@@ -514,13 +545,38 @@ impl TerminalPanel {
         let cursor = session.with_screen(|screen| screen.cursor_position());
         let live = session.with_screen(|screen| screen.scrollback() == 0);
         let selection = self.selection;
+        let focused = self.focus.is_focused(window);
         let (cols, rows) = session.size();
         session.with_screen(|screen| {
             let mut output = Vec::with_capacity(usize::from(rows));
             for row in 0..rows {
-                let mut cells = Vec::with_capacity(usize::from(cols));
+                // Find the last cell that paints something: trailing blanks
+                // on the default background need no element at all.
+                let mut end = 0;
+                let mut col = cols;
+                while col > 0 {
+                    col -= 1;
+                    let Some(cell) = screen.cell(row, col) else {
+                        continue;
+                    };
+                    if cell.is_wide_continuation() {
+                        continue;
+                    }
+                    let point = GridPoint { row, col };
+                    let padding = cell.contents().is_empty()
+                        && matches!(cell.bgcolor(), vt100::Color::Default)
+                        && !cell.inverse()
+                        && !selection.is_some_and(|selection| selection.contains(point))
+                        && !(live && !cursor_hidden && cursor == (row, col) && focused);
+                    if !padding {
+                        end = col + if cell.is_wide() { 2 } else { 1 };
+                        break;
+                    }
+                }
+
+                let mut runs = Vec::new();
                 let mut col = 0;
-                while col < cols {
+                while col < end {
                     let Some(cell) = screen.cell(row, col) else {
                         break;
                     };
@@ -530,10 +586,7 @@ impl TerminalPanel {
                     }
                     let point = GridPoint { row, col };
                     let selected = selection.is_some_and(|selection| selection.contains(point));
-                    let is_cursor = live
-                        && !cursor_hidden
-                        && cursor == (row, col)
-                        && self.focus.is_focused(window);
+                    let is_cursor = live && !cursor_hidden && cursor == (row, col) && focused;
                     let mut fg = ansi_color(cell.fgcolor(), foreground);
                     let mut bg = ansi_color(cell.bgcolor(), background);
                     if cell.inverse() {
@@ -552,22 +605,28 @@ impl TerminalPanel {
                         fg = fg.opacity(0.65);
                     }
                     let text = if cell.contents().is_empty() {
-                        " ".into()
+                        " "
                     } else {
-                        SharedString::from(cell.contents())
+                        cell.contents()
                     };
-                    let width_cells = if cell.is_wide() { 2 } else { 1 };
-                    cells.push(CellView {
+                    let wide = cell.is_wide();
+                    let width_cells = if wide { 2 } else { 1 };
+                    RunView::push(
+                        &mut runs,
                         text,
-                        foreground: fg,
-                        background: bg,
-                        bold: cell.bold(),
-                        underline: cell.underline(),
                         width_cells,
-                    });
+                        RunStyle {
+                            foreground: fg,
+                            background: bg,
+                            bold: cell.bold(),
+                            underline: cell.underline(),
+                            wide,
+                            highlight: selected || is_cursor,
+                        },
+                    );
                     col += width_cells;
                 }
-                output.push(RowView { cells });
+                output.push(RowView { runs });
             }
             output
         })
@@ -764,20 +823,20 @@ impl Render for TerminalPanel {
                                     .w_full()
                                     .flex()
                                     .flex_shrink_0()
-                                    .children(row.cells.into_iter().map(|cell| {
+                                    .children(row.runs.into_iter().map(|run| {
                                         div()
                                             .h_full()
-                                            .w(px(col_width * f32::from(cell.width_cells)))
+                                            .w(px(col_width * f32::from(run.width_cells)))
                                             .flex_shrink_0()
                                             .flex()
                                             .items_center()
-                                            .bg(cell.background)
-                                            .text_color(cell.foreground)
-                                            .when(cell.bold, |cell| {
-                                                cell.font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .bg(run.style.background)
+                                            .text_color(run.style.foreground)
+                                            .when(run.style.bold, |run| {
+                                                run.font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             })
-                                            .when(cell.underline, |cell| cell.underline())
-                                            .child(cell.text)
+                                            .when(run.style.underline, |run| run.underline())
+                                            .child(SharedString::from(run.text))
                                     }))
                             })),
                     )
@@ -919,6 +978,68 @@ mod tests {
             col_width,
             row_height,
         }
+    }
+
+    fn plain_style() -> RunStyle {
+        RunStyle {
+            foreground: gpui_kit::hsla(0., 0., 1., 1.),
+            background: gpui_kit::hsla(0., 0., 0., 1.),
+            bold: false,
+            underline: false,
+            wide: false,
+            highlight: false,
+        }
+    }
+
+    #[test]
+    fn a_plain_line_coalesces_into_one_run() {
+        let mut runs = Vec::new();
+        for _ in 0..80 {
+            RunView::push(&mut runs, " ", 1, plain_style());
+        }
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text.len(), 80);
+        assert_eq!(runs[0].width_cells, 80);
+    }
+
+    #[test]
+    fn style_highlight_and_wide_cells_split_runs_at_their_boundaries() {
+        let mut runs = Vec::new();
+        for _ in 0..4 {
+            RunView::push(&mut runs, "a", 1, plain_style());
+        }
+        let mut bold = plain_style();
+        bold.bold = true;
+        RunView::push(&mut runs, "b", 1, bold);
+        for _ in 0..4 {
+            RunView::push(&mut runs, "c", 1, plain_style());
+        }
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[1].text, "b");
+        assert!(runs[1].style.bold);
+
+        let mut highlighted = Vec::new();
+        RunView::push(&mut highlighted, "aa", 1, plain_style());
+        RunView::push(&mut highlighted, "b", 1, plain_style());
+        assert_eq!(highlighted.len(), 1);
+        let mut selected = plain_style();
+        selected.highlight = true;
+        RunView::push(&mut highlighted, "s", 1, selected);
+        RunView::push(&mut highlighted, "t", 1, plain_style());
+        assert_eq!(
+            highlighted.len(),
+            3,
+            "a selected cell must split the run even with equal colours"
+        );
+
+        let mut wide = plain_style();
+        wide.wide = true;
+        let mut cells = Vec::new();
+        RunView::push(&mut cells, "x", 1, plain_style());
+        RunView::push(&mut cells, "界", 2, wide);
+        RunView::push(&mut cells, "界", 2, wide);
+        assert_eq!(cells.len(), 2, "narrow and wide cells never share a run");
+        assert_eq!(cells[1].width_cells, 4);
     }
 
     #[test]
