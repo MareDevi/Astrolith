@@ -120,6 +120,9 @@ pub(crate) struct DocumentSession {
     lsp_status: LspStatus,
     /// Set when a failure already spent this cycle's single restart.
     lsp_retry_armed: bool,
+    /// Whether this attachment already reported a failure, so the exit that
+    /// follows a handshake error does not overwrite its cause.
+    lsp_failure_seen: bool,
     /// The pending restart timer; cancelling it leaves Build without a server.
     lsp_restart: Option<Task<()>>,
     _change: Subscription,
@@ -479,6 +482,7 @@ impl DocumentSession {
             lsp_capabilities: None,
             lsp_status: LspStatus::Inactive,
             lsp_retry_armed: false,
+            lsp_failure_seen: false,
             lsp_restart: None,
             _change: change,
             _cursor: cursor,
@@ -1745,6 +1749,7 @@ impl DocumentSession {
         });
         self.lsp = Some(state);
         self.lsp_diagnostic_version = None;
+        self.lsp_failure_seen = false;
         self.lsp_events = Some(cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
                 let _ = this.update(cx, |session, cx| session.apply_lsp_event(event, cx));
@@ -1815,12 +1820,18 @@ impl DocumentSession {
 
     /// Record a server failure, surface it, and arm one restart per cycle.
     fn note_lsp_failure(&mut self, status: LspStatus, cx: &mut Context<Self>) -> bool {
+        if self.lsp_failure_seen {
+            // `Failed` is followed by `Exited` for the same dead server; the
+            // first event is the cause and the one that owns the retry.
+            return false;
+        }
         let message = match &status {
             LspStatus::Failed(error) => format!("Language server failed: {error}"),
             LspStatus::Exited(Some(code)) => format!("Language server exited with status {code}"),
             LspStatus::Exited(None) => "Language server exited unexpectedly".to_owned(),
             _ => return false,
         };
+        self.lsp_failure_seen = true;
         self.lsp_status = status;
         let retry = !self.lsp_retry_armed && self.source_view && self.project_root.is_some();
         if retry {
@@ -1899,6 +1910,7 @@ impl DocumentSession {
         self.lsp_events = None;
         self.lsp_restart = None;
         self.lsp_retry_armed = false;
+        self.lsp_failure_seen = false;
         self.lsp_status = LspStatus::Inactive;
         self.release_lsp(cx);
     }
@@ -1910,6 +1922,9 @@ impl DocumentSession {
     /// grace period; dropping it earlier would abort the actor and SIGKILL a
     /// server that was mid-shutdown.
     fn release_lsp(&mut self, cx: &mut Context<Self>) {
+        // Drop the event loop first: an exit from this client must not be
+        // attributed to a replacement attached a moment later.
+        self.lsp_events = None;
         let Some(state) = self.lsp.take() else {
             return;
         };
@@ -2472,14 +2487,16 @@ mod tests {
 
                 assert!(
                     !session.apply_lsp_event(LspEvent::Exited(Some(3)), cx),
-                    "the one restart this cycle was already spent"
+                    "the exit that follows the failure is not a second cause"
                 );
-                assert_eq!(session.lsp_status, LspStatus::Exited(Some(3)));
+                assert_eq!(
+                    session.lsp_status,
+                    LspStatus::Failed("boom".into()),
+                    "the first failure keeps the diagnosis and the retry"
+                );
                 assert_eq!(
                     session.notice.as_deref(),
-                    Some(
-                        "Language server exited with status 3. Build continues without language support."
-                    )
+                    Some("Language server failed: boom. Retrying once.")
                 );
             });
         })
