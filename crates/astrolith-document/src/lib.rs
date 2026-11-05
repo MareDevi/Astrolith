@@ -56,7 +56,7 @@ pub use save::{
 };
 pub use sentences::{cursor_sentence, other_sentences, sentences};
 pub use serialize::serialize_document;
-pub use tokens::{TokenSnapshot, TokenSummary, token_snapshot};
+pub use tokens::{TokenSnapshot, TokenSummary, token_snapshot, token_summary};
 pub use version::DiskBaseline;
 pub use wysiwyg::{
     BlockKind, InlineMark, InlineMarkKind, RichBlock, RichText, SourceSegment, WysiwygDocument,

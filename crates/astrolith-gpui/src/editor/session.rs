@@ -3,8 +3,8 @@ use std::{ops::Range, path::PathBuf, time::Instant};
 
 use astrolith_document::{
     DocumentBuffer, DocumentIdentity, DocumentKind, DocumentRevision, FormatCommand, FormatOutcome,
-    ProjectionSegment, TextEdit, TokenSnapshot, WriterProjection, apply_visible_edit, diff_visible,
-    format_document, map_visible_offset, project_writer, token_snapshot,
+    ProjectionSegment, TextEdit, TokenSummary, WriterProjection, apply_visible_edit, diff_visible,
+    format_document, map_visible_offset, project_writer, token_summary,
 };
 use astrolith_lsp::{Client as LspClient, Event as LspEvent, LanguageId};
 use gpui_kit::component::ActiveTheme;
@@ -74,7 +74,10 @@ pub(crate) struct DocumentSession {
     /// In-flight debounce/classification task; dropping it cancels the result.
     copyedit_task: Option<gpui_kit::Task<()>>,
     /// The word and character counts of the current visible text.
-    pub counts: TokenSnapshot,
+    pub counts: TokenSummary,
+    /// Set when [`Self::projection`] changed, so a presentation refresh
+    /// re-tokenises and re-hashes only real text changes.
+    presentation_dirty: bool,
     /// [`fingerprint`] of [`Self::projection`]'s visible text, computed once per
     /// text change so presentation refreshes never re-hash the document.
     text_key: u64,
@@ -234,7 +237,7 @@ impl DocumentSession {
         let buffer =
             DocumentBuffer::from_unsaved_at_revision(identity, original, current, revision);
         let dirty = buffer.is_dirty();
-        let counts = token_snapshot(&projection.visible);
+        let counts = token_summary(&projection.visible);
         let text_key = fingerprint(&projection.visible);
         // A writing surface is not a code buffer: no line numbers, indent
         // guides, folding or automatic bracket insertion.
@@ -430,6 +433,7 @@ impl DocumentSession {
             copyedit: CopyeditPresentation::default(),
             copyedit_task: None,
             counts,
+            presentation_dirty: false,
             text_key,
             placeholders: Vec::new(),
             placeholder_index: 0,
@@ -1193,8 +1197,11 @@ impl DocumentSession {
     /// Rebuild prose decorations, the focus layer, counts and the typewriter
     /// offset after a text change.
     fn refresh_writer(&mut self, cx: &mut Context<Self>) {
-        self.counts = token_snapshot(&self.projection.visible);
-        self.text_key = fingerprint(&self.projection.visible);
+        if self.presentation_dirty {
+            self.counts = token_summary(&self.projection.visible);
+            self.text_key = fingerprint(&self.projection.visible);
+            self.presentation_dirty = false;
+        }
         if self.source_view {
             self.presentation.clear_layers(cx);
             self.copyedit.invalidate(cx);
@@ -1445,36 +1452,64 @@ impl DocumentSession {
             // mapped from it until a rebuild resynchronises it.
             return;
         }
-        let visible = self.editor.read(cx).text().to_string();
-        if visible == self.projection.visible {
+        // Absorb runs at every save and history boundary, not only on a
+        // delivered change. Compare the editor rope with the projection first
+        // so an unchanged document never allocates a copy of itself.
+        let unchanged = {
+            let editor = self.editor.read(cx);
+            let rope = editor.text();
+            rope.len() == self.projection.visible.len()
+                && rope_matches(rope, &self.projection.visible)
+        };
+        if unchanged {
             return;
         }
-        let before = self.buffer.current_text().to_owned();
+        let visible = self.editor.read(cx).text().to_string();
         let selection_before = self.last_selection.clone();
         let selection_after =
             self.projection_range_to_source(self.editor.read(cx).selected_range());
         let edit = diff_visible(&self.projection.visible, &visible);
-        match apply_visible_edit(&before, &self.projection, edit) {
-            Ok(source) => {
-                if let Err(error) = self.buffer.apply_text(source) {
+        let before = self.buffer.current_text().to_owned();
+        // The delivered change is one contiguous visible edit; map that range
+        // through the projection and splice the authoritative source in place.
+        // Anything else keeps the whole-document mapping as the fallback.
+        let mut spliced = false;
+        if let [replacement] = edit.replacements.as_slice()
+            && let Ok(source_range) = self.projection.map_visible_range(&replacement.range)
+        {
+            spliced = self
+                .buffer
+                .splice_text(source_range, &replacement.replacement)
+                .is_ok();
+        }
+        if !spliced {
+            match apply_visible_edit(&before, &self.projection, edit) {
+                Ok(source) => {
+                    if let Err(error) = self.buffer.apply_text(source) {
+                        self.refuse(&error.to_string());
+                        return;
+                    }
+                }
+                // Fail closed: the complete source is untouched and the rejected
+                // text is never guessed into it.
+                Err(error) => {
                     self.refuse(&error.to_string());
                     return;
                 }
-                let after = self.buffer.current_text().to_owned();
-                self.history.record(
-                    &before,
-                    &after,
-                    selection_before,
-                    selection_after.clone(),
-                    intent,
-                );
-                match self.projection.renew_visible(visible) {
-                    Ok(projection) => self.projection = projection,
-                    Err(error) => self.refuse(&error.to_string()),
-                }
             }
-            // Fail closed: the complete source is untouched and the rejected
-            // text is never guessed into it.
+        }
+        self.history.record(
+            &before,
+            self.buffer.current_text(),
+            selection_before,
+            selection_after.clone(),
+            intent,
+        );
+        match self.projection.renew_visible(visible) {
+            Ok(projection) => {
+                self.projection = projection;
+                self.presentation_dirty = true;
+            }
             Err(error) => self.refuse(&error.to_string()),
         }
         self.last_selection = selection_after;
@@ -1495,17 +1530,17 @@ impl DocumentSession {
             self.refuse(&error.to_string());
             return;
         }
-        let after = self.buffer.current_text().to_owned();
-        let (projection, notice) = project_or_complete(&after, self.kind);
+        let (projection, notice) = project_or_complete(self.buffer.current_text(), self.kind);
         self.projection = projection;
         if self.notice.is_none() {
             self.notice = notice;
         }
-        self.counts = token_snapshot(&self.projection.visible);
+        self.counts = token_summary(&self.projection.visible);
         self.text_key = fingerprint(&self.projection.visible);
+        self.presentation_dirty = false;
         self.history.record(
             &before,
-            &after,
+            self.buffer.current_text(),
             selection_before,
             selection_after.clone(),
             intent,
@@ -1833,6 +1868,7 @@ impl DocumentSession {
         // later absorb maps the divergent editor text over the kept bytes.
         self.refused = true;
         self.projection = project_or_complete(self.buffer.current_text(), self.kind).0;
+        self.presentation_dirty = true;
         self.notice = Some(SharedString::from(format!(
             "A writer edit was refused and the source was kept: {reason}. The editor was reloaded from the document."
         )));
@@ -1852,6 +1888,7 @@ impl DocumentSession {
         };
         let (projection, notice) = project_or_complete(self.buffer.current_text(), self.kind);
         self.projection = projection;
+        self.presentation_dirty = true;
         if let Some(notice) = notice {
             self.notice = Some(notice);
         }
@@ -2073,6 +2110,25 @@ fn source_diff(before: &str, after: &str) -> Option<(Range<usize>, String, Strin
         before[prefix..before_end].to_owned(),
         after[prefix..after_end].to_owned(),
     ))
+}
+
+/// Whether an editor rope holds exactly `text`.
+///
+/// The editor stores a rope, so an unchanged document can be compared without
+/// materialising it into a `String`; only a real edit is copied out.
+fn rope_matches(rope: &gpui_kit::base::input::Rope, text: &str) -> bool {
+    if rope.len() != text.len() {
+        return false;
+    }
+    let mut offset = 0;
+    for chunk in rope.chunks() {
+        let end = offset + chunk.len();
+        if text[offset..end] != *chunk {
+            return false;
+        }
+        offset = end;
+    }
+    true
 }
 
 fn clamp_range(range: Range<usize>, length: usize) -> Range<usize> {

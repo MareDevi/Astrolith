@@ -117,6 +117,20 @@ impl WriterProjection {
             .unwrap_or(0)
     }
 
+    /// Map one range of visible bytes to complete-source bytes.
+    ///
+    /// A visible range must lie inside a single visible segment; an empty range
+    /// shared by two visible runs is ambiguous and is refused. Only bytes the
+    /// writer shows can ever be rewritten through this mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectionError::HiddenBoundary`] when the range crosses or
+    /// touches a hidden region.
+    pub fn map_visible_range(&self, range: &Range<usize>) -> Result<Range<usize>, ProjectionError> {
+        map_range_to_source(self, range)
+    }
+
     /// Renew the visible text after an edit that stayed inside visible bytes.
     ///
     /// Hidden bytes and their source offsets are kept unchanged; the visible
@@ -348,7 +362,7 @@ pub fn apply_visible_edit(
                 end: range.end,
             });
         }
-        let source_range = map_visible_range(projection, range)?;
+        let source_range = projection.map_visible_range(range)?;
         mapped.push((source_range, replacement.replacement.as_str()));
     }
     mapped.sort_by_key(|(range, _)| range.start);
@@ -458,7 +472,7 @@ pub fn map_visible_offset(previous: &str, next: &str, offset: usize) -> usize {
     }
 }
 
-fn map_visible_range(
+fn map_range_to_source(
     projection: &WriterProjection,
     range: &Range<usize>,
 ) -> Result<Range<usize>, ProjectionError> {

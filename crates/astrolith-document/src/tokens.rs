@@ -51,21 +51,67 @@ pub struct TokenSummary {
 /// Tokenize `text` once and count words and characters from that snapshot.
 pub fn token_snapshot(text: &str) -> TokenSnapshot {
     let tokens = crate::copyedit::word_ranges(text);
-    let mut characters = 0;
-    let mut lines = 1;
-    for character in text.chars() {
-        if !character.is_whitespace() {
-            characters += 1;
-        }
-        if character == '\n' {
-            lines += 1;
-        }
-    }
+    let summary = scan_counts(text);
     TokenSnapshot {
         tokens,
-        characters,
-        lines,
+        characters: summary.characters,
+        lines: summary.lines,
     }
+}
+
+/// Count words, characters and lines in one allocation-free scan.
+///
+/// This is the footer's per-edit path: it applies the same word rule as
+/// [`token_snapshot`] but never materialises the token ranges, so the cost is
+/// one pass over the bytes with no allocation.
+pub fn token_summary(text: &str) -> TokenSummary {
+    let mut words = 0;
+    let mut in_word = false;
+    let mut counts = ScanCounts::default();
+    for character in text.chars() {
+        let word = is_word_character(character);
+        if word && !in_word {
+            words += 1;
+        }
+        in_word = word;
+        counts.push(character);
+    }
+    TokenSummary {
+        words,
+        characters: counts.characters,
+        lines: counts.lines + 1,
+    }
+}
+
+/// The same word rule the Copyedit classifier uses, kept in one place here.
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '\'' | '_')
+}
+
+#[derive(Default)]
+struct ScanCounts {
+    characters: usize,
+    lines: usize,
+}
+
+impl ScanCounts {
+    fn push(&mut self, character: char) {
+        if !character.is_whitespace() {
+            self.characters += 1;
+        }
+        if character == '\n' {
+            self.lines += 1;
+        }
+    }
+}
+
+fn scan_counts(text: &str) -> ScanCounts {
+    let mut counts = ScanCounts::default();
+    for character in text.chars() {
+        counts.push(character);
+    }
+    counts.lines += 1;
+    counts
 }
 
 #[cfg(test)]
@@ -124,5 +170,33 @@ mod tests {
         assert_eq!(snapshot.words(), 0);
         assert_eq!(snapshot.characters, 0);
         assert_eq!(snapshot.lines, 1);
+        assert_eq!(token_summary(""), snapshot.summary());
+    }
+
+    #[test]
+    fn summary_matches_the_range_snapshot_on_a_large_single_line() {
+        // One 100 KB line: the footer's allocation-free path must agree with
+        // the token ranges the classifier uses, including apostrophes and
+        // underscores inside words.
+        let text = "don't_stop 中文 🦀 **bold** `code` ".repeat(2_800);
+        let snapshot = token_snapshot(&text);
+        assert_eq!(token_summary(&text), snapshot.summary());
+        assert!(snapshot.words() > 0);
+    }
+
+    #[test]
+    fn summary_matches_the_range_snapshot_across_the_word_rule() {
+        for text in [
+            "Two words, and a [link](https://x.dev).\n",
+            "one\r\ntwo\r\n",
+            "Été 中文 déjà-vu",
+            "a_b c'd e''f __ _'",
+        ] {
+            assert_eq!(
+                token_summary(text),
+                token_snapshot(text).summary(),
+                "{text:?}"
+            );
+        }
     }
 }

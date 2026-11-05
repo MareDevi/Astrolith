@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use astrolith_core::{ProjectId, SourcePath};
 
 /// Monotonic document revision, starting at zero.
@@ -61,6 +63,15 @@ pub enum DocumentError {
         /// Human-readable description of the failure.
         message: String,
     },
+    /// A spliced edit range is outside the current text or splits a character.
+    InvalidEdit {
+        /// The requested start offset.
+        start: usize,
+        /// The requested end offset.
+        end: usize,
+        /// Current text length.
+        len: usize,
+    },
     /// A save would persist a document above the readable size cap.
     TooLarge {
         /// Byte length of the content that was refused.
@@ -85,6 +96,10 @@ impl std::fmt::Display for DocumentError {
                 write!(formatter, "unsupported patch for `{path}`: {reason}")
             }
             Self::Io { message } => write!(formatter, "document I/O failed: {message}"),
+            Self::InvalidEdit { start, end, len } => write!(
+                formatter,
+                "invalid edit {start}..{end} for a document of {len} bytes"
+            ),
             Self::TooLarge { bytes, limit } => write!(
                 formatter,
                 "document is {bytes} bytes; the maximum supported size is {limit} bytes"
@@ -253,6 +268,41 @@ impl DocumentBuffer {
 
         let next_revision = self.revision.checked_next()?;
         self.current_text = text;
+        self.revision = next_revision;
+        Ok(next_revision)
+    }
+
+    /// Replace one range of the current text in place and advance the revision.
+    ///
+    /// This is the incremental counterpart to [`Self::apply_text`] for a known
+    /// single-region edit: it never allocates a second copy of the document.
+    /// The caller has already proven the edit changed the text, so the revision
+    /// advances for every accepted splice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::RevisionOverflow`] before touching the text when
+    /// the revision cannot advance. Returns [`DocumentError::InvalidEdit`] for a
+    /// range outside the text or one that is not on a character boundary; the
+    /// text is unchanged in both cases.
+    pub fn splice_text(
+        &mut self,
+        range: Range<usize>,
+        replacement: &str,
+    ) -> Result<DocumentRevision, DocumentError> {
+        if range.start > range.end
+            || range.end > self.current_text.len()
+            || !self.current_text.is_char_boundary(range.start)
+            || !self.current_text.is_char_boundary(range.end)
+        {
+            return Err(DocumentError::InvalidEdit {
+                start: range.start,
+                end: range.end,
+                len: self.current_text.len(),
+            });
+        }
+        let next_revision = self.revision.checked_next()?;
+        self.current_text.replace_range(range, replacement);
         self.revision = next_revision;
         Ok(next_revision)
     }
@@ -444,6 +494,50 @@ mod tests {
         assert_eq!(buffer.original_text(), MDX_SOURCE);
         assert_eq!(buffer.revision(), DocumentRevision::MAX);
         assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn splice_replaces_one_region_in_place_and_advances_the_revision() {
+        let mut buffer = DocumentBuffer::new(identity(), MDX_SOURCE.to_owned());
+        let start = MDX_SOURCE.find("本文").expect("fixture body");
+        let range = start..start + "本文".len();
+
+        let revision = buffer
+            .splice_text(range.clone(), "編集済み")
+            .expect("a boundary-aligned splice must succeed");
+
+        assert_eq!(revision, DocumentRevision::INITIAL.checked_next().unwrap());
+        assert_eq!(
+            buffer.current_text(),
+            MDX_SOURCE.replacen("本文", "編集済み", 1)
+        );
+        assert!(buffer.is_dirty());
+        assert_eq!(buffer.original_text(), MDX_SOURCE);
+    }
+
+    #[test]
+    fn splice_refuses_a_range_that_splits_a_character_without_mutating_the_buffer() {
+        let mut buffer = DocumentBuffer::new(identity(), MDX_SOURCE.to_owned());
+        let start = MDX_SOURCE.find("本文").expect("fixture body") + 1;
+
+        let result = buffer.splice_text(start..start, "x");
+
+        assert!(matches!(result, Err(DocumentError::InvalidEdit { .. })));
+        assert_eq!(buffer.current_text(), MDX_SOURCE);
+        assert_eq!(buffer.revision(), DocumentRevision::INITIAL);
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn splice_at_max_revision_is_rejected_without_mutating_the_buffer() {
+        let mut buffer = DocumentBuffer::new(identity(), MDX_SOURCE.to_owned());
+        buffer.revision = DocumentRevision::MAX;
+
+        let result = buffer.splice_text(0..0, "x");
+
+        assert_eq!(result, Err(DocumentError::RevisionOverflow));
+        assert_eq!(buffer.current_text(), MDX_SOURCE);
+        assert_eq!(buffer.revision(), DocumentRevision::MAX);
     }
 
     #[test]

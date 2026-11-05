@@ -782,6 +782,7 @@ fn save_failure_class(error: &astrolith_document::DocumentError) -> &'static str
         DocumentError::Io { .. } => "io",
         DocumentError::TooLarge { .. } => "too-large",
         DocumentError::RevisionOverflow => "revision",
+        DocumentError::InvalidEdit { .. } => "invalid-edit",
         DocumentError::InvalidFrontmatter
         | DocumentError::UnsupportedFrontmatter { .. }
         | DocumentError::UnknownField { .. }
@@ -5121,11 +5122,11 @@ impl ProjectWorkspace {
 
     /// The word, character and line counts of the active session.
     ///
-    /// Only the scalars are copied: the token ranges stay in the session's one
-    /// snapshot instead of being cloned on every render.
+    /// The counts are already scalar: the session never materialises token
+    /// ranges for the footer.
     pub(crate) fn active_counts(&self, cx: &App) -> Option<TokenSummary> {
         self.active_session(cx)
-            .map(|session| session.read(cx).counts.summary())
+            .map(|session| session.read(cx).counts)
     }
 
     /// The writing modes every retained session applies.
@@ -12285,7 +12286,7 @@ export const collections = {blog, dataAuthors};
         session.read_with(cx, |session, _| {
             assert_eq!(session.projection.visible, source);
             assert_eq!(session.counts.lines, 3);
-            assert_eq!(session.counts.words(), 5);
+            assert_eq!(session.counts.words, 5);
         });
     }
 
