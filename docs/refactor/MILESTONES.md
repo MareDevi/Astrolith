@@ -149,6 +149,6 @@ Preferred Browser 用 executable+argv 或经验证的平台 browser identity，�
 
 范围：`editor/session.rs`、`layout/panels.rs`、`editor/rendered.rs`、`shell.rs`、`commands.rs`、core `PanelLayout` 默认值。
 
-Writing 保留现有写作页。Build 与 Writing 共用同一个 `DocumentSession`/`EditorState`，但由 `set_source_view` 打开代码呈现：行号、缩进参考线、折叠、智能缩进/自动括号、关闭软换行、按扩展名选择语法高亮（Markdown/MDX、Astro、YAML）；panel 在 Build 铺满 pane、显示滚动条并隐藏写作 rail。Preview 中心改用 `TextViewState` 渲染正文投影（frontmatter 与 MDX prelude 已隐藏），只读、可选择、按设置排版；Astro preview 改为独立底部面板，默认关闭，模式本身不再占用中心区。Inspector 仅 Writing 可用：命令可用性、Panels 菜单与模式切换共同保证。
+Writing 保留现有写作页。Build 与 Writing 共用同一个 `DocumentSession`/`EditorState`，但由 `set_source_view` 打开代码呈现：行号、缩进参考线、折叠、智能缩进/自动括号、关闭软换行、按扩展名选择语法高亮（Markdown/MDX、Astro、YAML）；panel 在 Build 铺满 pane、显示滚动条并隐藏写作 rail。Preview 中心改用 `TextViewState` 渲染正文投影（frontmatter 与 MDX prelude 已隐藏），只读、可选择、按设置排版；Astro preview 改为独立底部面板，默认关闭，模式本身不再占用中心区。Inspector 仅 Writing 可用：命令可用性、工具栏 Panels 下拉菜单与模式切换共同保证。
 
 退出条件：三模式往返不重建 session，Build 显示完整源，Preview 显示渲染正文且键盘输入不写回文档；`mise run check` 通过；原生窗口截图见 ACCEPTANCE §19。

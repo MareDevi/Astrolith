@@ -362,7 +362,7 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - `/tmp/astrolith-smoke/build-tabs.png`：单 buffer 时应用 token 风格的 buffer tab 与关闭按钮。
   - `/tmp/astrolith-smoke/preview3.png`：标题/段落/链接/代码块/表格/引用渲染，项目图片 `/parity-banner.svg` 从 `public/` 载入；无文档 rail 与 Astro dock。
 - 限制：
-  - 远程图片仍依赖 GPUI 自带 HTTP client；当前 Linux 构建没有 HttpClient，只有项目内本地图片可显示。
+  - 远程图片由启动时安装的 `UreqHttpClient`（`crates/astrolith-gpui/src/http.rs`）加载，Preview 与 `Alt` 悬停预览都支持绝对 `http`/`https` 图片；网络行为见 [privacy](../user/privacy.md)。
   - `TextView` 的表格列宽由库决定；窄页宽下会出现单元格末字符换行（截图中 “Frontmatter”），未在应用层覆盖。
   - Build 的 Astro 语法高亮依赖 `tree-sitter-astro`；该 grammar 未注册 `rust`/`ts` 代码块语言，Preview 中这类 fenced code 回退为纯文本。未新增 AST/语言服务。
   - macOS/Windows、150%/200% 显示缩放与 IME 未在本轮重验。
