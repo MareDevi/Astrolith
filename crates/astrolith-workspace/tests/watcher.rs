@@ -33,6 +33,21 @@ fn wait_for_change(watcher: &CollectionWatcher) -> WatchBatch {
     }
 }
 
+fn wait_for_schema(watcher: &CollectionWatcher) -> WatchBatch {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let batch = watcher.drain();
+        if batch.schema {
+            return batch;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher did not observe a schema change"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn write_project(root: &Path) {
     fs::create_dir_all(root.join("node_modules/astro")).unwrap();
     fs::create_dir_all(root.join("src/posts/guides")).unwrap();
@@ -191,4 +206,24 @@ fn project_root_collection_base_is_selectively_tracked() {
     )
     .unwrap();
     assert_quiet(&watcher, Duration::from_millis(250));
+}
+
+#[test]
+fn generated_schema_changes_are_reported_as_schema_batches() {
+    let (temp, manifest) = project();
+    fs::create_dir_all(temp.path().join(".astro/collections")).unwrap();
+    let watcher = CollectionWatcher::for_project(&manifest).unwrap();
+    thread::sleep(Duration::from_millis(50));
+
+    fs::write(
+        temp.path().join(".astro/collections/docs.schema.json"),
+        "{\"type\":\"object\"}\n",
+    )
+    .unwrap();
+    let batch = wait_for_schema(&watcher);
+    assert!(batch.schema);
+    assert!(
+        !batch.changed,
+        "generated schema files must not request an index scan"
+    );
 }

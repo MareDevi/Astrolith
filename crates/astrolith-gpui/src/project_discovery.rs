@@ -46,7 +46,7 @@ use astrolith_document::{
 };
 use astrolith_preview::RouteMapping;
 use astrolith_workspace::{
-    CollectionEntry, CollectionWatcher, MetaValue, ReferenceOption,
+    CollectionEntry, CollectionWatcher, MetaValue, ReferenceOption, WatchBatch,
     assets::AssetLocation,
     list::{self, EntryFilter, EntrySort, SortMode},
     operations::{
@@ -849,6 +849,17 @@ pub(crate) struct ProjectWorkspace {
     task: Option<Task<()>>,
     watch_task: Option<Task<()>>,
     schema_task: Option<Task<()>>,
+    /// Set while one schema reconciliation task is running.
+    schema_in_flight: bool,
+    /// Set when a schema batch arrives during a reconciliation, so one more pass
+    /// runs after it finishes instead of aborting the pass in flight.
+    schema_dirty: bool,
+    /// Number of schema reconciliation passes started for the open project.
+    ///
+    /// Closes over no timer: the initial open and schema watcher batches are the
+    /// only sources, so the count stays constant once generation settles.
+    #[cfg(test)]
+    schema_reconciliations: u32,
     watcher_owner: Option<ServiceWatcher>,
     loads: HashMap<PathBuf, Task<()>>,
     sessions: BTreeMap<PathBuf, Entity<DocumentSession>>,
@@ -1146,6 +1157,10 @@ impl ProjectWorkspace {
             task: None,
             watch_task: None,
             schema_task: None,
+            schema_in_flight: false,
+            schema_dirty: false,
+            #[cfg(test)]
+            schema_reconciliations: 0,
             watcher_owner: None,
             loads: HashMap::new(),
             sessions: BTreeMap::new(),
@@ -1917,30 +1932,66 @@ impl ProjectWorkspace {
         }));
     }
 
-    /// Generate collection schemas from the project's own Astro install and
-    /// keep them fresh while the project is open.
+    /// Reconcile collection schemas with the project's own Astro install.
     ///
-    /// Generation and the freshness fingerprint both run on the blocking lane.
-    /// A missing or failing Astro install is non-fatal: the frontmatter form
-    /// keeps whatever schemas it already had. A change to the generated schema
-    /// directory or the content/astro config starts a new generation; results
-    /// from a superseded request are dropped before touching the form, and the
-    /// form reloads from the live editor text so dirty edits survive.
+    /// Called once when a project opens and once per watcher batch that touched
+    /// a schema input. Generation and the freshness fingerprint both run on the
+    /// blocking lane. A missing or failing Astro install is non-fatal: the
+    /// frontmatter form keeps whatever schemas it already had. The fingerprint
+    /// observed before generation is compared with [`SchemaFreshness`], so an
+    /// unchanged input does no work and a superseded request is dropped before
+    /// touching the form. There is no periodic poll: an idle project performs no
+    /// schema work at all.
     fn load_collection_schemas(&mut self, cx: &mut Context<Self>) {
         let Some(manifest) = self.manifest.clone() else {
             return;
         };
+        if self.schema_in_flight {
+            // A reconciliation is already probing the same inputs; run one more
+            // pass when it finishes instead of aborting it (Astro writes many
+            // schema files while it runs).
+            self.schema_dirty = true;
+            return;
+        }
         let generation = self.generation;
         let project = self.project_id.clone();
         let root = manifest.root().to_owned();
         let cancellation = self.cancellation.clone();
+        self.schema_in_flight = true;
+        self.schema_dirty = false;
+        #[cfg(test)]
+        {
+            self.schema_reconciliations += 1;
+        }
         tracing::debug!(
             project = %project.as_ref().map_or("<unknown>", |project| project.as_str()),
             root = %root.display(),
-            "starting schema generation and freshness polling"
+            "reconciling collection schemas"
         );
         self.schema_task = Some(cx.spawn(async move |this, cx| {
+            let mut first = true;
             loop {
+                // The first pass always runs; later passes only when a schema
+                // batch arrived while this task was working. The last update also
+                // clears the in-flight flag atomically with the decision to stop,
+                // so a following batch starts a new task.
+                let step = this.update(cx, |this, _| {
+                    if this.generation != generation || this.project_id != project {
+                        // A project switch already released this flag for the
+                        // generation that replaced us.
+                        return None;
+                    }
+                    let dirty = std::mem::take(&mut this.schema_dirty);
+                    if !first && !dirty {
+                        this.schema_in_flight = false;
+                        return None;
+                    }
+                    first = false;
+                    Some(())
+                });
+                if !matches!(step, Ok(Some(()))) {
+                    break;
+                }
                 let probe_root = root.clone();
                 let fingerprint =
                     runtime::blocking(cx, move || schema_fingerprint(&probe_root)).await;
@@ -1960,9 +2011,6 @@ impl ProjectWorkspace {
                     if !matches!(decision, Ok(Ok(None))) {
                         break;
                     }
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(750))
-                        .await;
                     continue;
                 };
                 let generation_root = root.clone();
@@ -1973,15 +2021,15 @@ impl ProjectWorkspace {
                     let report = generate_collection_schemas(&request);
                     // Astro rewrites the schema files on every sync, so the
                     // fingerprint is re-read after generation and that exact
-                    // value is installed. Otherwise the next poll would see a
-                    // "different" fingerprint and sync forever.
+                    // value is installed. Otherwise the next pass would see a
+                    // "different" fingerprint and sync again.
                     let fingerprint = schema_fingerprint(&generation_root).ok();
                     (report, fingerprint)
                 })
                 .await;
-                let serviced = this.update(cx, |this, cx| {
+                let _ = this.update(cx, |this, cx| {
                     if this.generation != generation || this.project_id != project {
-                        return Err(());
+                        return;
                     }
                     match report {
                         Ok((Ok(report), Some(fingerprint))) => {
@@ -1991,35 +2039,43 @@ impl ProjectWorkspace {
                                 .map(|entry| (entry.collection, entry.schema))
                                 .collect();
                             this.apply_generated_schemas(request, fingerprint, schemas, cx);
-                            Ok(())
                         }
                         Ok((Ok(_), None)) => {
                             this.schema_freshness.reject(request);
                             tracing::warn!(
                                 "could not re-read the schema fingerprint after generation"
                             );
-                            Ok(())
                         }
                         Ok((Err(error), _)) => {
                             this.schema_freshness.reject(request);
                             tracing::warn!(%error, "collection schema generation failed");
-                            Ok(())
                         }
                         Err(error) => {
                             this.schema_freshness.reject(request);
                             tracing::warn!(%error, "collection schema generation task failed");
-                            Ok(())
                         }
                     }
                 });
-                if !matches!(serviced, Ok(Ok(()))) {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(750))
-                    .await;
             }
+            let _ = this.update(cx, |this, _| {
+                if this.generation == generation && this.project_id == project {
+                    this.schema_in_flight = false;
+                }
+            });
         }));
+    }
+
+    /// Run the non-index work of one merged watcher batch.
+    ///
+    /// A batch that touched a schema input reconciles the collection schemas
+    /// exactly once; every other batch does nothing here. The return value tells
+    /// the watcher loop whether an index scan is still required, so schema-only
+    /// traffic never triggers a project walk.
+    fn handle_watcher_batch(&mut self, batch: WatchBatch, cx: &mut Context<Self>) -> bool {
+        if batch.schema {
+            self.load_collection_schemas(cx);
+        }
+        batch.changed || batch.needs_rescan
     }
 
     /// Project identity, root and default route mapping for the preview panel.
@@ -3150,6 +3206,8 @@ impl ProjectWorkspace {
         self.status = "Discovering project…".into();
         self.watch_task = None;
         self.schema_task = None;
+        self.schema_in_flight = false;
+        self.schema_dirty = false;
         self.watcher_owner = None;
         self.command_tasks.clear();
         self.loads.clear();
@@ -3293,19 +3351,19 @@ impl ProjectWorkspace {
                     .await;
                 // Poll for a merged batch off the render path. The scan itself is a
                 // separate index request so it can be ordered against rescans.
+                // Schema invalidation rides on the same batch: a schema-only batch
+                // reconciles once and performs no project walk.
                 let polled = weak_watcher.clone();
                 let pending = runtime::blocking(cx, move || {
                     let Some(watcher) = polled.upgrade() else {
                         return Err("Watcher stopped".to_string());
                     };
-                    let batch = watcher.drain();
-                    Ok(batch.changed || batch.needs_rescan)
+                    Ok(watcher.drain())
                 })
                 .await
                 .and_then(|result| result);
-                match pending {
-                    Ok(false) => continue,
-                    Ok(true) => {}
+                let batch = match pending {
+                    Ok(batch) => batch,
                     Err(error) => {
                         tracing::warn!(%error, "project watcher failed; buffers retained");
                         let _ = this.update_in(cx, |this, _, cx| {
@@ -3319,6 +3377,26 @@ impl ProjectWorkspace {
                         });
                         break;
                     }
+                };
+                if !batch.changed && !batch.needs_rescan && !batch.schema {
+                    continue;
+                }
+                let rescan = this
+                    .update_in(cx, |this, _, cx| {
+                        if this.generation != generation
+                            || this.project_id.as_ref() != Some(&project)
+                        {
+                            return None;
+                        }
+                        Some(this.handle_watcher_batch(batch, cx))
+                    })
+                    .ok()
+                    .flatten();
+                let Some(rescan) = rescan else {
+                    break;
+                };
+                if !rescan {
+                    continue;
                 }
                 let Some((token, request, snapshots)) = this
                     .update_in(cx, |this, _, _| {
@@ -10395,6 +10473,81 @@ export const collections = {blog, dataAuthors};
             ));
             assert!(view.schemas.contains_key("blog"));
             assert_eq!(view.schema_revision, 1);
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn schema_reconciliation_runs_once_per_watcher_batch_without_polling(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| !view.schema_in_flight) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        let settled = view.read_with(cx, |view, _| {
+            assert!(
+                !view.schema_in_flight,
+                "the initial schema generation must finish"
+            );
+            assert_eq!(
+                view.schema_reconciliations, 1,
+                "the open reconciles the schemas exactly once"
+            );
+            view.schema_reconciliations
+        });
+
+        // The old implementation probed every 750 ms forever. No timer may start
+        // another pass once generation has settled.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(120));
+        cx.run_until_parked();
+        runtime::blocking(cx, || {
+            std::thread::sleep(std::time::Duration::from_millis(50))
+        })
+        .await
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(cx, |view, _| view.schema_reconciliations),
+            settled,
+            "an idle project must not reconcile schemas periodically"
+        );
+
+        view.update(cx, |view, cx| {
+            assert!(
+                !view.handle_watcher_batch(WatchBatch::default(), cx),
+                "a batch with nothing relevant does not rescan the index"
+            );
+            assert_eq!(view.schema_reconciliations, settled);
+            assert!(
+                !view.handle_watcher_batch(
+                    WatchBatch {
+                        schema: true,
+                        ..WatchBatch::default()
+                    },
+                    cx
+                ),
+                "a schema-only batch must not walk the project"
+            );
+            assert_eq!(
+                view.schema_reconciliations,
+                settled + 1,
+                "a schema batch reconciles exactly once"
+            );
         });
     }
 

@@ -39,6 +39,9 @@ pub struct WatchBatch {
     pub config_changed: bool,
     /// Changes may have been lost and the project needs a full rescan.
     pub needs_rescan: bool,
+    /// A schema input (content/astro config or `.astro/collections`) changed, so
+    /// the collection schemas must be reconciled once.
+    pub schema: bool,
 }
 
 impl WatchBatch {
@@ -47,6 +50,7 @@ impl WatchBatch {
         self.changed |= relevant_changes.changed;
         self.config_changed |= relevant_changes.config_changed;
         self.needs_rescan |= event.need_rescan();
+        self.schema |= relevant_changes.schema;
     }
 }
 
@@ -54,6 +58,7 @@ impl WatchBatch {
 struct EventRelevance {
     changed: bool,
     config_changed: bool,
+    schema: bool,
 }
 
 #[derive(Default)]
@@ -178,7 +183,11 @@ impl CollectionWatcher {
             notify::recommended_watcher(move |result: notify::Result<Event>| match result {
                 Ok(event) => {
                     let relevance = classify_event(&event, &callback_root);
-                    if !event.need_rescan() && !relevance.changed && !relevance.config_changed {
+                    if !event.need_rescan()
+                        && !relevance.changed
+                        && !relevance.config_changed
+                        && !relevance.schema
+                    {
                         return;
                     }
                     if event.need_rescan() {
@@ -295,6 +304,15 @@ fn project_registrations(
     let root = canonical_directory(project.root())?;
     let mut planner = ProjectRegistrationPlanner::new(&root);
     planner.add_directory(root.clone())?;
+    // Schema freshness is watcher-driven, so the generated and configured
+    // schema locations must deliver events. `.astro` is a dot directory and is
+    // not part of the source walk; its creation is observed through the
+    // project root registration.
+    for directory in [root.join(".astro"), root.join(".astro/collections")] {
+        if directory.is_dir() {
+            planner.add_directory(directory)?;
+        }
+    }
     let mut collection_bases = Vec::with_capacity(project.collections().len());
     let mut config_parents = Vec::with_capacity(project.collections().len());
     for descriptor in project.collections() {
@@ -501,6 +519,7 @@ fn classify_event(event: &Event, root: &Path) -> EventRelevance {
         return EventRelevance {
             changed: true,
             config_changed: false,
+            schema: true,
         };
     }
     let changed = match event.kind {
@@ -518,6 +537,7 @@ fn classify_event(event: &Event, root: &Path) -> EventRelevance {
     EventRelevance {
         changed,
         config_changed: changed && event.paths.iter().any(|path| is_discovery_config(path)),
+        schema: event.paths.iter().any(|path| is_schema_input(path, root)),
     }
 }
 
@@ -569,6 +589,31 @@ fn is_discovery_config(path: &Path) -> bool {
         )
 }
 
+/// Whether `path` feeds [`astrolith_astro::schema_fingerprint`].
+///
+/// The schema fingerprint covers the generated `.astro/collections` files and
+/// the nearest `content.config`/`astro.config` sources, so only those paths
+/// request a schema reconciliation. Dot-directory paths are normally ignored by
+/// the index predicate, but the generated schema directory is exactly what this
+/// check needs to see.
+fn is_schema_input(path: &Path, root: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    if relative.starts_with(".astro") {
+        return true;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "content.config.js"
+        || name == "content.config.mjs"
+        || name == "content.config.ts"
+        || name == "astro.config.js"
+        || name == "astro.config.mjs"
+        || name == "astro.config.ts"
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -581,9 +626,54 @@ mod tests {
     use astrolith_core::ProjectId;
     use notify::{
         Event, EventKind, RecursiveMode,
-        event::{CreateKind, DataChange, ModifyKind},
+        event::{CreateKind, DataChange, Flag, ModifyKind},
     };
     use std::{collections::BTreeMap, fs, path::PathBuf, sync::mpsc::TrySendError, thread};
+
+    #[test]
+    fn schema_inputs_are_classified_without_counting_as_index_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let created = |relative: &str| {
+            Event::new(EventKind::Create(CreateKind::File)).add_path(root.join(relative))
+        };
+
+        let generated = classify_event(&created(".astro/collections/blog.schema.json"), root);
+        assert!(generated.schema);
+        assert!(
+            !generated.changed,
+            "generated schema files must not request an index scan"
+        );
+
+        let content = classify_event(&created("src/content.config.ts"), root);
+        assert!(content.schema && content.config_changed && content.changed);
+
+        let astro = classify_event(&created("astro.config.mjs"), root);
+        assert!(astro.schema && astro.config_changed);
+
+        let editorial = classify_event(&created("src/posts/entry.md"), root);
+        assert!(editorial.changed);
+        assert!(!editorial.schema);
+
+        let rescan = Event::new(EventKind::Other)
+            .set_flag(Flag::Rescan)
+            .add_path(root.join("src/posts/entry.md"));
+        assert!(
+            classify_event(&rescan, root).schema,
+            "a lost-events rescan must also reconcile schemas"
+        );
+    }
+
+    #[test]
+    fn project_registration_targets_include_schema_directories() {
+        let (temp, manifest) = fixture_project();
+        fs::create_dir_all(temp.path().join(".astro/collections")).unwrap();
+        let watcher = CollectionWatcher::for_project(&manifest).unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let targets = watcher.registration_targets();
+        assert!(targets.contains(&(root.join(".astro"), RecursiveMode::NonRecursive)));
+        assert!(targets.contains(&(root.join(".astro/collections"), RecursiveMode::NonRecursive)));
+    }
 
     #[test]
     fn saturated_channel_is_deterministically_marked_for_rescan() {
