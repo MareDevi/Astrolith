@@ -1,4 +1,6 @@
-use std::ops::Range;
+use std::{ops::Range, sync::OnceLock};
+
+use ropey::Rope;
 
 use astrolith_core::{ProjectId, SourcePath};
 
@@ -179,12 +181,27 @@ impl DocumentLoadTicket {
 }
 
 /// Retained source baseline and current editable text for one document.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DocumentBuffer {
     identity: DocumentIdentity,
-    original_text: String,
-    current_text: String,
+    original_text: Rope,
+    current_text: Rope,
+    original_flat: OnceLock<String>,
+    current_flat: OnceLock<String>,
     revision: DocumentRevision,
+}
+
+impl Clone for DocumentBuffer {
+    fn clone(&self) -> Self {
+        Self {
+            identity: self.identity.clone(),
+            original_text: self.original_text.clone(),
+            current_text: self.current_text.clone(),
+            original_flat: OnceLock::new(),
+            current_flat: OnceLock::new(),
+            revision: self.revision,
+        }
+    }
 }
 
 impl DocumentBuffer {
@@ -192,8 +209,10 @@ impl DocumentBuffer {
     pub fn new(identity: DocumentIdentity, source: String) -> Self {
         Self {
             identity,
-            original_text: source.clone(),
-            current_text: source,
+            original_text: Rope::from_str(&source),
+            current_text: Rope::from_str(&source),
+            original_flat: OnceLock::new(),
+            current_flat: OnceLock::new(),
             revision: DocumentRevision::INITIAL,
         }
     }
@@ -216,8 +235,10 @@ impl DocumentBuffer {
     ) -> Self {
         Self {
             identity,
-            original_text: original,
-            current_text: current,
+            original_text: Rope::from_str(&original),
+            current_text: Rope::from_str(&current),
+            original_flat: OnceLock::new(),
+            current_flat: OnceLock::new(),
             revision,
         }
     }
@@ -235,14 +256,40 @@ impl DocumentBuffer {
         self.identity = identity;
     }
 
-    /// Return the source baseline used for dirty-state comparison.
+    /// Materialize the baseline for contiguous-text interoperability.
+    /// The result is cached until the baseline changes.
     pub fn original_text(&self) -> &str {
-        &self.original_text
+        self.original_flat
+            .get_or_init(|| self.original_text.to_string())
     }
 
-    /// Return the current editable text.
+    /// Materialize current source for contiguous-text interoperability.
+    /// Incremental consumers should use [`Self::text_snapshot`] instead.
+    /// The result is cached until the source changes.
     pub fn current_text(&self) -> &str {
-        &self.current_text
+        self.current_flat
+            .get_or_init(|| self.current_text.to_string())
+    }
+
+    /// Cheap immutable snapshot for background work and incremental consumers.
+    /// Snapshot bytes remain unchanged when this buffer is edited or reloaded.
+    pub fn text_snapshot(&self) -> Rope {
+        self.current_text.clone()
+    }
+
+    /// Baseline source length in bytes, without flattening its rope.
+    pub fn original_len(&self) -> usize {
+        self.original_text.len()
+    }
+
+    /// Current source length in UTF-8 bytes, without flattening its rope.
+    pub fn len(&self) -> usize {
+        self.current_text.len()
+    }
+
+    /// Whether the current source has no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.current_text.len() == 0
     }
 
     /// Return the current content revision.
@@ -262,12 +309,18 @@ impl DocumentBuffer {
     /// Returns [`DocumentError::RevisionOverflow`] without changing the buffer
     /// when changed text would exceed [`DocumentRevision::MAX`].
     pub fn apply_text(&mut self, text: String) -> Result<DocumentRevision, DocumentError> {
+        self.apply_snapshot(Rope::from_str(&text))
+    }
+
+    /// Replace source with a shared rope snapshot, preserving its chunk storage.
+    /// Returns [`DocumentError::RevisionOverflow`] before changing any state.
+    pub fn apply_snapshot(&mut self, text: Rope) -> Result<DocumentRevision, DocumentError> {
         if self.current_text == text {
             return Ok(self.revision);
         }
-
         let next_revision = self.revision.checked_next()?;
         self.current_text = text;
+        self.current_flat.take();
         self.revision = next_revision;
         Ok(next_revision)
     }
@@ -302,7 +355,9 @@ impl DocumentBuffer {
             });
         }
         let next_revision = self.revision.checked_next()?;
-        self.current_text.replace_range(range, replacement);
+        self.current_text.remove(range.clone());
+        self.current_text.insert(range.start, replacement);
+        self.current_flat.take();
         self.revision = next_revision;
         Ok(next_revision)
     }
@@ -316,7 +371,8 @@ impl DocumentBuffer {
     /// clean.
     pub fn confirm_saved(&mut self, saved_revision: DocumentRevision, persisted: &str) -> bool {
         if self.revision == saved_revision && self.current_text == persisted {
-            self.original_text = persisted.to_owned();
+            self.original_text = self.current_text.clone();
+            self.original_flat.take();
             true
         } else {
             false
@@ -333,7 +389,8 @@ impl DocumentBuffer {
     /// advanced, which requires a newer revision than the one saved.
     pub fn rebase_persisted(&mut self, saved_revision: DocumentRevision, persisted: &str) -> bool {
         if self.revision > saved_revision {
-            self.original_text = persisted.to_owned();
+            self.original_text = Rope::from_str(persisted);
+            self.original_flat.take();
             true
         } else {
             false
@@ -356,8 +413,11 @@ impl DocumentBuffer {
         } else {
             self.revision.checked_next()?
         };
+        let source = Rope::from_str(&source);
         self.original_text = source.clone();
         self.current_text = source;
+        self.original_flat.take();
+        self.current_flat.take();
         self.revision = revision;
         Ok(revision)
     }
@@ -396,8 +456,11 @@ impl DocumentBuffer {
         }
 
         let next_revision = self.revision.checked_next()?;
+        let source = Rope::from_str(&source);
         self.original_text = source.clone();
         self.current_text = source;
+        self.original_flat.take();
+        self.current_flat.take();
         self.revision = next_revision;
         Ok(true)
     }
@@ -430,6 +493,30 @@ mod tests {
             SourcePath::new("src/content/posts/你好.mdx")
                 .expect("fixture source path must be valid"),
         )
+    }
+
+    #[test]
+    fn rope_snapshot_survives_splices_reload_and_save_without_materializing_source() {
+        let source = MDX_SOURCE.repeat(2_000);
+        let mut buffer = DocumentBuffer::new(identity(), source.clone());
+        let snapshot = buffer.text_snapshot();
+        let start = source.find("本文").unwrap();
+        buffer
+            .splice_text(start..start + "本文".len(), "編集🦀")
+            .unwrap();
+        let edited = buffer.text_snapshot();
+        assert_eq!(snapshot, source);
+        assert_eq!(edited, source.replacen("本文", "編集🦀", 1));
+        assert!(buffer.is_dirty());
+        assert!(
+            buffer.current_flat.get().is_none(),
+            "edits and snapshots do not flatten the source"
+        );
+        let revision = buffer.revision();
+        buffer.force_reload(source.clone()).unwrap();
+        assert!(!buffer.confirm_saved(revision, &edited.to_string()));
+        assert_eq!(snapshot, buffer.text_snapshot());
+        assert!(!buffer.is_dirty());
     }
 
     #[test]

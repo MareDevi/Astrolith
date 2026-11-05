@@ -10,7 +10,7 @@ use astrolith_lsp::{ClientHandle, LanguageId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::input::{
     EditorState, InputEvent, Position, RangeDecoration, RangeDecorationCollection,
-    RangeDecorationStyle,
+    RangeDecorationStyle, Rope,
 };
 use gpui_kit::{
     App, AppContext, Context, Entity, EventEmitter, Focusable, Pixels, Point, SharedString,
@@ -245,8 +245,8 @@ impl DocumentSession {
     /// both input models keep rope copies once Build is opened. Count each
     /// representation once, including the inactive presentation cache.
     pub(crate) fn retained_bytes(&self, cx: &App) -> usize {
-        self.buffer.original_text().len()
-            + self.buffer.current_text().len()
+        self.buffer.original_len()
+            + self.buffer.len()
             + self.projection.visible.len()
             + self.writer_editor.read(cx).text().len()
             + self
@@ -1351,14 +1351,14 @@ impl DocumentSession {
         let Some(entry) = self.history.undo_entry() else {
             return false;
         };
-        let current = self.buffer.current_text().to_owned();
+        let current = self.buffer.text_snapshot();
         if !entry.matches_after(&current) {
             // A source rewrite outside the transaction stack invalidates it.
             self.history.clear();
             return false;
         }
         let restored = entry.undo(&current);
-        if self.buffer.apply_text(restored).is_err() {
+        if self.buffer.apply_snapshot(restored).is_err() {
             return false;
         }
         self.after_history_step(entry.selection_before.clone(), window, cx);
@@ -1371,13 +1371,13 @@ impl DocumentSession {
         let Some(entry) = self.history.redo_entry() else {
             return false;
         };
-        let current = self.buffer.current_text().to_owned();
+        let current = self.buffer.text_snapshot();
         if !entry.matches_before(&current) {
             self.history.clear();
             return false;
         }
         let restored = entry.redo(&current);
-        if self.buffer.apply_text(restored).is_err() {
+        if self.buffer.apply_snapshot(restored).is_err() {
             return false;
         }
         self.after_history_step(entry.selection_after.clone(), window, cx);
@@ -1392,7 +1392,7 @@ impl DocumentSession {
     ) {
         self.rebuild_projection(window, cx);
         let view_selection = if self.source_view {
-            clamp_range(selection.clone(), self.buffer.current_text().len())
+            clamp_range(selection.clone(), self.buffer.len())
         } else {
             self.source_range_to_projection(&selection)
         };
@@ -1567,7 +1567,8 @@ impl DocumentSession {
         let selection_after =
             self.projection_range_to_source(self.editor.read(cx).selected_range());
         let edit = diff_visible(&self.projection.visible, &visible);
-        let before = self.buffer.current_text().to_owned();
+        let before = self.buffer.text_snapshot();
+        let mut recorded_splice = None;
         // The delivered change is one contiguous visible edit; map that range
         // through the projection and splice the authoritative source in place.
         // Anything else keeps the whole-document mapping as the fallback.
@@ -1575,13 +1576,17 @@ impl DocumentSession {
         if let [replacement] = edit.replacements.as_slice()
             && let Ok(source_range) = self.projection.map_visible_range(&replacement.range)
         {
+            let removed = before.slice(source_range.clone()).to_string();
             spliced = self
                 .buffer
-                .splice_text(source_range, &replacement.replacement)
+                .splice_text(source_range.clone(), &replacement.replacement)
                 .is_ok();
+            if spliced {
+                recorded_splice = Some((source_range, removed, replacement.replacement.clone()));
+            }
         }
         if !spliced {
-            match apply_visible_edit(&before, &self.projection, edit) {
+            match apply_visible_edit(&before.to_string(), &self.projection, edit) {
                 Ok(source) => {
                     if let Err(error) = self.buffer.apply_text(source) {
                         self.refuse(&error.to_string());
@@ -1596,13 +1601,24 @@ impl DocumentSession {
                 }
             }
         }
-        self.history.record(
-            &before,
-            self.buffer.current_text(),
-            selection_before,
-            selection_after.clone(),
-            intent,
-        );
+        if let Some((range, removed, inserted)) = recorded_splice {
+            self.history.record_splice(
+                range,
+                removed,
+                inserted,
+                selection_before,
+                selection_after.clone(),
+                intent,
+            );
+        } else {
+            self.history.record(
+                &before.to_string(),
+                self.buffer.current_text(),
+                selection_before,
+                selection_after.clone(),
+                intent,
+            );
+        }
         match self.projection.renew_visible(visible) {
             Ok(projection) => {
                 self.projection = projection;
@@ -1976,7 +1992,7 @@ impl DocumentSession {
     fn current_source_selection(&self, cx: &App) -> Range<usize> {
         let selection = self.editor.read(cx).selected_range();
         if self.source_view {
-            clamp_range(selection, self.buffer.current_text().len())
+            clamp_range(selection, self.buffer.len())
         } else {
             self.projection_range_to_source(selection)
         }
@@ -2053,7 +2069,7 @@ impl DocumentSession {
         let previous_visible = self.projection.visible.clone();
         let caret = self.editor.read(cx).cursor().min(previous_visible.len());
         let source_caret = if self.source_view {
-            caret.min(self.buffer.current_text().len())
+            caret.min(self.buffer.len())
         } else {
             self.projection_offset_to_source(caret)
         };
@@ -2125,32 +2141,27 @@ struct SourceTransaction {
 }
 
 impl SourceTransaction {
-    fn undo(&self, current: &str) -> String {
-        let mut text = current.to_owned();
-        text.replace_range(
-            self.range.start..self.range.start + self.inserted.len(),
-            &self.removed,
-        );
+    fn undo(&self, current: &Rope) -> Rope {
+        let mut text = current.clone();
+        text.remove(self.range.start..self.range.start + self.inserted.len());
+        text.insert(self.range.start, &self.removed);
         text
     }
-
-    fn redo(&self, current: &str) -> String {
-        let mut text = current.to_owned();
-        text.replace_range(
-            self.range.start..self.range.start + self.removed.len(),
-            &self.inserted,
-        );
+    fn redo(&self, current: &Rope) -> Rope {
+        let mut text = current.clone();
+        text.remove(self.range.start..self.range.start + self.removed.len());
+        text.insert(self.range.start, &self.inserted);
         text
     }
-
-    fn matches_after(&self, current: &str) -> bool {
-        current.get(self.range.start..self.range.start + self.inserted.len())
-            == Some(self.inserted.as_str())
+    fn matches_after(&self, current: &Rope) -> bool {
+        current
+            .try_slice(self.range.start..self.range.start + self.inserted.len())
+            .is_ok_and(|slice| slice == self.inserted.as_str())
     }
-
-    fn matches_before(&self, current: &str) -> bool {
-        current.get(self.range.start..self.range.start + self.removed.len())
-            == Some(self.removed.as_str())
+    fn matches_before(&self, current: &Rope) -> bool {
+        current
+            .try_slice(self.range.start..self.range.start + self.removed.len())
+            .is_ok_and(|slice| slice == self.removed.as_str())
     }
 }
 
@@ -2175,59 +2186,55 @@ impl SourceHistory {
         selection_after: Range<usize>,
         intent: HistoryIntent,
     ) {
-        if before == after {
-            return;
+        if let Some((range, removed, inserted)) = source_diff(before, after) {
+            self.record_splice(
+                range,
+                removed,
+                inserted,
+                selection_before,
+                selection_after,
+                intent,
+            );
         }
-        self.entries.truncate(self.cursor);
-        let now = Instant::now();
-        if intent == HistoryIntent::Typing && self.try_merge(before, after, &selection_after, now) {
-            self.cursor = self.entries.len();
-            return;
-        }
-        let Some((range, removed, inserted)) = source_diff(before, after) else {
-            return;
-        };
-        self.entries.push(SourceTransaction {
-            range,
-            removed,
-            inserted,
-            selection_before,
-            selection_after,
-            intent,
-            at: now,
-        });
-        if self.entries.len() > 500 {
-            self.entries.remove(0);
-        }
-        self.cursor = self.entries.len();
     }
 
-    fn try_merge(
+    fn record_splice(
         &mut self,
-        before: &str,
-        after: &str,
-        selection_after: &Range<usize>,
-        now: Instant,
-    ) -> bool {
-        let Some(last) = self.entries.last_mut() else {
-            return false;
-        };
-        if last.intent != HistoryIntent::Typing || now.duration_since(last.at).as_millis() > 900 {
-            return false;
+        range: Range<usize>,
+        removed: String,
+        inserted: String,
+        selection_before: Range<usize>,
+        selection_after: Range<usize>,
+        intent: HistoryIntent,
+    ) {
+        self.entries.truncate(self.cursor);
+        let now = Instant::now();
+        if let Some(last) = self.entries.last_mut()
+            && intent == HistoryIntent::Typing
+            && last.intent == HistoryIntent::Typing
+            && now.duration_since(last.at).as_millis() <= 900
+            && last.removed.is_empty()
+            && removed.is_empty()
+            && range.start == last.range.start + last.inserted.len()
+        {
+            last.inserted.push_str(&inserted);
+            last.selection_after = selection_after;
+            last.at = now;
+        } else {
+            self.entries.push(SourceTransaction {
+                range,
+                removed,
+                inserted,
+                selection_before,
+                selection_after,
+                intent,
+                at: now,
+            });
+            if self.entries.len() > 500 {
+                self.entries.remove(0);
+            }
         }
-        let Some((range, removed, inserted)) = source_diff(before, after) else {
-            return true;
-        };
-        if !last.removed.is_empty() || !removed.is_empty() {
-            return false;
-        }
-        if range.start != last.range.start + last.inserted.len() {
-            return false;
-        }
-        last.inserted.push_str(&inserted);
-        last.selection_after = selection_after.clone();
-        last.at = now;
-        true
+        self.cursor = self.entries.len();
     }
 
     fn undo_entry(&mut self) -> Option<SourceTransaction> {

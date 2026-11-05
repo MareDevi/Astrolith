@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+ropey = "=2.0.0-beta.1"
 tracing.workspace = true
 astrolith-core = { path = "../astrolith-core" }
 serde_json = "1.0.154"
