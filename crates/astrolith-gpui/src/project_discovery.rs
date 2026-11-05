@@ -83,9 +83,14 @@ mod save;
 mod watch;
 
 use entry_operations::PendingCreate;
-use watch::{ServiceWatcher, WatcherScan};
+use watch::ServiceWatcher;
 
-use save::{PendingAfterSave, SaveAttempt};
+use save::PendingAfterSave;
+
+#[cfg(test)]
+use save::SaveAttempt;
+#[cfg(test)]
+use watch::WatcherScan;
 
 // Tokio owns the native watcher's final drop; UI cancellation only aborts its task.
 /// One clickable ancestor in the library breadcrumb.
