@@ -27,6 +27,7 @@
 | M6 | 完成（代码、自动化与 1000×700 原生大字体验证）；原生重启/缩放验收待用户确认 | 设置分为 Appearance/Workspace/Preview，保留 Project/Collections/Advanced；默认模式与按模式布局重置进入 Apply 草稿；启动/项目布局 clamp、临时浮层不恢复；可访问名称与 Tab 顺序有回归；记录见 ACCEPTANCE §15 |
 | M7 | 完成（Linux Wayland 矩阵、回归与视觉收尾；平台/缩放边界显式保留） | check 867 passed、perf workload、fixture oracle；dark/light × 1000×700/1440×900/2200×1300、28 px、Inspector/Settings/Preview、双项目模式隔离；导航两行条目重叠修复与回归；记录见 ACCEPTANCE §16 |
 | M7-UI | 完成（用户反馈后的界面放大与 Preferences 重设计） | 默认界面 18 px，旧 14/16 一次性迁移并备份；Preferences 去掉重复标题、dialog 放大、分区卡片与固定动作栏；记录见 ACCEPTANCE §17 |
+| M9 | 完成（协议层自动化与 headless smoke；真实服务器原生交互待验收） | Build 语法高亮覆盖 Astro 常用技术栈；`astrolith-lsp` 客户端支持诊断/补全/悬停/定义/code action 与项目内服务器发现；记录见 ACCEPTANCE §20 |
 | M8 | 完成（自动化与原生截图） | Writing 保留写作页；Build 单一 session 切换为 IDE 源码呈现（行号、缩进参考线、折叠、语法高亮、等宽铺满）；Preview 渲染 Markdown/MDX 正文；Inspector 仅 Writing；记录见 ACCEPTANCE §19 |
 
 M1 的退出只覆盖主题与共享控件本身；mock 的模式切换器、Build 标签条等区域属于 M2 及后续里程碑，未在 M1 提前实现。

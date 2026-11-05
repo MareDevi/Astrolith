@@ -199,6 +199,17 @@ frontmatter and MDX imports excluded, like a Markdown preview in a code
 editor; the Astro preview remains a separate bottom panel opened from the
 Panels menu. The **Details** inspector exists only in Writing.
 
+Build also speaks the Astro toolchain's language servers when the project has
+installed them: syntax highlighting for `.astro`, TypeScript/TSX,
+JavaScript/JSX, JSON, CSS, HTML, Svelte, YAML, TOML and Markdown/MDX; inline
+diagnostics; completions as you type or with `Ctrl+Space`; hover documentation;
+`F12` (or the context menu) to go to a definition, including another project
+file; and `Ctrl+.` for code actions. The application looks for servers in the
+project's `node_modules/.bin` and on `PATH`; it never downloads them. Without a
+server, the file still opens and highlights normally. Rename, workspace
+symbols, signature help, a diagnostics panel and cross-file code-action edits
+are not implemented; Markdown has no server.
+
 Open **Details** with the sliders button at the right of the document rail or
 `Ctrl+2` (`Cmd+2` on macOS). It is a non-modal popover: it never changes the
 document's width or position. **Escape**, a click outside, or its close button

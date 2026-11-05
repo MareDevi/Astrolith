@@ -63,6 +63,19 @@ with Ctrl-click, extending select-next across every user cursor, and applying
 distinct replacement text per cursor in one undo step are not available with
 the pinned editor API. See [Linux limits](guide.md#14-linux-limits-and-known-gaps).
 
+## Build code editor
+
+| Command | Shortcut |
+| --- | --- |
+| Show completions | Ctrl+Space |
+| Go to definition | F12 |
+| Show code actions | Ctrl+. |
+
+Completions also appear automatically while typing. Hovering a symbol shows
+server documentation. The code actions above are part of the pinned editor and
+only do something in Build mode when a language server is installed for the
+open file.
+
 ## Formatting
 
 | Command | Shortcut |

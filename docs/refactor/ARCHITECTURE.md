@@ -19,7 +19,8 @@
 | UI | 现有 `TitleBar`、`DockArea`、`DockSkin`、`EditorState`、`CommandState`、原生表单与 Sheet | 先组合已有组件，不逐个移植 React |
 | 浮层 | pinned `gpui-component/src/popover.rs` 与 `gpui-base/src/popover.rs` | 已核对 controlled `open`、`on_open_change`、`PopoverState`、outside dismissal、焦点恢复；嵌套 Select/DatePicker 仍需交互验证 |
 | 编辑器 | pinned `gpui-base/src/input/editor/`、`input/base/state.rs` | 行号/折叠/诊断接口存在，但应用当前 Writer 关闭代码辅助；API 存在不等于已集成 LSP |
-| Astro 高亮 | pinned Kit Cargo features 有 `tree-sitter-astro` | 项目仅使用默认 features；需要核对启用范围和锁文件变化，不能宣称已有 Astro 高亮 |
+| Astro 高亮 | pinned Kit Cargo features 有 `tree-sitter-astro` | Build 已显式启用 astro/typescript/tsx/javascript/css/html/svelte/toml/yaml/markdown grammar；Astro injection 依赖的 html/css/js/ts grammar 同时启用 |
+| LSP 客户端 | 本地 crate `astrolith-lsp`：stdio JSON-RPC、Content-Length framing、initialize/didOpen/didChange/didClose、诊断推送与 completion/hover/definition/codeAction 请求 | 仅服务 Build 的完整源；项目内 `node_modules/.bin` 优先发现服务器，不自动安装；GUI provider 只经异步 Task 访问 |
 
 本机 pinned source 位于 Cargo registry 的 `gpui-kit-0.8.1`、`gpui-component-0.8.1`、`gpui-base-0.8.1`；可移植审查应通过当前 `CARGO_HOME/registry/src` 定位，不硬编码开发者绝对路径。
 Context7 已 resolve `/longbridge/gpui-kit` 并查询 retained state / Root / overlay focus 文档；当前文档仅为辅证，安装源码优先。参考 [Coding Guides](https://gpui-kit.com/docs/coding-guides.md) 与 [Design Guides](https://gpui-kit.com/docs/design-guides.md)。
@@ -117,12 +118,13 @@ Surface 可用性按**实际窗口后端**判断：`WAYLAND_DISPLAY` 存在时�
 
 ## 7. 必交付新增能力与所有权
 
-- Astro 开发文件编辑：在 `ProjectWorkspace` 的真实项目文件导航中打开 `.astro` 源码，以 DocumentSession/DocumentBuffer 复用 dirty、history、save/conflict/recovery；源码不使用 Markdown frontmatter 投影。文件类型识别与内容集合身份分离。
+- Astro 开发文件编辑：在 `ProjectWorkspace` 的真实项目文件导航中打开 Astro 常用文本源（`.astro`、TS/JS/TSX/JSX、JSON、CSS/SCSS/LESS、HTML、Svelte、Vue、Markdown/MDX、YAML、TOML），以 DocumentSession/DocumentBuffer 复用 dirty、history、save/conflict/recovery；源码不使用 Markdown frontmatter 投影。文件类型识别与内容集合身份分离。
+- 语言服务：`astrolith-lsp` 拥有协议、进程与文档同步；`editor/lsp.rs` 只把 server 能力适配到 pinned provider trait。服务器按文档语言与项目根懒启动，活动 Build 文档才保留进程；诊断先转换为 editor 的字符坐标再进入 `DiagnosticSet`。跳转定义跨文件时经 DocumentSession 事件交由 ProjectWorkspace 打开目标 session。
 - 交互终端：M2c 新增项目绑定的 terminal service/state 和 GPUI 原生终端视图。服务持有 PTY/子进程和有界输出，视图负责输入、ANSI 呈现、选择/复制与 resize；隐藏 Dock/换模式不杀会话，关闭/切项目/退出按明确策略清理。具体 PTY/终端库在实施时核对文档、锁定版本并论证依赖。
 - Embedded：M5b 已以 XWayland/X11 窗口交付真实 surface，保留 WebView 实例并与现有 dev server 共享生命周期；Wayland 窗口保持 external fallback 并显示原因。macOS/Windows 仍只有编译路径，未做平台验收，不据此宣布支持。
 
 ## 8. 风险排序
 
-最高风险是统一 Undo/Redo、Writer/Source 投影切换、保存中的代际一致性。其次为浮层嵌套焦点与 IME、偏好迁移、主题适配与缩放。真实 WebView、`.astro` 开发文件服务和交互 Terminal 属于必交付新增能力，需独立可编译里程碑。完整 LSP 可另行扩展，但基础真实源码高亮和已有诊断不能用演示替代。Terminal 必须有 PTY、真实 shell 输入输出、resize、退出码与清理，不以 dev-server 日志或 IDE launch 代替。
+最高风险是统一 Undo/Redo、Writer/Source 投影切换、保存中的代际一致性。其次为浮层嵌套焦点与 IME、偏好迁移、主题适配与缩放。真实 WebView、`.astro` 开发文件服务和交互 Terminal 属于必交付新增能力，需独立可编译里程碑。完整 LSP 已作为独立 crate 交付可选服务器集成，但没有 rename/symbol/signature 等全量能力，不能宣称与 Zed 等 IDE 等价；基础真实源码高亮和已有诊断不能被演示替代。Terminal 必须有 PTY、真实 shell 输入输出、resize、退出码与清理，不以 dev-server 日志或 IDE launch 代替。
 
 现有 Help 链接测试在未改源码前失败，具体记录见 [ACCEPTANCE.md](ACCEPTANCE.md)。本次只补审计文档与文档兼容入口；所有功能差距仍留在后续里程碑，不在 M0 修代码。

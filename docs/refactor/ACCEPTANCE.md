@@ -366,3 +366,20 @@ M0 文档完成不等于 A01…A27 已通过。后续每阶段按实际结果更
   - `TextView` 的表格列宽由库决定；窄页宽下会出现单元格末字符换行（截图中 “Frontmatter”），未在应用层覆盖。
   - Build 的 Astro 语法高亮依赖 `tree-sitter-astro`；该 grammar 未注册 `rust`/`ts` 代码块语言，Preview 中这类 fenced code 回退为纯文本。未新增 AST/语言服务。
   - macOS/Windows、150%/200% 显示缩放与 IME 未在本轮重验。
+
+## 20. Build 模式语法高亮与语言服务扩展执行记录
+
+- 范围：`astrolith-lsp`（新 crate：framing、语言/服务器发现、异步 JSON-RPC 客户端、UTF-16/字符坐标转换）、`astrolith-gpui/src/editor/lsp.rs`（provider 适配与诊断投影）、`editor/session.rs`（项目根、客户端生命周期、文档同步、跨文件定位事件）、`project_discovery.rs`（可编辑源扩展、定义目标打开）、`commands.rs`（`Ctrl+Space`、`F12`）。
+- 语法高亮：gpui-kit 显式启用 markdown/markdown-inline、astro、css、html、javascript、svelte、toml、tsx、typescript、yaml grammar；Astro 的 injection 依赖同时启用。`editor_language` 覆盖 `.astro`、TS/MTS/CTS、TSX/JSX、JS/MJS/CJS、JSON/JSONC、CSS、HTML、Svelte、YAML、TOML、Markdown/MDX；未知扩展仍回退 `text`。
+- 可编辑文件：Build explorer 与 Open Project Source 走同一 retained session 的文本源扩展为 Astro 常用技术栈；集合条目仍优先按索引 session 打开；资源、项目外路径与依赖目录不进入写路径。
+- 语言服务：
+  - 只在 Build 完整源、已设项目根且语言有服务器定义时启动；活动文档才保留客户端，切换标签/模式/关闭文档停止进程。
+  - 发现顺序：项目及祖先 `node_modules/.bin` → `PATH`；不自动安装。服务器：`astro-ls`、`typescript-language-server`、`vscode-json-language-server`、`vscode-css-language-server`、`vscode-html-language-server`、`svelteserver`、`vue-language-server`。
+  - 协议：initialize/initialized、FULL 文本 didOpen/didChange/didClose（150 ms 合并）、`publishDiagnostics` → editor `DiagnosticSet`、completion/hover/definition/codeAction 请求。UTF-16 位置在响应边界转换为 editor 字符坐标；诊断在发布前转换。
+  - 交互：补全自动触发与 `Ctrl+Space`；悬停显示；`F12`/右键跳转定义，跨文件经 session 事件让 workspace 打开目标标签并定位；`Ctrl+.` code action 只应用当前文档 plain edits。
+- 回归：
+  - `astrolith-lsp` 单元测试：Content-Length 编解码与跨包读取/超限/缺头、UTF-16 ↔ 字符 ↔ 字节坐标（含非 BMP）、响应嵌套位置转换、语言与扩展映射、项目内/上级/`PATH` 发现与缺失/不可执行/无服务器语言、真实 duplex 握手、server 请求应答、错误响应、stdout 诊断事件。
+  - `astrolith-gpui`：`build_highlights_the_astro_stack`、`build_edits_text_sources_but_not_assets`，以及原 Build/源视图回归。
+  - 一次性真机式 smoke（未提交）：临时项目内 `node_modules/.bin/astro-ls` 假服务器 + headless GPUI 打开 `.astro` → Build → 服务器收到 didOpen → 编辑器 `DiagnosticSet` 得到 1 条诊断；`Client::spawn_process` 也以真实子进程验证 initialize/诊断/shutdown/exit。
+- 限制：未实现 rename、workspace symbol、signature help、diagnostics 面板、inlay hints、semantic tokens、snippet 补全与跨文件/`documentChanges` code action；服务器未安装时仅记录日志并保留高亮，不下载/提示安装。Markdown 无内置服务器。原生 Wayland 上的真实 `astro-ls`/TS server 交互、IME、150%/200% 缩放未在本轮重验。
+- 验证：`mise run check` 退出码 0；doctor、fmt、clippy `-D warnings`、build 通过；workspace Rust 测试合计 734 passed、0 failed、7 ignored（含 `astrolith-lsp` 24 个）；fixture 单元 6 passed，Astro fixture compatibility PASS。`Cargo.lock` 随新 crate 与 grammar 依赖提交。
