@@ -1513,10 +1513,9 @@ impl ProjectWorkspace {
                         // with our own write. The buffer stays dirty.
                         session.rebase_persisted(DocumentRevision::new(revision), persisted);
                     }
+                    // Both `confirm_saved` and `rebase_persisted` already clear
+                    // the external-change flag and adopt the persisted bytes.
                     session.dirty = session.buffer.is_dirty();
-                    if confirmed {
-                        session.externally_changed = false;
-                    }
                     cx.notify();
                     (confirmed, content)
                 });
@@ -8090,6 +8089,104 @@ mod tests {
             assert!(!session.buffer.is_dirty());
             assert!(!view.has_dirty(cx));
             assert!(view.status.contains("Saved"));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn our_own_save_does_not_report_an_external_change(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(0, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let path = view.read_with(cx, |view, _| view.active.clone().unwrap());
+
+        edit_active(cx, handle, &view, "# Saved\n").await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if std::fs::read_to_string(&path).unwrap() == "# Saved\n" {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Saved\n");
+
+        // The watcher batch our own rename triggers must not flag the document.
+        view.update(cx, |view, cx| {
+            let token = view.begin_index_request();
+            let manifest = view.manifest.as_ref().unwrap().as_ref().clone();
+            let entries = view.entries.as_ref().clone();
+            view.apply_watcher_scan(
+                token,
+                Ok(WatcherScan {
+                    index: Ok((manifest, entries)),
+                    fingerprints: vec![(
+                        path.clone(),
+                        Some(crate::editor::session::fingerprint("# Saved\n")),
+                    )],
+                }),
+                cx,
+            );
+        });
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert!(!session.externally_changed, "our own write is not external");
+            assert_eq!(
+                session.disk_fingerprint,
+                crate::editor::session::fingerprint("# Saved\n")
+            );
+            let tab = view
+                .tabs
+                .iter()
+                .find(|tab| tab.path == path)
+                .expect("the saved document has a tab");
+            assert!(!tab.externally_changed);
+            assert!(!view.status.contains("changed on disk"));
+        });
+
+        // A genuinely external edit is still detected.
+        std::fs::write(&path, "# External\n").unwrap();
+        view.update(cx, |view, cx| {
+            let token = view.begin_index_request();
+            let manifest = view.manifest.as_ref().unwrap().as_ref().clone();
+            let entries = view.entries.as_ref().clone();
+            view.apply_watcher_scan(
+                token,
+                Ok(WatcherScan {
+                    index: Ok((manifest, entries)),
+                    fingerprints: vec![(
+                        path.clone(),
+                        Some(crate::editor::session::fingerprint("# External\n")),
+                    )],
+                }),
+                cx,
+            );
+        });
+        view.read_with(cx, |view, cx| {
+            assert!(
+                view.sessions
+                    .get(&path)
+                    .unwrap()
+                    .read(cx)
+                    .externally_changed
+            );
+            let tab = view
+                .tabs
+                .iter()
+                .find(|tab| tab.path == path)
+                .expect("the document has a tab");
+            assert!(tab.externally_changed);
         });
     }
 

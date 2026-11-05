@@ -1261,14 +1261,27 @@ impl DocumentSession {
     }
 
     /// Record that `revision` was persisted.
+    ///
+    /// The disk now holds our own bytes, so the external-change fingerprint
+    /// follows them and the document is no longer reported as changed on disk.
     pub fn confirm_saved(&mut self, revision: DocumentRevision, persisted: &str) -> bool {
-        self.buffer.confirm_saved(revision, persisted)
+        self.disk_fingerprint = fingerprint(persisted);
+        self.externally_changed = false;
+        let confirmed = self.buffer.confirm_saved(revision, persisted);
+        self.dirty = self.buffer.is_dirty();
+        confirmed
     }
 
     /// Move the baseline to the bytes an earlier save persisted, keeping newer
     /// edits dirty so their follow-up save does not conflict with that write.
+    ///
+    /// Newer edits are not an external change: the disk holds our own write.
     pub fn rebase_persisted(&mut self, saved_revision: DocumentRevision, persisted: &str) -> bool {
-        self.buffer.rebase_persisted(saved_revision, persisted)
+        self.disk_fingerprint = fingerprint(persisted);
+        self.externally_changed = false;
+        let rebased = self.buffer.rebase_persisted(saved_revision, persisted);
+        self.dirty = self.buffer.is_dirty();
+        rebased
     }
 
     /// Re-target this session at a renamed source and re-project it.
