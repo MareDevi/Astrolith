@@ -82,10 +82,7 @@ fn spawn_reaped(command: &mut Command) -> std::io::Result<(u32, std::sync::mpsc:
             }
             let _ = finished_tx.send(());
         })?;
-    let child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => return Err(error),
-    };
+    let child = command.spawn()?;
     let pid = child.id();
     if let Err(std::sync::mpsc::SendError(mut child)) = child_tx.send(child) {
         // The reaper thread disappeared before it could take ownership; reap
