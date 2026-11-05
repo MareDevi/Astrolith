@@ -135,6 +135,7 @@ fn create_refuses_collisions_for_explicit_names_and_unsafe_names() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn create_and_rename_refuse_traversal_and_symlink_escapes() {
     let (directory, scope) = project();

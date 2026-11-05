@@ -833,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn traversal_and_symlink_escapes_are_refused() {
+    fn traversal_escapes_are_refused() {
         let project = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         assert_eq!(
@@ -844,6 +844,13 @@ mod tests {
             AssetLocation::resolve(project.path(), Some(outside.path().to_str().unwrap())),
             Err(AssetError::OutsideProject(outside.path().to_path_buf()))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escapes_are_refused() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), project.path().join("linked")).unwrap();
         let escaped = AssetLocation::resolve(project.path(), Some("linked/assets")).unwrap();
         let source = tempfile::tempdir().unwrap();
