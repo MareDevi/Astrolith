@@ -43,6 +43,12 @@ todo = "deny"
 [profile.dev]
 debug = 1
 
+# Packaging ships release builds; keep them small, fast, and symbol-stripped.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
 # Keep application code easy to debug while the editor's hot paths stay usable.
 # These overrides also apply to tests, so dev benchmarks exercise the same code.
 [profile.dev.package]
