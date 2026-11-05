@@ -293,8 +293,8 @@ impl WriterSurface {
                 target -= content_y + f32::from(height) - bottom;
             }
         }
-        let max = self.scroll.max_offset();
-        let target = px(target.clamp(f32::from(max.y), 0.));
+        let max = f32::from(self.scroll.max_offset().y);
+        let target = px(clamp_scroll_offset(target, max));
         if target != offset.y {
             self.scroll.set_offset(point(offset.x, target));
         }
@@ -351,6 +351,12 @@ impl WriterSurface {
 
 fn block_key(index: usize) -> u64 {
     index as u64 + 1
+}
+
+/// Clamp a scroll translation to GPUI's convention: 0 at the top, negative
+/// while scrolling down, bounded by the positive `max` distance.
+fn clamp_scroll_offset(target: f32, max: f32) -> f32 {
+    target.clamp(-max.max(0.), 0.)
 }
 
 /// The previous rendered character, crossing block boundaries.
@@ -829,6 +835,14 @@ mod tests {
         assert!(
             distance(bounds, point(px(0.), px(0.))) < distance(bounds, point(px(0.), px(100.)))
         );
+    }
+
+    #[test]
+    fn scroll_offsets_stay_between_the_top_and_the_positive_max_distance() {
+        assert_eq!(clamp_scroll_offset(120., 3219.), 0.);
+        assert_eq!(clamp_scroll_offset(-500., 3219.), -500.);
+        assert_eq!(clamp_scroll_offset(-9000., 3219.), -3219.);
+        assert_eq!(clamp_scroll_offset(12., 0.), 0.);
     }
 
     #[test]
