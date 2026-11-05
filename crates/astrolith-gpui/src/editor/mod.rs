@@ -12,6 +12,7 @@ pub(crate) mod save_failure;
 pub(crate) mod selection_toolbar;
 pub(crate) mod session;
 pub(crate) mod writer_chrome;
+pub(crate) mod writer_surface;
 pub(crate) mod writing_modes;
 
 use std::rc::Rc;

@@ -22,12 +22,15 @@ use crate::editor::lsp::LspState;
 
 use crate::editor::copyedit::{CopyeditConfig, CopyeditPresentation, DEBOUNCE};
 use crate::editor::formatting::external_url;
-use crate::editor::writing_modes::{SessionPresentation, WritingModes};
+use crate::editor::writer_surface::WriterSurface;
+use crate::editor::writing_modes::{ProseStyle, SessionPresentation, WritingModes};
 use crate::runtime;
 
 pub(crate) struct DocumentSession {
     /// The editor displays the writer projection, never the complete source.
     pub editor: Entity<EditorState>,
+    /// Rendered writing surface; the editor remains its input model.
+    pub(crate) writer: Entity<WriterSurface>,
     /// Authoritative complete source: frontmatter and MDX imports included.
     pub buffer: DocumentBuffer,
     /// The projection that produced the editor's text and its byte mapping.
@@ -110,6 +113,7 @@ pub(crate) struct DocumentSession {
     _blur: Subscription,
     _placeholder_keys: Subscription,
     _history_keys: Subscription,
+    _writer_keys: Subscription,
 }
 pub(crate) struct SessionChanged;
 impl EventEmitter<SessionChanged> for DocumentSession {}
@@ -183,6 +187,16 @@ impl DocumentSession {
                 .smart_indent(false)
                 .default_value(projection.visible.clone())
         });
+        let writer = {
+            let weak = cx.weak_entity();
+            let style = ProseStyle::new(
+                crate::theme::prose_font(cx),
+                16.,
+                2.,
+                crate::theme::PROSE_PAGE_WIDTH_PERCENT,
+            );
+            cx.new(|cx| WriterSurface::new(weak, style, cx))
+        };
         let change = cx.subscribe_in(
             &editor,
             window,
@@ -304,8 +318,38 @@ impl DocumentSession {
             // must never receive the same key.
             cx.stop_propagation();
         });
+        let writer_weak = cx.weak_entity();
+        let writer_focus = editor.read(cx).focus_handle(cx);
+        let writer_keys = cx.intercept_keystrokes(move |event, window, cx| {
+            if !writer_focus.is_focused(window) {
+                return;
+            }
+            let modifiers = event.keystroke.modifiers;
+            if modifiers.control || modifiers.alt || modifiers.platform {
+                return;
+            }
+            let key = event.keystroke.key.as_str();
+            if !matches!(key, "left" | "right" | "up" | "down" | "home" | "end") {
+                return;
+            }
+            let writer = writer_weak
+                .read_with(cx, |session, _| {
+                    (!session.source_view).then(|| session.writer.clone())
+                })
+                .ok()
+                .flatten();
+            let handled = writer.is_some_and(|writer| {
+                writer.update(cx, |writer, cx| {
+                    writer.navigate(key, modifiers.shift, window, cx)
+                })
+            });
+            if handled {
+                cx.stop_propagation();
+            }
+        });
         Self {
             editor,
+            writer,
             buffer,
             projection,
             origin: false,
@@ -343,6 +387,7 @@ impl DocumentSession {
             _blur: blur,
             _placeholder_keys: placeholder_keys,
             _history_keys: history_keys,
+            _writer_keys: writer_keys,
         }
     }
 
@@ -631,6 +676,17 @@ impl DocumentSession {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<String> {
+        if !self.source_view
+            && let Some(url) = self.writer.read(cx).url_at(position)
+        {
+            // The rendered surface collapses any modified-click cursor the
+            // editor may have added; only the requested link opens.
+            self.editor.update(cx, |editor, cx| {
+                let active = editor.selected_range();
+                editor.set_selected_range(active, cx);
+            });
+            return external_url(&url);
+        }
         let url = {
             let ranges = crate::editor::formatting::link_destinations(&self.projection.visible);
             let editor = self.editor.read(cx);
@@ -654,6 +710,11 @@ impl DocumentSession {
     /// Uses the same inverse `range_to_bounds` hit test as modified link
     /// clicks; the facade exposes no pointer-to-caret mapping.
     pub(crate) fn image_destination_at(&self, position: Point<Pixels>, cx: &App) -> Option<String> {
+        if !self.source_view
+            && let Some(destination) = self.writer.read(cx).image_at(position)
+        {
+            return Some(destination);
+        }
         let links = crate::editor::image_preview::image_links(&self.projection.visible);
         let editor = self.editor.read(cx);
         links
@@ -773,8 +834,7 @@ impl DocumentSession {
         Ok(())
     }
 
-    /// The current placeholder ranges, for navigation and tests.
-    #[cfg(test)]
+    /// The current placeholder ranges, for navigation and rendering.
     pub(crate) fn placeholder_ranges(&self) -> &[Range<usize>] {
         &self.placeholders
     }
@@ -952,6 +1012,45 @@ impl DocumentSession {
         true
     }
 
+    /// Install the document typography used by the rendered writing surface.
+    pub(crate) fn set_prose_style(&mut self, style: ProseStyle, cx: &mut Context<Self>) {
+        self.writer
+            .update(cx, |writer, cx| writer.set_style(style, cx));
+    }
+
+    /// Select the same visible range in the editor model from the rendered
+    /// writing surface and give that model the keyboard.
+    pub(crate) fn set_writer_selection(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let limit = self.projection.visible.len();
+        let anchor = anchor.min(limit);
+        let focus = focus.min(limit);
+        let range = anchor.min(focus)..anchor.max(focus);
+        self.editor.update(cx, |editor, cx| {
+            editor.set_selected_range(range.clone(), cx);
+            editor.focus(window, cx);
+        });
+        self.last_selection = self.projection_range_to_source(range);
+        cx.notify();
+    }
+
+    /// The rendered selection rectangle and viewport, when the writer surface
+    /// has laid them out.
+    pub(crate) fn writer_selection_geometry(
+        &self,
+        cx: &App,
+    ) -> Option<(
+        gpui_kit::Bounds<gpui_kit::Pixels>,
+        gpui_kit::Bounds<gpui_kit::Pixels>,
+    )> {
+        self.writer.read(cx).selection_geometry()
+    }
+
     /// Install the writing modes for this session.
     pub(crate) fn set_writing_modes(
         &mut self,
@@ -1021,8 +1120,12 @@ impl DocumentSession {
                     .read(cx)
                     .cursor()
                     .min(this.projection.visible.len());
-                this.copyedit
-                    .apply(&this.editor, ticket, analysis, cursor, cx);
+                if this
+                    .copyedit
+                    .apply(&this.editor, ticket, analysis, cursor, cx)
+                {
+                    this.writer.update(cx, |_, cx| cx.notify());
+                }
             });
         }));
     }
@@ -1042,6 +1145,7 @@ impl DocumentSession {
         self.presentation
             .refresh_focus(&self.editor, &self.projection.visible, cx);
         self.presentation.centre_cursor(&self.editor, cx);
+        self.writer.update(cx, |_, cx| cx.notify());
     }
 
     /// Refresh only what follows the caret.
@@ -1064,6 +1168,7 @@ impl DocumentSession {
             .min(self.projection.visible.len());
         self.copyedit.refresh_cursor(&self.editor, cursor, cx);
         self.presentation.centre_cursor(&self.editor, cx);
+        self.writer.update(cx, |_, cx| cx.notify());
     }
 
     pub fn is_dirty(&self) -> bool {

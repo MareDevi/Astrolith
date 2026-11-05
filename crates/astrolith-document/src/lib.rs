@@ -29,6 +29,8 @@ pub mod serialize;
 pub mod tokens;
 /// Disk baseline for conflict-aware saving.
 pub mod version;
+/// Rendered writer blocks with a lossless map back to Markdown source.
+pub mod wysiwyg;
 /// Raw YAML value validation.
 pub mod yaml;
 
@@ -53,6 +55,9 @@ pub use sentences::{cursor_sentence, other_sentences, sentences};
 pub use serialize::serialize_document;
 pub use tokens::{TokenSnapshot, TokenSummary, token_snapshot};
 pub use version::DiskBaseline;
+pub use wysiwyg::{
+    BlockKind, InlineMark, InlineMarkKind, RichBlock, RichText, SourceSegment, WysiwygDocument,
+};
 
 #[cfg(test)]
 #[path = "tests.rs"]

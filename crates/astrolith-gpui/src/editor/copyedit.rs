@@ -287,6 +287,23 @@ impl CopyeditPresentation {
         suppressed
     }
 
+    /// Ranges and colours the rendered writer should paint for `cursor`.
+    ///
+    /// The editor decorations are for the source surface; the WYSIWYG surface
+    /// paints the same analysis over rendered text.
+    pub(crate) fn render_ranges(&self, cursor: usize) -> Vec<(Range<usize>, Hsla)> {
+        if self.analysis_ticket.is_none() || !self.config.any_enabled() {
+            return Vec::new();
+        }
+        let ranges = decorated_ranges(&self.analysis, cursor, &self.config);
+        let mut rendered = Vec::new();
+        for (category, ranges) in CopyeditCategory::ALL.iter().zip(ranges) {
+            let color = self.config.color(*category).opacity(FILL_OPACITY);
+            rendered.extend(ranges.into_iter().map(|range| (range, color)));
+        }
+        rendered
+    }
+
     /// The ranges currently tracked by one category layer.
     #[cfg(test)]
     pub(crate) fn ranges(&self, category: CopyeditCategory, cx: &App) -> Vec<Range<usize>> {

@@ -3711,6 +3711,52 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn writing_surface_click_moves_the_caret_and_keeps_typing_working(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let directory = project_fixture("wysiwyg-click");
+        std::fs::write(
+            directory.path().join("src/content/first.md"),
+            "# A rendered heading\n\nA paragraph with enough words to click into the middle of the rendered page and keep typing.\n\n- one item\n- two items\n",
+        )
+        .unwrap();
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (project, _) =
+            open_first_entry(cx, handle, &view, directory.path().to_path_buf()).await;
+        let editor = project
+            .read_with(cx, |project, cx| project.active_session(cx))
+            .unwrap()
+            .read_with(cx, |session, _| session.editor.clone());
+        let original = editor.read_with(cx, |editor, _| editor.value().to_string());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            editor.update(cx, |editor, cx| editor.set_selected_range(0..0, cx));
+            window.click_at(("input", editor.entity_id()), point(px(120.), px(20.)), cx);
+            window.render_frame(cx);
+            assert!(
+                editor.read(cx).cursor() > 0,
+                "clicking the rendered page must place the caret in the document"
+            );
+            window.input("Z", cx);
+            let after_typing = editor.read(cx).cursor();
+            window.press("left", cx);
+            assert!(
+                editor.read(cx).cursor() < after_typing,
+                "left arrow must move the caret through the rendered text"
+            );
+            window.press("up", cx);
+        })
+        .unwrap();
+        let typed = editor.read_with(cx, |editor, _| editor.value().to_string());
+        assert_ne!(
+            typed, original,
+            "typing after the click must reach the buffer"
+        );
+        assert!(typed.contains('Z'));
+    }
+
+    #[gpui_kit::test]
     async fn frontmatter_inspector_is_an_overlay_with_unchanged_document_bounds(
         cx: &mut TestAppContext,
     ) {

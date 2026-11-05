@@ -136,7 +136,14 @@ impl WorkspacePanel {
         if self.prose.as_ref() == Some(&style) {
             return;
         }
-        self.prose = Some(style);
+        self.prose = Some(style.clone());
+        if let Some(session) = self
+            .wiring
+            .as_ref()
+            .and_then(|wiring| wiring.session.upgrade())
+        {
+            session.update(cx, |session, cx| session.set_prose_style(style, cx));
+        }
         cx.notify();
     }
 
@@ -430,8 +437,16 @@ impl Render for WorkspacePanel {
                     let paste = wiring.hooks.paste.clone();
                     element = element.on_paste(move |item, window, cx| (paste)(item, window, cx));
                 }
+                let writer = (!code)
+                    .then(|| wiring.as_ref().and_then(|wiring| wiring.session.upgrade()))
+                    .flatten()
+                    .map(|session| session.read(cx).writer.clone());
+                let content = match writer {
+                    Some(surface) => surface.into_any_element(),
+                    None => element.into_any_element(),
+                };
                 let mut body = if code {
-                    div().flex_1().min_h_0().relative().child(element)
+                    div().flex_1().min_h_0().relative().child(content)
                 } else {
                     div()
                         .flex_1()
@@ -447,7 +462,7 @@ impl Render for WorkspacePanel {
                                 .max_w(px(1200.))
                                 .px(px(crate::theme::PROSE_INSET))
                                 .pt(px(crate::theme::PROSE_TOP))
-                                .child(element),
+                                .child(content),
                         )
                 };
                 if let Some(hooks) = wiring.as_ref().map(|wiring| wiring.hooks.clone()) {

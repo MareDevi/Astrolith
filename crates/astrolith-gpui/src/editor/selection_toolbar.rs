@@ -102,7 +102,17 @@ pub(crate) fn overlay(
         if !toolbar_visible(&selection, focused) {
             return None;
         }
-        (state.range_to_bounds(&selection)?, state.text_bounds()?)
+        let writer = session
+            .read_with(cx, |session, cx| {
+                (!session.is_source_view()).then(|| session.writer_selection_geometry(cx))
+            })
+            .ok()
+            .flatten()
+            .flatten();
+        match writer {
+            Some(geometry) => geometry,
+            None => (state.range_to_bounds(&selection)?, state.text_bounds()?),
+        }
     };
     let placement = placement(bounds, viewport, TOOLBAR_WIDTH, TOOLBAR_HEIGHT);
     let comment = session
