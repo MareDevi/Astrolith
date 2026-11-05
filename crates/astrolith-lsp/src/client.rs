@@ -183,10 +183,15 @@ enum Pending {
     Shutdown(oneshot::Sender<()>),
 }
 
-/// Build a document URI from an absolute filesystem path.
+/// Build a document URI from a filesystem path.
+///
+/// Existing paths are canonicalized first, so a symlinked project root or a
+/// `..` segment maps to the same URI as the path the server normalizes to. A
+/// path that does not exist yet is used verbatim and must already be absolute.
 pub fn uri_from_path(path: &std::path::Path) -> Result<Uri, ClientError> {
-    let url = url::Url::from_file_path(path).map_err(|_| {
-        ClientError::Protocol(format!("{:?} is not an absolute document path", path))
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let url = url::Url::from_file_path(&canonical).map_err(|_| {
+        ClientError::Protocol(format!("{:?} is not an absolute document path", canonical))
     })?;
     Uri::from_str(url.as_str())
         .map_err(|error| ClientError::Protocol(format!("invalid document URI: {error}")))
@@ -1550,5 +1555,51 @@ mod tests {
         .await;
         assert!(abandoned.is_err(), "the request should still be pending");
         server.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_paths_share_one_document_uri() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("page.astro");
+        std::fs::write(&real, "").unwrap();
+        let alias = directory.path().join("alias.astro");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+
+        assert_eq!(
+            uri_from_path(&alias).unwrap(),
+            uri_from_path(&real).unwrap()
+        );
+    }
+
+    #[test]
+    fn relative_spellings_share_one_document_uri() {
+        let root = std::env::current_dir().unwrap();
+        let directory = tempfile::tempdir_in(&root).unwrap();
+        let real = directory.path().join("nested").join("page.astro");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "").unwrap();
+        let relative = real.strip_prefix(&root).unwrap();
+        assert!(!relative.is_absolute());
+
+        assert_eq!(
+            uri_from_path(relative).unwrap(),
+            uri_from_path(&real).unwrap()
+        );
+        assert_eq!(
+            uri_from_path(&root.join(relative)).unwrap(),
+            uri_from_path(&real).unwrap()
+        );
+    }
+
+    #[test]
+    fn not_yet_created_paths_are_used_verbatim() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing").join("page.astro");
+
+        assert_eq!(
+            uri_from_path(&missing).unwrap().as_str(),
+            url::Url::from_file_path(&missing).unwrap().as_str()
+        );
     }
 }
