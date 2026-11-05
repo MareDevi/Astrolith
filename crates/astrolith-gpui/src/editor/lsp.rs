@@ -4,14 +4,14 @@
 //! pinned editor's provider traits. Every provider awaits the server on the
 //! background executor, so rendering and typing stay independent of it.
 
-use std::{ops::Range, rc::Rc};
+use std::{ops::Range, rc::Rc, time::Duration};
 
 use astrolith_lsp::{
     Client, ClientHandle, LanguageId, code_action_params, completion_params, convert_positions,
     definition_params, hover_params, methods, uri_from_path, utf16_position_to_char,
 };
 use gpui_kit::{
-    App, AppContext as _, Entity, SharedString, Task, Window,
+    App, AppContext as _, BackgroundExecutor, Entity, SharedString, Task, Window,
     component::highlighter::{Diagnostic, DiagnosticSet},
     component::input::{
         CodeActionProvider, CompletionProvider, DefinitionProvider, EditorState, HoverProvider,
@@ -40,6 +40,42 @@ impl LspState {
     pub fn close(&self) {
         self.handle.close(self.uri.clone());
     }
+}
+
+/// How long a server that acknowledged `shutdown` gets to exit on its own.
+pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// The one handle operation the stop path needs; tests supply a counter.
+pub(crate) trait ShutdownSignal {
+    fn request_shutdown(&self);
+}
+
+impl ShutdownSignal for ClientHandle {
+    fn request_shutdown(&self) {
+        self.shutdown();
+    }
+}
+
+/// Ask the server to exit, then drop its client after `grace`.
+///
+/// The returned task must be detached: the caller never waits for the server,
+/// and the client (which kills the child on drop) stays alive long enough for
+/// the actor to finish its own shutdown handshake.
+pub(crate) fn release_after_shutdown<C>(
+    handle: &impl ShutdownSignal,
+    client: C,
+    executor: BackgroundExecutor,
+    grace: Duration,
+) -> Task<()>
+where
+    C: Send + 'static,
+{
+    handle.request_shutdown();
+    let timer = executor.clone();
+    executor.spawn(async move {
+        timer.timer(grace).await;
+        drop(client);
+    })
 }
 
 /// Install completion, hover, definition and code-action providers on `editor`.
@@ -345,6 +381,14 @@ fn apply_workspace_edit(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Instant,
+    };
+
     use super::*;
 
     fn uri(text: &str) -> lsp_types::Uri {
@@ -393,5 +437,68 @@ mod tests {
             !accepts_diagnostics(&document, Some(1), &document, None),
             "an unversioned publish cannot be ordered after a versioned one"
         );
+    }
+
+    struct FakeHandle(Arc<AtomicUsize>);
+
+    impl ShutdownSignal for FakeHandle {
+        fn request_shutdown(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct FakeClient(Arc<AtomicBool>);
+
+    impl Drop for FakeClient {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[gpui_kit::test]
+    async fn stopping_requests_shutdown_without_waiting_for_the_server(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        let task = release_after_shutdown(
+            &FakeHandle(requests.clone()),
+            FakeClient(dropped.clone()),
+            cx.executor(),
+            Duration::from_secs(30),
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the caller must not wait for the grace period"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(
+            !dropped.load(Ordering::SeqCst),
+            "the client must outlive the caller for the grace period"
+        );
+        drop(task);
+        cx.run_until_parked();
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "dropping the grace task releases the client"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn the_client_is_dropped_once_the_grace_period_expires(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let _task = release_after_shutdown(
+            &FakeHandle(requests.clone()),
+            FakeClient(dropped.clone()),
+            cx.executor(),
+            Duration::from_millis(10),
+        );
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

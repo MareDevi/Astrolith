@@ -1779,11 +1779,33 @@ impl DocumentSession {
         self.lsp_diagnostic_version = None;
         self.lsp_change = None;
         self.lsp_events = None;
-        if let Some(state) = self.lsp.take() {
-            state.close();
-            drop(state);
-            crate::editor::lsp::uninstall(&self.editor, cx);
-        }
+        self.release_lsp(cx);
+    }
+
+    /// Close the open document and give the server a bounded graceful exit.
+    ///
+    /// Providers are uninstalled synchronously, so the editor is usable at
+    /// once. The client itself is held on the background executor for the
+    /// grace period; dropping it earlier would abort the actor and SIGKILL a
+    /// server that was mid-shutdown.
+    fn release_lsp(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.lsp.take() else {
+            return;
+        };
+        state.close();
+        let LspState {
+            _client: client,
+            handle,
+            ..
+        } = state;
+        crate::editor::lsp::release_after_shutdown(
+            &handle,
+            client,
+            cx.background_executor().clone(),
+            crate::editor::lsp::SHUTDOWN_GRACE,
+        )
+        .detach();
+        crate::editor::lsp::uninstall(&self.editor, cx);
     }
 
     /// Focus this document at a language-server selection.
