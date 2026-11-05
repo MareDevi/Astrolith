@@ -15,25 +15,22 @@ use std::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 
-use super::{
-    migrate,
-    model::{
-        GLOBAL_PREFERENCES_VERSION, GlobalPreferencesV2, PROJECT_PREFERENCES_VERSION,
-        PROJECT_REGISTRY_VERSION, ProjectOpen, ProjectPreferencesV1, ProjectRecord,
-        ProjectRegistry,
-    },
+use super::model::{
+    GLOBAL_PREFERENCES_VERSION, GlobalPreferencesV2, PROJECT_PREFERENCES_VERSION,
+    PROJECT_REGISTRY_VERSION, ProjectOpen, ProjectPreferencesV1, ProjectRecord, ProjectRegistry,
 };
+use super::upgrade;
 
 const MAX_PREFERENCE_BYTES: u64 = 1024 * 1024;
 
-struct Stored<T> {
-    path: PathBuf,
+pub(super) struct Stored<T> {
+    pub(super) path: PathBuf,
     revision: u64,
-    baseline: Option<Vec<u8>>,
-    envelope: Option<Map<String, Value>>,
+    pub(super) baseline: Option<Vec<u8>>,
+    pub(super) envelope: Option<Map<String, Value>>,
     writable: bool,
-    value: T,
-    warning: Option<String>,
+    pub(super) value: T,
+    pub(super) warning: Option<String>,
 }
 
 impl<T> Stored<T>
@@ -83,9 +80,9 @@ where
         let expected = u64::from(version);
         match map.get("version") {
             Some(Value::Number(number)) if number.as_u64() == Some(expected) => {}
-            // A structurally valid but different version is a newer (or older)
-            // format: preserve it read-only rather than quarantining data a
-            // newer build may still need.
+            // An older numeric version is upgraded once by `upgrade`.
+            Some(Value::Number(number)) if number.as_u64().is_some_and(|old| old < expected) => {}
+            // A newer version is preserved read-only rather than overwritten.
             Some(Value::Number(number)) if number.as_u64().is_some() => {
                 stored.writable = false;
                 stored.warning = Some(format!(
@@ -184,387 +181,6 @@ where
     }
 }
 
-impl Stored<GlobalPreferencesV2> {
-    /// Retire the pre-neutral light/dark palette selectors from `global.json`.
-    ///
-    /// The exact file is copied beside itself before the two keys are removed,
-    /// so a user can always inspect what the previous build persisted. The
-    /// neutral appearance is now the only one, and selection has moved out of
-    /// the user's configuration. Unknown top-level fields are still preserved.
-    fn retire_legacy_palettes(&mut self) -> Option<String> {
-        const RETIRED: [&str; 2] = ["light_theme", "dark_theme"];
-        let envelope = self.envelope.as_mut()?;
-        if !RETIRED.iter().any(|key| envelope.contains_key(*key)) {
-            return None;
-        }
-        if !self.writable {
-            return Some(format!(
-                "Retired appearance palettes remain in {} because the file is read-only.",
-                self.path.display()
-            ));
-        }
-        let baseline = self.baseline.as_deref()?;
-        let backup = unique_destination(&self.path.with_file_name("global.json.pre-neutral.json"));
-        if let Err(error) = fs::write(&backup, baseline) {
-            return Some(format!(
-                "Could not back up retired appearance palettes to {}: {error}. The settings file is preserved.",
-                backup.display()
-            ));
-        }
-        for key in RETIRED {
-            envelope.remove(key);
-        }
-        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return Some(format!(
-                    "Could not encode migrated appearance settings: {error}."
-                ));
-            }
-        };
-        match write_atomic(&self.path, &bytes) {
-            Ok(()) => {
-                self.baseline = Some(bytes);
-                tracing::info!(
-                    path = %self.path.display(),
-                    backup = %backup.display(),
-                    "retired legacy appearance palettes"
-                );
-                None
-            }
-            Err(error) => Some(format!(
-                "Could not retire legacy appearance palettes in {}: {error}. The file is preserved.",
-                self.path.display()
-            )),
-        }
-    }
-}
-
-impl Stored<GlobalPreferencesV2> {
-    /// Convert the retired fixed page width in pixels to a pane percentage once.
-    ///
-    /// The old default was 768 px on a 1200 px reference pane, i.e. 64%.
-    /// Explicit widths scale the same way, so 900 px becomes 75%. The exact
-    /// previous file is kept beside the new one.
-    fn migrate_page_width_percent(&mut self) -> Option<String> {
-        let envelope = self.envelope.as_mut()?;
-        if envelope.contains_key("page_width_percent") {
-            return None;
-        }
-        let old_width = envelope.get("editor_width")?.as_f64()? as f32;
-        let percent = ((old_width / 1200. * 100.).clamp(30., 100.) * 10.).round() / 10.;
-        if !self.writable {
-            return Some(format!(
-                "The fixed page width remains in {} because the file is read-only.",
-                self.path.display()
-            ));
-        }
-        let baseline = self.baseline.as_deref()?;
-        let backup =
-            unique_destination(&self.path.with_file_name("global.json.pre-page-width.json"));
-        if let Err(error) = fs::write(&backup, baseline) {
-            return Some(format!(
-                "Could not back up the fixed page width to {}: {error}. The settings file is preserved.",
-                backup.display()
-            ));
-        }
-        self.value.page_width_percent = percent;
-        envelope.remove("editor_width");
-        envelope.insert(
-            "page_width_percent".to_owned(),
-            serde_json::json!(self.value.page_width_percent),
-        );
-        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return Some(format!(
-                    "Could not encode the page width percentage: {error}"
-                ));
-            }
-        };
-        match write_atomic(&self.path, &bytes) {
-            Ok(()) => {
-                self.baseline = Some(bytes);
-                tracing::info!(
-                    path = %self.path.display(),
-                    backup = %backup.display(),
-                    "converted the fixed page width to a pane percentage"
-                );
-                None
-            }
-            Err(error) => Some(format!(
-                "Could not convert the page width in {}: {error}. The file is preserved.",
-                self.path.display()
-            )),
-        }
-    }
-
-    /// Replace the pre-writing defaults with the mock's body typography once.
-    ///
-    /// Files written before M3 have no `editor_line_height`. The old defaults
-    /// (18 px at 720 px) came from the retired serif page, so an untouched value
-    /// is rewritten to the neutral 16/32 at 768; a value the user changed is
-    /// preserved. The exact previous file is kept beside the new one.
-    fn migrate_writing_defaults(&mut self) -> Option<String> {
-        let envelope = self.envelope.as_mut()?;
-        if envelope.contains_key("editor_line_height") {
-            return None;
-        }
-        if !self.writable {
-            return Some(format!(
-                "The pre-writing typography remains in {} because the file is read-only.",
-                self.path.display()
-            ));
-        }
-        let baseline = self.baseline.as_deref()?;
-        let backup = unique_destination(&self.path.with_file_name("global.json.pre-writing.json"));
-        if let Err(error) = fs::write(&backup, baseline) {
-            return Some(format!(
-                "Could not back up the pre-writing typography to {}: {error}. The settings file is preserved.",
-                backup.display()
-            ));
-        }
-        let defaults = GlobalPreferencesV2::default();
-        if (self.value.editor_font_size - 18.).abs() < f32::EPSILON {
-            self.value.editor_font_size = defaults.editor_font_size;
-        }
-        self.value.editor_line_height = defaults.editor_line_height;
-        for (key, value) in [
-            (
-                "editor_font_size",
-                serde_json::json!(self.value.editor_font_size),
-            ),
-            (
-                "editor_line_height",
-                serde_json::json!(self.value.editor_line_height),
-            ),
-            (
-                "prose_font_family",
-                serde_json::json!(self.value.prose_font_family),
-            ),
-            ("focus_mode", serde_json::json!(self.value.focus_mode)),
-            (
-                "typewriter_mode",
-                serde_json::json!(self.value.typewriter_mode),
-            ),
-        ] {
-            envelope.insert(key.to_owned(), value);
-        }
-        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return Some(format!(
-                    "Could not encode migrated writing typography: {error}"
-                ));
-            }
-        };
-        match write_atomic(&self.path, &bytes) {
-            Ok(()) => {
-                self.baseline = Some(bytes);
-                tracing::info!(
-                    path = %self.path.display(),
-                    backup = %backup.display(),
-                    "applied the neutral writing typography defaults"
-                );
-                None
-            }
-            Err(error) => Some(format!(
-                "Could not apply the writing typography in {}: {error}. The file is preserved.",
-                self.path.display()
-            )),
-        }
-    }
-
-    /// Raise the retired 14/16 px interface defaults to the larger base once.
-    ///
-    /// Earlier builds used 14 px, and M6-era files commonly stored the
-    /// hand-tuned 16 px default. Both are the old visual scale rather than a
-    /// deliberate choice of the current density, so they move to the new
-    /// 18 px default. Any other value is preserved, and the exact previous
-    /// file is kept beside the new one.
-    fn migrate_interface_scale(&mut self) -> Option<String> {
-        let envelope = self.envelope.as_mut()?;
-        if envelope.contains_key("interface_scale") {
-            return None;
-        }
-        let previous = self.value.ui_font_size;
-        let retired_default =
-            (previous - 14.).abs() < f32::EPSILON || (previous - 16.).abs() < f32::EPSILON;
-        if !retired_default {
-            return None;
-        }
-        if !self.writable {
-            return Some(format!(
-                "The smaller interface scale remains in {} because the file is read-only.",
-                self.path.display()
-            ));
-        }
-        let baseline = self.baseline.as_deref()?;
-        let backup = unique_destination(
-            &self
-                .path
-                .with_file_name("global.json.pre-interface-scale.json"),
-        );
-        if let Err(error) = fs::write(&backup, baseline) {
-            return Some(format!(
-                "Could not back up the smaller interface scale to {}: {error}. The settings file is preserved.",
-                backup.display()
-            ));
-        }
-        let defaults = GlobalPreferencesV2::default();
-        self.value.ui_font_size = defaults.ui_font_size;
-        envelope.insert(
-            "ui_font_size".to_owned(),
-            serde_json::json!(self.value.ui_font_size),
-        );
-        envelope.insert("interface_scale".to_owned(), serde_json::json!(1));
-        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return Some(format!(
-                    "Could not encode the larger interface scale: {error}"
-                ));
-            }
-        };
-        match write_atomic(&self.path, &bytes) {
-            Ok(()) => {
-                self.baseline = Some(bytes);
-                tracing::info!(
-                    path = %self.path.display(),
-                    backup = %backup.display(),
-                    "applied the larger interface scale"
-                );
-                None
-            }
-            Err(error) => Some(format!(
-                "Could not apply the larger interface scale in {}: {error}. The file is preserved.",
-                self.path.display()
-            )),
-        }
-    }
-
-    /// Replace the pre-mode split layout with the per-mode defaults once.
-    ///
-    /// The previous composition is backed up beside the file and never
-    /// restored; upgrading users get the mock's mode layouts instead of the
-    /// old three-column dock.
-    fn migrate_mode_layouts(&mut self) -> Option<String> {
-        let envelope = self.envelope.as_mut()?;
-        if !envelope.contains_key("layout") {
-            return None;
-        }
-        if !self.writable {
-            return Some(format!(
-                "The pre-mode layout remains in {} because the file is read-only.",
-                self.path.display()
-            ));
-        }
-        let baseline = self.baseline.as_deref()?;
-        let backup = unique_destination(&self.path.with_file_name("global.json.pre-mode.json"));
-        if let Err(error) = fs::write(&backup, baseline) {
-            return Some(format!(
-                "Could not back up the pre-mode layout to {}: {error}. The settings file is preserved.",
-                backup.display()
-            ));
-        }
-        envelope.remove("layout");
-        for (key, value) in [
-            (
-                "default_mode",
-                serde_json::to_value(self.value.default_mode),
-            ),
-            ("layouts", serde_json::to_value(&self.value.layouts)),
-        ] {
-            match value {
-                Ok(value) => {
-                    envelope.insert(key.to_owned(), value);
-                }
-                Err(error) => {
-                    return Some(format!("Could not encode migrated mode layouts: {error}"));
-                }
-            }
-        }
-        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return Some(format!("Could not encode migrated mode layouts: {error}"));
-            }
-        };
-        match write_atomic(&self.path, &bytes) {
-            Ok(()) => {
-                self.baseline = Some(bytes);
-                tracing::info!(
-                    path = %self.path.display(),
-                    backup = %backup.display(),
-                    "replaced the pre-mode layout with per-mode defaults"
-                );
-                None
-            }
-            Err(error) => Some(format!(
-                "Could not replace the pre-mode layout in {}: {error}. The file is preserved.",
-                self.path.display()
-            )),
-        }
-    }
-}
-
-impl Stored<ProjectPreferencesV1> {
-    /// Drop a project's pre-mode dock composition.
-    ///
-    /// The old layout is preserved in a backup; the project inherits the new
-    /// global mode layouts unless the user changes one again.
-    fn migrate_mode_layouts(&mut self) -> Option<String> {
-        let envelope = self.envelope.as_mut()?;
-        if !envelope.contains_key("layout") {
-            return None;
-        }
-        if !self.writable {
-            return Some(format!(
-                "The pre-mode layout remains in {} because the file is read-only.",
-                self.path.display()
-            ));
-        }
-        let baseline = self.baseline.as_deref()?;
-        let backup = unique_destination(&self.path.with_file_name(format!(
-            "{}.pre-mode.json",
-            self.path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "project".into())
-        )));
-        if let Err(error) = fs::write(&backup, baseline) {
-            return Some(format!(
-                "Could not back up the pre-mode project layout to {}: {error}. The file is preserved.",
-                backup.display()
-            ));
-        }
-        envelope.remove("layout");
-        let bytes = match serde_json::to_vec_pretty(&Value::Object(envelope.clone())) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return Some(format!(
-                    "Could not encode migrated project settings: {error}"
-                ));
-            }
-        };
-        match write_atomic(&self.path, &bytes) {
-            Ok(()) => {
-                self.baseline = Some(bytes);
-                tracing::info!(
-                    path = %self.path.display(),
-                    backup = %backup.display(),
-                    "dropped the pre-mode project layout"
-                );
-                None
-            }
-            Err(error) => Some(format!(
-                "Could not drop the pre-mode layout in {}: {error}. The file is preserved.",
-                self.path.display()
-            )),
-        }
-    }
-}
-
 /// Project scopes and the open-project registry share one store so a project
 /// open updates both files under one lock and one atomic write.
 pub(crate) struct PreferencesStore {
@@ -575,12 +191,12 @@ pub(crate) struct PreferencesStore {
 }
 
 impl PreferencesStore {
-    /// Load every scope root and migrate the legacy single file once.
+    /// Load every scope root and import the legacy single file once.
     pub fn load(global_path: PathBuf) -> (Self, GlobalPreferencesV2, Option<String>) {
         tracing::debug!(path = %global_path.display(), "loading preferences");
-        let migration_warning = migrate::migrate_legacy(
+        let legacy_warning = upgrade::import_legacy(
             &global_path,
-            migrate::legacy_settings_path(&global_path).as_deref(),
+            upgrade::legacy_settings_path(&global_path).as_deref(),
         );
         let root = global_path
             .parent()
@@ -589,20 +205,12 @@ impl PreferencesStore {
             .to_path_buf();
         let mut global =
             Stored::<GlobalPreferencesV2>::load(global_path, GLOBAL_PREFERENCES_VERSION);
-        let palette_migration_warning = global.retire_legacy_palettes();
-        let mode_migration_warning = global.migrate_mode_layouts();
-        let interface_migration_warning = global.migrate_interface_scale();
-        let page_width_migration_warning = global.migrate_page_width_percent();
-        let writing_migration_warning = global.migrate_writing_defaults();
+        let upgrade_warning = upgrade::upgrade_global(&mut global);
         let registry =
             Stored::<ProjectRegistry>::load(root.join("projects.json"), PROJECT_REGISTRY_VERSION);
         let warning = combine_warnings([
-            migration_warning,
-            palette_migration_warning,
-            mode_migration_warning,
-            interface_migration_warning,
-            page_width_migration_warning,
-            writing_migration_warning,
+            legacy_warning,
+            upgrade_warning,
             global.warning.clone(),
             registry.warning.clone(),
         ]);
@@ -678,15 +286,7 @@ impl PreferencesStore {
         let stored = match projects.entry(id.to_owned()) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                let mut stored: Stored<ProjectPreferencesV1> =
-                    Stored::load(path, PROJECT_PREFERENCES_VERSION);
-                let mode_warning = stored.migrate_mode_layouts();
-                if let Some(warning) = mode_warning {
-                    stored.warning = Some(match stored.warning.take() {
-                        Some(existing) => format!("{existing} {warning}"),
-                        None => warning,
-                    });
-                }
+                let mut stored = self.load_project(path);
                 if stored.value.project_id.is_empty() {
                     stored.value.project_id = id.to_owned();
                 }
@@ -713,7 +313,7 @@ impl PreferencesStore {
             .map_err(|_| io::Error::other("Project preference store unavailable."))?;
         let stored = projects
             .entry(id.to_owned())
-            .or_insert_with(|| Stored::load(path, PROJECT_PREFERENCES_VERSION));
+            .or_insert_with(|| self.load_project(path));
         stored.save(revision, preferences)
     }
 
@@ -753,7 +353,7 @@ impl PreferencesStore {
             .map_err(|_| io::Error::other("Project preference store unavailable."))?;
         let stored = projects
             .entry(open.id.clone())
-            .or_insert_with(|| Stored::load(project_path, PROJECT_PREFERENCES_VERSION));
+            .or_insert_with(|| self.load_project(project_path));
         let mut preferences = if stored.value.project_id.is_empty() {
             ProjectPreferencesV1::for_project(open.id.clone(), open.path.clone())
         } else {
@@ -764,6 +364,18 @@ impl PreferencesStore {
         stored.save_current()?;
         registry.save_current()?;
         Ok(open)
+    }
+
+    /// Load one project file and apply the one-time version upgrade.
+    fn load_project(&self, path: PathBuf) -> Stored<ProjectPreferencesV1> {
+        let mut stored = Stored::load(path, PROJECT_PREFERENCES_VERSION);
+        if let Some(warning) = upgrade::upgrade_project(&mut stored) {
+            stored.warning = Some(match stored.warning.take() {
+                Some(existing) => format!("{existing} {warning}"),
+                None => warning,
+            });
+        }
+        stored
     }
 
     fn project_path(&self, id: &str) -> io::Result<PathBuf> {
@@ -964,171 +576,8 @@ mod tests {
         assert!(envelope.get("layout").is_none());
         assert!(envelope.get("mode_layouts").is_none());
         assert!(envelope.get("layouts").is_some());
-        assert!(path.with_file_name("global.json.pre-mode.json").exists());
-    }
-
-    #[test]
-    fn retired_palettes_are_backed_up_and_removed_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let original = r#"{"version":2,"theme":"dark","light_theme":"nord_light","dark_theme":"ink","future_field":{"keep":true}}"#;
-        fs::write(&path, original).unwrap();
-
-        let (store, mut preferences, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(preferences.theme, ThemePreference::Dark);
-
-        let backup = path.with_file_name("global.json.pre-neutral.json");
-        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
-        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert!(envelope.get("light_theme").is_none());
-        assert!(envelope.get("dark_theme").is_none());
-        assert_eq!(envelope["future_field"]["keep"], true);
-        assert_eq!(envelope["theme"], "dark");
-
-        preferences.theme = ThemePreference::Light;
-        store.save_global(1, &preferences).unwrap();
-        let saved = fs::read_to_string(&path).unwrap();
-        assert!(!saved.contains("light_theme"));
-        assert!(!saved.contains("dark_theme"));
-
-        let (_, restored, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(restored.theme, ThemePreference::Light);
-        assert!(
-            !path
-                .with_file_name("global.json.pre-neutral-2.json")
-                .exists(),
-            "the migration is a one-time backup"
-        );
-    }
-
-    #[test]
-    fn legacy_preferences_migrate_once_and_are_never_read_again() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        let legacy = directory.path().join("preferences.json");
-        fs::write(
-            &legacy,
-            r#"{"version":1,"theme":"dark","layout":{"sidebar_visible":false,"inspector_visible":true,"preview_visible":true,"sidebar_width":200.0,"inspector_width":300.0}}"#,
-        )
-        .unwrap();
-
-        let (_, migrated, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(migrated.theme, ThemePreference::Dark);
-        assert_eq!(migrated.default_mode, WorkspaceMode::Writing);
-        assert_eq!(migrated.layouts, ModeLayouts::default());
-        assert!(path.exists());
-        assert!(!legacy.exists());
-        assert!(
-            directory
-                .path()
-                .join("preferences.v1.migrated.json")
-                .exists()
-        );
-
-        fs::remove_file(&path).unwrap();
-        let (_, defaults, _) = PreferencesStore::load(path);
-        assert_eq!(defaults.theme, ThemePreference::System);
-        assert_eq!(defaults.layouts, ModeLayouts::default());
-    }
-
-    #[test]
-    fn pre_writing_defaults_upgrade_once_and_preserve_explicit_values() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let original = r#"{"version":2,"editor_font_size":18.0,"editor_width":720.0,"future_field":{"keep":true}}"#;
-        fs::write(&path, original).unwrap();
-
-        let (_, preferences, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(preferences.editor_font_size, 16.);
-        assert_eq!(preferences.editor_line_height, 2.);
-        assert_eq!(preferences.page_width_percent, 60.);
-        assert!(!preferences.focus_mode);
-        assert!(!preferences.typewriter_mode);
-        let width_backup = path.with_file_name("global.json.pre-page-width.json");
-        assert_eq!(fs::read_to_string(&width_backup).unwrap(), original);
-        assert!(path.with_file_name("global.json.pre-writing.json").exists());
-        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(envelope["editor_font_size"], 16.0);
-        assert_eq!(envelope["editor_line_height"], 2.0);
-        assert_eq!(envelope["page_width_percent"], 60.0);
-        assert!(envelope.get("editor_width").is_none());
-        assert_eq!(envelope["future_field"]["keep"], true);
-
-        // A second load does not migrate again.
-        let (_, restored, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(restored.editor_font_size, 16.);
-        assert!(
-            !path
-                .with_file_name("global.json.pre-writing-2.json")
-                .exists()
-        );
-        assert!(
-            !path
-                .with_file_name("global.json.pre-page-width-2.json")
-                .exists()
-        );
-
-        // A size the user chose survives even though the old width was default.
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            r#"{"version":2,"editor_font_size":20.0,"editor_width":720.0}"#,
-        )
-        .unwrap();
-        let (_, preferences, warning) = PreferencesStore::load(path);
-        assert!(warning.is_none());
-        assert_eq!(preferences.editor_font_size, 20.);
-        assert_eq!(preferences.page_width_percent, 60.);
-    }
-
-    #[test]
-    fn retired_interface_scale_upgrades_once_and_preserves_other_sizes() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let original = r#"{"version":2,"ui_font_size":16.0,"future_field":{"keep":true}}"#;
-        fs::write(&path, original).unwrap();
-
-        let (_, preferences, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(preferences.ui_font_size, 18.);
-        let backup = path.with_file_name("global.json.pre-interface-scale.json");
-        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
-        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(envelope["ui_font_size"], 18.0);
-        assert_eq!(envelope["interface_scale"], 1);
-        assert_eq!(envelope["future_field"]["keep"], true);
-
-        let (_, restored, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(restored.ui_font_size, 18.);
-        assert!(
-            !path
-                .with_file_name("global.json.pre-interface-scale-2.json")
-                .exists()
-        );
-
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{"version":2,"ui_font_size":20.0}"#).unwrap();
-        let (_, preferences, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(preferences.ui_font_size, 20.);
-        assert!(
-            !path
-                .with_file_name("global.json.pre-interface-scale.json")
-                .exists()
-        );
+        assert_eq!(envelope["version"], 3);
+        assert!(path.with_file_name("global.json.v2.bak").exists());
     }
 
     #[test]
@@ -1242,32 +691,6 @@ mod tests {
     }
 
     #[test]
-    fn pre_mode_project_layout_is_backed_up_and_dropped() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        let projects = path.parent().unwrap().join("projects");
-        fs::create_dir_all(&projects).unwrap();
-        let original = r#"{"version":1,"project_id":"site","path":"/tmp/site","layout":{"sidebar_visible":false,"inspector_visible":true,"preview_visible":true,"sidebar_width":200.0,"inspector_width":300.0},"future_field":{"keep":true}}"#;
-        fs::write(projects.join("site.json"), original).unwrap();
-
-        let (store, _, warning) = PreferencesStore::load(path);
-        assert!(warning.is_none());
-        let (preferences, _, warning) = store.project("site").unwrap();
-        assert!(warning.is_none());
-        assert_eq!(
-            preferences.layout_overrides,
-            ModeLayoutOverrides::default(),
-            "the old dock composition is never restored"
-        );
-        let backup = projects.join("site.pre-mode.json");
-        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
-        let envelope: Value =
-            serde_json::from_slice(&fs::read(projects.join("site.json")).unwrap()).unwrap();
-        assert!(envelope.get("layout").is_none());
-        assert_eq!(envelope["future_field"]["keep"], true);
-    }
-
-    #[test]
     fn registry_rebinds_a_moved_project_and_persists_its_scope() {
         let directory = tempfile::tempdir().unwrap();
         let path = global_path(directory.path());
@@ -1324,5 +747,214 @@ mod tests {
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0]["id"], first.id);
         assert_eq!(projects[0]["path"], moved.path);
+    }
+    #[test]
+    fn clean_install_writes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("preferences");
+        let path = global_path(directory.path());
+        let (store, preferences, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(preferences, GlobalPreferencesV2::default());
+        assert!(!path.exists(), "a clean install writes no global file");
+        assert!(
+            !folder.exists(),
+            "a clean install creates no preferences folder"
+        );
+        store.save_global(1, &preferences).unwrap();
+        assert!(path.exists(), "the first change creates the file");
+        let names = fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["global.json"]);
+    }
+
+    #[test]
+    fn version_two_upgrades_once_with_one_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"{"version":2,"theme":"dark","ui_font_size":14.0,"editor_font_size":18.0,"editor_width":720.0,"layout":{"sidebar_visible":true,"inspector_visible":true,"preview_visible":false,"sidebar_width":240.0,"inspector_width":260.0},"interface_scale":1,"light_theme":"nord_light","dark_theme":"ink","future_field":{"keep":true}}"#;
+        fs::write(&path, original).unwrap();
+
+        let (_, preferences, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(preferences.theme, ThemePreference::Dark);
+        assert_eq!(preferences.ui_font_size, 18.);
+        assert_eq!(preferences.editor_font_size, 16.);
+        assert_eq!(preferences.editor_line_height, 2.);
+        assert_eq!(
+            preferences.page_width_percent, 60.,
+            "720 px keeps its meaning"
+        );
+        assert_eq!(preferences.default_mode, WorkspaceMode::Writing);
+        assert_eq!(preferences.layouts, ModeLayouts::default());
+
+        let backup = path.with_file_name("global.json.v2.bak");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
+        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(envelope["version"], 3);
+        for retired in [
+            "light_theme",
+            "dark_theme",
+            "editor_width",
+            "interface_scale",
+            "layout",
+        ] {
+            assert!(envelope.get(retired).is_none(), "{retired} was retired");
+        }
+        assert_eq!(envelope["ui_font_size"], 18.0);
+        assert_eq!(envelope["editor_font_size"], 16.0);
+        assert_eq!(envelope["page_width_percent"], 60.0);
+        assert_eq!(envelope["editor_line_height"], 2.0);
+        assert_eq!(envelope["future_field"]["keep"], true);
+        assert!(envelope.get("layouts").is_some());
+
+        // A later launch neither upgrades nor writes again.
+        let before = fs::read(&path).unwrap();
+        let (_, restored, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(restored.ui_font_size, 18.);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!path.with_file_name("global.json.v2-2.bak").exists());
+    }
+
+    #[test]
+    fn upgrade_preserves_explicit_non_default_values_and_the_envelope_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"version":2,"ui_font_size":22.0,"editor_font_size":20.0,"editor_line_height":1.75,"page_width_percent":55.0,"future":{"x":1}}"#,
+        )
+        .unwrap();
+        let (store, mut preferences, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(preferences.ui_font_size, 22.);
+        assert_eq!(preferences.editor_font_size, 20.);
+        assert_eq!(preferences.editor_line_height, 1.75);
+        assert_eq!(preferences.page_width_percent, 55.);
+
+        preferences.theme = ThemePreference::Light;
+        store.save_global(1, &preferences).unwrap();
+        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(envelope["ui_font_size"], 22.0);
+        assert_eq!(envelope["editor_font_size"], 20.0);
+        assert_eq!(envelope["page_width_percent"], 55.0);
+        assert_eq!(envelope["editor_line_height"], 1.75);
+        assert_eq!(envelope["future"]["x"], 1);
+        assert_eq!(envelope["version"], 3);
+    }
+
+    #[test]
+    fn absent_values_get_the_current_defaults_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"version":2,"future_field":true}"#).unwrap();
+        let (_, preferences, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(preferences.page_width_percent, 64.);
+        assert_eq!(preferences.editor_line_height, 2.);
+        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(envelope["page_width_percent"], 64.0);
+        assert_eq!(envelope["editor_line_height"], 2.0);
+        assert_eq!(envelope["future_field"], true);
+    }
+
+    #[test]
+    fn legacy_imports_once_and_never_repeats_its_warning() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        let legacy = directory.path().join("preferences.json");
+        fs::write(&legacy, r#"{"version":1,"theme":"dark"}"#).unwrap();
+        let (_, preferences, warning) = PreferencesStore::load(path.clone());
+        assert!(warning.is_none());
+        assert_eq!(preferences.theme, ThemePreference::Dark);
+        assert_eq!(preferences.version, 3);
+        assert!(path.exists());
+        assert!(!legacy.exists());
+        assert!(
+            directory
+                .path()
+                .join("preferences.v1.migrated.json")
+                .exists()
+        );
+
+        let (_, _, warning) = PreferencesStore::load(path);
+        assert!(warning.is_none(), "the legacy file is gone");
+    }
+
+    #[test]
+    fn legacy_file_is_ignored_once_when_global_preferences_exist() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"version":3,"theme":"light"}"#).unwrap();
+        let legacy = directory.path().join("preferences.json");
+        fs::write(&legacy, r#"{"version":1,"theme":"dark"}"#).unwrap();
+
+        let (_, preferences, warning) = PreferencesStore::load(path.clone());
+        assert_eq!(preferences.theme, ThemePreference::Light);
+        assert!(warning.is_some(), "the ignored file is reported once");
+        assert!(!legacy.exists());
+        assert!(
+            directory
+                .path()
+                .join("preferences.v1.ignored.json")
+                .exists()
+        );
+
+        let (_, _, warning) = PreferencesStore::load(path);
+        assert!(warning.is_none(), "the warning is not repeated");
+    }
+
+    #[test]
+    fn oversized_files_are_quarantined_and_persistence_stays_writable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let padding = "x".repeat(1024 * 1024 + 1024);
+        fs::write(
+            &path,
+            format!(r#"{{"version":3,"theme":"dark","padding":"{padding}"}}"#),
+        )
+        .unwrap();
+        let (store, defaults, warning) = PreferencesStore::load(path.clone());
+        let warning = warning.expect("oversize is surfaced");
+        assert!(warning.contains("moved"));
+        assert!(!path.exists());
+        assert!(path.with_file_name("global.json.corrupt").exists());
+        store.save_global(1, &defaults).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn project_versions_upgrade_once_and_drop_the_old_layout() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = global_path(directory.path());
+        let projects = path.parent().unwrap().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        let original = r#"{"version":1,"project_id":"site","path":"/tmp/site","layout":{"sidebar_visible":false,"inspector_visible":true,"preview_visible":true,"sidebar_width":200.0,"inspector_width":300.0},"future_field":{"keep":true}}"#;
+        fs::write(projects.join("site.json"), original).unwrap();
+
+        let (store, _, warning) = PreferencesStore::load(path);
+        assert!(warning.is_none());
+        let (preferences, _, warning) = store.project("site").unwrap();
+        assert!(warning.is_none());
+        assert_eq!(preferences.layout_overrides, ModeLayoutOverrides::default());
+        let backup = projects.join("site.json.v1.bak");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
+        let envelope: Value =
+            serde_json::from_slice(&fs::read(projects.join("site.json")).unwrap()).unwrap();
+        assert_eq!(envelope["version"], 2);
+        assert!(envelope.get("layout").is_none());
+        assert_eq!(envelope["future_field"]["keep"], true);
+
+        let (_, _, warning) = store.project("site").unwrap();
+        assert!(warning.is_none());
+        assert!(!projects.join("site.json.v1-2.bak").exists());
     }
 }

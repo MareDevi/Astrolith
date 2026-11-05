@@ -11,9 +11,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Version stored in `global.json`.
-pub const GLOBAL_PREFERENCES_VERSION: u32 = 2;
+pub const GLOBAL_PREFERENCES_VERSION: u32 = 3;
 /// Version stored in every per-project preferences file.
-pub const PROJECT_PREFERENCES_VERSION: u32 = 1;
+pub const PROJECT_PREFERENCES_VERSION: u32 = 2;
 /// Version stored in `projects.json`.
 pub const PROJECT_REGISTRY_VERSION: u32 = 1;
 
