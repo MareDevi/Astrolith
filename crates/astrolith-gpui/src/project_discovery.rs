@@ -773,8 +773,9 @@ pub(crate) struct ProjectWorkspace {
     list_sort: EntrySort,
     /// Sort menu entries derived from the installed collection schemas.
     sort_options: Vec<(SortMode, SharedString)>,
-    /// Operation to run once a guarded save of a dirty session succeeds.
-    pending_after_save: Option<PendingAfterSave>,
+    /// Operations to run once the guarded save of a dirty session succeeds,
+    /// keyed by the canonical source path whose save releases them.
+    pending_after_save: BTreeMap<PathBuf, PendingAfterSave>,
     /// Destination for redacted save-failure artifacts; `None` disables them.
     save_failure_dir: Option<PathBuf>,
     /// Project switch waiting for every dirty buffer to save.
@@ -1054,7 +1055,7 @@ impl ProjectWorkspace {
             list_filter: EntryFilter::default(),
             list_sort: EntrySort::default(),
             sort_options: Vec::new(),
-            pending_after_save: None,
+            pending_after_save: BTreeMap::new(),
             save_failure_dir: settings::save_failure_dir().ok(),
             pending_switch: None,
             pending_quit: false,
@@ -1487,7 +1488,7 @@ impl ProjectWorkspace {
     ) {
         let Some(session) = self.sessions.get(path).cloned() else {
             self.save_coordinator.forget(path);
-            self.pending_after_save = None;
+            self.pending_after_save.clear();
             self.status = "Document closed before the save finished.".into();
             return;
         };
@@ -1609,16 +1610,9 @@ impl ProjectWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pending) = self.pending_after_save.as_ref() else {
+        let Some(action) = self.pending_after_save.remove(path) else {
             return;
         };
-        if pending.path() != path {
-            return;
-        }
-        let action = self
-            .pending_after_save
-            .take()
-            .expect("the pending action was just read");
         if marked {
             self.run_after_save(action, window, cx);
         } else {
@@ -1633,13 +1627,9 @@ impl ProjectWorkspace {
     /// close never destroys it. The status names the consequence so the user
     /// knows the operation did not happen.
     fn abandon_pending_after_save(&mut self, path: &std::path::Path) {
-        let Some(pending) = self.pending_after_save.take() else {
+        let Some(pending) = self.pending_after_save.remove(path) else {
             return;
         };
-        if pending.path() != path {
-            self.pending_after_save = Some(pending);
-            return;
-        }
         let consequence = match pending {
             PendingAfterSave::Rename { .. } => "The rename was not applied.",
             PendingAfterSave::Duplicate { .. } => "The entry was not duplicated.",
@@ -3807,10 +3797,12 @@ impl ProjectWorkspace {
                                     .on_click(move |_, window, cx| {
                                         window.close_dialog(cx);
                                         let _ = save_owner.update(cx, |this, cx| {
-                                            this.pending_after_save =
-                                                Some(PendingAfterSave::Close {
+                                            this.pending_after_save.insert(
+                                                save_path.clone(),
+                                                PendingAfterSave::Close {
                                                     path: save_path.clone(),
-                                                });
+                                                },
+                                            );
                                             this.save_path(
                                                 save_path.clone(),
                                                 SaveKind::Manual,
@@ -5568,10 +5560,13 @@ impl ProjectWorkspace {
             }
         }
         if self.needs_save(&path, cx) {
-            self.pending_after_save = Some(PendingAfterSave::Rename {
-                from: path.clone(),
-                to: destination,
-            });
+            self.pending_after_save.insert(
+                path.clone(),
+                PendingAfterSave::Rename {
+                    from: path.clone(),
+                    to: destination,
+                },
+            );
             self.save_path(path, SaveKind::Manual, window, cx);
         } else {
             self.perform_rename(path, destination, window, cx);
@@ -5708,7 +5703,8 @@ impl ProjectWorkspace {
 
     fn duplicate_entry(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.needs_save(&path, cx) {
-            self.pending_after_save = Some(PendingAfterSave::Duplicate { path: path.clone() });
+            self.pending_after_save
+                .insert(path.clone(), PendingAfterSave::Duplicate { path: path.clone() });
             self.save_path(path, SaveKind::Manual, window, cx);
         } else {
             self.perform_duplicate(path, window, cx);
@@ -5838,7 +5834,8 @@ impl ProjectWorkspace {
 
     fn save_and_trash(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.needs_save(&path, cx) {
-            self.pending_after_save = Some(PendingAfterSave::Trash { path: path.clone() });
+            self.pending_after_save
+                .insert(path.clone(), PendingAfterSave::Trash { path: path.clone() });
             self.save_path(path, SaveKind::Manual, window, cx);
         } else {
             self.perform_trash(path, window, cx);
@@ -9167,17 +9164,20 @@ mod tests {
         let from = path.clone();
         cx.update_window(handle.into(), move |_, window, cx| {
             finish_view.update(cx, |view, cx| {
-                view.pending_after_save = Some(PendingAfterSave::Rename {
-                    from,
-                    to: destination,
-                });
+                view.pending_after_save.insert(
+                    from.clone(),
+                    PendingAfterSave::Rename {
+                        from,
+                        to: destination,
+                    },
+                );
                 view.finish_save(request, Ok(SaveAttempt::Conflict), window, cx)
             })
         })
         .unwrap();
 
         assert!(
-            view.read_with(cx, |view, _| view.pending_after_save.is_none()),
+            view.read_with(cx, |view, _| view.pending_after_save.is_empty()),
             "a conflict never leaves the rename queued"
         );
         assert!(!target.exists(), "a rename never runs after a conflict");
@@ -9192,6 +9192,132 @@ mod tests {
                 Some(SaveStatus::Conflict)
             );
         });
+    }
+
+    #[gpui_kit::test]
+    async fn pending_after_save_actions_are_tracked_per_document(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(0, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let path_a = view.read_with(cx, |view, _| view.active.clone().unwrap());
+        edit_active(cx, handle, &view, "# A edited\n").await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(1, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let path_b = view.read_with(cx, |view, _| view.active.clone().unwrap());
+        assert_ne!(path_a, path_b);
+        edit_active(cx, handle, &view, "# B edited\n").await;
+
+        let revision = |view: &Entity<ProjectWorkspace>, path: &Path, cx: &mut TestAppContext| {
+            let session = view.read_with(cx, |view, _| view.sessions.get(path).unwrap().clone());
+            session.update(cx, |session, cx| {
+                session.sync_buffer(cx);
+                session.buffer.revision().get()
+            })
+        };
+        let rev_a = revision(&view, &path_a, cx);
+        let rev_b = revision(&view, &path_b, cx);
+
+        let backend = Arc::new(RecordingTrash {
+            fail: false,
+            saved: Mutex::new(None),
+        });
+        view.update(cx, |view, _| view.trash_backend = backend.clone());
+        let destination = SourcePath::new("src/posts/renamed.md").unwrap();
+        let target = dir.path().join("src/posts/renamed.md");
+        let trash_path = path_b.clone();
+        cx.update_window(handle.into(), |_, window, cx| {
+            let request_a = save_request(&view, &path_a, SaveKind::Manual, cx);
+            let request_b = save_request(&view, &path_b, SaveKind::Manual, cx);
+            let rename_path = path_a.clone();
+            let rename_destination = destination.clone();
+            view.update(cx, |view, cx| {
+                view.pending_after_save.insert(
+                    rename_path.clone(),
+                    PendingAfterSave::Rename {
+                        from: rename_path,
+                        to: rename_destination,
+                    },
+                );
+                view.pending_after_save.insert(
+                    trash_path.clone(),
+                    PendingAfterSave::Trash {
+                        path: trash_path.clone(),
+                    },
+                );
+
+                // A's completion runs its rename and must leave B's trash queued.
+                view.finish_save(
+                    request_a,
+                    Ok(SaveAttempt::Saved {
+                        revision: rev_a,
+                        persisted: "# A edited\n".to_owned(),
+                    }),
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    view.pending_after_save.len(),
+                    1,
+                    "A's save must not drop B's queued action"
+                );
+                assert!(view.pending_after_save.contains_key(&path_b));
+
+                let (b_text, b_revision) = {
+                    let session = view.sessions.get(&path_b).unwrap().read(cx);
+                    (session.buffer.current_text().to_owned(), session.buffer.revision())
+                };
+                assert_eq!(b_revision, DocumentRevision::new(rev_b), "B's revision");
+                view.finish_save(
+                    request_b,
+                    Ok(SaveAttempt::Saved {
+                        revision: rev_b,
+                        persisted: b_text,
+                    }),
+                    window,
+                    cx,
+                );
+                assert!(view.pending_after_save.is_empty());
+                assert!(
+                    view.status.contains("Trash"),
+                    "status after B's completion: {}",
+                    view.status
+                );
+            })
+        })
+        .unwrap();
+
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if target.exists() && !path_b.exists() && backend.saved.lock().unwrap().is_some() {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert!(target.exists(), "A's rename still runs");
+        assert!(!path_a.exists());
+        assert!(
+            !path_b.exists(),
+            "B's trash still runs; status={:?} saved={:?}",
+            view.read_with(cx, |view, _| view.status.clone()),
+            backend.saved.lock().unwrap().is_some()
+        );
+        assert!(
+            backend.saved.lock().unwrap().is_some(),
+            "B was moved through the trash backend"
+        );
     }
 
     #[cfg(unix)]
@@ -12649,7 +12775,8 @@ export const collections = {blog, dataAuthors};
         cx.update_window(handle.into(), |_, window, cx| {
             let request = save_request(&view, &path, SaveKind::Manual, cx);
             view.update(cx, |view, cx| {
-                view.pending_after_save = Some(PendingAfterSave::Trash { path: path.clone() });
+                view.pending_after_save
+                    .insert(path.clone(), PendingAfterSave::Trash { path: path.clone() });
                 // The completion seam: the snapshot's revision is already outdated.
                 view.finish_save(
                     request,
@@ -12664,7 +12791,7 @@ export const collections = {blog, dataAuthors};
         })
         .unwrap();
         assert!(
-            view.read_with(cx, |view, _| view.pending_after_save.is_none()),
+            view.read_with(cx, |view, _| view.pending_after_save.is_empty()),
             "the pending trash is consumed exactly once"
         );
         assert!(backend.saved.lock().unwrap().is_none(), "no trash happened");
@@ -12739,10 +12866,13 @@ export const collections = {blog, dataAuthors};
         cx.update_window(handle.into(), |_, window, cx| {
             let request = save_request(&view, &path, SaveKind::Manual, cx);
             view.update(cx, |view, cx| {
-                view.pending_after_save = Some(PendingAfterSave::Rename {
-                    from: path.clone(),
-                    to: destination.clone(),
-                });
+                view.pending_after_save.insert(
+                    path.clone(),
+                    PendingAfterSave::Rename {
+                        from: path.clone(),
+                        to: destination.clone(),
+                    },
+                );
                 view.finish_save(
                     request,
                     Ok(SaveAttempt::Saved {
