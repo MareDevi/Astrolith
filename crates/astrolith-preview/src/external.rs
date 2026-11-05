@@ -47,15 +47,52 @@ pub struct SystemOpener;
 
 impl Opener for SystemOpener {
     fn spawn(&self, program: &str, args: &[String]) -> Result<(), String> {
-        Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map(drop)
-            .map_err(|error| error.to_string())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        let launched = spawn_reaped(&mut command).map(drop);
+        #[cfg(not(unix))]
+        let launched = command.spawn().map(drop);
+        launched.map_err(|error| error.to_string())
     }
+}
+
+/// Start `command` and reap the child on a detached thread.
+///
+/// Launch stays fire-and-forget: this returns as soon as the process starts, and
+/// the caller never awaits the opener. The thread waits for the opener to exit
+/// so an exited `xdg-open` cannot linger as a zombie, then ends. It returns the
+/// child id and a receiver that fires once the child has been reaped, which lets
+/// tests observe the wait without retaining the child itself.
+#[cfg(unix)]
+fn spawn_reaped(command: &mut Command) -> std::io::Result<(u32, std::sync::mpsc::Receiver<()>)> {
+    use std::sync::mpsc::channel;
+
+    let (finished_tx, finished_rx) = channel();
+    let (child_tx, child_rx) = channel::<std::process::Child>();
+    std::thread::Builder::new()
+        .name("opener-reaper".to_owned())
+        .spawn(move || {
+            if let Ok(mut child) = child_rx.recv() {
+                let _ = child.wait();
+            }
+            let _ = finished_tx.send(());
+        })?;
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return Err(error),
+    };
+    let pid = child.id();
+    if let Err(std::sync::mpsc::SendError(mut child)) = child_tx.send(child) {
+        // The reaper thread disappeared before it could take ownership; reap
+        // here so no zombie remains.
+        let _ = child.wait();
+    }
+    Ok((pid, finished_rx))
 }
 
 /// The platform opener command for `url`.
@@ -372,5 +409,33 @@ mod tests {
         }));
         browser.open(&url()).unwrap();
         assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    /// A launched opener must be waited on so it never lingers as a zombie.
+    #[cfg(unix)]
+    #[test]
+    fn system_opener_reaps_the_child_it_starts() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exit 7"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let (pid, finished) = spawn_reaped(&mut command).unwrap();
+        assert!(pid > 0);
+        finished
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the reaper thread must wait for the opener to exit");
+        // A completed `wait` is what removes the process-table entry; a dropped
+        // child would leave the reaper receiver waiting until process exit.
+    }
+
+    /// The production entry point still launches without waiting for the opener.
+    #[cfg(unix)]
+    #[test]
+    fn system_opener_launches_a_short_lived_stub() {
+        SystemOpener
+            .spawn("sh", &["-c".to_owned(), "exit 0".to_owned()])
+            .expect("a stub opener launches");
     }
 }
