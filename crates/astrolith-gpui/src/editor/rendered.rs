@@ -28,6 +28,10 @@ pub(crate) struct RenderedDocument {
     /// Project root and document path used to resolve relative images.
     root: Option<PathBuf>,
     document: Option<PathBuf>,
+    /// Number of document installs, so a test can prove an unchanged frame
+    /// does not copy or re-parse the body.
+    #[cfg(test)]
+    syncs: usize,
 }
 
 impl RenderedDocument {
@@ -41,6 +45,8 @@ impl RenderedDocument {
             style: None,
             root: None,
             document: None,
+            #[cfg(test)]
+            syncs: 0,
         }
     }
 
@@ -94,8 +100,18 @@ impl RenderedDocument {
         self.empty_copy = empty_copy;
         self.root = root.map(Path::to_path_buf);
         self.document = document.map(Path::to_path_buf);
+        #[cfg(test)]
+        {
+            self.syncs += 1;
+        }
         self.state.update(cx, |state, cx| state.set_text(text, cx));
         cx.notify();
+    }
+
+    /// Number of document installs performed, for the per-frame cost test.
+    #[cfg(test)]
+    pub(crate) fn sync_count(&self) -> usize {
+        self.syncs
     }
 
     /// The Markdown source the reading pane currently shows.

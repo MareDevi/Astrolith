@@ -50,6 +50,7 @@ use crate::{
     url_scheme::{self, StartupRequest, StartupTarget},
 };
 use astrolith_core::preferences::{ModeLayouts, PreviewPresentation, WorkspaceMode};
+use astrolith_document::{DocumentKind, DocumentRevision};
 use astrolith_preview::{HostEnvironment, PreviewCapability};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -216,6 +217,19 @@ struct PaletteEntry {
     action: PaletteAction,
 }
 
+/// Identity of the document last installed in the reading pane.
+///
+/// [`RenderedDocument::set_document`] already ignores identical text, but only
+/// after the caller copied the whole visible body to reach that check.
+/// Comparing this key first keeps an unchanged session out of the copy.
+#[derive(PartialEq, Eq)]
+struct RenderedSyncKey {
+    root: Option<PathBuf>,
+    path: Option<PathBuf>,
+    kind: Option<DocumentKind>,
+    revision: Option<DocumentRevision>,
+}
+
 pub(crate) struct Shell {
     dock: Entity<DockArea>,
     document: Entity<WorkspacePanel>,
@@ -303,6 +317,8 @@ pub(crate) struct Shell {
     chrome: ChromeVisibility,
     /// Typed characters per active document, for the chrome auto-hide policy.
     typed: TypedCharacters,
+    /// Document identity last pushed into the reading pane.
+    rendered_sync_key: Option<RenderedSyncKey>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -732,6 +748,7 @@ impl Shell {
             focus,
             chrome: ChromeVisibility::default(),
             typed: TypedCharacters::default(),
+            rendered_sync_key: None,
             _subscriptions: subscriptions,
         }
     }
@@ -1882,6 +1899,11 @@ impl Shell {
         let inspector_open = self.inspector_open;
         self.set_inspector_open(false, cx);
         self.mode = mode;
+        if mode == WorkspaceMode::Preview {
+            // Re-install the reading pane once when the view becomes visible,
+            // even when the active document identity did not change.
+            self.rendered_sync_key = None;
+        }
         self.sync_document_empty_copy(cx);
         self.project.update(cx, |project, cx| {
             project.set_source_view(mode == WorkspaceMode::Build, window, cx)
@@ -3186,20 +3208,41 @@ impl Render for Shell {
         self.rendered
             .update(cx, |rendered, cx| rendered.set_prose_style(style, cx));
         if self.mode == WorkspaceMode::Preview {
-            let root = self.project.read(cx).project_root();
-            let path = self.project.read(cx).active_path();
-            let body = self.project.read(cx).active_session(cx).map(|session| {
-                let session = session.read(cx);
-                (session.kind(), session.projection.visible.clone())
-            });
-            self.rendered.update(cx, |rendered, cx| {
-                rendered.set_document(
-                    root.as_deref(),
-                    path.as_deref(),
-                    body.as_ref().map(|(kind, text)| (*kind, text.as_str())),
-                    cx,
-                )
-            });
+            // Only the identity of the active document is compared per frame;
+            // the visible body is copied only when that identity changed.
+            let (root, path, key) = {
+                let project = self.project.read(cx);
+                let root = project.project_root();
+                let path = project.active_path();
+                let key = project.active_session(cx).map(|session| {
+                    let session = session.read(cx);
+                    (session.kind(), session.buffer.revision())
+                });
+                (root, path, key)
+            };
+            let sync_key = RenderedSyncKey {
+                root,
+                path,
+                kind: key.map(|(kind, _)| kind),
+                revision: key.map(|(_, revision)| revision),
+            };
+            if self.rendered_sync_key.as_ref() != Some(&sync_key) {
+                let body = self.project.read(cx).active_session(cx).map(|session| {
+                    let session = session.read(cx);
+                    (session.kind(), session.projection.visible.clone())
+                });
+                let root = sync_key.root.clone();
+                let path = sync_key.path.clone();
+                self.rendered.update(cx, |rendered, cx| {
+                    rendered.set_document(
+                        root.as_deref(),
+                        path.as_deref(),
+                        body.as_ref().map(|(kind, text)| (*kind, text.as_str())),
+                        cx,
+                    )
+                });
+                self.rendered_sync_key = Some(sync_key);
+            }
         }
         self.chrome.set_sidebars(
             self.mode == WorkspaceMode::Writing && !layout.sidebar_visible && !self.inspector_open,
@@ -3655,6 +3698,70 @@ mod tests {
                 .iter()
                 .all(|category| !view.settings.copyedit.enabled(*category))
         }));
+    }
+
+    #[gpui_kit::test]
+    async fn preview_frames_do_not_replace_an_unchanged_reading_document(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let directory = project_fixture("preview-frame-site");
+        std::fs::write(
+            directory.path().join("src/content/first.md"),
+            "---\ntitle: First\n---\n# First\n\nA body that the reading pane shows.\n",
+        )
+        .unwrap();
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (project, _) =
+            open_first_entry(cx, handle, &view, directory.path().to_path_buf()).await;
+        let editor = project
+            .read_with(cx, |project, cx| project.active_session(cx))
+            .unwrap()
+            .read_with(cx, |session, _| session.editor.clone());
+        let session = project
+            .read_with(cx, |project, cx| project.active_session(cx))
+            .unwrap();
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.set_mode(WorkspaceMode::Preview, window, cx)
+            });
+            window.render_frame(cx);
+            let installed = view.read(cx).rendered.read(cx).sync_count();
+            assert_eq!(installed, 1, "Preview installs the body once");
+
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).rendered.read(cx).sync_count(),
+                installed,
+                "an unchanged session must not copy or replace the body"
+            );
+
+            session
+                .update(cx, |session, cx| {
+                    session
+                        .patch_complete(window, cx, |source| {
+                            Ok(format!("{source}\nAn appended paragraph.\n"))
+                        })
+                        .expect("the buffer accepts an edit")
+                });
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).rendered.read(cx).sync_count(),
+                installed + 1,
+                "a buffer edit reinstalls the body exactly once"
+            );
+
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).rendered.read(cx).sync_count(),
+                installed + 1
+            );
+        })
+        .unwrap();
+        // The editor entity stays mounted and unchanged by the reading pane.
+        assert!(!editor.read_with(cx, |editor, _| editor.value().is_empty()));
     }
 
     #[gpui_kit::test]
