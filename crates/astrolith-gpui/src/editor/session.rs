@@ -203,6 +203,18 @@ impl DocumentSession {
         )
     }
 
+    /// Bytes this session retains for its document representations.
+    ///
+    /// The baseline and current source are independent `String`s even when the
+    /// document is unedited, the writer projection is its own visible buffer, and
+    /// the editor keeps a rope copy, so each representation is counted once.
+    pub(crate) fn retained_bytes(&self, cx: &App) -> usize {
+        self.buffer.original_text().len()
+            + self.buffer.current_text().len()
+            + self.projection.visible.len()
+            + self.editor.read(cx).text().len()
+    }
+
     fn build(
         identity: DocumentIdentity,
         state: BuildState,

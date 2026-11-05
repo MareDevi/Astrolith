@@ -2978,6 +2978,10 @@ impl ProjectWorkspace {
         if self.sessions.len() + self.loads.len() >= 32 {
             return Err("Close an open document before opening more than 32 documents.".into());
         }
+        let retained_bytes = self.retained_source_bytes(cx);
+        if retained_bytes + (self.loads.len() + 1) * MAX_DOCUMENT_BYTES > 32 * 1024 * 1024 {
+            return Err("Close documents before exceeding the 32 MiB loaded-source budget.".into());
+        }
         let Some(project) = self.project_id.clone() else {
             return Err("The project is not ready; try again after it opens.".into());
         };
@@ -3687,6 +3691,18 @@ impl ProjectWorkspace {
         self.open_entry_inner(ix, true, window, cx);
     }
 
+    /// Bytes retained by every open session, counted once per representation.
+    ///
+    /// Load admission budgets the real footprint: the baseline and current source
+    /// are distinct buffers, and the writer projection and editor rope are
+    /// separate again. An in-flight load still reserves its maximum below.
+    fn retained_source_bytes(&self, cx: &App) -> usize {
+        self.sessions
+            .values()
+            .map(|session| session.read(cx).retained_bytes(cx))
+            .sum()
+    }
+
     fn open_entry_inner(
         &mut self,
         ix: usize,
@@ -3736,11 +3752,7 @@ impl ProjectWorkspace {
             cx.notify();
             return;
         }
-        let retained_bytes: usize = self
-            .sessions
-            .values()
-            .map(|session| session.read(cx).buffer.original_text().len())
-            .sum();
+        let retained_bytes = self.retained_source_bytes(cx);
         if retained_bytes + (self.loads.len() + 1) * MAX_DOCUMENT_BYTES > 32 * 1024 * 1024 {
             self.status =
                 "Close documents before exceeding the 32 MiB loaded-source budget.".into();
@@ -10669,6 +10681,91 @@ export const collections = {blog, dataAuthors};
             view.read_with(cx, |view, _| view.index_revision) > revision,
             "the current generation still publishes watcher scans"
         );
+    }
+
+    #[gpui_kit::test]
+    async fn load_admission_counts_every_retained_representation(cx: &mut TestAppContext) {
+        let dir = fixture();
+        // Large enough that four retained representations cross the 32 MiB
+        // budget while the old original-text-only accounting would not. The
+        // first line stays short so frontmatter sniffing does not read the body.
+        let large_source = format!("# Large\n{}", "a".repeat(6_500_000));
+        std::fs::write(dir.path().join("src/posts/large.md"), &large_source).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/pages")).unwrap();
+        std::fs::write(
+            dir.path().join("src/pages/index.astro"),
+            "---\nconst title = 'x';\n---\n<h1>{title}</h1>\n",
+        )
+        .unwrap();
+
+        let (handle, view) = mount(cx);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.start(dir.path().into(), window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+
+        let large = view.read_with(cx, |view, _| {
+            view.entries
+                .iter()
+                .position(|entry| entry.entry().source().as_str() == "src/posts/large.md")
+                .expect("the large document is indexed")
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(large, window, cx))
+        })
+        .unwrap();
+        cx.condition(&view, |view, _| view.loads.is_empty()).await;
+        let large_path = view.read_with(cx, |view, cx| {
+            let path = view.active.clone().expect("the large document is active");
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            let retained = session.retained_bytes(cx);
+            assert!(
+                retained > 3 * large_source.len(),
+                "baseline, projection and editor text all count: {retained}"
+            );
+            assert!(
+                retained < 5 * large_source.len(),
+                "no representation is counted twice: {retained}"
+            );
+            path
+        });
+
+        // The same budget now refuses a second, small entry.
+        let small = view.read_with(cx, |view, _| {
+            view.entries
+                .iter()
+                .position(|entry| entry.entry().source().as_str() == "src/posts/a.md")
+                .expect("the small document is indexed")
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.open_entry(small, window, cx))
+        })
+        .unwrap();
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.status.contains("32 MiB"),
+                "the entry open must report the budget: {}",
+                view.status
+            );
+            assert_eq!(view.sessions.len(), 1);
+            assert_eq!(view.active.as_ref(), Some(&large_path));
+        });
+
+        // The project-source open path applies the same accounting.
+        let source = dir.path().join("src/pages/index.astro");
+        let result = cx
+            .update_window(handle.into(), |_, window, cx| {
+                view.update(cx, |view, cx| view.open_project_source(source, window, cx))
+            })
+            .unwrap();
+        assert!(
+            result
+                .expect_err("the project source must be refused")
+                .contains("32 MiB"),
+            "the project-source open must report the same budget"
+        );
+        view.read_with(cx, |view, _| assert_eq!(view.sessions.len(), 1));
     }
 
     #[gpui_kit::test]
