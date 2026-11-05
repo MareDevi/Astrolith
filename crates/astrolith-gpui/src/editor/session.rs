@@ -139,6 +139,16 @@ impl EventEmitter<HistoryChanged> for DocumentSession {}
 /// request, not through the idle deadline.
 pub(crate) struct SaveOnBlur;
 impl EventEmitter<SaveOnBlur> for DocumentSession {}
+
+/// The initial text state one session build adopts.
+struct BuildState {
+    original: String,
+    current: String,
+    revision: DocumentRevision,
+    disk_fingerprint: u64,
+    externally_changed: bool,
+}
+
 impl DocumentSession {
     pub fn new(
         identity: DocumentIdentity,
@@ -146,19 +156,19 @@ impl DocumentSession {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::build(identity, source.clone(), source, window, cx)
-    }
-
-    /// Build a session whose baseline is the on-disk `original` but whose visible
-    /// text is recovered unsaved `current` content (so it loads dirty).
-    pub fn from_recovered(
-        identity: DocumentIdentity,
-        original: String,
-        current: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::build(identity, original, current, window, cx)
+        let disk_fingerprint = fingerprint(&source);
+        Self::build(
+            identity,
+            BuildState {
+                original: source.clone(),
+                current: source,
+                revision: DocumentRevision::INITIAL,
+                disk_fingerprint,
+                externally_changed: false,
+            },
+            window,
+            cx,
+        )
     }
 
     /// Build a session from a recovery record that retained its revision.
@@ -179,13 +189,15 @@ impl DocumentSession {
     ) -> Self {
         let externally_changed = original != disk;
         let disk_fingerprint = fingerprint(&disk);
-        Self::build_with(
+        Self::build(
             identity,
-            original,
-            current,
-            revision,
-            disk_fingerprint,
-            externally_changed,
+            BuildState {
+                original,
+                current,
+                revision,
+                disk_fingerprint,
+                externally_changed,
+            },
             window,
             cx,
         )
@@ -193,34 +205,17 @@ impl DocumentSession {
 
     fn build(
         identity: DocumentIdentity,
-        original: String,
-        current: String,
+        state: BuildState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let disk_fingerprint = fingerprint(&original);
-        Self::build_with(
-            identity,
+        let BuildState {
             original,
             current,
-            DocumentRevision::INITIAL,
+            revision,
             disk_fingerprint,
-            false,
-            window,
-            cx,
-        )
-    }
-
-    fn build_with(
-        identity: DocumentIdentity,
-        original: String,
-        current: String,
-        revision: DocumentRevision,
-        disk_fingerprint: u64,
-        externally_changed: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+            externally_changed,
+        } = state;
         let kind = kind_for(identity.canonical_source().as_str());
         let language = editor_language(identity.canonical_source().as_str());
         let (projection, notice) = project_or_complete(&current, kind);
@@ -1335,6 +1330,36 @@ impl DocumentSession {
         let rebased = self.buffer.rebase_persisted(saved_revision, persisted);
         self.dirty = self.buffer.is_dirty();
         rebased
+    }
+
+    /// Discard this session's in-memory edits and adopt `source` from disk.
+    ///
+    /// The caller must have obtained `source` from an explicit user reload
+    /// action: the current buffer text is lost, the document becomes clean and
+    /// the external-change flag resets to the newly read bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the buffer error as text when the revision cannot advance.
+    pub fn force_reload(
+        &mut self,
+        source: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.buffer
+            .force_reload(source.clone())
+            .map_err(|error| error.to_string())?;
+        self.disk_fingerprint = fingerprint(&source);
+        self.externally_changed = false;
+        self.dirty = false;
+        self.rebuild_projection(window, cx);
+        self.refresh_copyedit(cx);
+        self.refresh_writer(cx);
+        self.sync_placeholders(cx);
+        cx.emit(SessionChanged);
+        cx.notify();
+        Ok(())
     }
 
     /// Re-target this session at a renamed source and re-project it.

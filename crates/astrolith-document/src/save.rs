@@ -201,6 +201,125 @@ fn save_blocking(
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Persist `content` at `path` unconditionally, under the same per-path writer
+/// lock as [`save_snapshot`].
+///
+/// This deliberately bypasses the baseline comparison: it is the explicit
+/// "overwrite disk with my edits" resolution for a save conflict. The write is
+/// still atomic and is refused above [`MAX_DOCUMENT_BYTES`].
+///
+/// # Errors
+///
+/// Returns [`DocumentError::TooLarge`] without writing, or [`DocumentError::Io`]
+/// when the write fails.
+pub async fn overwrite_document(
+    path: impl AsRef<Path>,
+    content: &str,
+) -> Result<(), DocumentError> {
+    if content.len() > MAX_DOCUMENT_BYTES {
+        return Err(DocumentError::TooLarge {
+            bytes: content.len(),
+            limit: MAX_DOCUMENT_BYTES,
+        });
+    }
+    let path = path.as_ref().to_path_buf();
+    let lock = path_lock(&path);
+    let _guard = lock.lock().await;
+    let content = content.to_owned();
+    tokio::task::spawn_blocking(move || write_atomic(&path, &content))
+        .await
+        .map_err(|error| DocumentError::Io {
+            message: format!("write task panicked: {error}"),
+        })?
+        .map_err(|error| DocumentError::Io {
+            message: format!("cannot write the document: {error}"),
+        })
+}
+
+/// Write `content` to the first free sibling of `source` named
+/// `<stem>.local<ext>`, `<stem>.local-2<ext>`, … and return the written path.
+///
+/// Existing files are never replaced. This is the non-destructive resolution
+/// for a save conflict: the original document keeps its unsaved edits.
+///
+/// # Errors
+///
+/// Returns [`DocumentError::TooLarge`] without writing, or [`DocumentError::Io`]
+/// when the copy cannot be created.
+pub async fn save_document_copy(
+    source: impl AsRef<Path>,
+    content: &str,
+) -> Result<PathBuf, DocumentError> {
+    if content.len() > MAX_DOCUMENT_BYTES {
+        return Err(DocumentError::TooLarge {
+            bytes: content.len(),
+            limit: MAX_DOCUMENT_BYTES,
+        });
+    }
+    let source = source.as_ref().to_path_buf();
+    let lock = path_lock(&source);
+    let _guard = lock.lock().await;
+    let content = content.to_owned();
+    tokio::task::spawn_blocking(move || write_copy_blocking(&source, &content))
+        .await
+        .map_err(|error| DocumentError::Io {
+            message: format!("copy task panicked: {error}"),
+        })?
+        .map_err(|error| DocumentError::Io {
+            message: format!("cannot write a copy of the document: {error}"),
+        })
+}
+
+/// Create the first free `.local` sibling of `source` and write `content` into
+/// it with `create_new`, so an existing file is never replaced.
+fn write_copy_blocking(source: &Path, content: &str) -> io::Result<PathBuf> {
+    let directory = source
+        .parent()
+        .ok_or_else(|| io::Error::other("document path has no parent directory"))?;
+    let stem = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("document");
+    let extension = source.extension().and_then(|extension| extension.to_str());
+    for index in 0..1_000_u32 {
+        let suffix = if index == 0 {
+            String::new()
+        } else {
+            format!("-{}", index + 1)
+        };
+        let name = match extension {
+            Some(extension) => format!("{stem}.local{suffix}.{extension}"),
+            None => format!("{stem}.local{suffix}"),
+        };
+        let candidate = directory.join(name);
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let write_result = (|| {
+            file.write_all(content.as_bytes())?;
+            file.sync_all()
+        })();
+        drop(file);
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&candidate);
+            return Err(error);
+        }
+        if let Ok(directory_handle) = fs::File::open(directory) {
+            let _ = directory_handle.sync_all();
+        }
+        return Ok(candidate);
+    }
+    Err(io::Error::other(
+        "could not find a free name for the document copy",
+    ))
+}
+
 pub(crate) fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
     let directory = path
         .parent()
@@ -549,6 +668,38 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(&path).unwrap().len(), MAX_DOCUMENT_BYTES);
         assert_eq!(fs::read_to_string(&path).unwrap(), at_cap);
+    }
+
+    #[test]
+    fn overwrite_document_replaces_a_changed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "external").unwrap();
+
+        runtime()
+            .block_on(overwrite_document(&path, "mine"))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "mine");
+    }
+
+    #[test]
+    fn save_document_copy_uses_free_local_names_and_keeps_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("post.md");
+        fs::write(&source, "original").unwrap();
+
+        let first = runtime()
+            .block_on(save_document_copy(&source, "first copy"))
+            .unwrap();
+        assert_eq!(first.file_name().unwrap(), "post.local.md");
+        assert_eq!(fs::read_to_string(&first).unwrap(), "first copy");
+
+        let second = runtime()
+            .block_on(save_document_copy(&source, "second copy"))
+            .unwrap();
+        assert_eq!(second.file_name().unwrap(), "post.local-2.md");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "second copy");
+        assert_eq!(fs::read_to_string(&source).unwrap(), "original");
     }
 
     #[test]

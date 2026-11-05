@@ -2120,6 +2120,21 @@ impl Shell {
                 self.project
                     .update(cx, |project, cx| project.save_active(window, cx));
             }
+            CommandId::ResolveConflictReload => {
+                self.project.update(cx, |project, cx| {
+                    project.resolve_conflict_reload(window, cx)
+                });
+            }
+            CommandId::ResolveConflictOverwrite => {
+                self.project.update(cx, |project, cx| {
+                    project.resolve_conflict_overwrite(window, cx)
+                });
+            }
+            CommandId::ResolveConflictSaveCopy => {
+                self.project.update(cx, |project, cx| {
+                    project.resolve_conflict_save_copy(window, cx)
+                });
+            }
             CommandId::CloseDocument => {
                 self.project
                     .update(cx, |project, cx| project.close_active(window, cx));
@@ -3053,6 +3068,9 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::RevealEntry => IconName::FolderOpen,
         CommandId::CopyPathAbsolute | CommandId::CopyPathRelative => IconName::Copy,
         CommandId::Save => IconName::Save,
+        CommandId::ResolveConflictReload => IconName::RotateCcw,
+        CommandId::ResolveConflictOverwrite => IconName::Save,
+        CommandId::ResolveConflictSaveCopy => IconName::Copy,
         CommandId::CloseDocument => IconName::X,
         CommandId::RecoverUnsaved => IconName::RotateCcw,
         CommandId::OpenPalette => IconName::Command,

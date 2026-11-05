@@ -290,6 +290,28 @@ impl DocumentBuffer {
         }
     }
 
+    /// Replace the baseline and current text with authoritative disk bytes.
+    ///
+    /// This is the deliberate "discard my edits" reload: the buffer becomes
+    /// clean against `source`, and the revision advances only when the content
+    /// actually changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::RevisionOverflow`] without changing the buffer
+    /// when changed source would exceed [`DocumentRevision::MAX`].
+    pub fn force_reload(&mut self, source: String) -> Result<DocumentRevision, DocumentError> {
+        let revision = if self.current_text == source {
+            self.revision
+        } else {
+            self.revision.checked_next()?
+        };
+        self.original_text = source.clone();
+        self.current_text = source;
+        self.revision = revision;
+        Ok(revision)
+    }
+
     /// Capture the identity and revision needed to validate asynchronous work.
     pub fn load_ticket(&self) -> DocumentLoadTicket {
         DocumentLoadTicket::new(self.identity.clone(), self.revision)

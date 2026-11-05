@@ -42,7 +42,7 @@ use astrolith_core::{
 use astrolith_document::{
     DocumentIdentity, DocumentKind, DocumentLoadTicket, DocumentRevision, DocumentSnapshot,
     FormatCommand, MAX_DOCUMENT_BYTES, RecoveryRecord, RecoveryStore, SaveOutcome, TokenSummary,
-    parse_document, save_snapshot,
+    overwrite_document, parse_document, save_document_copy, save_snapshot,
 };
 use astrolith_preview::RouteMapping;
 use astrolith_workspace::{
@@ -675,6 +675,13 @@ fn save_failure_class(error: &astrolith_document::DocumentError) -> &'static str
     }
 }
 
+/// The file name used in status text for one document path.
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 /// One completed guarded save, as the workspace applies it.
 enum SaveAttempt {
     /// The revision was persisted; `persisted` is the exact text written, so the
@@ -832,16 +839,6 @@ enum PendingAfterSave {
     Duplicate { path: PathBuf },
     Trash { path: PathBuf },
     Close { path: PathBuf },
-}
-
-impl PendingAfterSave {
-    /// The source whose guarded save releases this action.
-    fn path(&self) -> &Path {
-        match self {
-            Self::Rename { from, .. } => from,
-            Self::Duplicate { path } | Self::Trash { path } | Self::Close { path } => path,
-        }
-    }
 }
 
 /// One completed watcher scan, published only when its request is the newest.
@@ -1559,7 +1556,7 @@ impl ProjectWorkspace {
                     session.externally_changed = true;
                     cx.notify();
                 });
-                self.status = "Save conflict: the file changed on disk. Your edits are kept; reopen the document to reload, then try again.".into();
+                self.status = "Save conflict: the file changed on disk. Your edits are kept. Choose “Reload from Disk (discard my edits)”, “Overwrite Disk with My Edits”, or “Save My Edits as a Copy” to resolve it.".into();
                 self.update_tab_state(path, cx);
                 cx.emit(SessionChanged);
                 self.abandon_pending_after_save(path);
@@ -2958,7 +2955,7 @@ impl ProjectWorkspace {
             match self.save_coordinator.status(session) {
                 Some(SaveStatus::Conflict) => {
                     blocked = Some(
-                        "Project switch cancelled: a document changed on disk and was not overwritten. Reopen the document to reload, then switch.".to_string(),
+                        "Project switch cancelled: a document changed on disk and was not overwritten. Resolve the conflict (reload, overwrite, or save a copy), then switch.".to_string(),
                     );
                 }
                 Some(SaveStatus::Failed(message)) => {
@@ -3731,7 +3728,7 @@ impl ProjectWorkspace {
             browser.set_active(Some(path.to_path_buf()), cx)
         });
         self.status = if session.read(cx).externally_changed {
-            "Document changed on disk. This buffer is retained; close and reopen to reload."
+            "Document changed on disk. This buffer is retained; resolve it with Reload from Disk, Overwrite Disk with My Edits, or Save My Edits as a Copy."
         } else {
             ""
         }
@@ -3902,7 +3899,7 @@ impl ProjectWorkspace {
             match self.save_coordinator.status(session) {
                 Some(SaveStatus::Conflict) => {
                     blocked = Some(
-                        "Quit cancelled: a document changed on disk and was not overwritten. Reopen the document to reload, then quit.".to_string(),
+                        "Quit cancelled: a document changed on disk and was not overwritten. Resolve the conflict (reload, overwrite, or save a copy), then quit.".to_string(),
                     );
                 }
                 Some(SaveStatus::Failed(message)) => {
@@ -3935,6 +3932,203 @@ impl ProjectWorkspace {
             return;
         };
         self.save_path(path, SaveKind::Manual, window, cx);
+    }
+
+    /// Discard the active document's edits and reload the current disk bytes.
+    ///
+    /// The explicit user command is the consent to lose in-memory text. The
+    /// recovery record is cleared only after the disk bytes were adopted, and
+    /// the session's baseline, fingerprint and clean state follow those bytes.
+    pub(crate) fn resolve_conflict_reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.active.clone() else {
+            self.status = "No document is open to reload.".into();
+            cx.notify();
+            return;
+        };
+        let Some(session) = self.sessions.get(&path).cloned() else {
+            return;
+        };
+        let identity = session.read(cx).buffer.identity().clone();
+        let read_path = path.clone();
+        self.status = "Reloading the document from disk…".into();
+        cx.notify();
+        let work = runtime::blocking(cx, move || {
+            read_bounded(&read_path, MAX_DOCUMENT_BYTES).map_err(|error| error.to_string())
+        });
+        self.retain_command_task(cx.spawn_in(window, async move |this, cx| {
+            let result = work.await.and_then(|result| result);
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(source) => {
+                        match session
+                            .update(cx, |session, cx| session.force_reload(source, window, cx))
+                        {
+                            Ok(()) => {
+                                let revision = session.read(cx).buffer.revision().get();
+                                this.save_coordinator.observe(
+                                    &path,
+                                    revision,
+                                    false,
+                                    cx.background_executor().now(),
+                                );
+                                if let Some(store) = this.recovery.clone() {
+                                    let task = runtime::blocking(cx, move || {
+                                        let _ = store.clear(&identity);
+                                    });
+                                    task.detach();
+                                }
+                                this.status = format!(
+                                    "Reloaded {} from disk; your unsaved edits were discarded.",
+                                    file_label(&path)
+                                );
+                                this.update_tab_state(&path, cx);
+                                cx.emit(SessionChanged);
+                            }
+                            Err(error) => {
+                                this.status = format!("Could not reload the document: {error}");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        this.status = format!("Could not read the document from disk: {error}");
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Write the active buffer over the file, bypassing the baseline comparison.
+    ///
+    /// This is the explicit "keep mine" resolution: the user chose to replace
+    /// the external edit. A successful write is treated as a normal save so the
+    /// baseline, fingerprint, recovery record, tab and status all follow it.
+    pub(crate) fn resolve_conflict_overwrite(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.active.clone() else {
+            self.status = "No document is open to overwrite.".into();
+            cx.notify();
+            return;
+        };
+        let Some(session) = self.sessions.get(&path).cloned() else {
+            return;
+        };
+        let identity = session.read(cx).buffer.identity().clone();
+        let (revision, content) = session.update(cx, |session, cx| {
+            session.sync_buffer(cx);
+            (
+                session.buffer.revision(),
+                session.buffer.current_text().to_owned(),
+            )
+        });
+        let persisted = content.clone();
+        let write_path = path.clone();
+        self.status = "Overwriting the file with your edits…".into();
+        cx.notify();
+        let work = runtime::spawn(cx, async move {
+            overwrite_document(&write_path, &content)
+                .await
+                .map_err(|error| error.to_string())
+        });
+        self.retain_command_task(cx.spawn_in(window, async move |this, cx| {
+            let result = work.await.and_then(|result| result);
+            let _ = this.update_in(cx, |this, _window, cx| {
+                match result {
+                    Ok(()) => {
+                        let (confirmed, dirty) = session.update(cx, |session, cx| {
+                            let confirmed = session.confirm_saved(revision, &persisted);
+                            if !confirmed {
+                                session.rebase_persisted(revision, &persisted);
+                            }
+                            session.dirty = session.buffer.is_dirty();
+                            cx.notify();
+                            (confirmed, session.buffer.is_dirty())
+                        });
+                        let revision = session.read(cx).buffer.revision().get();
+                        this.save_coordinator.observe(
+                            &path,
+                            revision,
+                            dirty,
+                            cx.background_executor().now(),
+                        );
+                        if let Some(store) = this.recovery.clone() {
+                            let saved = persisted.clone();
+                            let task = runtime::blocking(cx, move || {
+                                let _ = store.clear_after_save(&identity, &saved);
+                            });
+                            task.detach();
+                        }
+                        this.status = if confirmed {
+                            format!("Overwrote {} with your edits.", file_label(&path))
+                        } else {
+                            "Wrote an earlier revision; newer edits remain unsaved.".into()
+                        };
+                        this.update_tab_state(&path, cx);
+                        cx.emit(SessionChanged);
+                    }
+                    Err(error) => {
+                        this.status = format!("Could not overwrite the file: {error}");
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Write the active buffer to a collision-free `.local` sibling.
+    ///
+    /// The original document keeps its unsaved edits and recovery record; only
+    /// the copy is written, and the status names exactly where it landed.
+    pub(crate) fn resolve_conflict_save_copy(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.active.clone() else {
+            self.status = "No document is open to copy.".into();
+            cx.notify();
+            return;
+        };
+        let Some(session) = self.sessions.get(&path).cloned() else {
+            return;
+        };
+        let content = session.update(cx, |session, cx| {
+            session.sync_buffer(cx);
+            session.buffer.current_text().to_owned()
+        });
+        let source = path.clone();
+        self.status = "Saving a copy of your edits…".into();
+        cx.notify();
+        let work = runtime::spawn(cx, async move {
+            save_document_copy(&source, &content)
+                .await
+                .map_err(|error| error.to_string())
+        });
+        self.retain_command_task(cx.spawn_in(window, async move |this, cx| {
+            let result = work.await.and_then(|result| result);
+            let _ = this.update_in(cx, |this, _window, cx| {
+                match result {
+                    Ok(copy) => {
+                        let shown = this
+                            .project_root()
+                            .and_then(|root| copy.strip_prefix(root).ok())
+                            .map(|relative| relative.display().to_string())
+                            .unwrap_or_else(|| copy.display().to_string());
+                        this.status = format!(
+                            "Saved a copy to {shown}. {} keeps your unsaved edits.",
+                            file_label(&path)
+                        );
+                    }
+                    Err(error) => {
+                        this.status = format!("Could not save a copy: {error}");
+                    }
+                }
+                cx.notify();
+            });
+        }));
     }
 
     /// Save one retained document through the guarded atomic path.
@@ -4744,6 +4938,17 @@ impl ProjectWorkspace {
         let selection_nonempty = session
             .as_ref()
             .is_some_and(|session| !session.read(cx).editor.read(cx).selected_range().is_empty());
+        let save_conflict = self.active.as_ref().is_some_and(|path| {
+            let externally_changed_dirty = self.sessions.get(path).is_some_and(|session| {
+                let session = session.read(cx);
+                session.externally_changed && session.dirty
+            });
+            externally_changed_dirty
+                || matches!(
+                    self.save_coordinator.status(path),
+                    Some(SaveStatus::Conflict)
+                )
+        });
         CommandAvailability {
             project_open: self.manifest.is_some(),
             active_entry: self.active.is_some(),
@@ -4765,6 +4970,7 @@ impl ProjectWorkspace {
             typewriter_mode: self.writing.typewriter,
             fullscreen: self.view_fullscreen,
             updates_configured: false,
+            save_conflict,
         }
     }
 
@@ -5704,8 +5910,10 @@ impl ProjectWorkspace {
 
     fn duplicate_entry(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.needs_save(&path, cx) {
-            self.pending_after_save
-                .insert(path.clone(), PendingAfterSave::Duplicate { path: path.clone() });
+            self.pending_after_save.insert(
+                path.clone(),
+                PendingAfterSave::Duplicate { path: path.clone() },
+            );
             self.save_path(path, SaveKind::Manual, window, cx);
         } else {
             self.perform_duplicate(path, window, cx);
@@ -8257,6 +8465,252 @@ mod tests {
         });
     }
 
+    /// Turn the open fixture document into a live save conflict.
+    async fn make_conflict(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+        view: &Entity<ProjectWorkspace>,
+        path: &Path,
+    ) {
+        std::fs::write(path, "# External\n").unwrap();
+        edit_active(cx, handle, view, "# Mine\n").await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.save_active(window, cx))
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, _| view.status.contains("Save conflict")) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert!(view.read_with(cx, |view, _| view.status.contains("Save conflict")));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "# External\n");
+    }
+
+    fn conflict_availability(
+        cx: &mut TestAppContext,
+        handle: WindowHandle<Root>,
+        view: &Entity<ProjectWorkspace>,
+    ) -> CommandAvailability {
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.read(cx).command_availability(cx, window)
+        })
+        .unwrap()
+    }
+
+    #[gpui_kit::test]
+    async fn conflict_reload_discards_edits_and_clears_recovery(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let recovery = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(recovery.path());
+        let identity = DocumentIdentity::new(
+            ProjectId::new("workspace-1").unwrap(),
+            1,
+            SourcePath::new("src/posts/a.md").unwrap(),
+        );
+        store
+            .save(&RecoveryRecord::new_with_baseline(
+                identity,
+                DocumentRevision::new(1),
+                "# Mine\n",
+                Some("# A\n".to_owned()),
+                1,
+            ))
+            .unwrap();
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| view.recovery = Some(store.clone()));
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        let availability = conflict_availability(cx, handle, &view);
+        assert!(
+            !availability.save_conflict,
+            "a clean document has no conflict to resolve"
+        );
+        assert!(!CommandId::ResolveConflictReload.is_available(availability));
+        assert!(!CommandId::ResolveConflictOverwrite.is_available(availability));
+        assert!(!CommandId::ResolveConflictSaveCopy.is_available(availability));
+
+        make_conflict(cx, handle, &view, &path).await;
+        let availability = conflict_availability(cx, handle, &view);
+        assert!(availability.save_conflict);
+        for command in [
+            CommandId::ResolveConflictReload,
+            CommandId::ResolveConflictOverwrite,
+            CommandId::ResolveConflictSaveCopy,
+        ] {
+            assert!(command.is_available(availability), "{}", command.label());
+        }
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.resolve_conflict_reload(window, cx))
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if view.read_with(cx, |view, cx| {
+                let session = view.sessions.get(&path).unwrap().read(cx);
+                session.buffer.current_text() == "# External\n" && !session.buffer.is_dirty()
+            }) {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert_eq!(session.buffer.current_text(), "# External\n");
+            assert_eq!(session.buffer.original_text(), "# External\n");
+            assert!(!session.buffer.is_dirty());
+            assert!(!session.externally_changed);
+            assert_eq!(
+                session.disk_fingerprint,
+                crate::editor::session::fingerprint("# External\n")
+            );
+            assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Saved));
+            assert!(view.status.contains("Reloaded"), "{}", view.status);
+        });
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if store.load().unwrap().records().is_empty() {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert!(
+            store.load().unwrap().records().is_empty(),
+            "the deliberate discard clears the recovery record"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn conflict_overwrite_writes_buffer_bytes_and_clears_the_conflict(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let (handle, view) = mount(cx);
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        make_conflict(cx, handle, &view, &path).await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.resolve_conflict_overwrite(window, cx))
+        })
+        .unwrap();
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if std::fs::read_to_string(&path).unwrap() == "# Mine\n"
+                && view.read_with(cx, |view, cx| {
+                    !view.sessions.get(&path).unwrap().read(cx).buffer.is_dirty()
+                })
+            {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Mine\n");
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert!(!session.buffer.is_dirty());
+            assert!(!session.externally_changed);
+            assert_eq!(
+                session.disk_fingerprint,
+                crate::editor::session::fingerprint("# Mine\n")
+            );
+            assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Saved));
+            assert!(view.status.contains("Overwrote"), "{}", view.status);
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn conflict_save_copy_writes_a_sibling_and_keeps_the_original_dirty(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = fixture();
+        let recovery = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(recovery.path());
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| view.recovery = Some(store.clone()));
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+        make_conflict(cx, handle, &view, &path).await;
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| view.resolve_conflict_save_copy(window, cx))
+        })
+        .unwrap();
+        let copy = dir.path().join("src/posts/a.local.md");
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if copy.exists() {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "# Mine\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# External\n",
+            "the original file is never overwritten by a copy"
+        );
+        view.read_with(cx, |view, cx| {
+            let session = view.sessions.get(&path).unwrap().read(cx);
+            assert!(session.buffer.is_dirty(), "the original stays unsaved");
+            assert!(session.externally_changed);
+            assert_eq!(
+                view.save_coordinator.status(&path),
+                Some(SaveStatus::Conflict)
+            );
+            assert!(view.status.contains("a.local.md"), "{}", view.status);
+        });
+
+        // The original keeps its recovery record; the copy does not consume it.
+        view.update(cx, |view, cx| view.schedule_recovery(cx));
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if store
+                .load()
+                .unwrap()
+                .records()
+                .iter()
+                .any(|record| record.content() == "# Mine\n")
+            {
+                break;
+            }
+            runtime::blocking(cx, || {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            })
+            .await
+            .unwrap();
+        }
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .records()
+                .iter()
+                .any(|record| record.content() == "# Mine\n"),
+            "the original document keeps its recovery record"
+        );
+    }
+
     #[gpui_kit::test]
     async fn dirty_edits_are_recorded_for_recovery_and_cleared_after_save(cx: &mut TestAppContext) {
         let dir = fixture();
@@ -8438,10 +8892,7 @@ mod tests {
             .unwrap();
         }
         view.read_with(cx, |view, cx| {
-            let session = view
-                .sessions
-                .get(&path)
-                .expect("the record must restore");
+            let session = view.sessions.get(&path).expect("the record must restore");
             let session = session.read(cx);
             assert_eq!(session.editor.read(cx).value(), "# Recovered\n");
             assert_eq!(
@@ -8481,7 +8932,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# External\n");
         view.read_with(cx, |view, cx| {
             assert!(view.sessions.get(&path).unwrap().read(cx).buffer.is_dirty());
-            assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Conflict));
+            assert_eq!(
+                view.save_coordinator.status(&path),
+                Some(SaveStatus::Conflict)
+            );
         });
     }
 
@@ -9283,7 +9737,10 @@ mod tests {
 
                 let (b_text, b_revision) = {
                     let session = view.sessions.get(&path_b).unwrap().read(cx);
-                    (session.buffer.current_text().to_owned(), session.buffer.revision())
+                    (
+                        session.buffer.current_text().to_owned(),
+                        session.buffer.revision(),
+                    )
                 };
                 assert_eq!(b_revision, DocumentRevision::new(rev_b), "B's revision");
                 view.finish_save(

@@ -26,6 +26,9 @@ pub(crate) enum CommandId {
     CopyPathAbsolute,
     CopyPathRelative,
     Save,
+    ResolveConflictReload,
+    ResolveConflictOverwrite,
+    ResolveConflictSaveCopy,
     CloseDocument,
     RecoverUnsaved,
     FindInDocument,
@@ -102,6 +105,9 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::CopyPathAbsolute,
     CommandId::CopyPathRelative,
     CommandId::Save,
+    CommandId::ResolveConflictReload,
+    CommandId::ResolveConflictOverwrite,
+    CommandId::ResolveConflictSaveCopy,
     CommandId::CloseDocument,
     CommandId::RecoverUnsaved,
     CommandId::FindInDocument,
@@ -208,6 +214,8 @@ pub(crate) struct CommandAvailability {
     pub workspace_mode: WorkspaceMode,
     /// This build carries a manifest URL and public key for update checks.
     pub updates_configured: bool,
+    /// The active document has a save conflict that the resolutions can settle.
+    pub save_conflict: bool,
 }
 
 /// One collection offered as a switch command.
@@ -324,6 +332,9 @@ impl CommandId {
             Self::ToggleComment => state.editor_focused && state.markdown_document,
             Self::OpenComponentBuilder => state.editor_focused && state.mdx_document,
             Self::CheckForUpdates => state.updates_configured,
+            Self::ResolveConflictReload
+            | Self::ResolveConflictOverwrite
+            | Self::ResolveConflictSaveCopy => state.save_conflict,
             Self::ToggleInspector => {
                 state.frontmatter_available && state.workspace_mode == WorkspaceMode::Writing
             }
@@ -349,6 +360,9 @@ impl CommandId {
             Self::CopyPathAbsolute => "Copy absolute path",
             Self::CopyPathRelative => "Copy project-relative path",
             Self::Save => "Save",
+            Self::ResolveConflictReload => "Reload from Disk (discard my edits)",
+            Self::ResolveConflictOverwrite => "Overwrite Disk with My Edits",
+            Self::ResolveConflictSaveCopy => "Save My Edits as a Copy",
             Self::CloseDocument => "Close file",
             Self::RecoverUnsaved => "Recover unsaved changes…",
             Self::FindInDocument => "Find…",
@@ -740,6 +754,9 @@ pub(crate) fn install_menus(
                 CommandId::ReloadCollections,
                 CommandId::NewEntry,
                 CommandId::Save,
+                CommandId::ResolveConflictReload,
+                CommandId::ResolveConflictOverwrite,
+                CommandId::ResolveConflictSaveCopy,
                 CommandId::CloseDocument,
                 CommandId::DuplicateEntry,
                 CommandId::RenameEntry,
@@ -977,6 +994,9 @@ pub(crate) fn command_group(command: CommandId) -> &'static str {
         | CommandId::CopyPathAbsolute
         | CommandId::CopyPathRelative
         | CommandId::Save
+        | CommandId::ResolveConflictReload
+        | CommandId::ResolveConflictOverwrite
+        | CommandId::ResolveConflictSaveCopy
         | CommandId::CloseDocument
         | CommandId::RecoverUnsaved
         | CommandId::OpenProjectInIde
@@ -1413,6 +1433,26 @@ mod tests {
                 ..configured
             })
         );
+    }
+
+    #[test]
+    fn conflict_resolutions_require_a_live_conflict() {
+        let idle = CommandAvailability::default();
+        let conflicted = CommandAvailability {
+            save_conflict: true,
+            ..idle
+        };
+        for command in [
+            CommandId::ResolveConflictReload,
+            CommandId::ResolveConflictOverwrite,
+            CommandId::ResolveConflictSaveCopy,
+        ] {
+            assert!(COMMANDS.contains(&command));
+            assert_eq!(command_group(command), "File");
+            assert!(command.shortcut().is_none());
+            assert!(!command.is_available(idle), "{}", command.label());
+            assert!(command.is_available(conflicted), "{}", command.label());
+        }
     }
 
     #[test]

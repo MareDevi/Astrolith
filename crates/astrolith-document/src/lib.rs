@@ -50,7 +50,10 @@ pub use projection::{
     apply_visible_edit, diff_visible, map_visible_offset, project_writer,
 };
 pub use recovery::{RecoveryLoad, RecoveryRecord, RecoveryStore};
-pub use save::{DocumentSnapshot, MAX_DOCUMENT_BYTES, SaveOutcome, save_snapshot};
+pub use save::{
+    DocumentSnapshot, MAX_DOCUMENT_BYTES, SaveOutcome, overwrite_document, save_document_copy,
+    save_snapshot,
+};
 pub use sentences::{cursor_sentence, other_sentences, sentences};
 pub use serialize::serialize_document;
 pub use tokens::{TokenSnapshot, TokenSummary, token_snapshot};
