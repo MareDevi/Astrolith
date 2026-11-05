@@ -41,8 +41,8 @@ use astrolith_core::{
 };
 use astrolith_document::{
     DocumentIdentity, DocumentKind, DocumentLoadTicket, DocumentRevision, DocumentSnapshot,
-    FormatCommand, RecoveryRecord, RecoveryStore, SaveOutcome, TokenSummary, parse_document,
-    save_snapshot,
+    FormatCommand, MAX_DOCUMENT_BYTES, RecoveryRecord, RecoveryStore, SaveOutcome, TokenSummary,
+    parse_document, save_snapshot,
 };
 use astrolith_preview::RouteMapping;
 use astrolith_workspace::{
@@ -666,6 +666,7 @@ fn save_failure_class(error: &astrolith_document::DocumentError) -> &'static str
     use astrolith_document::DocumentError;
     match error {
         DocumentError::Io { .. } => "io",
+        DocumentError::TooLarge { .. } => "too-large",
         DocumentError::RevisionOverflow => "revision",
         DocumentError::InvalidFrontmatter
         | DocumentError::UnsupportedFrontmatter { .. }
@@ -2817,7 +2818,7 @@ impl ProjectWorkspace {
                 return Err("Source mapping changed; reopen the project.".into());
             }
             let source =
-                read_bounded(&actual, 8 * 1024 * 1024).map_err(|error| error.to_string())?;
+                read_bounded(&actual, MAX_DOCUMENT_BYTES).map_err(|error| error.to_string())?;
             if source.lines().count() > 50_000 {
                 return Err("Documents are limited to 50,000 lines.".into());
             }
@@ -3241,7 +3242,7 @@ impl ProjectWorkspace {
                             )
                             .ok()
                             .filter(|actual| actual == &path)
-                            .and_then(|actual| read_bounded(&actual, 8 * 1024 * 1024).ok())
+                            .and_then(|actual| read_bounded(&actual, MAX_DOCUMENT_BYTES).ok())
                             .map(|text| crate::editor::session::fingerprint(&text));
                             (path, fingerprint)
                         })
@@ -3519,7 +3520,7 @@ impl ProjectWorkspace {
             .values()
             .map(|session| session.read(cx).buffer.original_text().len())
             .sum();
-        if retained_bytes + (self.loads.len() + 1) * 8 * 1024 * 1024 > 32 * 1024 * 1024 {
+        if retained_bytes + (self.loads.len() + 1) * MAX_DOCUMENT_BYTES > 32 * 1024 * 1024 {
             self.status =
                 "Close documents before exceeding the 32 MiB loaded-source budget.".into();
             cx.notify();
@@ -3546,7 +3547,7 @@ impl ProjectWorkspace {
                 return Err("Source mapping changed; rescan the project.".into());
             }
             let source =
-                read_bounded(&actual, 8 * 1024 * 1024).map_err(|error| error.to_string())?;
+                read_bounded(&actual, MAX_DOCUMENT_BYTES).map_err(|error| error.to_string())?;
             if source.lines().count() > 50_000 {
                 return Err("Documents are limited to 50,000 lines.".into());
             }
@@ -4245,7 +4246,7 @@ impl ProjectWorkspace {
                     );
                     continue;
                 };
-                let Ok(disk) = read_bounded(&actual, 8 * 1024 * 1024) else {
+                let Ok(disk) = read_bounded(&actual, MAX_DOCUMENT_BYTES) else {
                     tracing::warn!(
                         path = %actual.display(),
                         "could not read the current document while restoring recovery"
@@ -7359,6 +7360,15 @@ mod tests {
                 "{rejected}"
             );
         }
+    }
+
+    #[test]
+    fn an_oversized_save_reports_a_stable_failure_class() {
+        let error = astrolith_document::DocumentError::TooLarge {
+            bytes: MAX_DOCUMENT_BYTES + 1,
+            limit: MAX_DOCUMENT_BYTES,
+        };
+        assert_eq!(save_failure_class(&error), "too-large");
     }
 
     struct TestHost {

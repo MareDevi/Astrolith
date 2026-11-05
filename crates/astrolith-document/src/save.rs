@@ -29,6 +29,12 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::buffer::{DocumentBuffer, DocumentError, DocumentIdentity, DocumentRevision};
 use crate::version::DiskBaseline;
 
+/// Largest document that may be read into, or written from, the editor.
+///
+/// The open path refuses files above this cap, so a save above it would create
+/// a file the application can never reopen or fingerprint again.
+pub const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+
 /// Outcome of attempting to save one document snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SaveOutcome {
@@ -140,6 +146,18 @@ fn save_blocking(
     baseline: &DiskBaseline,
     revision: u64,
 ) -> Result<SaveOutcome, DocumentError> {
+    if content.len() > MAX_DOCUMENT_BYTES {
+        tracing::warn!(
+            path = %path.display(),
+            bytes = content.len(),
+            limit = MAX_DOCUMENT_BYTES,
+            "refusing to save a document above the readable size cap"
+        );
+        return Err(DocumentError::TooLarge {
+            bytes: content.len(),
+            limit: MAX_DOCUMENT_BYTES,
+        });
+    }
     let current = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -486,6 +504,51 @@ mod tests {
             "a newer edit must stay dirty"
         );
         assert!(document.is_dirty());
+    }
+
+    #[test]
+    fn a_save_above_the_readable_cap_is_refused_without_touching_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "old").unwrap();
+
+        let oversized = "x".repeat(MAX_DOCUMENT_BYTES + 1);
+        let mut document = buffer("old");
+        document.apply_text(oversized).unwrap();
+        let snapshot = DocumentSnapshot::capture(&document, &path);
+
+        let result = runtime().block_on(save_snapshot(&snapshot));
+        assert_eq!(
+            result,
+            Err(DocumentError::TooLarge {
+                bytes: MAX_DOCUMENT_BYTES + 1,
+                limit: MAX_DOCUMENT_BYTES,
+            }),
+            "a document that could never be reopened must not be written"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+    }
+
+    #[test]
+    fn a_save_exactly_at_the_readable_cap_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "old").unwrap();
+
+        let at_cap = "x".repeat(MAX_DOCUMENT_BYTES);
+        let mut document = buffer("old");
+        let revision = document.apply_text(at_cap.clone()).unwrap();
+        let snapshot = DocumentSnapshot::capture(&document, &path);
+
+        let outcome = runtime().block_on(save_snapshot(&snapshot)).unwrap();
+        assert_eq!(
+            outcome,
+            SaveOutcome::Saved {
+                revision: revision.get()
+            }
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap().len(), MAX_DOCUMENT_BYTES);
+        assert_eq!(fs::read_to_string(&path).unwrap(), at_cap);
     }
 
     #[test]

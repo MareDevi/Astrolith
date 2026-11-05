@@ -17,8 +17,9 @@ pub(crate) fn read_document(path: PathBuf) -> io::Result<DocumentSource> {
         return Err(io::Error::other("Choose a regular file."));
     }
     let mut bytes = Vec::new();
-    file.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 8 * 1024 * 1024 {
+    file.take((astrolith_document::MAX_DOCUMENT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > astrolith_document::MAX_DOCUMENT_BYTES {
         return Err(io::Error::other("Readonly files are limited to 8 MiB."));
     }
     let source =
@@ -62,7 +63,7 @@ mod tests {
         let path = directory.path().join("large.md");
         std::fs::File::create(&path)
             .unwrap()
-            .set_len(8 * 1024 * 1024 + 1)
+            .set_len((astrolith_document::MAX_DOCUMENT_BYTES + 1) as u64)
             .unwrap();
         assert!(read_document(path).is_err());
     }

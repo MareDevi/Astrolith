@@ -61,6 +61,13 @@ pub enum DocumentError {
         /// Human-readable description of the failure.
         message: String,
     },
+    /// A save would persist a document above the readable size cap.
+    TooLarge {
+        /// Byte length of the content that was refused.
+        bytes: usize,
+        /// The largest accepted content length.
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for DocumentError {
@@ -78,6 +85,10 @@ impl std::fmt::Display for DocumentError {
                 write!(formatter, "unsupported patch for `{path}`: {reason}")
             }
             Self::Io { message } => write!(formatter, "document I/O failed: {message}"),
+            Self::TooLarge { bytes, limit } => write!(
+                formatter,
+                "document is {bytes} bytes; the maximum supported size is {limit} bytes"
+            ),
         }
     }
 }
