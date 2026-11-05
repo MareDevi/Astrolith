@@ -339,6 +339,17 @@ pub(crate) struct Shell {
     pending_entry: Option<PathBuf>,
     /// Last menu model installed, so render does not rebuild unchanged menus.
     menu_signature: Option<(CommandAvailability, Vec<RecentEntry>, Vec<CollectionItem>)>,
+    /// Set by the change handlers that can change menu inputs (mode, project
+    /// notify, session change, preferences, recent list, collections, dock).
+    /// The next frame installs the menus once instead of every frame.
+    menus_dirty: bool,
+    /// The editor focus/selection pair the installed menu model was built from.
+    menu_editor_key: Option<(bool, bool)>,
+    /// Menu recomputations and installs, for the per-frame cost test.
+    #[cfg(test)]
+    menu_refreshes: usize,
+    #[cfg(test)]
+    menu_installs: usize,
     /// Single-instance listener task, kept alive for the window's lifetime.
     instance_task: Option<Task<()>>,
     focus: FocusHandle,
@@ -509,6 +520,8 @@ impl Shell {
                     // would mutate the dock on every splitter move.
                     this.capture_layout(cx);
                     this.sync_terminal_activity(window, cx);
+                    // Sidebar/preview visibility is part of menu availability.
+                    this.menus_dirty = true;
                 }
             }),
             cx.observe_window_bounds(window, |this, window, cx| {
@@ -531,6 +544,7 @@ impl Shell {
             let open = header.read(cx).inspector_open();
             if this.inspector_open != open {
                 this.inspector_open = open;
+                this.menus_dirty = true;
                 cx.notify();
             }
         }));
@@ -540,6 +554,8 @@ impl Shell {
             |this, _, _: &SessionChanged, _window, cx| {
                 this.sync_preview(cx);
                 this.note_typing(cx);
+                // Formatting availability follows the active document.
+                this.menus_dirty = true;
             },
         ));
         // Recording the open, restoring the project layout and reopening its
@@ -572,6 +588,9 @@ impl Shell {
             this.sync_preview(cx);
             this.track_active_entry(cx);
             this.refresh_component_builder(&project, cx);
+            // Collections, availability and the active document all live in the
+            // project; the menu model follows its notifications.
+            this.menus_dirty = true;
         }));
         // Undo/redo can change hidden frontmatter without changing the field key;
         // force the form to reload from the restored complete source.
@@ -788,6 +807,12 @@ impl Shell {
             recent: Vec::new(),
             pending_entry: None,
             menu_signature: None,
+            menus_dirty: true,
+            menu_editor_key: None,
+            #[cfg(test)]
+            menu_refreshes: 0,
+            #[cfg(test)]
+            menu_installs: 0,
             instance_task: None,
             focus,
             chrome: ChromeVisibility::default(),
@@ -853,6 +878,7 @@ impl Shell {
     fn set_registry(&mut self, records: Vec<ProjectRecord>) {
         self.recent = recent_projects::entries(&records);
         self.recent_records = records;
+        self.menus_dirty = true;
     }
 
     /// Route one startup or forwarded request.
@@ -999,6 +1025,11 @@ impl Shell {
 
     /// Rebuild the native menu bar only when its model changed.
     fn refresh_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        {
+            self.menu_refreshes += 1;
+        }
+        self.menus_dirty = false;
         let availability = self.availability(window, cx);
         let unchanged = {
             let project = self.project.read(cx);
@@ -1013,6 +1044,10 @@ impl Shell {
         };
         if unchanged {
             return;
+        }
+        #[cfg(test)]
+        {
+            self.menu_installs += 1;
         }
         let collections = self.project.read(cx).collection_items().to_vec();
         commands::install_menus(
@@ -1789,6 +1824,7 @@ impl Shell {
         }
         self.sync_embedded(window, cx);
         self.sync_terminal_activity(window, cx);
+        self.menus_dirty = true;
     }
 
     /// The terminal polls at frame rate only while Build shows its dock.
@@ -2776,6 +2812,8 @@ impl Shell {
         }
         self.persist_global(cx);
         self.persist_project(cx);
+        // Focus/typewriter mode and copyedit labels are menu state.
+        self.menus_dirty = true;
         cx.notify();
     }
 
@@ -3268,8 +3306,30 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The document rail owns the trigger click and the popover dismissal;
         // mirror its state before menus and availability read it.
-        self.inspector_open = self.document_header.read(cx).inspector_open();
-        self.refresh_menus(window, cx);
+        let inspector_open = self.document_header.read(cx).inspector_open();
+        if self.inspector_open != inspector_open {
+            self.inspector_open = inspector_open;
+            self.menus_dirty = true;
+        }
+        // Editor focus and selection change availability without an event;
+        // compare the cheap pair and rebuild menus only when it moved.
+        let editor_key = self.project.read(cx).active_session(cx).map(|session| {
+            let session = session.read(cx);
+            let editor = session.editor.read(cx);
+            (
+                editor.focus_handle(cx).is_focused(window),
+                !editor.selected_range().is_empty(),
+            )
+        });
+        if self.menu_editor_key != editor_key {
+            self.menu_editor_key = editor_key;
+            self.menus_dirty = true;
+        }
+        // Every other menu input is cached by the change handlers; an
+        // unrelated frame does no project-sized work here.
+        if self.menus_dirty {
+            self.refresh_menus(window, cx);
+        }
         // Activate the frontmatter form whenever the active document, its schema
         // revision or its mapped fields change. Editing the form does not change
         // this key, so live edits never rebuild the controls mid-entry.
@@ -3393,7 +3453,7 @@ impl Render for Shell {
         );
         let chrome_hidden = self.chrome.is_hidden() && self.warning.is_none();
         let project_name = self.project.read(cx).project_name();
-        let has_buffers = !self.project.read(cx).open_tabs().is_empty();
+        let has_buffers = self.project.read(cx).has_open_tabs();
 
         let close_owner = self.project.downgrade();
         div()
@@ -3879,6 +3939,64 @@ mod tests {
             assert_eq!(view.read(cx).prose_style_resolutions, resolved + 1);
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn unrelated_frames_do_not_rebuild_menus_but_changes_do(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let (refreshes, installs) =
+            view.read_with(cx, |view, _| (view.menu_refreshes, view.menu_installs));
+        assert!(refreshes > 0, "the first frame installs the menus");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.menu_refreshes, refreshes,
+                "an unrelated frame must not recompute menu availability"
+            );
+            assert_eq!(view.menu_installs, installs);
+        });
+
+        // A mode change is one of the menu inputs.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_mode(WorkspaceMode::Build, window, cx)
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.menu_installs > installs,
+                "a mode change updates the menu model"
+            );
+        });
+
+        // Project notifications are the collection/availability path.
+        let refreshes = view.read_with(cx, |view, _| view.menu_refreshes);
+        view.update(cx, |view, cx| {
+            view.project.update(cx, |_, cx| cx.notify());
+        });
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.menu_refreshes,
+                refreshes + 1,
+                "a project change schedules exactly one menu refresh"
+            );
+        });
     }
 
     #[gpui_kit::test]
