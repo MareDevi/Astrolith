@@ -74,6 +74,8 @@ pub(crate) struct WriterSurface {
     /// The block range of the very first layout, for the windowing tests.
     #[cfg(test)]
     first_rendered_range: Option<Range<usize>>,
+    #[cfg(test)]
+    dimmed_blocks: Vec<usize>,
 }
 
 impl WriterSurface {
@@ -101,7 +103,13 @@ impl WriterSurface {
             rendered_range: 0..0,
             #[cfg(test)]
             first_rendered_range: None,
+            #[cfg(test)]
+            dimmed_blocks: Vec::new(),
         }
+    }
+
+    pub(crate) fn request_caret_follow(&mut self) {
+        self.last_cursor = None;
     }
 
     /// Install the configured document typography.
@@ -635,7 +643,7 @@ impl Render for WriterSurface {
                 editor.cursor().min(editor.text().len()),
                 editor.selected_range(),
                 editor.focus_handle(cx).is_focused(window),
-                session.presentation.modes,
+                session.writing_modes,
                 session.placeholder_ranges().to_vec(),
             )
         };
@@ -725,6 +733,12 @@ impl Render for WriterSurface {
 
         let refs: Vec<&BlockNode> = nodes.iter().collect();
         let render_context = RenderContext::from_app(cx).with_body_font_size(px(style.font_size));
+        let inherited_style = render_context.style().clone();
+        let heading_color = crate::theme::prose_heading_color(cx);
+        let text_style = inherited_style
+            .clone()
+            .with_heading(move |level| inherited_style.heading(level).text_color(heading_color));
+        let render_context = render_context.with_style(text_style);
         let mut blocks: Vec<AnyElement> = Vec::with_capacity(rendered.len() + 2);
         // The omitted blocks keep their scroll range through spacers whose
         // heights are the same estimates the window was computed from.
@@ -738,6 +752,8 @@ impl Render for WriterSurface {
                     .into_any_element(),
             );
         }
+        #[cfg(test)]
+        self.dimmed_blocks.clear();
         for (local, index) in rendered.clone().enumerate() {
             let block = &document.blocks[index];
             let element = nodes[local].render(
@@ -751,6 +767,10 @@ impl Render for WriterSurface {
                 && focus_sentence.as_ref().is_none_or(|sentence| {
                     !(sentence.start < block.source.end && sentence.end > block.source.start)
                 });
+            #[cfg(test)]
+            if dimmed {
+                self.dimmed_blocks.push(index);
+            }
             blocks.push(block_wrapper(block, element, dimmed, cx));
         }
         if rendered.end < total && prefix.len() == total + 1 {
@@ -1273,6 +1293,101 @@ mod tests {
                     >= leaf.bounds().top()
             );
         });
+    }
+
+    #[gpui_kit::test]
+    fn focus_mode_follows_the_visible_caret_block(cx: &mut TestAppContext) {
+        let source = "First sentence.
+
+Second sentence.
+
+```
+# code
+```
+";
+        let (handle, session) = mount_writer(cx, source);
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session.set_writing_modes(
+                    crate::editor::writing_modes::WritingModes {
+                        focus: true,
+                        typewriter: false,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        writer.read_with(cx, |writer, _| assert_eq!(writer.dimmed_blocks, [1, 2, 3]));
+        let second = source.find("Second").unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session.set_writer_selection(second, second, window, cx)
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        writer.read_with(cx, |writer, _| assert_eq!(writer.dimmed_blocks, [0, 2, 3]));
+    }
+
+    #[gpui_kit::test]
+    fn enabling_typewriter_centres_the_visible_caret_without_moving_it(cx: &mut TestAppContext) {
+        let (handle, session) = mount_writer(cx, &window_source(100));
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let (index, offset) = writer.read_with(cx, |writer, _| {
+            let geometry = writer.geometry.borrow();
+            let (key, _) = geometry
+                .leaves
+                .iter()
+                .find(|(_, leaf)| {
+                    let bounds = leaf.bounds();
+                    bounds.top() > geometry.viewport.center().y + px(30.)
+                        && bounds.bottom() < geometry.viewport.bottom() - px(30.)
+                })
+                .expect("a visible paragraph below the centre");
+            let index = (*key as usize) - 1;
+            (index, writer.document.blocks[index].content.start)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session
+                    .editor
+                    .update(cx, |editor, cx| window.focus(&editor.focus_handle(cx), cx));
+                session.set_writer_selection(offset, offset, window, cx);
+            });
+            window.render_frame(cx);
+            session.update(cx, |session, cx| {
+                session.set_writing_modes(
+                    crate::editor::writing_modes::WritingModes {
+                        focus: false,
+                        typewriter: true,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        writer.read_with(cx, |writer, _| {
+            let geometry = writer.geometry.borrow();
+            let leaf = geometry.leaves.get(&block_key(index)).unwrap();
+            let centre = leaf.position_for_index(0).y + leaf.caret_height() / 2.;
+            assert!((f32::from(centre - geometry.viewport.center().y)).abs() < 2.);
+        });
+        assert_eq!(
+            session.read_with(cx, |session, cx| session.editor.read(cx).cursor()),
+            offset
+        );
     }
 
     #[gpui_kit::test]

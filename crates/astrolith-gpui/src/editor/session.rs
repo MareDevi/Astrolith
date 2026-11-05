@@ -1,4 +1,4 @@
-//! One retained editor/history for each canonical source, independent of selection.
+//! One source history and retained editing models per canonical source.
 use std::{ops::Range, path::PathBuf, time::Instant};
 
 use astrolith_document::{
@@ -23,7 +23,7 @@ use crate::editor::lsp::ProviderSupport;
 use crate::editor::copyedit::{CopyeditConfig, CopyeditPresentation, DEBOUNCE};
 use crate::editor::formatting::external_url;
 use crate::editor::writer_surface::WriterSurface;
-use crate::editor::writing_modes::{ProseStyle, SessionPresentation, WritingModes};
+use crate::editor::writing_modes::{ProseStyle, WritingModes};
 use crate::runtime;
 
 pub(crate) struct DocumentSession {
@@ -76,20 +76,17 @@ pub(crate) struct DocumentSession {
     pub dirty: bool,
     pub disk_fingerprint: u64,
     kind: DocumentKind,
-    /// Prose, focus and typewriter presentation for this session.
-    pub presentation: SessionPresentation,
+    /// Focus and typewriter preferences for the visible writing surface.
+    pub writing_modes: WritingModes,
     /// Copyedit category layers and the background analysis generations.
     pub copyedit: CopyeditPresentation,
     /// In-flight debounce/classification task; dropping it cancels the result.
     copyedit_task: Option<gpui_kit::Task<()>>,
     /// The word and character counts of the current visible text.
     pub counts: TokenSummary,
-    /// Set when [`Self::projection`] changed, so a presentation refresh
-    /// re-tokenises and re-hashes only real text changes.
+    /// Set when [`Self::projection`] changed, so counts only update after
+    /// actual text changes.
     presentation_dirty: bool,
-    /// [`fingerprint`] of [`Self::projection`]'s visible text, computed once per
-    /// text change so presentation refreshes never re-hash the document.
-    text_key: u64,
     /// Snippet placeholder ranges in visible bytes, in insertion order.
     placeholders: Vec<Range<usize>>,
     /// The placeholder Tab moves from next.
@@ -278,7 +275,6 @@ impl DocumentSession {
             DocumentBuffer::from_unsaved_at_revision(identity, original, current, revision);
         let dirty = buffer.is_dirty();
         let counts = token_summary(&projection.visible);
-        let text_key = fingerprint(&projection.visible);
         // A writing surface is not a code buffer: no line numbers, indent
         // guides, folding or automatic bracket insertion.
         let editor = cx.new(|cx| {
@@ -456,12 +452,11 @@ impl DocumentSession {
             dirty,
             disk_fingerprint,
             kind,
-            presentation: SessionPresentation::new(WritingModes::default()),
+            writing_modes: WritingModes::default(),
             copyedit: CopyeditPresentation::default(),
             copyedit_task: None,
             counts,
             presentation_dirty: false,
-            text_key,
             placeholders: Vec::new(),
             placeholder_index: 0,
             placeholder_offsets: Vec::new(),
@@ -1224,11 +1219,14 @@ impl DocumentSession {
     pub(crate) fn set_writing_modes(
         &mut self,
         modes: WritingModes,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.presentation.set_modes(&self.editor, modes, window, cx);
-        self.presentation.invalidate();
+        if self.writing_modes.typewriter != modes.typewriter {
+            self.writer
+                .update(cx, |writer, _| writer.request_caret_follow());
+        }
+        self.writing_modes = modes;
         self.refresh_writer(cx);
         cx.emit(SessionChanged);
         cx.notify();
@@ -1304,42 +1302,29 @@ impl DocumentSession {
     fn refresh_writer(&mut self, cx: &mut Context<Self>) {
         if self.presentation_dirty {
             self.counts = token_summary(&self.projection.visible);
-            self.text_key = fingerprint(&self.projection.visible);
             self.presentation_dirty = false;
         }
         if self.source_view {
-            self.presentation.clear_layers(cx);
             self.copyedit.invalidate(cx);
             return;
         }
-        self.presentation
-            .refresh_prose(&self.editor, &self.projection.visible, self.text_key, cx);
-        self.presentation
-            .refresh_focus(&self.editor, &self.projection.visible, cx);
-        self.presentation.centre_cursor(&self.editor, cx);
+        // Typography, focus dimming and typewriter scrolling belong to the
+        // visible rich surface. The input model needs no second prose layer.
         self.writer.update(cx, |_, cx| cx.notify());
     }
 
     /// Refresh only what follows the caret.
     fn refresh_cursor(&mut self, cx: &mut Context<Self>) {
         if self.source_view {
-            self.presentation.clear_layers(cx);
             self.copyedit.invalidate(cx);
             return;
         }
-        // The prose key includes the text and the pane width, so a caret move
-        // after either changed rebuilds the layer instead of leaving it stale.
-        self.presentation
-            .refresh_prose(&self.editor, &self.projection.visible, self.text_key, cx);
-        self.presentation
-            .refresh_focus(&self.editor, &self.projection.visible, cx);
         let cursor = self
             .editor
             .read(cx)
             .cursor()
             .min(self.projection.visible.len());
         self.copyedit.refresh_cursor(&self.editor, cursor, cx);
-        self.presentation.centre_cursor(&self.editor, cx);
         self.writer.update(cx, |_, cx| cx.notify());
     }
 
@@ -1649,7 +1634,6 @@ impl DocumentSession {
             self.notice = notice;
         }
         self.counts = token_summary(&self.projection.visible);
-        self.text_key = fingerprint(&self.projection.visible);
         self.presentation_dirty = false;
         self.history.record(
             &before,
