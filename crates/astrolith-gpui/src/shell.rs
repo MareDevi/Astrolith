@@ -3464,6 +3464,11 @@ impl Render for Shell {
         let chrome_hidden = self.chrome.is_hidden() && self.warning.is_none();
         let project_name = self.project.read(cx).project_name();
         let has_buffers = self.project.read(cx).has_open_tabs();
+        // Open, scan and builder failures used to be stored and never shown.
+        // Surface them in a compact status line; the neutral "no file" copy
+        // stays implicit so a healthy window keeps its original layout.
+        let file_status = self.file_status.clone();
+        let show_file_status = file_status != "Readonly · No file open" && !file_status.is_empty();
 
         let close_owner = self.project.downgrade();
         div()
@@ -3691,6 +3696,25 @@ impl Render for Shell {
                 shell.child(self.build_tab_strip(cx))
             })
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
+            .when(show_file_status, |shell| {
+                shell.child(
+                    div()
+                        .id("file-status")
+                        .test_support()
+                        .flex_shrink_0()
+                        .h(px(20.))
+                        .w_full()
+                        .h_flex()
+                        .items_center()
+                        .px_3()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().tab_bar)
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(file_status),
+                )
+            })
     }
 }
 
@@ -8093,5 +8117,28 @@ mod tests {
                         )
                 })
         }));
+    }
+
+    #[gpui_kit::test]
+    async fn file_status_surfaces_a_failure_in_the_window(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("file-status").is_none(),
+                "a healthy window keeps no status line"
+            );
+            view.update(cx, |shell, cx| {
+                shell.file_status = "Could not open file: permissions".into();
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(
+                window.try_find("file-status").is_some(),
+                "a stored open/scan failure must be visible"
+            );
+        })
+        .unwrap();
     }
 }
