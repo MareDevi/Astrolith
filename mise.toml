@@ -25,7 +25,7 @@ run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 
 [tasks.check]
 description = "Run the current milestone's automated checks"
-run = [{ task = "doctor" }, { task = "fmt" }, { task = "lint" }, { task = "build" }, { task = "test" }, { task = "test:fixtures" }]
+run = [{ task = "doctor" }, { task = "fmt" }, { task = "lint" }, { task = "build" }, { task = "test" }, { task = "test:perf-harness" }, { task = "test:fixtures" }]
 
 [tasks.ci]
 description = "Run the same checks in continuous integration"
@@ -131,3 +131,7 @@ run = "packaging/linux/build-appimage.sh"
 [tasks."package:rpm"]
 description = "Build the RPM into dist/ (requires rpmbuild)"
 run = "packaging/linux/build-rpm.sh"
+
+[tasks."test:perf-harness"]
+description = "Test editor performance run validation and process lifetime"
+run = "node --test scripts/editor-perf.test.mjs"

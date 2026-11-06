@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const GENERATOR_VERSION = 1;
@@ -510,7 +511,10 @@ function summarize(events) {
     .filter((event) => event.event === 'document_close')
     .map((event) => Number(event.ms ?? 0))
     .sort((a, b) => a - b);
+  const preview = events.filter((event) => event.event === 'text_layout_frame' && event.mode === 'preview')
+    .map((event) => Number(event.prepare_ms)).filter(Number.isFinite).sort((a, b) => a - b);
   return {
+    preview_prepare: { samples: preview.length, p50: percentile(preview, 0.5), p95: percentile(preview, 0.95), max: preview.at(-1) ?? null },
     writer_repaints: {
       samples: repaints.length,
       paint_ms: {
@@ -622,6 +626,136 @@ function summarize(events) {
   };
 }
 
+// Attach before any external waits: a child can exit during a resize pair.
+export function watchChild(child, timeout, processGroup = false) {
+  return new Promise((resolve) => {
+    let timedOut = false;
+    let error = null;
+    let killTimer;
+    const kill = (signal) => {
+      try {
+        if (processGroup) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch (failure) {
+        if (failure.code !== 'ESRCH') error = failure.message;
+      }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      kill('SIGTERM');
+      killTimer = setTimeout(() => kill('SIGKILL'), 2000);
+    }, timeout);
+    child.once('error', (failure) => { error = failure.message; });
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      resolve({ code, signal, timedOut, error });
+    });
+  });
+}
+
+export function assessRun(run, metrics) {
+  const steps = run.events.filter((event) => event.event === 'driver_step');
+  const documentReady = run.events.some((event) => event.event === 'driver_document' && event.ready === 'true');
+  const quit = steps.at(-1)?.name === 'quit'
+    && run.events.some((event) => event.event === 'driver_quit');
+  const execution = {
+    status: !run.timedOut && !run.exit.error && run.exit.code === 0 && !run.exit.signal
+      && documentReady && quit && steps.length === run.expectedSteps
+      && (run.fullscreenPairs ?? 0) === (run.fullscreenRequested ?? 0) ? 'passed' : 'failed',
+    exit_code: run.exit.code,
+    signal: run.exit.signal ?? null,
+    error: run.exit.error ?? null,
+    timed_out: Boolean(run.timedOut),
+    document_ready: documentReady,
+    quit_observed: quit,
+    expected_steps: run.expectedSteps,
+    observed_steps: steps.length,
+  };
+  const checks = [];
+  const check = (name, value, limit) => {
+    if (Number.isFinite(value)) checks.push({ name, value_ms: value, limit_ms: limit, passed: value <= limit });
+  };
+  for (const [name, frames] of [['writing', metrics.writer_frames], ['build', metrics.build_frames]]) {
+    check(`${name}_frame_p95`, frames?.total_ms?.p95, 16.7);
+    check(`${name}_frame_p99`, frames?.total_ms?.p99, 33);
+  }
+  check('preview_prepare_p95', metrics.preview_prepare?.p95, 16.7);
+  check('source_transaction_p95', metrics.change_handlers?.p95, 4);
+  check('mode_handler_p95', metrics.mode_handlers?.p95, 4);
+  check('edit_install_p95', metrics.document_convergence?.edit_install_ms?.p95, 50);
+  const performance = {
+    status: !checks.length ? 'not_run' : checks.every((item) => item.passed) ? 'passed' : 'failed',
+    scope: 'Sampled CPU spans only; first correct visible frame and compositor presentation are not measured.',
+    checks,
+  };
+  return { execution, performance };
+}
+
+function ownedClient(pid) {
+  const result = spawnSync('hyprctl', ['clients', '-j'], { encoding: 'utf8' });
+  if (result.status !== 0) return null;
+  const clients = JSON.parse(result.stdout);
+  return clients.find((client) => {
+    let ancestor = client.pid;
+    for (let depth = 0; ancestor > 1 && depth < 8; depth += 1) {
+      if (ancestor === pid) return true;
+      try {
+        ancestor = Number(fs.readFileSync(`/proc/${ancestor}/status`, 'utf8').match(/^PPid:\s+(\d+)/m)?.[1] ?? 0);
+      } catch { return false; }
+    }
+    return false;
+  });
+}
+
+function windowSnapshot(client) {
+  return client && Object.fromEntries(['address', 'pid', 'at', 'size', 'fullscreen', 'fullscreenClient', 'monitor'].map((key) => [key, client[key]]));
+}
+
+async function fullscreenWorkload(child, options) {
+  const records = [];
+  const requested = Number(options['fullscreen-pairs'] ?? 0);
+  if (!requested) return records;
+  let client;
+  const deadline = Date.now() + Number(options['wait-document'] ?? 15000);
+  while (Date.now() < deadline && child.exitCode === null && child.signalCode === null) {
+    client = ownedClient(child.pid);
+    if (client) break;
+    await sleep(50);
+  }
+  if (!client) return records;
+  const initial = windowSnapshot(client);
+  const selector = JSON.stringify(`address:${client.address}`);
+  const dispatch = (expression) => hyprctl('dispatch', expression);
+  try {
+    for (let pair = 0; pair < requested; pair += 1) {
+      await sleep(Number(options['fullscreen-wait'] ?? 1200));
+      if (child.exitCode !== null || child.signalCode !== null) break;
+      const before = windowSnapshot(ownedClient(child.pid));
+      const enter = dispatch(`hl.dsp.window.fullscreen({window=${selector},action="set",mode="fullscreen"})`);
+      await sleep(Number(options['fullscreen-hold'] ?? 1200));
+      const fullscreen = windowSnapshot(ownedClient(child.pid));
+      const leave = dispatch(`hl.dsp.window.fullscreen({window=${selector},action="unset",mode="fullscreen"})`);
+      await sleep(Number(options['fullscreen-gap'] ?? 600));
+      const after = windowSnapshot(ownedClient(child.pid));
+      const sameWindow = before?.address === initial.address && fullscreen?.address === initial.address && after?.address === initial.address;
+      records.push({
+        before, fullscreen, after, enter, leave,
+        passed: sameWindow && enter.status === 0 && leave.status === 0
+          && fullscreen.fullscreen === 2 && after.fullscreen === 0
+          && JSON.stringify(before.size) !== JSON.stringify(fullscreen.size)
+          && JSON.stringify(fullscreen.size) !== JSON.stringify(after.size),
+      });
+    }
+  } finally {
+    const remaining = ownedClient(child.pid);
+    if (remaining?.address === initial.address) {
+      dispatch(`hl.dsp.window.fullscreen_state({window=${selector},action="set",internal=${initial.fullscreen ?? 0},client=${initial.fullscreenClient ?? 0}})`);
+    }
+  }
+  return records;
+}
+
 async function runOnce(options) {
   const backend = options.backend ?? 'pre';
   const sourceSurface = Boolean(options['source-surface']);
@@ -705,43 +839,17 @@ async function runOnce(options) {
     cwd: ROOT,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
   });
+  const finished = watchChild(child, Number(options.timeout ?? 180) * 1000, process.platform !== 'win32');
   child.stdout.pipe(stdout);
   child.stderr.pipe(stderr);
 
-  let fullscreenPairs = 0;
-  let hyprland = 'not_run';
-  if (options['fullscreen-pairs']) {
-    const pairs = Number(options['fullscreen-pairs']);
-    hyprland = 'attempted';
-    for (let pair = 0; pair < pairs; pair += 1) {
-      await sleep(Number(options['fullscreen-wait'] ?? 1200));
-      const before = hyprctl('dispatch', 'hl.dsp.window.fullscreen({mode=0})');
-      await sleep(Number(options['fullscreen-hold'] ?? 1200));
-      const after = hyprctl('dispatch', 'hl.dsp.window.fullscreen({mode=0})');
-      if (before.status === 0 && after.status === 0) fullscreenPairs += 1;
-      await sleep(Number(options['fullscreen-gap'] ?? 600));
-    }
-  }
-
-  const timeout = Number(options.timeout ?? 180) * 1000;
-  const timedOut = await new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      resolve(true);
-    }, timeout);
-    child.on('exit', () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
-  });
-  await new Promise((resolve) => {
-    const timer = setTimeout(resolve, 5000);
-    child.on('exit', () => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
+  const fullscreen = await fullscreenWorkload(child, options);
+  const fullscreenPairs = fullscreen.filter((pair) => pair.passed).length;
+  const hyprland = options['fullscreen-pairs'] ? 'attempted' : 'not_run';
+  const exit = await finished;
+  const timedOut = exit.timedOut;
   await new Promise((resolve) => stdout.end(resolve));
   await new Promise((resolve) => stderr.end(resolve));
   const duration = (Date.now() - started) / 1000;
@@ -764,10 +872,14 @@ async function runOnce(options) {
     }
     cpu = fields;
   }
-  const status = timedOut || !documentReady ? 'failed' : 'passed';
+  const assessment = assessRun({ events, expectedSteps: scenario.steps.length, exit, timedOut,
+    fullscreenRequested: Number(options['fullscreen-pairs'] ?? 0), fullscreenPairs }, metrics);
+  const status = assessment.execution.status === 'passed'
+    && (!options['enforce-slo'] || assessment.performance.status === 'passed') ? 'passed' : 'failed';
   const observed = [
     timedOut ? 'driver timed out' : null,
     documentReady ? 'document opened through a startup entry' : 'document did not open',
+    `execution: ${assessment.execution.status}; sampled CPU SLO: ${assessment.performance.status}`,
     `writer frames sampled: ${metrics.writer_frames.samples}`,
     `source editor frames sampled: ${metrics.build_frames.samples}`,
   ]
@@ -792,6 +904,7 @@ async function runOnce(options) {
       backend,
       features: backend === 'fast' ? ['gpui-fast'] : [],
       source_surface: sourceSurface,
+      hyprland_version: hyprland === 'not_run' ? null : hyprctl('version', '-j').output,
       session: process.env.XDG_SESSION_TYPE ?? null,
       wayland_display: process.env.WAYLAND_DISPLAY ?? null,
       scale: null,
@@ -821,14 +934,17 @@ async function runOnce(options) {
       ...metrics,
       cpu,
       fullscreen_pairs: fullscreenPairs,
+      fullscreen_transitions: fullscreen,
+      ...assessment,
     },
     limitations: [
       'Scripted actions call the real writer input adapter; physical keyboard and IME candidate windows are not exercised.',
       'Frame timings cover the writer request-layout through paint CPU phases; compositor presentation is excluded.',
       hyprland === 'not_run'
         ? 'No Hyprland fullscreen/resize actions were requested for this run.'
-        : 'Hyprland fullscreen dispatch was attempted; check the pair count.',
-      'Preview uses Kit TextView internals and is measured externally; Build reports the Kit Editor element\'s own layout/prepaint/paint phases as build_frame events.',
+        : 'Hyprland transitions target the spawned process window; inspect recorded state, sizes and verified pair count.',
+      'Preview uses the app-owned text layout; preview_prepare measures preparation only. Build reports build_frame CPU phases.',
+      'Baseline status checks execution. Sampled CPU SLO is separate; --enforce-slo also requires measured limits to pass.',
     ],
     rerun_notes: 'Run the same command with an isolated preferences directory; do not compare across different fixtures or fonts.',
   };
@@ -874,7 +990,9 @@ async function main() {
   process.exitCode = 2;
 }
 
-main().catch((error) => {
-  console.error(error.stack ?? error.message ?? error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    console.error(error.stack ?? error.message ?? error);
+    process.exitCode = 1;
+  });
+}

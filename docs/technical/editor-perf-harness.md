@@ -45,7 +45,8 @@ node scripts/editor-perf.mjs run \
 
 - `--backend pre|fast`：分别构建到独立的 `CARGO_TARGET_DIR`（`target/editor-perf/pre|fast`），避免构建产物互相覆盖。
 - `--scenario idle|cycle|scroll-input|preview|preview-idle|build-idle|build|build-wrap|m7-input|m7-close`：分别覆盖稳定窗口、六向模式切换、Writer 滚动与输入、Preview 滚动、Preview 静止、Build 静止/Build 动作/软换行对照，以及 M7 的输入收敛和文档关闭。
-- `--fullscreen-pairs N`：在驱动步骤之间用 Hyprland 全屏/平铺切换，只有 dispatcher 成功才计入 `manifest.metrics.fullscreen_pairs`。
+- `--fullscreen-pairs N`：按启动进程 PID（含 CPU time 包装器子进程）定位窗口，使用 address 定向切换；只有状态与尺寸均确认变化才计入 `manifest.metrics.fullscreen_pairs`。`fullscreen_transitions` 保留前后快照和 dispatcher 结果，最后恢复原全屏状态。场景时长必须覆盖请求的全部切换。
+- `--enforce-slo`：同时要求本次采样的 CPU 指标达标；不加时允许记录超标基线。`metrics.execution` 检查退出码、超时、完整步骤数、quit 和全屏次数；`metrics.performance` 单列测量范围、阈值及通过/失败，不代表 compositor 或真实 IME 验收。
 - `--fixture <id>`、`--cycles`、`--settle`、`--wait-document`、`--timeout` 控制负载与等待；
   `--test-id` 指定 artifact 目录与 manifest 标识，避免不同里程碑共用 M0 命名。
 
