@@ -593,11 +593,20 @@ impl BlockLayout {
     fn carry_prefix(&mut self, old: &BlockLayout, block: &RichBlock) -> usize {
         let old_text = old.text.as_str();
         let new_text = block.text.text.as_str();
-        let mut prefix = 0;
-        for (left, right) in old_text.bytes().zip(new_text.bytes()) {
-            if left != right {
-                break;
-            }
+        // Compare unchanged source in chunks instead of visiting every byte
+        // on the UI thread after an edit near the end of a huge paragraph.
+        const CHUNK: usize = 64;
+        let mut prefix = old_text
+            .as_bytes()
+            .as_chunks::<CHUNK>()
+            .0
+            .iter()
+            .zip(new_text.as_bytes().as_chunks::<CHUNK>().0)
+            .take_while(|(before, after)| before == after)
+            .count()
+            * CHUNK;
+        let limit = old_text.len().min(new_text.len());
+        while prefix < limit && old_text.as_bytes()[prefix] == new_text.as_bytes()[prefix] {
             prefix += 1;
         }
         while prefix > 0 && !old_text.is_char_boundary(prefix) {
