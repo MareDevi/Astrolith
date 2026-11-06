@@ -2,7 +2,7 @@
 
 - 日期：2026-11-06。
 - 对应方案：[编辑器性能优化实施方案](editor-performance-implementation-plan.md) M6。
-- 状态：**SourceSurface 已实现并通过帧预算；completion、diagnostics、hover 与 code action 浮层已由公开状态宿主接管，Build 产品路径仍保留 stock Editor。** 功能门槛（folding/搜索/overview ruler 等）未全部通过，M6 不关闭。
+- 状态：**SourceSurface 已实现并通过帧预算；completion、diagnostics、hover、code action 与 go-to-definition 已由公开状态宿主接管，Build 产品路径仍保留 stock Editor。** 功能门槛（folding/搜索/overview ruler 等）未全部通过，M6 不关闭。
 - 环境：Linux 7.3.1-1-cachyos x64，Hyprland/Wayland，scale 1，gpui-pre 0.3.11，dev profile，无 profiler。
 - 入口：debug 构建设置 `ASTROLITH_SOURCE_SURFACE=1` 时 Build 使用 SourceSurface；默认仍是 stock Kit `Editor`。perf harness 使用 `--source-surface` 记录该开关。
 - 证据：`artifacts/e2e/editor-m6-surface-build-*`。
@@ -72,7 +72,7 @@ Kit 的浮层控件（`input/popovers/*`）是 `pub(crate)`，无法直接复用
 | Hover popover | `hover_popover()`、`present_hover()`、`clear_hover_state()`、`Lsp::hover_provider` | 已实施：宿主自行 debounce 并调用 provider，见 §3.4 |
 | Code action 菜单 | `code_action_menu_state()`、`present_code_actions()`、`perform_code_action()` | 已实施：宿主调用 `Lsp::code_action_providers` 后提交状态，见 §3.4 |
 | Diagnostic popover | `diagnostic_popover()`、`present_diagnostic()`、`diagnostics()`（`DiagnosticSet` 可遍历） | 可读可写，宿主自行做命中与绘制 |
-| Go to definition | `Lsp::definition_provider` | 导航实现（`go_to_definition`）是 `pub(crate)`，宿主需自行跳转 |
+| Go to definition | `Lsp::definition_provider`、`show_document` | 已实施：宿主自行查询、绘制修饰键下划线并跳转，见 §3.5 |
 | Folding | `display_map()`（只读）、`set_folding`/`unfold_at` | 折叠后的显示映射可读；SourceSurface 尚未按 `DisplayMap` 渲染 |
 
 结论：completion 可以完全由公开 API 承载；hover/code action/diagnostic/definition 的**呈现**可以自行实现，但它们的**触发时序**目前在 Kit 元素内部，宿主必须自己重建（provider 调用、去抖、范围解析）。这些能力在替换产品路径前必须逐项落地。
@@ -112,6 +112,14 @@ Kit 把 hover/code action 的**触发时序**写在元素内部，SourceSurface 
 
 验证：`hover_popover_mirrors_and_clears_the_retained_state`、`hover_contents_joins_marked_strings`、`code_action_menu_mirrors_the_retained_overlay`（headless）覆盖状态镜像、内容展平、键盘移动、提交与关闭；原生 `editor-m6-surface-build-overlay-hosts`（`complex-markdown`，132 帧，total p95 2.67 ms）确认新增浮层路径未影响渲染。真实 LSP hover/code action 往返仍属 editor-09，本轮未触发。
 
+### 3.5 已实施：go to definition
+
+- `f12`（`GoToDefinition`）用光标偏移调用 `Lsp::definition_provider`，取首个 `LocationLink` 后按 Kit 语义跳转：先交给公开 `show_document` 钩子，再对 http/https 目标调用 `open_url`，其余目标用 `position_to_offset` 换算并 `set_selected_range`。
+- 按住次级修饰键移动指针时，宿主以 `word_range` 起始、响应里的 `origin_selection_range` 校正，保存 symbol range 与 locations；该范围以 `link_text` 样式加实线下划线并入整形 run，移开、Alt 或文本变化即清除。
+- 下划线存在时，次级点击命中 symbol 直接跟随首个目标；未命中则保持原有选中文档行为。状态只保存在 surface 内，不新增第二套编辑状态。
+
+验证：`definition_request_moves_the_selection`（headless，假 provider 返回同文档目标，断言选区跳到 `1:0–1:4`）与 `definition_hover_underlines_the_resolved_symbol`（headless，断言只有 symbol 范围加下划线）；原生 `editor-m6-surface-build-definition-host`（`complex-markdown`，88 帧，total p95 2.47 ms）确认渲染路径未回归。真实语言服务器往返仍属 editor-09。
+
 ## 4. 复现
 
 ```sh
@@ -131,6 +139,6 @@ node scripts/editor-perf.mjs run \
 - release profile、gpui-fast 组合未测。
 - 折叠开关动作仍调用 `EditorState::set_folding`；SourceSurface 不读取折叠后的 display map，视觉上未生效。
 - 输入坐标验证停在 `EditorState` 适配器与 headless composition；真实 fcitx5 未执行。
-- hover 与 code action 的宿主只在 headless 测试中验证状态与绘制；真实语言服务器的往返、浮层候选位置与原生输入未在本轮场景触发（属 editor-09）。
+- hover、code action 与 definition 的宿主只在 headless 测试中验证状态、绘制与跳转；真实语言服务器的往返、浮层候选位置与原生输入未在本轮场景触发（属 editor-09）。
 - 长 RTL/双向文本的窗口化命中只做字素/整形上下文保护，未做原生 bidi 视觉滚动验收。
 - 亮度/主题仅改色的失效路径依赖每帧样式比较；未用计数器单独统计。
