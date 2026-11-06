@@ -1,0 +1,1 @@
+/home/maredevi/Projects/Astrolith/target/editor-perf/pre/debug/astrolith-desktop /tmp/astrolith-editor-perf-ZOWqyV/project/src/content/fixture.md

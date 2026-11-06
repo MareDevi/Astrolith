@@ -1,0 +1,151 @@
+{
+  "schema": "astrolith.editor-perf.metrics/1",
+  "test_id": "editor-m7-close-complex-markdown",
+  "backend": "pre",
+  "fixture": "complex-markdown",
+  "metrics": {
+    "build_ms": 287,
+    "writer_repaints": {
+      "samples": 0,
+      "paint_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "caret_blinks_max": 0
+    },
+    "writer_frames": {
+      "samples": 26,
+      "total_ms": {
+        "p50": 0.565441,
+        "p95": 7.78843,
+        "p99": 8.460072,
+        "max": 8.460072
+      },
+      "render_ms": {
+        "p50": 0.265923,
+        "p95": 7.0631699999999995,
+        "max": 7.913873
+      },
+      "layout_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "prepaint_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "paint_ms": {
+        "p50": 0.29290700000000003,
+        "p95": 0.8351149999999999,
+        "max": 1.253817
+      },
+      "blocks_rendered_max": 35,
+      "blocks_total_max": 2956,
+      "nodes_built_total": 0,
+      "nodes_reused_total": 0,
+      "geometry_leaves_max": 0,
+      "shaping_bytes_max": 365,
+      "caret_blinks_max": 8
+    },
+    "build_frames": {
+      "samples": 5,
+      "total_ms": {
+        "p50": 2.686997,
+        "p95": 17.745927,
+        "p99": 17.745927,
+        "max": 17.745927
+      },
+      "prepare_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "layout_ms": {
+        "p50": 0.08242000000000001,
+        "p95": 10.01996,
+        "max": 10.01996
+      },
+      "prepaint_ms": {
+        "p50": 2.264738,
+        "p95": 6.816923,
+        "max": 6.816923
+      },
+      "paint_ms": {
+        "p50": 0.37607999999999997,
+        "p95": 1.707821,
+        "max": 1.707821
+      }
+    },
+    "driver_steps": {
+      "samples": 7,
+      "p50": 0.467428,
+      "p95": 1.046847,
+      "max": 1.046847
+    },
+    "mode_handlers": {
+      "samples": 3,
+      "p50": 0.231658,
+      "p95": 0.559393,
+      "max": 0.559393
+    },
+    "change_handlers": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "parse_queue_vs_install": {
+      "samples": 1,
+      "p50": 0.003128,
+      "p95": 0.003128,
+      "max": 0.003128
+    },
+    "parse_runs": {
+      "samples": 1,
+      "bytes": {
+        "p50": 98304,
+        "max": 98304
+      },
+      "reused_blocks": {
+        "p50": 0,
+        "max": 0
+      },
+      "incremental_samples": 0,
+      "ms": {
+        "p50": 13.929856,
+        "p95": 13.929856,
+        "max": 13.929856
+      }
+    },
+    "document_convergence": {
+      "initial_install_ms": {
+        "samples": 1,
+        "p50": 33.288028,
+        "p95": 33.288028,
+        "max": 33.288028
+      },
+      "edit_install_ms": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "layout_reconcile_ms": {
+        "p50": 11.086896000000001,
+        "p95": 11.086896000000001,
+        "max": 11.086896000000001
+      }
+    },
+    "document_close": {
+      "samples": 1,
+      "p50": 0.38459699999999997,
+      "p95": 0.38459699999999997,
+      "max": 0.38459699999999997
+    },
+    "cpu": null,
+    "fullscreen_pairs": 0
+  }
+}
