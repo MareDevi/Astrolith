@@ -1,0 +1,192 @@
+{
+  "schema": "astrolith.e2e.manifest/1",
+  "test_id": "editor-m6-surface-build-definition-host",
+  "title": "Native pre baseline: complex-markdown",
+  "purpose": "M0 baseline for the editor performance plan: repeatable fixture, isolated launch, counters and phase timings.",
+  "status": "passed",
+  "layer": "L2 real process",
+  "started_at": "2026-11-06T13:51:01.674Z",
+  "duration_s": 16.774,
+  "source": "2026-11-06T13:51:12.483637Z  INFO main astrolith_gpui::shell: crates/astrolith-gpui/src/shell.rs:108: GPUI backend selected for this build gpui_fast=false",
+  "environment": {
+    "os": "Linux 7.3.1-1-cachyos",
+    "arch": "x64",
+    "backend": "pre",
+    "features": [],
+    "source_surface": true,
+    "session": "wayland",
+    "wayland_display": "wayland-1",
+    "scale": null,
+    "profiled": false
+  },
+  "fixture": {
+    "id": "complex-markdown",
+    "bytes": 98304,
+    "sha256": "0670b9d7a5b04efe37d9a39e9bdbbbb4a50cfd14f234082aad17f1470003eb45",
+    "generated": "target/editor-perf/fixtures/complex-markdown.mdx",
+    "shape": "tables, footnotes, references, HTML/MDX, images, fences"
+  },
+  "command": "/home/maredevi/Projects/Astrolith/target/editor-perf/pre/debug/astrolith-desktop /tmp/astrolith-editor-perf-aascFD/project/src/content/fixture.mdx",
+  "repro": "node scripts/editor-perf.mjs run --fixture complex-markdown --backend pre --scenario build --source-surface",
+  "expected": "The document opens at a startup entry, the scripted steps complete, and numeric writer frames, mode, change and parse spans are recorded.",
+  "observed": "document opened through a startup entry; writer frames sampled: 52; source editor frames sampled: 88",
+  "evidence": {
+    "stdout": "artifacts/e2e/editor-m6-surface-build-definition-host/stdout.log",
+    "stderr": "artifacts/e2e/editor-m6-surface-build-definition-host/stderr.log",
+    "build_log": "artifacts/e2e/editor-m6-surface-build-definition-host/build.log",
+    "scenario": "artifacts/e2e/editor-m6-surface-build-definition-host/scenario.json",
+    "traces": "not captured in this run"
+  },
+  "metrics": {
+    "build_ms": 10780,
+    "writer_repaints": {
+      "samples": 0,
+      "paint_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "caret_blinks_max": 0
+    },
+    "writer_frames": {
+      "samples": 52,
+      "total_ms": {
+        "p50": 0.468842,
+        "p95": 8.263219,
+        "p99": 11.277462,
+        "max": 11.277462
+      },
+      "render_ms": {
+        "p50": 0.19270800000000002,
+        "p95": 7.121689,
+        "max": 10.403925
+      },
+      "layout_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "prepaint_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "paint_ms": {
+        "p50": 0.230324,
+        "p95": 0.722841,
+        "max": 1.14153
+      },
+      "blocks_rendered_max": 36,
+      "blocks_total_max": 2956,
+      "nodes_built_total": 0,
+      "nodes_reused_total": 0,
+      "geometry_leaves_max": 0,
+      "shaping_bytes_max": 580,
+      "caret_blinks_max": 1
+    },
+    "build_frames": {
+      "samples": 88,
+      "total_ms": {
+        "p50": 1.6682139999999999,
+        "p95": 2.469862,
+        "p99": 10.419851999999999,
+        "max": 10.419851999999999
+      },
+      "prepare_ms": {
+        "p50": 1.16145,
+        "p95": 1.5981809999999999,
+        "max": 5.693859
+      },
+      "layout_ms": {
+        "p50": 0.104865,
+        "p95": 0.14416299999999999,
+        "max": 6.90785
+      },
+      "prepaint_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "paint_ms": {
+        "p50": 0.44901,
+        "p95": 0.838704,
+        "max": 3.226231
+      }
+    },
+    "driver_steps": {
+      "samples": 16,
+      "p50": 0.024922,
+      "p95": 0.863328,
+      "max": 0.863328
+    },
+    "mode_handlers": {
+      "samples": 1,
+      "p50": 0.534966,
+      "p95": 0.534966,
+      "max": 0.534966
+    },
+    "change_handlers": {
+      "samples": 2,
+      "p50": 2.967111,
+      "p95": 3.736332,
+      "max": 3.736332
+    },
+    "parse_queue_vs_install": {
+      "samples": 12,
+      "p50": 0.001414,
+      "p95": 0.001763,
+      "max": 0.001763
+    },
+    "parse_runs": {
+      "samples": 12,
+      "bytes": {
+        "p50": 98307,
+        "max": 98312
+      },
+      "reused_blocks": {
+        "p50": 2954,
+        "max": 2955
+      },
+      "incremental_samples": 11,
+      "ms": {
+        "p50": 4.708483,
+        "p95": 12.611135,
+        "max": 12.611135
+      }
+    },
+    "document_convergence": {
+      "initial_install_ms": {
+        "samples": 1,
+        "p50": 27.992186,
+        "p95": 27.992186,
+        "max": 27.992186
+      },
+      "edit_install_ms": {
+        "samples": 11,
+        "p50": 10.956717,
+        "p95": 13.714651,
+        "max": 13.714651
+      },
+      "layout_reconcile_ms": {
+        "p50": 6.174184,
+        "p95": 10.680022000000001,
+        "max": 10.680022000000001
+      }
+    },
+    "document_close": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "cpu": null,
+    "fullscreen_pairs": 0
+  },
+  "limitations": [
+    "Scripted actions call the real writer input adapter; physical keyboard and IME candidate windows are not exercised.",
+    "Frame timings cover the writer request-layout through paint CPU phases; compositor presentation is excluded.",
+    "No Hyprland fullscreen/resize actions were requested for this run.",
+    "Preview uses Kit TextView internals and is measured externally; Build reports the Kit Editor element's own layout/prepaint/paint phases as build_frame events."
+  ],
+  "rerun_notes": "Run the same command with an isolated preferences directory; do not compare across different fixtures or fonts."
+}

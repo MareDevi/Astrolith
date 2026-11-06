@@ -1,0 +1,70 @@
+{
+  "settle_ms": 1500,
+  "wait_document_ms": 15000,
+  "steps": [
+    {
+      "mode": "build",
+      "wait_ms": 700
+    },
+    {
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": -2000,
+      "wait_ms": 700
+    },
+    {
+      "scroll_x": -600,
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": 0,
+      "scroll_x": 0,
+      "wait_ms": 350
+    },
+    {
+      "caret": "end",
+      "wait_ms": 700
+    },
+    {
+      "input": "中🦀",
+      "wait_ms": 700
+    },
+    {
+      "input": "\t",
+      "wait_ms": 700
+    },
+    {
+      "mono_font_size": 16,
+      "wait_ms": 700
+    },
+    {
+      "mono_font_family": "DejaVu Sans Mono",
+      "wait_ms": 700
+    },
+    {
+      "resize_width": 1000,
+      "resize_height": 640,
+      "wait_ms": 700
+    },
+    {
+      "resize_width": 1600,
+      "resize_height": 1000,
+      "wait_ms": 700
+    },
+    {
+      "set_folding": false,
+      "wait_ms": 700
+    },
+    {
+      "set_folding": true,
+      "wait_ms": 700
+    },
+    {
+      "wait_ms": 300
+    },
+    {
+      "quit": true
+    }
+  ]
+}
