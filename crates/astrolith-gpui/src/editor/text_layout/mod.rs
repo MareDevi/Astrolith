@@ -527,6 +527,10 @@ impl BlockLayout {
         let mono_all = matches!(self.kind, BlockKind::Code { .. });
         self.base = base_run(&self.kind, style);
         self.runs = resolve_runs(&self.text, &self.marks, style, mono_all, &self.base);
+        for row in &mut self.rows {
+            row.shaped = None;
+        }
+        self.marker_line = None;
         for cell in &mut self.cells {
             cell.update_style(style);
         }
@@ -1246,10 +1250,6 @@ impl TextLayout {
         self.style = style.clone();
         for block in &mut self.blocks {
             block.update_style(&style);
-            for row in &mut block.rows {
-                row.shaped = None;
-            }
-            block.marker_line = None;
         }
     }
 

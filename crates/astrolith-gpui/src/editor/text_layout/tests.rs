@@ -466,3 +466,31 @@ fn style_edits_invalidate_carried_rows(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui_kit::test]
+fn theme_changes_restyle_cached_table_cells(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        let text_system = WindowTextSystem::new(cx.text_system().clone());
+        let mut layout = TextLayout::new(
+            parse("| header |\n| --- |\n| body |\n"),
+            test_style(),
+            px(400.),
+            &ImageMetrics::default(),
+        );
+        prepare_all(&mut layout, &text_system, 800.);
+        let cell = &layout.blocks[0].cells[0];
+        assert!(cell.rows[0].shaped.is_some());
+        let old_rows = cell.rows.len();
+        let mut style = (*test_style()).clone();
+        style.foreground = gpui_kit::white();
+        layout.set_style(Arc::new(style));
+        let cell = &layout.blocks[0].cells[0];
+        assert_eq!(cell.rows.len(), old_rows, "colour changes retain wrapping");
+        assert!(
+            cell.rows[0].shaped.is_none(),
+            "old table glyph colours must be invalidated"
+        );
+        assert_eq!(cell.run_at(0).color, gpui_kit::white());
+    });
+}
