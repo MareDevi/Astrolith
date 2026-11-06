@@ -1,0 +1,144 @@
+{
+  "schema": "astrolith.e2e.manifest/1",
+  "test_id": "editor-m6-pre-build-history-single-paragraph-102420",
+  "title": "Native pre baseline: history-single-paragraph-102420",
+  "purpose": "M0 baseline for the editor performance plan: repeatable fixture, isolated launch, counters and phase timings.",
+  "status": "passed",
+  "layer": "L2 real process",
+  "started_at": "2026-11-06T09:03:57.019Z",
+  "duration_s": 19.377,
+  "source": "2026-11-06T09:03:57.361943Z  INFO main astrolith_gpui::shell: crates/astrolith-gpui/src/shell.rs:108: GPUI backend selected for this build gpui_fast=false",
+  "environment": {
+    "os": "Linux 7.3.1-1-cachyos",
+    "arch": "x64",
+    "backend": "pre",
+    "features": [],
+    "session": "wayland",
+    "wayland_display": "wayland-1",
+    "scale": null,
+    "profiled": false
+  },
+  "fixture": {
+    "id": "history-single-paragraph-102420",
+    "bytes": 102420,
+    "sha256": "34a6a328ba1699d8ed3f39235fd9914195409337b2a9d4d2c36e2210a936d28b",
+    "generated": "target/editor-perf/fixtures/history-single-paragraph-102420.md",
+    "shape": "one paragraph; CJK, emoji, emphasis and inline code"
+  },
+  "command": "/home/maredevi/Projects/Astrolith/target/editor-perf/pre/debug/astrolith-desktop /tmp/astrolith-editor-perf-iVfYhE/project/src/content/fixture.md",
+  "repro": "node scripts/editor-perf.mjs run --fixture history-single-paragraph-102420 --backend pre --scenario build",
+  "expected": "The document opens at a startup entry, the scripted steps complete, and numeric writer frames, mode, change and parse spans are recorded.",
+  "observed": "document opened through a startup entry; writer frames sampled: 17; source editor frames sampled: 149",
+  "evidence": {
+    "stdout": "artifacts/e2e/editor-m6-pre-build-history-single-paragraph-102420/stdout.log",
+    "stderr": "artifacts/e2e/editor-m6-pre-build-history-single-paragraph-102420/stderr.log",
+    "build_log": "artifacts/e2e/editor-m6-pre-build-history-single-paragraph-102420/build.log",
+    "scenario": "artifacts/e2e/editor-m6-pre-build-history-single-paragraph-102420/scenario.json",
+    "traces": "not captured in this run"
+  },
+  "metrics": {
+    "build_ms": 310,
+    "writer_repaints": {
+      "samples": 0,
+      "paint_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "caret_blinks_max": 0
+    },
+    "writer_frames": {
+      "samples": 17,
+      "total_ms": {
+        "p50": 1.011242,
+        "p95": 10.638523,
+        "p99": 10.638523,
+        "max": 10.638523
+      },
+      "render_ms": {
+        "p50": 0.134066,
+        "p95": 10.62229,
+        "max": 10.62229
+      },
+      "layout_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "prepaint_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "paint_ms": {
+        "p50": 0.716431,
+        "p95": 4.576821,
+        "max": 4.576821
+      },
+      "blocks_rendered_max": 1,
+      "blocks_total_max": 1,
+      "nodes_built_total": 0,
+      "nodes_reused_total": 0,
+      "geometry_leaves_max": 0,
+      "shaping_bytes_max": 7916,
+      "caret_blinks_max": 5
+    },
+    "build_frames": {
+      "samples": 149,
+      "total_ms": {
+        "p50": 1.4255339999999999,
+        "p95": 2.871511,
+        "p99": 116.199758,
+        "max": 123.471561
+      },
+      "layout_ms": {
+        "p50": 0.040913,
+        "p95": 0.09012200000000001,
+        "max": 7.414073
+      },
+      "prepaint_ms": {
+        "p50": 0.814646,
+        "p95": 1.7912080000000001,
+        "max": 115.488951
+      },
+      "paint_ms": {
+        "p50": 0.5894010000000001,
+        "p95": 0.970443,
+        "max": 1.758969
+      }
+    },
+    "driver_steps": {
+      "samples": 19,
+      "p50": 0.028509,
+      "p95": 12.325604,
+      "max": 12.325604
+    },
+    "mode_handlers": {
+      "samples": 1,
+      "p50": 0.8298650000000001,
+      "p95": 0.8298650000000001,
+      "max": 0.8298650000000001
+    },
+    "change_handlers": {
+      "samples": 2,
+      "p50": 2.85337,
+      "p95": 4.69927,
+      "max": 4.69927
+    },
+    "parse_queue_vs_install": {
+      "samples": 1,
+      "p50": 0.000685,
+      "p95": 0.000685,
+      "max": 0.000685
+    },
+    "cpu": null,
+    "fullscreen_pairs": 0
+  },
+  "limitations": [
+    "Scripted actions call the real writer input adapter; physical keyboard and IME candidate windows are not exercised.",
+    "Frame timings cover the writer request-layout through paint CPU phases; compositor presentation is excluded.",
+    "No Hyprland fullscreen/resize actions were requested for this run.",
+    "Preview uses Kit TextView internals and is measured externally; Build reports the Kit Editor element's own layout/prepaint/paint phases as build_frame events."
+  ],
+  "rerun_notes": "Run the same command with an isolated preferences directory; do not compare across different fixtures or fonts."
+}
