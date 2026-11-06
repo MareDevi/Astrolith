@@ -51,8 +51,8 @@
 
 SourceSurface 满足几何与性能门槛，但以下 Build 行为仍由 Kit `Input` 元素承担，当前 surface 尚未提供对应 UI/交互：
 
-- LSP completion、hover、code action、diagnostic popover 的浮层呈现；
-- diagnostics 下划线/overview ruler、折叠 gutter 与 folding 后的行映射；
+- LSP hover 与 code action 浮层的呈现；completion 与 diagnostic 浮层已由 SourceSurface 绘制（见 §3.2、§3.3）；
+- diagnostics overview ruler、折叠 gutter 与 folding 后的行映射；
 - 编辑器内搜索/替换、bracket matching、indent guides、auto-close/smart-indent 的可见反馈；
 - 真实 fcitx5 预编辑/候选窗口、物理键盘与剪贴板原生验收仍属 editor-04。
 
@@ -90,6 +90,17 @@ Kit 的浮层控件（`input/popovers/*`）是 `pub(crate)`，无法直接复用
 
 验证：`completion_menu_mirrors_the_retained_overlay`（headless）覆盖状态镜像、键盘移动与提交区间；原生 `editor-m6-surface-build-completion-host` 重跑 build 场景确认渲染路径未回归。
 
+### 3.3 已实施：diagnostics 下划线与 hover popover
+
+`SourceSurface` 现在把 `EditorState` 的公开诊断状态投影到自有布局：
+
+- 每个整形窗口从 `EditorState::diagnostics()` 读取与窗口相交的 `DiagnosticEntry`，与语法 run 用 `combine_highlights` 合并；诊断范围剪到整形窗口内，按严重度绘制波浪下划线（error/warning/info/hint 取 `highlight_theme.style.status` 的同名颜色）。
+- 指针移动（非拖选）时按自有命中几何取字节偏移，用 `DiagnosticSet::for_offset` 查条目；命中变化时调用 `present_diagnostic()`，离开下划线调用 `clear_diagnostic_popover()`。状态与内容只在 `EditorState` 保留一份，宿主不另存诊断副本。
+- 浮层从诊断起点或实际命中点的自有 caret 几何锚定，在视口内钳制，下方放不下时上移；显示消息与可选 code，边框/背景/前景取对应严重度的状态色。无已整形几何时不显示浮层，继续 fail-closed。
+
+验证：`diagnostic_runs_underline_exactly_the_reported_range`（headless）断言 run 只覆盖诊断范围且保留下划线 `wavy`；`diagnostic_hover_mirrors_and_clears_the_retained_popover`（headless）覆盖命中锚定、状态镜像、popover 渲染与移开清除。
+
+仍未接入：overview ruler 与 gutter 诊断标记；诊断未参与 M6 性能基线（`build` 场景未注入 LSP 诊断）。
 
 ## 4. 复现
 
