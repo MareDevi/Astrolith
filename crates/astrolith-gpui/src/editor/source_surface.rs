@@ -20,6 +20,7 @@ use gpui_kit::base::input::{DiagnosticColors, DiagnosticEntry, DiagnosticSet, Di
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::highlighter::{HighlightTheme, SyntaxHighlighter};
 use gpui_kit::component::input::{self, EditorState, InputEvent, Rope, RopeExt};
+use gpui_kit::component::text::TextView;
 use gpui_kit::{
     AnyElement, App, Bounds, ClipboardItem, Context, Div, Element, ElementId, Entity,
     EntityInputHandler, Focusable, GlobalElementId, HighlightStyle, IntoElement, LayoutId,
@@ -59,6 +60,10 @@ const COMPLETION_MIN_WIDTH: f32 = 160.;
 const POPUP_GAP: f32 = 4.;
 const DIAGNOSTIC_MAX_WIDTH: f32 = 420.;
 const DIAGNOSTIC_MIN_WIDTH: f32 = 180.;
+/// Debounce before a hover reaches the language server.
+const HOVER_DELAY: Duration = Duration::from_millis(150);
+const HOVER_MAX_WIDTH: f32 = 500.;
+const HOVER_MIN_WIDTH: f32 = 200.;
 
 #[derive(Clone, Copy, Default)]
 struct FrameGeometry {
@@ -127,6 +132,11 @@ pub(crate) struct SourceSurface {
     completion_selected: usize,
     /// Byte offset of the squiggle whose popover is shown.
     diagnostic_anchor: Option<usize>,
+    /// Pending debounced hover request; replaced on every pointer move.
+    hover_task: Option<gpui_kit::Task<anyhow::Result<()>>>,
+    /// Menu revision the selected code action row belongs to.
+    code_action_revision: u64,
+    code_action_selected: usize,
     _observe: gpui_kit::Subscription,
     _change: gpui_kit::Subscription,
 }
@@ -156,6 +166,9 @@ impl SourceSurface {
                 let text = this.editor.read(cx).text().clone();
                 this.sync_text(&text);
                 this.schedule_highlight(text, cx);
+                this.clear_hover(cx);
+                this.dismiss_code_actions(cx);
+                cx.notify();
             }
         });
         Self {
@@ -179,6 +192,9 @@ impl SourceSurface {
             completion_revision: 0,
             completion_selected: 0,
             diagnostic_anchor: None,
+            hover_task: None,
+            code_action_revision: 0,
+            code_action_selected: 0,
             _observe: observe,
             _change: change,
         }
@@ -613,7 +629,9 @@ impl SourceSurface {
                 $root.on_action(cx.listener(|this, _: &$action, window, cx| {
                     if !$extend
                         && !$paged
-                        && $menu.is_some_and(|delta| this.move_completion(delta, cx))
+                        && $menu.is_some_and(|delta| {
+                            this.move_completion(delta, cx) || this.move_code_action(delta, cx)
+                        })
                     {
                         return;
                     }
@@ -660,8 +678,13 @@ impl SourceSurface {
                 .update(cx, |editor, cx| editor.show_completions(window, cx));
             cx.notify();
         }))
+        .on_action(
+            cx.listener(|this, _: &input::ToggleCodeActions, window, cx| {
+                this.trigger_code_actions(window, cx);
+            }),
+        )
         .on_action(cx.listener(|this, _: &input::Enter, window, cx| {
-            if !this.accept_completion(window, cx) {
+            if !this.accept_completion(window, cx) && !this.accept_code_action(window, cx) {
                 this.insert("\n", window, cx);
             }
         }))
@@ -693,7 +716,7 @@ impl SourceSurface {
             }
         }))
         .on_action(cx.listener(|this, _: &input::Escape, window, cx| {
-            if this.dismiss_completion(cx) {
+            if this.dismiss_completion(cx) || this.dismiss_code_actions(cx) {
                 return;
             }
             this.editor
@@ -928,6 +951,278 @@ impl SourceSurface {
             .update(cx, |editor, cx| editor.clear_diagnostic_popover(cx));
     }
 
+    /// Ask the language server for the hover at the pointed offset.
+    ///
+    /// The Kit editor element owns this trigger internally, so the host
+    /// rebuilds the same sequence on its own geometry: capture the word range,
+    /// debounce until the pointer rests, then publish the result through the
+    /// retained editor's public hover state. Every pointer move replaces the
+    /// pending task, so positions the pointer passes over never reach the
+    /// server.
+    fn update_hover(
+        &mut self,
+        position: Point<Pixels>,
+        alt: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if alt {
+            self.clear_hover(cx);
+            return;
+        }
+        let Some(offset) = self.source_at(position) else {
+            self.clear_hover(cx);
+            return;
+        };
+        let Some(provider) = self.editor.read(cx).lsp().hover_provider.clone() else {
+            return;
+        };
+        if self
+            .editor
+            .read(cx)
+            .hover_popover()
+            .is_some_and(|popover| popover.symbol_range.contains(&offset))
+        {
+            return;
+        }
+        let text = self.editor.read(cx).text().clone();
+        let mut symbol_range = text.word_range(offset).unwrap_or(offset..offset);
+        let should_delay = self.editor.read(cx).hover_popover().is_none();
+        let editor = self.editor.clone();
+        self.hover_task = Some(cx.spawn_in(window, async move |_, cx| {
+            if should_delay {
+                cx.background_executor().timer(HOVER_DELAY).await;
+            }
+            let response = editor.update_in(cx, |editor, window, cx| {
+                provider.hover(editor.text(), offset, window, cx)
+            })?;
+            let result = response.await;
+            editor.update(cx, |editor, cx| match result {
+                Ok(Some(hover)) => {
+                    if let Some(range) = hover.range {
+                        let start = editor.text().position_to_offset(&range.start);
+                        let end = editor.text().position_to_offset(&range.end);
+                        symbol_range = start..end;
+                    }
+                    editor.present_hover(symbol_range, hover, cx);
+                }
+                _ => editor.clear_hover_state(cx),
+            });
+            Ok(())
+        }));
+    }
+
+    fn clear_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_task = None;
+        if self.editor.read(cx).hover_popover().is_some() {
+            self.editor
+                .update(cx, |editor, cx| editor.clear_hover_state(cx));
+        }
+    }
+
+    /// Paint the hover popover the retained editor is presenting.
+    fn hover_popup(
+        &self,
+        placement: PopupPlacement,
+        anchor: usize,
+        hover: &lsp_types::Hover,
+        cx: &App,
+    ) -> AnyElement {
+        let contents = hover_contents(hover);
+        let theme = cx.theme();
+        div()
+            .id("source-hover-popover")
+            .absolute()
+            .left(px(placement.left))
+            .top(px(placement.top))
+            .w(px(placement.width))
+            .px(px(8.))
+            .py(px(5.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .text_size(px(placement.font_size))
+            .child(TextView::markdown(("source-hover-text", anchor), contents).selectable(false))
+            .into_any_element()
+    }
+
+    /// Ask every code action provider for actions at the current selection.
+    fn trigger_code_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let providers = self.editor.read(cx).lsp().code_action_providers.clone();
+        if providers.is_empty() {
+            return;
+        }
+        let range = self.editor.read(cx).selected_range();
+        let state = self.editor.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let mut responses = Vec::with_capacity(providers.len());
+            cx.update(|window, cx| {
+                for provider in providers {
+                    let response = provider.code_actions(state.clone(), range.clone(), window, cx);
+                    responses.push((provider.id(), response));
+                }
+            })?;
+            let mut items = Vec::new();
+            for (provider_id, response) in responses {
+                if let Ok(actions) = response.await {
+                    items.extend(actions.into_iter().map(|action| input::CodeActionItem {
+                        provider_id: provider_id.clone(),
+                        action,
+                    }));
+                }
+            }
+            state.update(cx, |editor, cx| editor.present_code_actions(items, cx));
+            Ok::<(), anyhow::Error>(())
+        })
+        .detach();
+    }
+
+    /// Paint the code action menu the retained editor is presenting.
+    fn code_action_popup(
+        &mut self,
+        placement: PopupPlacement,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (open, revision, len) = {
+            let editor = self.editor.read(cx);
+            let menu = editor.code_action_menu_state();
+            (menu.open, menu.revision(), menu.items.len())
+        };
+        if !open || len == 0 {
+            self.code_action_selected = 0;
+            return None;
+        }
+        if revision != self.code_action_revision {
+            self.code_action_revision = revision;
+            self.code_action_selected = 0;
+        }
+        self.code_action_selected = self.code_action_selected.min(len - 1);
+        let selected = self.code_action_selected;
+        let start = (selected + 1).saturating_sub(COMPLETION_ROWS);
+        let end = (start + COMPLETION_ROWS).min(len);
+        let items = {
+            let editor = self.editor.read(cx);
+            editor.code_action_menu_state().items[start..end].to_vec()
+        };
+        let theme = cx.theme();
+        let (popover, foreground, active, border) = (
+            theme.popover,
+            theme.popover_foreground,
+            theme.list_active,
+            theme.border,
+        );
+        let mut rows = Vec::with_capacity(items.len());
+        for (offset, item) in items.iter().enumerate() {
+            let index = start + offset;
+            let row = div()
+                .id(("code-action-row", index as u64))
+                .h(px(placement.row_height))
+                .w_full()
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .when(index == selected, |row| row.bg(active))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(placement.font_size))
+                        .text_color(foreground)
+                        .child(SharedString::from(item.action.title.clone())),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        this.commit_code_action(index, window, cx);
+                        cx.stop_propagation();
+                    }),
+                );
+            rows.push(row.into_any_element());
+        }
+        Some(
+            div()
+                .id("source-code-action-menu")
+                .absolute()
+                .left(px(placement.left))
+                .top(px(placement.top))
+                .w(px(placement.width))
+                .py(px(COMPLETION_PADDING))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(border)
+                .bg(popover)
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    /// Move the menu selection; `false` leaves the action to the caret.
+    fn move_code_action(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let len = {
+            let editor = self.editor.read(cx);
+            let menu = editor.code_action_menu_state();
+            if !menu.open {
+                return false;
+            }
+            menu.items.len()
+        };
+        if len == 0 {
+            return false;
+        }
+        let next = (self.code_action_selected as isize + delta).clamp(0, len as isize - 1);
+        self.code_action_selected = next as usize;
+        cx.notify();
+        true
+    }
+
+    /// Apply the selected code action; `false` when the menu was closed.
+    fn accept_code_action(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let open = {
+            let editor = self.editor.read(cx);
+            let menu = editor.code_action_menu_state();
+            menu.open && !menu.items.is_empty()
+        };
+        if !open {
+            return false;
+        }
+        self.commit_code_action(self.code_action_selected, window, cx);
+        true
+    }
+
+    fn commit_code_action(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = ({
+            let editor = self.editor.read(cx);
+            editor.code_action_menu_state().items.get(index).cloned()
+        }) else {
+            return;
+        };
+        self.editor.update(cx, |editor, cx| {
+            editor.perform_code_action(&item, window, cx);
+            editor.dismiss_code_action_overlay(cx);
+        });
+        self.code_action_selected = 0;
+        cx.notify();
+    }
+
+    /// Close the code action menu; `false` when none was open.
+    fn dismiss_code_actions(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.editor.read(cx).code_action_menu_state().open;
+        if !open {
+            return false;
+        }
+        self.editor
+            .update(cx, |editor, cx| editor.dismiss_code_action_overlay(cx));
+        self.code_action_selected = 0;
+        true
+    }
+
     /// Paint the diagnostic popover the retained editor is presenting.
     fn diagnostic_popup(
         &self,
@@ -984,6 +1279,33 @@ impl SourceSurface {
             .child(body)
             .into_any_element()
     }
+}
+
+/// Flatten LSP hover contents into the Markdown the popover presents.
+fn hover_contents(hover: &lsp_types::Hover) -> SharedString {
+    let marked = |value: &lsp_types::MarkedString| match value {
+        lsp_types::MarkedString::String(text) => text.clone(),
+        lsp_types::MarkedString::LanguageString(code) => code.value.clone(),
+    };
+    let text = match &hover.contents {
+        lsp_types::HoverContents::Scalar(value) => marked(value),
+        lsp_types::HoverContents::Array(values) => {
+            values.iter().map(marked).collect::<Vec<_>>().join("\n\n")
+        }
+        lsp_types::HoverContents::Markup(markup) => markup.value.clone(),
+    };
+    SharedString::from(text)
+}
+
+/// Estimated hover height, used to choose the side of the symbol.
+fn hover_height(contents: &str, width: f32, font_size: f32) -> f32 {
+    let per_line = ((width - 16.) / (font_size * 0.6)).max(8.);
+    let lines = contents
+        .lines()
+        .map(|line| ((line.chars().count() as f32 / per_line).ceil() as usize).max(1))
+        .sum::<usize>()
+        .max(1);
+    lines as f32 * font_size * 1.4 + 10.
 }
 
 /// Estimated popover height, used to choose the side of the squiggle.
@@ -1357,6 +1679,77 @@ impl Render for SourceSurface {
                 cx,
             ))
         });
+        let hover = {
+            let hover = self
+                .editor
+                .read(cx)
+                .hover_popover()
+                .map(|popover| (popover.symbol_range.clone(), popover.hover.clone()));
+            hover.and_then(|(range, hover)| {
+                let (caret, _) = self.state.borrow().layout.as_ref()?.caret(range.start)?;
+                let popup_width = HOVER_MAX_WIDTH.min(width).max(HOVER_MIN_WIDTH.min(width));
+                let font_size = f32::from(style.font_size);
+                let contents = hover_contents(&hover);
+                let estimated = hover_height(&contents, popup_width, font_size);
+                let left = (gutter + f32::from(caret.x) - scroll_x)
+                    .clamp(0., (width - popup_width).max(0.));
+                let below = f32::from(caret.y) - scroll_y + row_height + POPUP_GAP;
+                let top = if below + estimated <= height {
+                    below
+                } else {
+                    (f32::from(caret.y) - scroll_y - estimated - POPUP_GAP).max(0.)
+                };
+                Some(self.hover_popup(
+                    PopupPlacement {
+                        left,
+                        top,
+                        width: popup_width,
+                        row_height,
+                        font_size,
+                    },
+                    range.start,
+                    &hover,
+                    cx,
+                ))
+            })
+        };
+        let code_actions = {
+            let editor = self.editor.read(cx);
+            let menu = editor.code_action_menu_state();
+            (focused && menu.open && !menu.items.is_empty()).then_some(menu.items.len())
+        }
+        .and_then(|len| {
+            let caret = self
+                .state
+                .borrow()
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.caret(cursor));
+            let (caret, caret_height) = caret?;
+            let rows = len.min(COMPLETION_ROWS);
+            let popup_width = COMPLETION_MAX_WIDTH
+                .min(width)
+                .max(COMPLETION_MIN_WIDTH.min(width));
+            let popup_height = rows as f32 * COMPLETION_ROW_HEIGHT + COMPLETION_PADDING * 2.;
+            let left =
+                (gutter + f32::from(caret.x) - scroll_x).clamp(0., (width - popup_width).max(0.));
+            let below = f32::from(caret.y) - scroll_y + f32::from(caret_height) + POPUP_GAP;
+            let top = if below + popup_height <= height {
+                below
+            } else {
+                (f32::from(caret.y) - scroll_y - popup_height - POPUP_GAP).max(0.)
+            };
+            self.code_action_popup(
+                PopupPlacement {
+                    left,
+                    top,
+                    width: popup_width,
+                    row_height: COMPLETION_ROW_HEIGHT,
+                    font_size: f32::from(style.font_size),
+                },
+                cx,
+            )
+        });
         let scroll_area = div()
             .id(("source-surface", self.editor.entity_id()))
             .size_full()
@@ -1375,6 +1768,7 @@ impl Render for SourceSurface {
                 if event.pressed_button == Some(MouseButton::Left) {
                     this.select(event.position, true, window, cx);
                 } else {
+                    this.update_hover(event.position, event.modifiers.alt, window, cx);
                     this.update_diagnostic_hover(event.position, cx);
                 }
             }))
@@ -1392,8 +1786,14 @@ impl Render for SourceSurface {
         if let Some(popup) = popup {
             root = root.child(popup);
         }
+        if let Some(hover) = hover {
+            root = root.child(hover);
+        }
         if let Some(diagnostic) = diagnostic {
             root = root.child(diagnostic);
+        }
+        if let Some(code_actions) = code_actions {
+            root = root.child(code_actions);
         }
         let focus = self.editor.read(cx).focus_handle(cx);
         self.bind_commands(root.track_focus(&focus), cx)
@@ -1906,6 +2306,120 @@ mod tests {
             });
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn hover_popover_mirrors_and_clears_the_retained_state(cx: &mut TestAppContext) {
+        let (handle, surface) = mount_source(cx, "alpha\nbeta\n");
+        surface.update(cx, |surface, cx| {
+            surface.editor.update(cx, |editor, cx| {
+                editor.present_hover(
+                    0..5,
+                    lsp_types::Hover {
+                        contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+                            kind: lsp_types::MarkupKind::Markdown,
+                            value: "**alpha**".into(),
+                        }),
+                        range: None,
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        surface.read_with(cx, |surface, cx| {
+            let popover = surface
+                .editor
+                .read(cx)
+                .hover_popover()
+                .expect("the retained editor keeps the hover state");
+            assert_eq!(popover.symbol_range, 0..5);
+            assert_eq!(hover_contents(&popover.hover).as_ref(), "**alpha**");
+            assert!(
+                surface
+                    .state
+                    .borrow()
+                    .layout
+                    .as_ref()
+                    .is_some_and(|layout| layout.caret(0).is_some()),
+                "the popover anchors on the shaped symbol"
+            );
+        });
+        surface.update(cx, |surface, cx| surface.clear_hover(cx));
+        surface.read_with(cx, |surface, cx| {
+            assert!(surface.editor.read(cx).hover_popover().is_none());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn hover_contents_joins_marked_strings(cx: &mut TestAppContext) {
+        cx.update(|_| {
+            let hover = lsp_types::Hover {
+                contents: lsp_types::HoverContents::Array(vec![
+                    lsp_types::MarkedString::String("first".into()),
+                    lsp_types::MarkedString::LanguageString(lsp_types::LanguageString {
+                        language: "ts".into(),
+                        value: "const a = 1;".into(),
+                    }),
+                ]),
+                range: None,
+            };
+            assert_eq!(hover_contents(&hover).as_ref(), "first\n\nconst a = 1;");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn code_action_menu_mirrors_the_retained_overlay(cx: &mut TestAppContext) {
+        let (handle, surface) = mount_source(cx, "alpha\n");
+        surface.update(cx, |surface, cx| {
+            let editor = surface.editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(0..5, cx);
+                editor.present_code_actions(
+                    vec![
+                        input::CodeActionItem {
+                            provider_id: "test".into(),
+                            action: lsp_types::CodeAction {
+                                title: "Extract symbol".into(),
+                                ..Default::default()
+                            },
+                        },
+                        input::CodeActionItem {
+                            provider_id: "test".into(),
+                            action: lsp_types::CodeAction {
+                                title: "Format document".into(),
+                                ..Default::default()
+                            },
+                        },
+                    ],
+                    cx,
+                );
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        surface.read_with(cx, |surface, _| assert_eq!(surface.code_action_selected, 0));
+        surface.update(cx, |surface, cx| {
+            assert!(
+                surface.move_code_action(1, cx),
+                "the open menu owns MoveDown"
+            );
+        });
+        surface.read_with(cx, |surface, _| assert_eq!(surface.code_action_selected, 1));
+        cx.update_window(handle.into(), |_, window, cx| {
+            surface.update(cx, |surface, cx| {
+                assert!(surface.accept_code_action(window, cx));
+            });
+        })
+        .unwrap();
+        surface.read_with(cx, |surface, cx| {
+            assert!(!surface.editor.read(cx).code_action_menu_state().open);
+        });
     }
 
     #[gpui_kit::test]
