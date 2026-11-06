@@ -6,6 +6,7 @@ pub(crate) mod formatting;
 pub(crate) mod header;
 pub(crate) mod image_preview;
 pub(crate) mod lsp;
+pub(crate) mod perf;
 pub(crate) mod rendered;
 pub(crate) mod save_coordinator;
 pub(crate) mod save_failure;

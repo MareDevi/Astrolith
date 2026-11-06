@@ -7,6 +7,9 @@ use std::{
     },
 };
 
+#[cfg(debug_assertions)]
+mod perf;
+
 use crate::{
     commands::{self, COMMANDS, CollectionItem, CommandAvailability, CommandId},
     drag_drop,
@@ -102,6 +105,10 @@ pub fn open(cx: &mut App) {
         // window exists it would leave this process waiting indefinitely.
         std::process::exit(0);
     }
+    tracing::info!(
+        gpui_fast = gpui_kit::GPUI_FAST,
+        "GPUI backend selected for this build"
+    );
     if let Err(error) = runtime::init(cx) {
         tracing::error!(%error, "could not start background services");
         eprintln!("Could not start background services: {error}");
@@ -883,6 +890,8 @@ impl Shell {
         })
         .detach();
         self.schedule_launch_update_check(window, cx);
+        #[cfg(debug_assertions)]
+        self.start_perf_driver(window, cx);
     }
 
     fn set_registry(&mut self, records: Vec<ProjectRecord>) {
@@ -2048,9 +2057,14 @@ impl Shell {
             self.rendered_sync_key = None;
         }
         self.sync_document_empty_copy(cx);
+        let mode_started = crate::editor::perf::start();
         self.project.update(cx, |project, cx| {
-            project.set_source_view(mode == WorkspaceMode::Build, window, cx)
+            project.set_source_view(mode == WorkspaceMode::Build, window, cx);
+            project.set_writer_visible(mode == WorkspaceMode::Writing, cx);
         });
+        if let Some(started) = mode_started {
+            crate::editor::perf::span("mode_handler", mode.label(), started.elapsed());
+        }
         let layout = self.active_layout(mode);
         self.apply_layout(layout, window, cx);
         if let Some(scope) = self.project_scope.as_mut()

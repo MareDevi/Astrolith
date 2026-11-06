@@ -309,27 +309,9 @@ impl WriterSurface {
         if self.caret_state.as_ref() == Some(&state) {
             return;
         }
-        self.caret_state = Some(state.clone());
-        self.caret_visible = true;
-        self.caret_task = None;
-        if state.0 && state.2.is_empty() {
-            self.caret_task = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(500))
-                        .await;
-                    if this
-                        .update(cx, |this, cx| {
-                            this.caret_visible = !this.caret_visible;
-                            cx.notify();
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }));
-        }
+        self.caret_state = Some(state);
+        // The blink timer belongs to the caret layer. This notification only
+        // rebuilds the text layer when focus or selection actually changed.
         cx.notify();
     }
 }

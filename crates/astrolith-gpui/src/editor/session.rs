@@ -500,6 +500,7 @@ impl DocumentSession {
         if !matches!(event, InputEvent::Change) {
             return;
         }
+        let started = crate::editor::perf::start();
         if self.origin {
             if !self.source_view {
                 self.absorbed_writer_text = self.editor.read(cx).text().clone();
@@ -535,6 +536,9 @@ impl DocumentSession {
         self.dirty = self.buffer.is_dirty();
         cx.emit(SessionChanged);
         cx.notify();
+        if let Some(started) = started {
+            crate::editor::perf::span("source_transaction", "change_handler", started.elapsed());
+        }
     }
 
     fn watch_source_editor(
@@ -1195,6 +1199,18 @@ impl DocumentSession {
     pub(crate) fn set_prose_style(&mut self, style: ProseStyle, cx: &mut Context<Self>) {
         self.writer
             .update(cx, |writer, cx| writer.set_style(style, cx));
+    }
+
+    /// Stop or resume the caret blink for this document's visible surface.
+    pub(crate) fn set_writer_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.writer
+            .update(cx, |writer, cx| writer.set_visible(visible, cx));
+    }
+
+    /// Scroll the visible writing surface, for the native perf driver.
+    pub(crate) fn perf_scroll(&mut self, y: f32, cx: &mut Context<Self>) {
+        self.writer
+            .update(cx, |writer, cx| writer.set_scroll_offset(y, cx));
     }
 
     /// Select the same visible range in the editor model from the rendered

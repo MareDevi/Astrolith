@@ -14,6 +14,7 @@
 mod commands;
 mod input;
 
+use super::perf;
 use super::text_change::TextChange;
 use gpui_kit::component::input::Rope;
 use std::cell::RefCell;
@@ -24,6 +25,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Instant;
 
 use astrolith_document::{BlockKind, WysiwygDocument, cursor_sentence};
 use gpui_kit::base::text::editor_host::{
@@ -51,9 +53,19 @@ struct FrameGeometry {
 /// The writing surface for one retained document session.
 pub(crate) struct WriterSurface {
     session: gpui_kit::WeakEntity<DocumentSession>,
-    caret_visible: bool,
-    caret_task: Option<gpui_kit::Task<()>>,
     caret_state: Option<(bool, usize, Range<usize>)>,
+    /// Caret painting and blinking live in this child entity, so a blink never
+    /// invalidates the text layout.
+    caret: gpui_kit::Entity<CaretOverlay>,
+    /// Prepared Kit nodes for the accepted document revision. Rebuilding them
+    /// every frame creates a fresh inline state per block, which also defeats
+    /// the upstream retained-layout table.
+    nodes: HashMap<usize, BlockNode>,
+    node_revision: Option<u64>,
+    /// Content width the measured heights belong to.
+    laid_out_width: Option<f32>,
+    /// Last frame's measured writer work, for the opt-in counters.
+    frame_stats: perf::Frame,
     document: Arc<WysiwygDocument>,
     source: Rope,
     parsed_source: Rope,
@@ -61,6 +73,8 @@ pub(crate) struct WriterSurface {
     requested_revision: Option<u64>,
     pending_edit: Option<TextChange>,
     pending_snapshot: Option<(u64, Rope)>,
+    /// When the latest snapshot was requested, to report queue wait.
+    parse_queued_at: Option<Instant>,
     parse_task: Option<gpui_kit::Task<()>>,
     parse_cancel: Arc<AtomicBool>,
     style: ProseStyle,
@@ -92,6 +106,9 @@ pub(crate) struct WriterSurface {
     first_rendered_range: Option<Range<usize>>,
     #[cfg(test)]
     dimmed_blocks: Vec<usize>,
+    /// Number of prepared nodes built since the last accepted revision.
+    #[cfg(test)]
+    prepared_builds: usize,
 }
 
 impl Drop for WriterSurface {
@@ -104,24 +121,30 @@ impl WriterSurface {
     pub(crate) fn new(
         session: gpui_kit::WeakEntity<DocumentSession>,
         style: ProseStyle,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let geometry = Rc::new(RefCell::new(FrameGeometry::default()));
+        let caret = cx.new(|cx| CaretOverlay::new(geometry.clone(), cx));
         Self {
             session,
-            caret_visible: true,
-            caret_task: None,
             caret_state: None,
+            caret,
+            nodes: HashMap::new(),
+            node_revision: None,
+            laid_out_width: None,
+            frame_stats: perf::Frame::default(),
             document: Arc::new(WysiwygDocument::default()),
+            geometry,
             source: Rope::new(),
             parsed_source: Rope::new(),
             parsed_text: String::new(),
             requested_revision: None,
             pending_edit: None,
             pending_snapshot: None,
+            parse_queued_at: None,
             parse_task: None,
             parse_cancel: Arc::new(AtomicBool::new(false)),
             style,
-            geometry: Rc::new(RefCell::new(FrameGeometry::default())),
             scroll: ScrollHandle::new(),
             drag_anchor: None,
             heights: Rc::new(RefCell::new(Vec::new())),
@@ -137,11 +160,32 @@ impl WriterSurface {
             first_rendered_range: None,
             #[cfg(test)]
             dimmed_blocks: Vec::new(),
+            #[cfg(test)]
+            prepared_builds: 0,
         }
     }
 
     pub(crate) fn request_caret_follow(&mut self) {
         self.last_cursor = None;
+    }
+
+    /// Stop the caret blink while the writing surface is not on screen.
+    pub(crate) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if !visible {
+            self.caret.update(cx, |caret, cx| caret.clear(cx));
+        }
+    }
+
+    /// Move the viewport to an absolute translation. The native harness uses
+    /// this instead of synthesising wheel input, which Wayland cannot inject.
+    pub(crate) fn set_scroll_offset(&mut self, y: f32, cx: &mut Context<Self>) {
+        let max = f32::from(self.scroll.max_offset().y);
+        let target = px(clamp_scroll_offset(y, max));
+        let offset = self.scroll.offset();
+        if target != offset.y {
+            self.scroll.set_offset(point(offset.x, target));
+        }
+        cx.notify();
     }
 
     /// Install the configured document typography.
@@ -150,8 +194,11 @@ impl WriterSurface {
             return;
         }
         self.style = style;
-        // Line metrics changed, so every measured height is stale.
+        // A font or line-metric change invalidates every measured height. The
+        // prepared nodes keep their text and marks; the render context carries
+        // the new style.
         self.heights.borrow_mut().fill(None);
+        self.laid_out_width = None;
         cx.notify();
     }
 
@@ -177,6 +224,7 @@ impl WriterSurface {
         self.pending_edit = TextChange::between(&self.parsed_source, &source);
         self.source = source.clone();
         self.pending_snapshot = Some((revision, source));
+        self.parse_queued_at = perf::start();
         self.start_parse(cx);
     }
 
@@ -187,6 +235,9 @@ impl WriterSurface {
         let Some((revision, source)) = self.pending_snapshot.take() else {
             return;
         };
+        if let Some(queued) = self.parse_queued_at.take() {
+            perf::span("parse_queue", "wait", queued.elapsed());
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         self.parse_cancel = cancel.clone();
         let work = cx.background_spawn(async move {
@@ -208,7 +259,7 @@ impl WriterSurface {
                 if this.requested_revision == Some(revision)
                     && let Some((source, text, document)) = result
                 {
-                    this.install_document(revision, source, text, document);
+                    this.install_document(revision, source, text, document, cx);
                     cx.notify();
                 }
                 this.start_parse(cx);
@@ -222,14 +273,20 @@ impl WriterSurface {
         source: Rope,
         text: String,
         document: WysiwygDocument,
+        cx: &mut Context<Self>,
     ) {
         self.document_revision = Some(revision);
         self.parsed_source = source;
         self.parsed_text = text;
         self.pending_edit = None;
         self.document = Arc::new(document);
+        // A new accepted revision invalidates prepared style runs. They are
+        // rebuilt lazily for the blocks the next frames actually render.
+        self.nodes.clear();
+        self.node_revision = Some(revision);
         self.geometry.borrow_mut().leaves.clear();
         self.last_cursor = None;
+        self.caret.update(cx, |caret, cx| caret.clear(cx));
         // Keep the measured heights across an edit: clearing them would make
         // the first frame after every keystroke render the whole document
         // again. The vector only grows or shrinks; blocks that moved keep an
@@ -765,6 +822,7 @@ fn distance(bounds: Bounds<Pixels>, position: Point<Pixels>) -> f32 {
 
 impl Render for WriterSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let render_started = Instant::now();
         let Some(session) = self.session.upgrade() else {
             return div().size_full().into_any_element();
         };
@@ -795,6 +853,19 @@ impl Render for WriterSurface {
         let viewport_height = self.effective_viewport_height(window);
         let content_width = f32::from(self.geometry.borrow().viewport.size.width);
         self.content_width = (content_width > 0.).then_some(content_width);
+        // A width change re-wraps every block. Measured heights belong to the
+        // previous width epoch, so keep them only until a new width is known.
+        if content_width > 0.
+            && self
+                .laid_out_width
+                .is_some_and(|previous| (previous - content_width).abs() > 0.5)
+        {
+            self.heights.borrow_mut().fill(None);
+            self.prefix.clear();
+        }
+        if content_width > 0. {
+            self.laid_out_width = Some(content_width);
+        }
         let follow_cursor = self.last_cursor != Some(cursor);
         self.last_cursor = Some(cursor);
         if follow_cursor {
@@ -828,29 +899,32 @@ impl Render for WriterSurface {
             None
         };
 
-        let mut nodes = Vec::with_capacity(rendered.len());
+        // Prepared nodes survive until the next accepted revision. Rebuilding
+        // them per frame also rebuilt each inline state, so the retained text
+        // layout table could never hit.
+        if self.node_revision != self.document_revision {
+            self.nodes.clear();
+            self.node_revision = self.document_revision;
+        }
+        let mut stats = perf::Frame {
+            blocks_total: document.blocks.len(),
+            blocks_rendered: rendered.len(),
+            ..perf::Frame::default()
+        };
         for index in rendered.clone() {
             let block = &document.blocks[index];
-            let key = block_key(index);
-            let paragraph = paragraph_for(block, key);
-            let node = match &block.kind {
-                BlockKind::Heading(level) => BlockNode::Heading {
-                    level: *level,
-                    children: paragraph,
-                    span: None,
-                },
-                BlockKind::Paragraph => BlockNode::Paragraph(paragraph),
-                BlockKind::ListItem { .. } => BlockNode::Paragraph(paragraph),
-                BlockKind::Quote => BlockNode::Paragraph(paragraph),
-                BlockKind::Code { language } => BlockNode::CodeBlock(CodeBlock::new(
-                    block.text.text.clone().into(),
-                    (!language.is_empty()).then(|| SharedString::from(language.clone())),
-                    None::<Span>,
-                )),
-                BlockKind::Rule => BlockNode::HorizontalRule { span: None },
-            };
-            nodes.push(node);
-
+            stats.shaping_bytes += block.text.text.len();
+            match self.nodes.entry(index) {
+                std::collections::hash_map::Entry::Occupied(_) => stats.nodes_reused += 1,
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(build_block_node(block, index));
+                    stats.nodes_built += 1;
+                    #[cfg(test)]
+                    {
+                        self.prepared_builds += 1;
+                    }
+                }
+            }
             if !selection.is_empty() {
                 add_source_decoration(
                     &mut decorations,
@@ -876,7 +950,8 @@ impl Render for WriterSurface {
             }
         }
 
-        let refs: Vec<&BlockNode> = nodes.iter().collect();
+        stats.decorations = decorations.values().map(Vec::len).sum();
+        let refs: Vec<&BlockNode> = rendered.clone().map(|index| &self.nodes[&index]).collect();
         let render_context = RenderContext::from_app(cx).with_body_font_size(px(style.font_size));
         let inherited_style = render_context.style().clone();
         let heading_color = crate::theme::prose_heading_color(cx);
@@ -901,7 +976,7 @@ impl Render for WriterSurface {
         self.dimmed_blocks.clear();
         for (local, index) in rendered.clone().enumerate() {
             let block = &document.blocks[index];
-            let element = nodes[local].render(
+            let element = refs[local].render(
                 local,
                 FlowPosition::at(&refs, local, local + 1 == refs.len()),
                 &render_context,
@@ -923,8 +998,24 @@ impl Render for WriterSurface {
             blocks.push(div().w_full().h(px(omitted.max(0.))).into_any_element());
         }
 
-        let caret = (focused && selection.is_empty() && self.caret_visible).then_some(cursor);
-        let caret_color = cx.theme().caret;
+        // The caret is a sibling entity: blinking only invalidates its own
+        // paint layer, never this text layout.
+        let caret_target = if focused && selection.is_empty() {
+            document
+                .caret_location(cursor)
+                .map(|(block, rendered)| CaretTarget {
+                    block,
+                    rendered,
+                    color: cx.theme().caret,
+                })
+        } else {
+            None
+        };
+        stats.caret_blinks = self.caret.read(cx).blinks;
+        self.caret
+            .update(cx, |caret, cx| caret.set_target(caret_target, cx));
+        self.frame_stats = stats;
+        let render_elapsed = render_started.elapsed();
         let flow = RichFlow {
             child: Some(
                 div()
@@ -938,10 +1029,11 @@ impl Render for WriterSurface {
             decorations,
             geometry: self.geometry.clone(),
             heights: self.heights.clone(),
-            document: document.clone(),
-            caret,
-            caret_color,
             input: cx.entity(),
+            stats,
+            render_elapsed,
+            layout_elapsed: std::time::Duration::ZERO,
+            repainted: false,
         };
         let content = div()
             .id("writer-wysiwyg-content")
@@ -978,10 +1070,32 @@ impl Render for WriterSurface {
         let root = div()
             .id(("input", editor.entity_id()))
             .size_full()
-            .child(content);
+            .child(content)
+            .child(self.caret.clone());
         self.bind_commands(root.track_focus(&editor.read(cx).focus_handle(cx)), cx)
             .test_support()
             .into_any_element()
+    }
+}
+
+fn build_block_node(block: &astrolith_document::RichBlock, index: usize) -> BlockNode {
+    let key = block_key(index);
+    let paragraph = paragraph_for(block, key);
+    match &block.kind {
+        BlockKind::Heading(level) => BlockNode::Heading {
+            level: *level,
+            children: paragraph,
+            span: None,
+        },
+        BlockKind::Paragraph | BlockKind::ListItem { .. } | BlockKind::Quote => {
+            BlockNode::Paragraph(paragraph)
+        }
+        BlockKind::Code { language } => BlockNode::CodeBlock(CodeBlock::new(
+            block.text.text.clone().into(),
+            (!language.is_empty()).then(|| SharedString::from(language.clone())),
+            None::<Span>,
+        )),
+        BlockKind::Rule => BlockNode::HorizontalRule { span: None },
     }
 }
 
@@ -1140,21 +1254,26 @@ fn add_source_decoration(
     }
 }
 
-/// Renders blocks, collects leaf geometry and paints the caret.
+/// Renders blocks, collects leaf geometry and reports frame work.
 struct RichFlow {
     child: Option<AnyElement>,
     decorations: HashMap<u64, Vec<(Range<usize>, Hsla)>>,
     geometry: Rc<RefCell<FrameGeometry>>,
     /// Per-block measured heights, owned by the surface across frames.
     heights: Rc<RefCell<Vec<Option<f32>>>>,
-    document: Arc<WysiwygDocument>,
-    caret: Option<usize>,
-    caret_color: Hsla,
     input: gpui_kit::Entity<WriterSurface>,
+    stats: perf::Frame,
+    render_elapsed: std::time::Duration,
+    layout_elapsed: std::time::Duration,
+    /// A frame where this element was painted from the previous render tree.
+    /// GPUI only re-renders views that were invalidated; a caret blink paints
+    /// the cached flow without repeating its render/layout/prepaint phases.
+    repainted: bool,
 }
 
 struct Prepaint {
     leaves: HashMap<u64, LeafGeometry>,
+    prepaint_elapsed: std::time::Duration,
 }
 
 impl IntoElement for RichFlow {
@@ -1184,8 +1303,10 @@ impl Element for RichFlow {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, AnyElement) {
+        let started = Instant::now();
         let mut child = self.child.take().expect("flow child is laid out once");
         let layout = child.request_layout(window, cx);
+        self.layout_elapsed = started.elapsed();
         (layout, child)
     }
 
@@ -1198,8 +1319,10 @@ impl Element for RichFlow {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepaint {
+        let started = Instant::now();
         let decorations = std::mem::take(&mut self.decorations);
         let (_, leaves) = collect_leaf_geometry(decorations, || child.prepaint(window, cx));
+        let prepaint_elapsed = started.elapsed();
         // Leaf height is independent of the scroll position, so a frame that
         // laid a block out is enough to measure it for later windows.
         {
@@ -1214,7 +1337,10 @@ impl Element for RichFlow {
             leaves: leaves.clone(),
             viewport: bounds.intersect(&window.content_mask().bounds),
         };
-        Prepaint { leaves }
+        Prepaint {
+            leaves,
+            prepaint_elapsed,
+        }
     }
 
     fn paint(
@@ -1227,23 +1353,185 @@ impl Element for RichFlow {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let started = Instant::now();
         let input = self.input.clone();
         input.update(cx, |input, cx| {
             input.register_input(input.geometry.borrow().viewport, window, cx)
         });
         child.paint(window, cx);
-        let Some(source) = self.caret else {
+        let mut stats = self.stats;
+        stats.geometry_leaves = prepaint.leaves.len();
+        // Only the first paint of a render tree reports render/layout/prepaint.
+        // A repaint from the same tree must not repeat stale phase durations.
+        if std::mem::replace(&mut self.repainted, true) {
+            perf::frame_repaint(stats, started.elapsed());
+        } else {
+            perf::frame(
+                stats,
+                self.render_elapsed,
+                self.layout_elapsed,
+                prepaint.prepaint_elapsed,
+                started.elapsed(),
+            );
+        }
+    }
+}
+
+/// Where the caret is drawn for the current layout epoch.
+#[derive(Clone, Copy, PartialEq)]
+struct CaretTarget {
+    block: usize,
+    rendered: usize,
+    color: Hsla,
+}
+
+/// Caret paint layer.
+///
+/// Blinking toggles `visible` and invalidates this entity only. The text
+/// layout, parsed document and prepared nodes are not touched.
+struct CaretOverlay {
+    geometry: Rc<RefCell<FrameGeometry>>,
+    target: Option<CaretTarget>,
+    visible: bool,
+    blinks: u64,
+    task: Option<gpui_kit::Task<()>>,
+}
+
+impl CaretOverlay {
+    fn new(geometry: Rc<RefCell<FrameGeometry>>, _cx: &mut Context<Self>) -> Self {
+        Self {
+            geometry,
+            target: None,
+            visible: true,
+            blinks: 0,
+            task: None,
+        }
+    }
+
+    fn clear(&mut self, cx: &mut Context<Self>) {
+        if self.target.take().is_some() {
+            self.task = None;
+            cx.notify();
+        }
+    }
+
+    /// Install the caret target. An unchanged target keeps the running blink
+    /// phase; a new target restarts it visible.
+    fn set_target(&mut self, target: Option<CaretTarget>, cx: &mut Context<Self>) {
+        if self.target == target {
+            return;
+        }
+        self.target = target;
+        self.visible = true;
+        self.task = None;
+        if target.is_some() {
+            self.task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(500))
+                        .await;
+                    if this
+                        .update(cx, |this, cx| {
+                            this.visible = !this.visible;
+                            this.blinks += 1;
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
+        cx.notify();
+    }
+}
+
+impl Render for CaretOverlay {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        CaretLayer {
+            geometry: self.geometry.clone(),
+            target: if self.visible { self.target } else { None },
+        }
+        .into_any_element()
+    }
+}
+
+struct CaretLayer {
+    geometry: Rc<RefCell<FrameGeometry>>,
+    target: Option<CaretTarget>,
+}
+
+impl IntoElement for CaretLayer {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for CaretLayer {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui_kit::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let style = gpui_kit::Style {
+            position: gpui_kit::Position::Absolute,
+            ..Default::default()
+        };
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui_kit::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut Window,
+        _: &mut App,
+    ) {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui_kit::InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        _: &mut App,
+    ) {
+        let Some(target) = self.target else {
             return;
         };
-        let Some((block, rendered)) = self.document.caret_location(source) else {
+        let geometry = self.geometry.borrow();
+        let Some(leaf) = geometry.leaves.get(&block_key(target.block)) else {
             return;
         };
-        let Some(leaf) = prepaint.leaves.get(&block_key(block)) else {
-            return;
-        };
-        let origin = leaf.position_for_index(rendered);
+        let origin = leaf.position_for_index(target.rendered);
         let bounds = Bounds::new(origin, size(px(1.5), leaf.caret_height().max(px(2.))));
-        window.paint_quad(fill(bounds, self.caret_color));
+        // Clipped by the flow's own viewport instead of painting over the
+        // chrome when the caret has scrolled away.
+        if !geometry.viewport.intersects(&bounds) {
+            return;
+        }
+        window.paint_quad(fill(bounds, target.color));
     }
 }
 
@@ -1762,6 +2050,39 @@ Second sentence.
         assert_eq!(clamp_scroll_offset(-500., 3219.), -500.);
         assert_eq!(clamp_scroll_offset(-9000., 3219.), -3219.);
         assert_eq!(clamp_scroll_offset(12., 0.), 0.);
+    }
+
+    #[gpui_kit::test]
+    fn caret_blink_only_repaints_the_overlay_after_the_first_layout(cx: &mut TestAppContext) {
+        let source = "A **bold** and `code` paragraph with a link.\n\n".repeat(40);
+        let (handle, session) = mount_writer(cx, &source);
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("writer-wysiwyg-content", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let (builds, cached) = writer.read_with(cx, |writer, cx| {
+            assert!(writer.caret.read(cx).blinks == 0);
+            (writer.prepared_builds, writer.nodes.len())
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(1_100));
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        writer.read_with(cx, |writer, cx| {
+            assert!(
+                writer.caret.read(cx).blinks >= 2,
+                "the caret timer toggled the overlay"
+            );
+            assert_eq!(
+                (writer.prepared_builds, writer.nodes.len()),
+                (builds, cached),
+                "blinking must not rebuild prepared style runs"
+            );
+        });
     }
 
     #[test]

@@ -3377,6 +3377,15 @@ impl ProjectWorkspace {
         self.sync_lsp(cx);
     }
 
+    /// Stop caret animation in every retained session while another mode is
+    /// shown. Sessions are kept for history and selection, not for rendering.
+    pub(crate) fn set_writer_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        let sessions: Vec<Entity<DocumentSession>> = self.sessions.values().cloned().collect();
+        for session in sessions {
+            session.update(cx, |session, cx| session.set_writer_visible(visible, cx));
+        }
+    }
+
     /// Apply the persisted writing modes after the shell replaces preferences.
     pub(crate) fn apply_writing_preferences(
         &mut self,
