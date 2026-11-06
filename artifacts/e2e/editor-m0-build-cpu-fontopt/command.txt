@@ -1,0 +1,1 @@
+/usr/bin/time -f user_s=%U sys_s=%S elapsed_s=%e max_rss_kb=%M -o /home/maredevi/Projects/Astrolith/artifacts/e2e/editor-m0-pre-history-single-paragraph-102420-2026-11-06T05-47-12-792Z/cpu.txt /home/maredevi/Projects/Astrolith/target/editor-perf/fontopt/debug/astrolith-desktop /tmp/astrolith-editor-perf-eSEkcL/project/src/content/fixture.md

@@ -301,6 +301,9 @@ function scenarioFor(options) {
         pushMode(to);
       }
     }
+  } else if (name === 'build-idle') {
+    pushMode('build');
+    steps.push({ wait_ms: Number(options.duration ?? 8000) });
   } else if (name === 'scroll-input') {
     pushMode('writing');
     for (let step = 0; step < Number(options.cycles ?? 4); step += 1) {
@@ -316,17 +319,19 @@ function scenarioFor(options) {
   return { settle_ms: settle, wait_document_ms: waitDocument, steps };
 }
 
-function targetDir(backend) {
+function targetDir(backend, override) {
+  if (override) return path.resolve(override);
   return path.join(ROOT, 'target/editor-perf', backend === 'fast' ? 'fast' : 'pre');
 }
 
-function buildBinary(backend, log) {
+function buildBinary(backend, log, targetOverride) {
   const args = ['build', '-p', 'astrolith-desktop', '--locked'];
   if (backend === 'fast') args.push('--features', 'gpui-fast');
+  const directory = targetDir(backend, targetOverride);
   const started = Date.now();
   const result = spawnSync('cargo', args, {
     cwd: ROOT,
-    env: { ...process.env, CARGO_TARGET_DIR: targetDir(backend) },
+    env: { ...process.env, CARGO_TARGET_DIR: directory },
     encoding: 'utf8',
   });
   const elapsed = (Date.now() - started) / 1000;
@@ -335,7 +340,7 @@ function buildBinary(backend, log) {
     throw new Error(`cargo build failed for ${backend}; see ${log}`);
   }
   return {
-    binary: path.join(targetDir(backend), 'debug', 'astrolith-desktop'),
+    binary: path.join(directory, 'debug', 'astrolith-desktop'),
     build_ms: elapsed * 1000,
   };
 }
@@ -494,7 +499,7 @@ async function runOnce(options) {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'astrolith-editor-perf-'));
   const logFile = path.join(caseDir, 'build.log');
   fs.writeFileSync(logFile, '');
-  const build = buildBinary(backend, logFile);
+  const build = buildBinary(backend, logFile, options['target-dir']);
 
   const project = mkdirp(runDir, 'project');
   projectStub(project);
@@ -528,10 +533,19 @@ async function runOnce(options) {
     ASTROLITH_LOG_FILE: 'off',
     ASTROLITH_LOG_FORMAT: 'text',
   };
-  const command = [
-    build.binary,
-    entry,
-  ];
+  const cpuFile = path.join(caseDir, 'cpu.txt');
+  const useCpuTime = Boolean(options['cpu-time']);
+  const command = useCpuTime
+    ? [
+        '/usr/bin/time',
+        '-f',
+        'user_s=%U sys_s=%S elapsed_s=%e max_rss_kb=%M',
+        '-o',
+        cpuFile,
+        build.binary,
+        entry,
+      ]
+    : [build.binary, entry];
   fs.writeFileSync(path.join(caseDir, 'command.txt'), `${command.join(' ')}\n`);
   fs.writeFileSync(
     path.join(caseDir, 'scenario.json'),
@@ -567,15 +581,23 @@ async function runOnce(options) {
   }
 
   const timeout = Number(options.timeout ?? 180) * 1000;
-  const timedOut = await Promise.race([
-    new Promise((resolve) => child.on('exit', () => resolve(false))),
-    sleep(timeout).then(() => true),
-  ]);
-  if (timedOut) child.kill('SIGTERM');
-  await Promise.race([
-    new Promise((resolve) => child.on('exit', resolve)),
-    sleep(5000),
-  ]);
+  const timedOut = await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      resolve(true);
+    }, timeout);
+    child.on('exit', () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, 5000);
+    child.on('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
   await new Promise((resolve) => stdout.end(resolve));
   await new Promise((resolve) => stderr.end(resolve));
   const duration = (Date.now() - started) / 1000;
@@ -588,6 +610,16 @@ async function runOnce(options) {
   const backendLine = stderrText
     .split('\n')
     .find((line) => line.includes('GPUI backend selected'));
+  let cpu = null;
+  if (useCpuTime && fs.existsSync(cpuFile)) {
+    const fields = {};
+    for (const match of fs
+      .readFileSync(cpuFile, 'utf8')
+      .matchAll(/([a-z_]+)=([0-9.]+)/g)) {
+      fields[match[1]] = Number(match[2]);
+    }
+    cpu = fields;
+  }
   const status = timedOut || !documentReady ? 'failed' : 'passed';
   const observed = [
     timedOut ? 'driver timed out' : null,
@@ -641,6 +673,7 @@ async function runOnce(options) {
     metrics: {
       build_ms: build.build_ms,
       ...metrics,
+      cpu,
       fullscreen_pairs: fullscreenPairs,
     },
     limitations: [

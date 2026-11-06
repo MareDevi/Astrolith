@@ -1,0 +1,3 @@
+$ cargo build -p astrolith-desktop --locked
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.59s
+

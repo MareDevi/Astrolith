@@ -46,18 +46,28 @@ fixture `history-multiblock-1112000`（1,112,000 B 多块文章），相同动�
 - 单段落 `writer_frame` p95 52 ms，已显著低于历史诊断中 610 ms 的布局样本，但两者 fixture 生成、采样方式与进程状态不同，不能当作受控前后对比。
 - caret blink、隐藏模式（Build/Preview）与失焦都会停止 overlay 定时器；恢复 Writing 后由下一次渲染重建可见 caret。
 
-## 4. 决策门
+## 4. 字体栈 dev opt-level 3 A/B
+
+在 Build 模式打开 `history-single-paragraph-102420`，停留 6 s，`/usr/bin/time` 记录整个进程的总 CPU；同一 target、fixture、字体、窗口与动作，n=3：
+
+| profile | user CPU | sys CPU | elapsed | max RSS |
+| --- | ---: | ---: | ---: | ---: |
+| 当前 dev profile | 3.03–3.08 s | 0.53–0.58 s | 10.5–10.6 s | 424–432 MB |
+| 字体栈 `opt-level = 3` | 1.96–2.02 s | 0.55–0.83 s | 10.5–11.4 s | 426–430 MB |
+
+字体栈优化把 Build 长单行的进程用户态 CPU 降低约 35%，系统态、墙钟等待与内存基本不变。收益成立，因此采用 `font-types`、`fontdb`、`harfrust`、`read-fonts`、`skrifa`、`swash`、`ttf-parser` 的 dev opt-level 3；该组只影响开发构建，release 不变。此测量不是帧时间，也不代表冷启动首屏延迟已达标。
+
+## 5. 决策门
 
 单段落 p95 52 ms、p99 62.8 ms，未达到 16.7 / 33 ms 目标；多块文档 p95 20.1 ms 也未达标。Fast + M1 不足以关闭性能任务，按方案进入 M2（自有文本布局可行性）——本阶段未执行。
 
-## 5. 未执行项
+## 6. 未执行项
 
-- 字体栈 dev opt-level 3 的受控 A/B（方案要求收益成立才提交 profile）。
-- Preview/Build 的应用内分阶段计时；本次只对 Writing 计数，Preview/Build 需要 CPU 采样或自有布局接入。
+- Preview/Build 的应用内分阶段计时；本次只对 Writing 计数，Build 使用进程 CPU 对照，Preview 仅有外部观察。
 - 释放板、冷进程首屏、8 MiB 边界、真实 fcitx5 候选窗口与物理键盘。
 - 所有原生场景（editor-01..09）中的 IME、选择、剪贴板、跨平台项均保持 `not_run`。
 
-## 6. 复现
+## 7. 复现
 
 ```sh
 node scripts/editor-perf.mjs fixtures

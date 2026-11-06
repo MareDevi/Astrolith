@@ -289,7 +289,7 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 
 | 阶段 | 状态 | 依据 |
 | --- | --- | --- |
-| M0 基线、fixture、隔离驱动、后端 A/B | 已完成；字体栈 profile A/B 未执行 | [M0/M1 结果](editor-performance-m0-m1-results.md)、`artifacts/e2e/editor-m0-*` |
+| M0 基线、fixture、隔离驱动、后端 A/B、字体栈 profile A/B | 已完成；字体栈优化已采用 | [M0/M1 结果](editor-performance-m0-m1-results.md)、`artifacts/e2e/editor-m0-*` |
 | M1 生命周期与刷新隔离 | 已完成 | 同上；准备节点复用、caret 独立层、宽度 epoch、隐藏停止 |
 | M2 自有文本布局可行性 | 未开始（决策门要求进入） | 单段落 p95 52 ms，未达 16.7 ms |
 | M3–M7 | 未开始 | — |
