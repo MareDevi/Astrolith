@@ -339,6 +339,18 @@ function scenarioFor(options) {
     steps.push({ scroll_y: 0, wait_ms: pause });
     steps.push({ caret: 'end', wait_ms: pause * 2 });
     steps.push({ input: '中🦀', wait_ms: pause * 2 });
+  } else if (name === 'm7-input') {
+    pushMode('writing');
+    steps.push({ caret: 'end', wait_ms: pause });
+    for (let step = 0; step < Number(options.cycles ?? 4); step += 1) {
+      steps.push({ input: '中🦀', wait_ms: pause * 2 });
+    }
+  } else if (name === 'm7-close') {
+    pushMode('writing');
+    pushMode('preview');
+    pushMode('build');
+    pushMode('writing');
+    steps.push({ close: true, wait_ms: pause * 2 });
   } else if (name === 'scroll-input') {
     pushMode('writing');
     for (let step = 0; step < Number(options.cycles ?? 4); step += 1) {
@@ -474,6 +486,21 @@ function summarize(events) {
     .filter((event) => event.event === 'parse_queue')
     .map((event) => Number(event.ms ?? 0))
     .sort((a, b) => a - b);
+  const parseRuns = events.filter((event) => event.event === 'parse_run');
+  const parseRunMs = parseRuns.map((event) => Number(event.ms ?? 0)).sort((a, b) => a - b);
+  const ready = events.filter((event) => event.event === 'document_ready');
+  const readyBy = (name) =>
+    ready
+      .filter((event) => event.name === name)
+      .map((event) => Number(event.ms ?? 0))
+      .sort((a, b) => a - b);
+  const requestToInstall = readyBy('initial_install');
+  const editToInstall = readyBy('edit_install');
+  const reconcile = readyBy('layout_reconcile');
+  const closes = events
+    .filter((event) => event.event === 'document_close')
+    .map((event) => Number(event.ms ?? 0))
+    .sort((a, b) => a - b);
   return {
     writer_repaints: {
       samples: repaints.length,
@@ -540,6 +567,48 @@ function summarize(events) {
       p50: percentile(parses, 0.5),
       p95: percentile(parses, 0.95),
       max: parses.at(-1) ?? null,
+    },
+    parse_runs: {
+      samples: parseRuns.length,
+      bytes: {
+        p50: percentile(parseRuns.map((event) => Number(event.bytes ?? 0)).sort((a, b) => a - b), 0.5),
+        max: Math.max(0, ...parseRuns.map((event) => Number(event.bytes ?? 0))),
+      },
+      reused_blocks: {
+        p50: percentile(parseRuns.map((event) => Number(event.reused_blocks ?? 0)).sort((a, b) => a - b), 0.5),
+        max: Math.max(0, ...parseRuns.map((event) => Number(event.reused_blocks ?? 0))),
+      },
+      incremental_samples: parseRuns.filter((event) => Number(event.reused_blocks ?? 0) > 0).length,
+      ms: {
+        p50: percentile(parseRunMs, 0.5),
+        p95: percentile(parseRunMs, 0.95),
+        max: parseRunMs.at(-1) ?? null,
+      },
+    },
+    document_convergence: {
+      initial_install_ms: {
+        samples: requestToInstall.length,
+        p50: percentile(requestToInstall, 0.5),
+        p95: percentile(requestToInstall, 0.95),
+        max: requestToInstall.at(-1) ?? null,
+      },
+      edit_install_ms: {
+        samples: editToInstall.length,
+        p50: percentile(editToInstall, 0.5),
+        p95: percentile(editToInstall, 0.95),
+        max: editToInstall.at(-1) ?? null,
+      },
+      layout_reconcile_ms: {
+        p50: percentile(reconcile, 0.5),
+        p95: percentile(reconcile, 0.95),
+        max: reconcile.at(-1) ?? null,
+      },
+    },
+    document_close: {
+      samples: closes.length,
+      p50: percentile(closes, 0.5),
+      p95: percentile(closes, 0.95),
+      max: closes.at(-1) ?? null,
     },
   };
 }

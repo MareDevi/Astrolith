@@ -3,7 +3,7 @@
 - 日期：2026-11-06。
 - 基线提交：`8c9d7f3`（依赖升级）、`c54783f`（新版本性能诊断）。
 - 依赖基线：GPUI Kit/base/component 0.9.0、gpui-pre 0.3.11，全部使用发布包。
-- 状态：M0–M4 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)、[M4 结果](editor-performance-m4-results.md)）；Writing 与 Preview 已切换到自有布局，Build 仍走现有实现。M5 已按触发条件评估并保留现有输入桥（见 [M5 决策](editor-performance-m5-decision.md)）。M6 已完成 stock Editor 评估并实现、验证 `SourceSurface` 的帧预算；因 LSP 浮层、折叠与搜索等能力仍未接入，Build 默认继续使用 stock Editor（见 [M6 决策](editor-performance-m6-decision.md)、[SourceSurface 结果](editor-performance-m6-source-surface-results.md)）；M7 未开始。
+- 状态：M0–M4 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)、[M4 结果](editor-performance-m4-results.md)）；Writing 与 Preview 已切换到自有布局，Build 仍走现有实现。M5 已按触发条件评估并保留现有输入桥（见 [M5 决策](editor-performance-m5-decision.md)）。M6 已完成 stock Editor 评估并实现、验证 `SourceSurface` 的帧预算；因 LSP 浮层、折叠与搜索等能力仍未接入，Build 默认继续使用 stock Editor（见 [M6 决策](editor-performance-m6-decision.md)、[SourceSurface 结果](editor-performance-m6-source-surface-results.md)）；M7 已完成解析增量化评估与收尾，多块本地编辑改用块级增量解析，单一巨大块保留整块重解析（见 [M7 结果](editor-performance-m7-results.md)）。
 - 目标环境：首先解决用户实际运行的 `mise run dev` 与 Hyprland/Wayland 场景；release 和其他平台单独验收。
 
 ## 1. 决策与范围
@@ -296,7 +296,7 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 | M4 Preview 接入共享阅读布局 | 已完成；Preview 产品路径已切换 | [M4 结果](editor-performance-m4-results.md)；`artifacts/e2e/editor-m4-pre-*` |
 | M5 Writing 输入内核迁移 | 已评估：保留现有输入桥，未触发迁移 | [M5 决策](editor-performance-m5-decision.md)；`artifacts/e2e/editor-m5-gate-*` |
 | M6 Build 长行决策与修复 | 评估完成；`SourceSurface` 已实现并达到帧预算，Build 产品路径仍保留 stock Editor（功能门槛未过） | [M6 决策](editor-performance-m6-decision.md)、[SourceSurface 结果](editor-performance-m6-source-surface-results.md)；`artifacts/e2e/editor-m6-pre-build-*`、`editor-m6-surface-build-*` |
-| M7 解析增量化与收尾 | 未开始 | — |
+| M7 解析增量化与收尾 | 本轮实施完成；已采用块级增量解析并删除 M2 对照原型。M6/Build 功能门槛、release 与原生 IME/平台矩阵仍未关闭 | [M7 结果](editor-performance-m7-results.md)；`artifacts/e2e/editor-m7-*` |
 | GPUI Fast 采用 | 不采用默认后端 | 长单段落 p95 277 ms，明显差于 gpui-pre 52 ms |
 
 ### M0：可重复基线与最小测量入口（必做）
@@ -415,6 +415,11 @@ LSP 浮层、折叠、搜索等仍由 Kit `Input` 元素承载，因此默认 Bu
 - 清理旧渲染器、过渡 flag、无用订阅、重复历史和被替代的测试辅助代码；更新能力文档与原生证据。
 
 **验收：** 全部性能/行为矩阵和缓存生命周期通过；没有常驻的双全文渲染、隐藏输入面或无法解释的后台扫描。
+
+**2026-11-06 结果：增量解析已采用，收尾清理完成。** 1.1 MB 多块文档的输入收敛由 126.53 ms 降到
+17.06 ms（p95），96 KB 复杂 Markdown 由 27.20 ms 降到 15.78 ms；单一巨大块保留整块重解析
+（1 MiB 单行仍为 88.38 ms p95）。引用定义被编辑时回退整文档解析；fence/表格/合并段按解析单元整体
+重算。M2 的 `--spike=text-layout` 原型已删除。证据、限制与复现见 [M7 结果](editor-performance-m7-results.md)。
 
 ## 9. 文件与模块改动地图
 
