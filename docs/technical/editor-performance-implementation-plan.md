@@ -3,7 +3,7 @@
 - 日期：2026-11-06。
 - 基线提交：`8c9d7f3`（依赖升级）、`c54783f`（新版本性能诊断）。
 - 依赖基线：GPUI Kit/base/component 0.9.0、gpui-pre 0.3.11，全部使用发布包。
-- 状态：M0–M4 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)、[M4 结果](editor-performance-m4-results.md)）；Writing 与 Preview 已切换到自有布局，Build 仍走现有实现。M5 已按触发条件评估并保留现有输入桥（见 [M5 决策](editor-performance-m5-decision.md)），M6 起未开始。
+- 状态：M0–M4 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)、[M4 结果](editor-performance-m4-results.md)）；Writing 与 Preview 已切换到自有布局，Build 仍走现有实现。M5 已按触发条件评估并保留现有输入桥（见 [M5 决策](editor-performance-m5-decision.md)）。M6 已完成 stock Editor 评估：长单行不达标，按方案进入 `SourceSurface` 接入，替换实施未完成（见 [M6 决策](editor-performance-m6-decision.md)）；M7 未开始。
 - 目标环境：首先解决用户实际运行的 `mise run dev` 与 Hyprland/Wayland 场景；release 和其他平台单独验收。
 
 ## 1. 决策与范围
@@ -295,7 +295,8 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 | M3 Writing 接入新布局 | 已完成；Writing 产品路径已切换 | [M3 结果](editor-performance-m3-results.md)；`artifacts/e2e/editor-m3-pre-*` |
 | M4 Preview 接入共享阅读布局 | 已完成；Preview 产品路径已切换 | [M4 结果](editor-performance-m4-results.md)；`artifacts/e2e/editor-m4-pre-*` |
 | M5 Writing 输入内核迁移 | 已评估：保留现有输入桥，未触发迁移 | [M5 决策](editor-performance-m5-decision.md)；`artifacts/e2e/editor-m5-gate-*` |
-| M6–M7 | 未开始 | — |
+| M6 Build 长行决策与修复 | 评估完成：stock Editor 不达标，`SourceSurface` 接入未完成 | [M6 决策](editor-performance-m6-decision.md)；`artifacts/e2e/editor-m6-pre-build-*`、`editor-m6-probe-build-wrap-*` |
+| M7 解析增量化与收尾 | 未开始 | — |
 | GPUI Fast 采用 | 不采用默认后端 | 长单段落 p95 277 ms，明显差于 gpui-pre 52 ms |
 
 ### M0：可重复基线与最小测量入口（必做）
@@ -383,6 +384,12 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 ### M6：Build 长行决策与修复（验收必做，替换有条件）
 
 先在 M0 的 profile A/B 基础上复测 stock Editor：冷长行、末尾输入、水平滚动、folding、缩窗、tab、多字体与缩放。
+
+**2026-11-06 评估结果：仍然不达标。** 多块文档满足帧预算（1.1 MB 多块 p95 2.78 ms、p99 17.14 ms；
+96 KB/2,956 块 p99 13.44 ms），但 1 MiB 单行 `prepaint` p95 2,744 ms，102 KB 单行在进入 Build、末尾输入与
+等宽字体变化时出现 110–123 ms 同步整形帧。公开 API 没有水平视口裁剪或行渲染器钩子；软换行对照仍产生
+2.64 s 首次整行测量。因此走“仍不达标”分支，接入 `SourceSurface`；证据、归因与实施边界见
+[M6 决策](editor-performance-m6-decision.md)，`SourceSurface` 实施尚未完成。
 
 - **达到指标：** 保留 stock Editor，记录依赖与性能边界；不进行无收益的源码编辑器重写。
 - **仍不达标：** 接入 `SourceSurface`，以源文本文字和高亮 run 使用共用布局核心；实现纵向可见行以及超长行内部的有界整形/水平命中。
