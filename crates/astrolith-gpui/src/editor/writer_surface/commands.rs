@@ -1,9 +1,9 @@
 //! Editing commands for the visible rich surface, using published input APIs.
 
 use super::WriterSurface;
-use gpui_kit::component::input::{self, Rope, RopeExt};
+use crate::editor::input_boundaries::{grapheme_boundary, word_boundary};
+use gpui_kit::component::input::{self, RopeExt};
 use gpui_kit::{ClipboardItem, Context, Div, EntityInputHandler, Stateful, Window, prelude::*};
-use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
 
 #[derive(Clone, Copy)]
 enum Boundary {
@@ -316,63 +316,10 @@ impl WriterSurface {
     }
 }
 
-fn word_boundary(text: &Rope, at: usize, backward: bool) -> usize {
-    let mut offset = at;
-    let mut in_word = false;
-    let characters: Box<dyn Iterator<Item = char> + '_> = if backward {
-        Box::new(text.chars_at(at).reversed())
-    } else {
-        Box::new(text.chars_at(at))
-    };
-    for character in characters {
-        let word = character.is_alphanumeric() || character == '_';
-        if in_word && !word {
-            break;
-        }
-        in_word |= word;
-        if backward {
-            offset -= character.len_utf8();
-        } else {
-            offset += character.len_utf8();
-        }
-    }
-    offset
-}
-
-fn grapheme_boundary(text: &Rope, at: usize, backward: bool) -> usize {
-    if (backward && at == 0) || (!backward && at == text.len()) {
-        return at;
-    }
-    let mut cursor = GraphemeCursor::new(at, text.len(), true);
-    let (mut chunk, mut start) = text.chunk(if backward { at - 1 } else { at });
-    loop {
-        let result = if backward {
-            cursor.prev_boundary(chunk, start)
-        } else {
-            cursor.next_boundary(chunk, start)
-        };
-        match result {
-            Ok(boundary) => return boundary.unwrap_or(at),
-            Err(GraphemeIncomplete::PreContext(end)) => {
-                let (context, context_start) = text.chunk(end - 1);
-                cursor.provide_context(&context[..end - context_start], context_start);
-            }
-            Err(GraphemeIncomplete::PrevChunk) => {
-                (chunk, start) = text.chunk(start - 1);
-            }
-            Err(GraphemeIncomplete::NextChunk) => {
-                (chunk, start) = text.chunk(start + chunk.len());
-            }
-            Err(GraphemeIncomplete::InvalidOffset) => {
-                unreachable!("cursor and chunks belong to the same rope")
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::component::input::Rope;
     use unicode_segmentation::UnicodeSegmentation;
 
     #[test]

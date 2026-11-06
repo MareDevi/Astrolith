@@ -36,6 +36,7 @@ use gpui_kit::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+pub(crate) mod source;
 #[cfg(debug_assertions)]
 pub(crate) mod spike;
 #[cfg(test)]

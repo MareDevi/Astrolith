@@ -447,7 +447,7 @@ function summarize(events) {
   const buildFrames = events.filter((event) => event.event === 'build_frame');
   const buildTotals = buildFrames
     .map((frame) =>
-      ['layout_ms', 'prepaint_ms', 'paint_ms']
+      ['prepare_ms', 'layout_ms', 'prepaint_ms', 'paint_ms']
         .map((key) => Number(frame[key] ?? 0))
         .reduce((sum, value) => sum + value, 0),
     )
@@ -512,6 +512,7 @@ function summarize(events) {
         p99: percentile(buildTotals, 0.99),
         max: buildTotals.at(-1) ?? null,
       },
+      prepare_ms: buildPhase('prepare_ms'),
       layout_ms: buildPhase('layout_ms'),
       prepaint_ms: buildPhase('prepaint_ms'),
       paint_ms: buildPhase('paint_ms'),
@@ -545,6 +546,7 @@ function summarize(events) {
 
 async function runOnce(options) {
   const backend = options.backend ?? 'pre';
+  const sourceSurface = Boolean(options['source-surface']);
   if (!['pre', 'fast'].includes(backend)) {
     throw new Error(`unknown backend ${backend}`);
   }
@@ -592,6 +594,7 @@ async function runOnce(options) {
     ASTROLITH_SAVE_FAILURE_DIR: path.join(runDir, 'save-failures'),
     ASTROLITH_EDITOR_PERF: '1',
     ASTROLITH_PERF_SCENARIO: JSON.stringify(scenario),
+    ...(sourceSurface ? { ASTROLITH_SOURCE_SURFACE: '1' } : {}),
     ASTROLITH_LOG: 'info',
     ASTROLITH_LOG_FILE: 'off',
     ASTROLITH_LOG_FORMAT: 'text',
@@ -710,6 +713,7 @@ async function runOnce(options) {
       arch: os.arch(),
       backend,
       features: backend === 'fast' ? ['gpui-fast'] : [],
+      source_surface: sourceSurface,
       session: process.env.XDG_SESSION_TYPE ?? null,
       wayland_display: process.env.WAYLAND_DISPLAY ?? null,
       scale: null,
@@ -723,7 +727,7 @@ async function runOnce(options) {
       shape: fixture.shape,
     },
     command: command.join(' '),
-    repro: `node scripts/editor-perf.mjs run --fixture ${fixture.id} --backend ${backend} --scenario ${options.scenario ?? 'cycle'}`,
+    repro: `node scripts/editor-perf.mjs run --fixture ${fixture.id} --backend ${backend} --scenario ${options.scenario ?? 'cycle'}${sourceSurface ? ' --source-surface' : ''}`,
     expected:
       'The document opens at a startup entry, the scripted steps complete, and numeric writer frames, mode, change and parse spans are recorded.',
     observed,

@@ -443,10 +443,21 @@ impl Render for WorkspacePanel {
                     .map(|session| session.read(cx).writer.clone());
                 let content = match writer {
                     Some(surface) => surface.into_any_element(),
-                    None if code => crate::editor::source_viewport(
-                        editor.clone(),
-                        crate::editor::perf::build_frame_element(element.into_any_element()),
-                    ),
+                    None if code => {
+                        let surface = wiring
+                            .as_ref()
+                            .and_then(|wiring| wiring.session.upgrade())
+                            .and_then(|session| session.read(cx).source_surface().cloned());
+                        match surface {
+                            Some(surface) => surface.into_any_element(),
+                            None => crate::editor::source_viewport(
+                                editor.clone(),
+                                crate::editor::perf::build_frame_element(
+                                    element.into_any_element(),
+                                ),
+                            ),
+                        }
+                    }
                     None => element.into_any_element(),
                 };
                 let mut body = if code {

@@ -290,3 +290,52 @@ pub(crate) fn text_layout_edit(outcome: crate::editor::text_layout::UpdateOutcom
         "application text layout edit"
     );
 }
+
+/// Emit one prepared complete-source viewport.
+pub(crate) fn source_layout(
+    stats: crate::editor::text_layout::source::SourceStats,
+    prepare: Duration,
+    total_width: f32,
+    total_height: f32,
+) {
+    if !enabled() {
+        return;
+    }
+    tracing::info!(
+        target: "astrolith::perf",
+        event = "source_layout_frame",
+        measured_chunks = stats.measured_chunks,
+        measured_bytes = stats.measured_bytes,
+        shaped_lines = stats.shaped_lines,
+        shaped_bytes = stats.shaped_bytes,
+        reused_lines = stats.reused_lines,
+        pending = stats.pending,
+        prepare_ms = millis(prepare),
+        total_width,
+        total_height,
+        "source viewport layout"
+    );
+}
+
+/// Emit one complete-source surface frame.
+///
+/// `total_ms` includes the render-time preparation, so the source surface can
+/// be compared with the stock editor's element phases without hiding shaping.
+pub(crate) fn source_frame(prepare: Duration, render: Duration, layout: Duration, paint: Duration) {
+    if !enabled() {
+        return;
+    }
+    let sequence = FRAME_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    tracing::info!(
+        target: "astrolith::perf",
+        event = "build_frame",
+        source = "surface",
+        sequence,
+        prepare_ms = millis(prepare),
+        layout_ms = millis(render + layout),
+        prepaint_ms = millis(layout),
+        paint_ms = millis(paint),
+        total_ms = millis(prepare + render + layout + paint),
+        "source surface frame"
+    );
+}

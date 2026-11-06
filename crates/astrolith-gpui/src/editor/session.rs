@@ -24,7 +24,10 @@ use super::text_change::TextChange;
 use crate::editor::copyedit::{CopyeditConfig, CopyeditPresentation, DEBOUNCE};
 use crate::editor::formatting::external_url;
 use crate::editor::writer_surface::WriterSurface;
-use crate::editor::writing_modes::{ProseStyle, WritingModes};
+use crate::editor::{
+    source_surface::SourceSurface,
+    writing_modes::{ProseStyle, WritingModes},
+};
 use crate::runtime;
 
 pub(crate) struct DocumentSession {
@@ -120,6 +123,8 @@ pub(crate) struct DocumentSession {
     /// Set when a failure was already reported, so the exit that follows a
     /// handshake error does not overwrite its cause.
     lsp_failure_seen: bool,
+    /// Visible complete-source surface, when the internal M6 switch selects it.
+    source_surface: Option<Entity<SourceSurface>>,
     _change: Subscription,
     _cursor: Subscription,
     _blur: Subscription,
@@ -444,6 +449,7 @@ impl DocumentSession {
         Self {
             writer_editor: editor.clone(),
             source_editor: None,
+            source_surface: None,
             writer_revision: revision,
             source_revision: None,
             source_subscriptions: Vec::new(),
@@ -577,6 +583,11 @@ impl DocumentSession {
     /// Whether the editor currently shows complete source rather than prose.
     pub(crate) fn is_source_view(&self) -> bool {
         self.source_view
+    }
+
+    /// The visible complete-source surface, when the internal switch is on.
+    pub(crate) fn source_surface(&self) -> Option<&Entity<SourceSurface>> {
+        self.source_surface.as_ref()
     }
 
     /// The source syntax this session was built for.
@@ -1212,6 +1223,12 @@ impl DocumentSession {
     /// scroll convention.
     pub(crate) fn perf_scroll(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
         if self.source_view {
+            if let Some(surface) = self.source_surface.clone() {
+                surface.update(cx, |surface, cx| {
+                    surface.set_scroll_offset(x, y, cx);
+                });
+                return;
+            }
             self.editor.update(cx, |editor, cx| {
                 editor.set_scroll_offset(point(px(-x), px(-y)), cx)
             });
@@ -1789,6 +1806,12 @@ impl DocumentSession {
         } else {
             self.writer_editor.clone()
         };
+        if source && SourceSurface::enabled() && self.source_surface.is_none() {
+            let editor = self.editor.clone();
+            let language = self.language.clone();
+            let weak = cx.weak_entity();
+            self.source_surface = Some(cx.new(|cx| SourceSurface::new(weak, editor, language, cx)));
+        }
         let stale = if source {
             self.source_revision != Some(revision)
         } else {
