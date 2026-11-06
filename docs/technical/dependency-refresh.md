@@ -38,3 +38,6 @@ application build or native Windows runtime test.
 
 Version inventory, Cargo resolution logs and check output are retained with the
 native profiling evidence produced after this upgrade.
+
+See [the post-upgrade native profile](editor-bottlenecks-0.9.md) for measured
+rendering hotspots and the Editor/EditorState/TextView ownership distinction.
