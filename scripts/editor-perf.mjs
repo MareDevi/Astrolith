@@ -339,6 +339,15 @@ function scenarioFor(options) {
     steps.push({ scroll_y: 0, wait_ms: pause });
     steps.push({ caret: 'end', wait_ms: pause * 2 });
     steps.push({ input: '中🦀', wait_ms: pause * 2 });
+  } else if (name === 'find') {
+    pushMode('build');
+    steps.push({ wait_ms: pause });
+    steps.push({ find_query: options.query ?? 'ordinary', wait_ms: pause });
+    for (let step = 0; step < Number(options.cycles ?? 4); step += 1) {
+      steps.push({ find_next: 1, wait_ms: pause });
+    }
+    steps.push({ find_replace_all: 'common', wait_ms: pause });
+    steps.push({ find_close: true, wait_ms: pause });
   } else if (name === 'm7-input') {
     pushMode('writing');
     steps.push({ caret: 'end', wait_ms: pause });

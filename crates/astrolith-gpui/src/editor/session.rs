@@ -1792,6 +1792,7 @@ impl DocumentSession {
                             .line_number(true)
                             .indent_guides(true)
                             .folding(true)
+                            .searchable(true)
                             .auto_close(true)
                             .smart_indent(true)
                             .soft_wrap(false)
@@ -1810,7 +1811,8 @@ impl DocumentSession {
             let editor = self.editor.clone();
             let language = self.language.clone();
             let weak = cx.weak_entity();
-            self.source_surface = Some(cx.new(|cx| SourceSurface::new(weak, editor, language, cx)));
+            self.source_surface =
+                Some(cx.new(|cx| SourceSurface::new(weak, editor, language, window, cx)));
         }
         let stale = if source {
             self.source_revision != Some(revision)

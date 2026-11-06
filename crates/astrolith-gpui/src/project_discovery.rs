@@ -3309,6 +3309,12 @@ impl ProjectWorkspace {
                 } else {
                     editor.previous_search_match(cx)
                 };
+                if found.is_some() {
+                    // The source surface owns both layout and scroll: the editor
+                    // itself has no mounted element to repaint, so publish the
+                    // step here for its observer.
+                    cx.notify();
+                }
                 found.is_some()
             })
         })

@@ -17,10 +17,11 @@ use super::perf;
 use super::session::DocumentSession;
 use super::text_layout::source::{SourceLayout, SourceRuns, SourceStyle, SourceViewport};
 use gpui_kit::base::input::{DiagnosticColors, DiagnosticEntry, DiagnosticSet, DiagnosticSeverity};
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::highlighter::{HighlightTheme, SyntaxHighlighter};
-use gpui_kit::component::input::{self, EditorState, InputEvent, Rope, RopeExt};
+use gpui_kit::component::input::{self, EditorState, Input, InputEvent, InputState, Rope, RopeExt};
 use gpui_kit::component::text::TextView;
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _};
 use gpui_kit::{
     AnyElement, App, Bounds, ClipboardItem, Context, Div, Element, ElementId, Entity,
     EntityInputHandler, Focusable, GlobalElementId, HighlightStyle, IntoElement, LayoutId,
@@ -146,8 +147,20 @@ pub(crate) struct SourceSurface {
     /// Menu revision the selected code action row belongs to.
     code_action_revision: u64,
     code_action_selected: usize,
+    /// Query and replacement fields of the search bar this view presents.
+    find_query: Entity<InputState>,
+    find_replace: Entity<InputState>,
+    /// Search activation revision the fields were last synchronized with.
+    find_activation: u64,
+    /// Whether the bar was open on the previous observation.
+    find_open: bool,
+    /// Match set and current index the view last revealed.
+    search_key: Option<(usize, usize, usize)>,
+    /// Match offset the view still has to scroll into sight.
+    search_reveal: Option<usize>,
     _observe: gpui_kit::Subscription,
     _change: gpui_kit::Subscription,
+    _find_query: gpui_kit::Subscription,
 }
 
 impl Drop for SourceSurface {
@@ -167,9 +180,13 @@ impl SourceSurface {
         session: WeakEntity<DocumentSession>,
         editor: Entity<EditorState>,
         language: SharedString,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let observe = cx.observe(&editor, |_, _, cx| cx.notify());
+        let observe = cx.observe_in(&editor, window, |this, _, window, cx| {
+            this.sync_find(window, cx);
+            cx.notify();
+        });
         let change = cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 let text = this.editor.read(cx).text().clone();
@@ -181,6 +198,30 @@ impl SourceSurface {
                 cx.notify();
             }
         });
+        let find_query = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+        let find_replace = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
+        let find_query_events = cx.subscribe(&find_query, |this, _, event: &InputEvent, cx| {
+            if !matches!(event, InputEvent::Change) {
+                return;
+            }
+            let query = this.find_query.read(cx).value().to_string();
+            let case_insensitive = this.editor.read(cx).search_session().case_insensitive;
+            this.editor.update(cx, |editor, cx| {
+                editor.set_search_query(query, case_insensitive, cx);
+            });
+        });
+        let (find_activation, find_open, open_query) = {
+            let editor = editor.read(cx);
+            let session = editor.search_session();
+            (
+                editor.search_activation_revision(),
+                session.open,
+                session.open.then(|| session.query.clone()),
+            )
+        };
+        if let Some(query) = open_query {
+            find_query.update(cx, |input, cx| input.set_value(query, window, cx));
+        }
         Self {
             session,
             editor,
@@ -207,9 +248,62 @@ impl SourceSurface {
             definition_task: None,
             code_action_revision: 0,
             code_action_selected: 0,
+            find_query,
+            find_replace,
+            find_activation,
+            find_open,
+            search_key: None,
+            search_reveal: None,
             _observe: observe,
             _change: change,
+            _find_query: find_query_events,
         }
+    }
+
+    /// Mirror a newly opened search session into the bar's query field.
+    ///
+    /// Re-invoking search advances the activation revision even when the
+    /// session is already open; that path re-selects the query instead of
+    /// overwriting its contents on every editor notification.
+    fn sync_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (activation, open, query, replace_mode) = {
+            let editor = self.editor.read(cx);
+            let session = editor.search_session();
+            (
+                editor.search_activation_revision(),
+                session.open,
+                session.query.clone(),
+                session.replace_mode,
+            )
+        };
+        if !open && self.find_open {
+            // A command or another action closed the session; the bar is gone,
+            // so the field must not keep the keyboard.
+            self.find_open = false;
+            self.search_key = None;
+            self.search_reveal = None;
+            let focus = self.editor.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+        }
+        self.find_open = open;
+        if activation == self.find_activation {
+            return;
+        }
+        self.find_activation = activation;
+        if !open {
+            return;
+        }
+        self.find_query.update(cx, |input, cx| {
+            input.set_value(query, window, cx);
+            input.select_all(window, cx);
+        });
+        let replaceable = self.editor.read(cx).is_replaceable();
+        let field = if replace_mode && replaceable {
+            &self.find_replace
+        } else {
+            &self.find_query
+        };
+        field.update(cx, |input, cx| input.focus_handle(cx).focus(window, cx));
     }
 
     fn sync_text(&mut self, text: &Rope) {
@@ -1341,6 +1435,167 @@ impl SourceSurface {
         cx.notify();
     }
 
+    /// Step the retained search session; the view reveals the match it lands on.
+    fn find_step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let moved = self.editor.update(cx, |editor, cx| {
+            let moved = if forward {
+                editor.next_search_match(cx)
+            } else {
+                editor.previous_search_match(cx)
+            };
+            if moved.is_some() {
+                // The Kit element would repaint off its own scroll handle; this
+                // view owns neither that layout nor its scroll, so notify here.
+                cx.notify();
+            }
+            moved.is_some()
+        });
+        if moved {
+            cx.notify();
+        }
+    }
+
+    /// Replace the current match, or every match, with the replacement field's
+    /// value.
+    fn replace_matches(&mut self, all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let replacement = self.find_replace.read(cx).value().to_string();
+        self.editor.update(cx, |editor, cx| {
+            if all {
+                editor.replace_all_search_matches(&replacement, window, cx);
+            } else {
+                editor.replace_current_search_match(&replacement, window, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// Close the search session and give the editor its focus back.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            editor.close_search(cx);
+            editor.focus_handle(cx).focus(window, cx);
+        });
+        self.find_activation = self.editor.read(cx).search_activation_revision();
+        self.search_key = None;
+        self.search_reveal = None;
+        cx.notify();
+    }
+
+    /// Paint the search bar over the shaped viewport.
+    fn find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let session = self.editor.read(cx).search_session().clone();
+        if !session.open {
+            return None;
+        }
+        let theme = cx.theme();
+        let replaceable = self.editor.read(cx).is_replaceable();
+        let replace_mode = session.replace_mode && replaceable;
+        let matches = session.matcher.label();
+        let count = div()
+            .flex_none()
+            .text_size(px(11.))
+            .text_color(if session.matcher.is_empty() {
+                theme.muted_foreground
+            } else {
+                theme.foreground
+            })
+            .child(SharedString::from(matches));
+        let button = |id: &'static str, label: &'static str| {
+            let view = cx.entity();
+            let step = if id == "find-previous" { -1 } else { 1 };
+            let close = id == "find-close";
+            Button::new(id)
+                .small()
+                .ghost()
+                .label(label)
+                .on_click(move |_, window, cx| {
+                    let view = view.clone();
+                    if close {
+                        view.update(cx, |this, cx| this.close_find(window, cx));
+                    } else {
+                        view.update(cx, |this, cx| {
+                            this.find_step(step > 0, cx);
+                        });
+                    }
+                })
+        };
+        let query = Input::new(&self.find_query)
+            .small()
+            .w(px(220.))
+            .aria_label("Find in document");
+        let row = div()
+            .h_flex()
+            .items_center()
+            .gap_1()
+            .child(query)
+            .child(count)
+            .child(button("find-previous", "↑"))
+            .child(button("find-next", "↓"))
+            .child(button("find-close", "×"));
+        let replace = replace_mode.then(|| {
+            let view = cx.entity();
+            let replace_one = view.clone();
+            let replace_all = view.clone();
+            div()
+                .h_flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    Input::new(&self.find_replace)
+                        .small()
+                        .w(px(220.))
+                        .aria_label("Replace with"),
+                )
+                .child(
+                    Button::new("find-replace")
+                        .small()
+                        .ghost()
+                        .label("Replace")
+                        .on_click(move |_, window, cx| {
+                            let view = replace_one.clone();
+                            view.update(cx, |this, cx| this.replace_matches(false, window, cx));
+                        }),
+                )
+                .child(
+                    Button::new("find-replace-all")
+                        .small()
+                        .ghost()
+                        .label("All")
+                        .on_click(move |_, window, cx| {
+                            let view = replace_all.clone();
+                            view.update(cx, |this, cx| this.replace_matches(true, window, cx));
+                        }),
+                )
+        });
+        Some(
+            div()
+                .id("source-find-bar")
+                .absolute()
+                .top(px(8.))
+                .right(px(8.))
+                .occlude()
+                .v_flex()
+                .gap_1()
+                .p(px(6.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover)
+                .text_color(theme.popover_foreground)
+                .on_action(cx.listener(|this, action: &input::Enter, _, cx| {
+                    this.find_step(!action.shift, cx);
+                    cx.stop_propagation();
+                }))
+                .on_action(cx.listener(|this, _: &input::Escape, window, cx| {
+                    this.close_find(window, cx);
+                    cx.stop_propagation();
+                }))
+                .child(row)
+                .children(replace)
+                .into_any_element(),
+        )
+    }
+
     /// Close the code action menu; `false` when none was open.
     fn dismiss_code_actions(&mut self, cx: &mut Context<Self>) -> bool {
         let open = self.editor.read(cx).code_action_menu_state().open;
@@ -1505,6 +1760,14 @@ enum Boundary {
     Document,
 }
 
+/// Active search session projected onto the shaped window.
+struct SearchHighlights<'a> {
+    ranges: &'a [Range<usize>],
+    current: usize,
+    active: gpui_kit::Hsla,
+    inactive: gpui_kit::Hsla,
+}
+
 /// Syntax and diagnostic runs for the shaped source window.
 struct ThemedSourceRuns<'a> {
     highlighter: Option<&'a SyntaxHighlighter>,
@@ -1514,6 +1777,7 @@ struct ThemedSourceRuns<'a> {
     diagnostic_colors: DiagnosticColors,
     /// The symbol range the modifier-hover definition query resolved.
     definition: Option<&'a (Range<usize>, HighlightStyle)>,
+    search: Option<SearchHighlights<'a>>,
 }
 
 impl SourceRuns for ThemedSourceRuns<'_> {
@@ -1540,6 +1804,35 @@ impl SourceRuns for ThemedSourceRuns<'_> {
             })
             .unwrap_or_default();
         let mut extras = diagnostics;
+        if let Some(search) = self.search.as_ref() {
+            let first = search
+                .ranges
+                .partition_point(|span| span.end <= range.start);
+            for (index, span) in search
+                .ranges
+                .iter()
+                .enumerate()
+                .skip(first)
+                .take_while(|(_, span)| span.start < range.end)
+            {
+                let start = span.start.max(range.start);
+                let end = span.end.min(range.end);
+                if start >= end {
+                    continue;
+                }
+                extras.push((
+                    start..end,
+                    HighlightStyle {
+                        background_color: Some(if index == search.current {
+                            search.active
+                        } else {
+                            search.inactive
+                        }),
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
         if let Some((span, style)) = self.definition {
             let start = span.start.max(range.start);
             let end = span.end.min(range.end);
@@ -1649,7 +1942,7 @@ impl Render for SourceSurface {
         }
         self.sync_blink(focused, cx);
 
-        let (width, height, scroll_x, scroll_y) = self.viewport_metrics(window);
+        let (width, height, mut scroll_x, mut scroll_y) = self.viewport_metrics(window);
         let gutter = gutter_width(self.state.borrow().layout.as_ref(), &style);
         let content_width = (width - gutter).max(80.);
         let highlight_theme = cx.theme().highlight_theme.clone();
@@ -1669,6 +1962,27 @@ impl Render for SourceSurface {
             });
             (definition.symbol_range.clone(), style)
         });
+        let selection_color = cx.theme().selection;
+        let search_ranges = {
+            let editor = self.editor.read(cx);
+            let session = editor.search_session();
+            (session.is_active() && !session.matcher.is_empty()).then(|| {
+                (
+                    session.matcher.matched_ranges(),
+                    session.matcher.current_match_index(),
+                )
+            })
+        };
+        if let Some((ranges, current)) = search_ranges.as_ref() {
+            let key = (Rc::as_ptr(ranges) as usize, *current, ranges.len());
+            if self.search_key != Some(key) {
+                self.search_key = Some(key);
+                self.search_reveal = ranges.get(*current).map(|span| span.start);
+            }
+        } else {
+            self.search_key = None;
+            self.search_reveal = None;
+        }
         let prepare_started = Instant::now();
         {
             let editor = self.editor.read(cx);
@@ -1698,7 +2012,19 @@ impl Render for SourceSurface {
                 diagnostics,
                 diagnostic_colors,
                 definition: definition_run.as_ref(),
+                search: search_ranges
+                    .as_ref()
+                    .map(|(ranges, current)| SearchHighlights {
+                        ranges: ranges.as_slice(),
+                        current: *current,
+                        active: selection_color,
+                        inactive: gpui_kit::Hsla {
+                            s: 0.1,
+                            ..selection_color
+                        },
+                    }),
             };
+            let focus = self.search_reveal.unwrap_or(cursor);
             let _prepared = layout.prepare(
                 window.text_system(),
                 SourceViewport {
@@ -1707,7 +2033,7 @@ impl Render for SourceSurface {
                     width: content_width,
                     height,
                 },
-                Some(cursor),
+                Some(focus),
                 &runs,
             );
             state.active_line = Some(layout.line_of(cursor));
@@ -1723,6 +2049,47 @@ impl Render for SourceSurface {
                 layout.row_height(),
             )
         };
+        if let Some(offset) = self.search_reveal {
+            let (line, x, shaped) = {
+                let state = self.state.borrow();
+                let layout = state.layout.as_ref().expect("layout exists");
+                let (position, _) = layout.caret(offset).unzip();
+                (
+                    layout.line_of(offset),
+                    position.map(|position| f32::from(position.x)),
+                    position.is_some(),
+                )
+            };
+            let top = line as f32 * row_height;
+            let x = x.unwrap_or(0.);
+            let mut next_x = scroll_x;
+            let mut next_y = scroll_y;
+            if x < scroll_x {
+                next_x = x;
+            } else if x + 1. > scroll_x + content_width {
+                next_x = x + 1. - content_width;
+            }
+            if top < scroll_y {
+                next_y = top;
+            } else if top + row_height > scroll_y + height {
+                next_y = top + row_height - height;
+            }
+            if next_x != scroll_x || next_y != scroll_y {
+                let max = self.scroll.max_offset();
+                self.scroll.set_offset(point(
+                    px((-next_x).clamp(-f32::from(max.x), 0.)),
+                    px((-next_y).clamp(-f32::from(max.y), 0.)),
+                ));
+                self.follow_caret = false;
+            }
+            scroll_x = next_x;
+            scroll_y = next_y;
+            if shaped {
+                self.search_reveal = None;
+            } else {
+                window.request_animation_frame();
+            }
+        }
         let follow = self.last_cursor != Some(cursor);
         self.last_cursor = Some(cursor);
         if follow {
@@ -1990,6 +2357,10 @@ impl Render for SourceSurface {
         }
         if let Some(code_actions) = code_actions {
             root = root.child(code_actions);
+        }
+        let find = self.find_bar(cx);
+        if let Some(find) = find {
+            root = root.child(find);
         }
         let focus = self.editor.read(cx).focus_handle(cx);
         self.bind_commands(root.track_focus(&focus), cx)
@@ -2385,8 +2756,9 @@ mod tests {
                 });
                 let editor = session.read(cx).editor.clone();
                 let weak = session.downgrade();
-                let surface =
-                    cx.new(|cx| SourceSurface::new(weak, editor, SharedString::from("astro"), cx));
+                let surface = cx.new(|cx| {
+                    SourceSurface::new(weak, editor, SharedString::from("astro"), window, cx)
+                });
                 mounted = Some(surface.clone());
                 cx.new(|cx| SourceHost {
                     surface,
@@ -2684,6 +3056,7 @@ mod tests {
                 diagnostics: None,
                 diagnostic_colors: DiagnosticColors::default(),
                 definition: Some(&definition),
+                search: None,
             }
             .runs(0..11);
             let underlined: Vec<_> = runs.iter().filter(|run| run.underline.is_some()).collect();
@@ -2717,6 +3090,7 @@ mod tests {
                     ..Default::default()
                 },
                 definition: None,
+                search: None,
             }
             .runs(0..11);
             assert_eq!(
@@ -2792,6 +3166,88 @@ mod tests {
         surface.read_with(cx, |surface, cx| {
             assert_eq!(surface.diagnostic_anchor, None);
             assert!(surface.editor.read(cx).diagnostic_popover().is_none());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn search_bar_mirrors_the_session_and_replaces(cx: &mut TestAppContext) {
+        let (handle, surface) = mount_source(cx, "foo foo\n");
+        cx.update_window(handle.into(), |_, _, cx| {
+            surface.update(cx, |surface, cx| {
+                surface.editor.update(cx, |editor, cx| {
+                    editor.set_selected_range(0..3, cx);
+                    editor.open_search(false, cx);
+                });
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        surface.read_with(cx, |surface, cx| {
+            assert_eq!(
+                surface.find_query.read(cx).value().as_ref(),
+                "foo",
+                "opening search seeds the bar with the selected text"
+            );
+            assert_eq!(
+                surface.editor.read(cx).search_session().matcher.len(),
+                2,
+                "the session matches the query the bar shows"
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            surface.update(cx, |surface, cx| {
+                surface
+                    .find_replace
+                    .update(cx, |input, cx| input.set_value("bar", window, cx));
+                surface.replace_matches(true, window, cx);
+                assert_eq!(surface.editor.read(cx).text().to_string(), "bar bar\n");
+                surface.close_find(window, cx);
+                assert!(!surface.editor.read(cx).search_session().open);
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn search_runs_background_every_match_and_the_current_one(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let theme = cx.theme().highlight_theme.clone();
+            let selection = cx.theme().selection;
+            let ranges = [0..3, 4..7];
+            let runs = ThemedSourceRuns {
+                highlighter: None,
+                theme: &theme,
+                style: Arc::new(SourceStyle::from_theme(cx)),
+                diagnostics: None,
+                diagnostic_colors: DiagnosticColors::default(),
+                definition: None,
+                search: Some(SearchHighlights {
+                    ranges: &ranges,
+                    current: 1,
+                    active: selection,
+                    inactive: gpui_kit::Hsla {
+                        s: 0.1,
+                        ..selection
+                    },
+                }),
+            }
+            .runs(0..7);
+            assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), 7);
+            let backgrounds: Vec<_> = runs.iter().filter_map(|run| run.background_color).collect();
+            assert_eq!(backgrounds.len(), 2, "both matches are painted");
+            assert_eq!(
+                backgrounds[1], selection,
+                "the current match uses the selection color"
+            );
+            assert_ne!(
+                backgrounds[0], backgrounds[1],
+                "other matches are dimmer than the current one"
+            );
         });
     }
 }

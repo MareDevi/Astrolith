@@ -64,6 +64,18 @@ struct Step {
     resize_height: Option<f32>,
     #[serde(default)]
     input: Option<String>,
+    /// Open build search with this query.
+    #[serde(default)]
+    find_query: Option<String>,
+    /// Steps to the next search match this many times.
+    #[serde(default)]
+    find_next: Option<u32>,
+    /// Replace every current search match with this text.
+    #[serde(default)]
+    find_replace_all: Option<String>,
+    /// Close the search bar.
+    #[serde(default)]
+    find_close: bool,
     /// Close the active document. Only valid while it has no unsaved edits.
     #[serde(default)]
     close: bool,
@@ -145,6 +157,14 @@ impl Shell {
             mode.to_owned()
         } else if step.input.is_some() {
             "input".to_owned()
+        } else if step.find_query.is_some() {
+            "find_query".to_owned()
+        } else if step.find_next.is_some() {
+            "find_next".to_owned()
+        } else if step.find_replace_all.is_some() {
+            "find_replace_all".to_owned()
+        } else if step.find_close {
+            "find_close".to_owned()
         } else if step.scroll_y.is_some() || step.scroll_x.is_some() {
             "scroll".to_owned()
         } else if step.caret.is_some() {
@@ -184,6 +204,33 @@ impl Shell {
             };
         }
         let session = self.project.read(cx).active_session(cx);
+        if self.mode == WorkspaceMode::Build
+            && (step.find_query.is_some()
+                || step.find_next.is_some()
+                || step.find_replace_all.is_some()
+                || step.find_close)
+            && let Some(session) = session.clone()
+        {
+            let editor = session.read(cx).editor.clone();
+            editor.update(cx, |editor, cx| {
+                if let Some(query) = step.find_query.as_deref() {
+                    editor.open_search(false, cx);
+                    editor.set_search_query(query, true, cx);
+                }
+                if let Some(steps) = step.find_next {
+                    for _ in 0..steps {
+                        editor.next_search_match(cx);
+                    }
+                    cx.notify();
+                }
+                if let Some(replacement) = step.find_replace_all.as_deref() {
+                    editor.replace_all_search_matches(replacement, window, cx);
+                }
+                if step.find_close {
+                    editor.close_search(cx);
+                }
+            });
+        }
         if step.scroll_y.is_some() || step.scroll_x.is_some() {
             let x = step.scroll_x.unwrap_or(0.);
             let y = step.scroll_y.unwrap_or(0.);
