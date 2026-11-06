@@ -19,19 +19,17 @@ focused, previously visible caret is pushed out by a shrinking viewport. The
 adjustment runs on the next UI turn; manual scroll ownership is preserved.
 The stock source editor still owns source shaping and display wrapping.
 
-Preview keeps the published TextView renderer for Markdown/MDX, images and links.
-An application-owned visible-item list groups source into pages with a soft
-8 KiB budget. A markdown-rs 1.0.0 AST planner runs on a background executor after
-an 80 ms debounce. Only complete top-level blocks split; lists, fenced code and
-MDX component bodies remain whole. Cross-page link/image definitions accompany
-each page. Invalid MDX and footnote documents stay whole to preserve context.
-Page ranges concatenate to the original UTF-8/CRLF bytes. Accepted results are
-generation-checked; parsed page-view retention is bounded to a neighbourhood.
+Preview no longer mounts the published TextView renderer or a source-page list.
+It reuses the writer's accepted `WysiwygDocument` revision when available and
+lays the whole body out with the application-owned viewport text layout:
+visible-row wrapping, bounded shaping, table-cell grids, footnote and raw
+HTML/MDX blocks and standalone images. Read-only selection, keyboard navigation,
+Select All/Copy, link activation and a scroll anchor live in the pane; source
+selection is still what Select All copies.
 
-Width changes restore list height estimates through public ListState APIs.
-Whole-document Select All and Copy remain available across pages. A pointer
-selection gesture belongs to its page's TextView; dragging one selection across
-page boundaries is a remaining limitation of this application paging approach.
+Inline images remain alt text (the same rule as Writing); standalone image
+paragraphs paint the picture. Raw HTML/MDX flow is shown verbatim rather than
+interpreted. Page splitting and its list height repair are gone.
 
 ## Limits
 

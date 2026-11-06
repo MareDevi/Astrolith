@@ -45,7 +45,7 @@ node scripts/editor-perf.mjs run \
 ```
 
 - `--backend pre|fast`：分别构建到独立的 `CARGO_TARGET_DIR`（`target/editor-perf/pre|fast`），避免构建产物互相覆盖。
-- `--scenario idle|cycle|scroll-input`：分别覆盖稳定窗口、六向模式切换、滚动与输入。
+- `--scenario idle|cycle|scroll-input|preview|preview-idle|build-idle`：分别覆盖稳定窗口、六向模式切换、Writer 滚动与输入、Preview 滚动、Preview 静止和 Build 静止。
 - `--fullscreen-pairs N`：在驱动步骤之间用 Hyprland 全屏/平铺切换，只有 dispatcher 成功才计入 `manifest.metrics.fullscreen_pairs`。
 - `--fixture <id>`、`--cycles`、`--settle`、`--wait-document`、`--timeout` 控制负载与等待；
   `--test-id` 指定 artifact 目录与 manifest 标识，避免不同里程碑共用 M0 命名。
@@ -69,7 +69,7 @@ node scripts/editor-perf.mjs ab --fixture history-single-paragraph-102420 --scen
 - `parse_queue`：快照请求到后台解析任务真正开始之间的等待。
 - `driver_step`：脚本动作的派发到返回，用于与应用外时钟对齐。
 
-Preview 与 Build 仍由 Kit TextView/Editor 内部完成布局；本基线通过 CPU 采样和外部时间观察，不伪造应用内分阶段计时。
+Preview 自 M4 起使用应用自有布局，`text_layout_frame` 以 `mode="preview"` 记录 wrap/shape、行数与 prepare 时间；Build 仍由 Kit Editor 内部完成布局，本基线通过 CPU 采样和外部时间观察，不伪造应用内分阶段计时。
 
 ## 5. M2 文本布局对照入口
 

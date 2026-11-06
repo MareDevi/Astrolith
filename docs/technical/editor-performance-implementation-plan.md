@@ -3,7 +3,7 @@
 - 日期：2026-11-06。
 - 基线提交：`8c9d7f3`（依赖升级）、`c54783f`（新版本性能诊断）。
 - 依赖基线：GPUI Kit/base/component 0.9.0、gpui-pre 0.3.11，全部使用发布包。
-- 状态：M0–M3 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)）；Writing 已切换到自有布局，Preview/Build 仍走现有实现，M4 起未开始。
+- 状态：M0–M4 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)、[M4 结果](editor-performance-m4-results.md)）；Writing 与 Preview 已切换到自有布局，Build 仍走现有实现，M5 起未开始。
 - 目标环境：首先解决用户实际运行的 `mise run dev` 与 Hyprland/Wayland 场景；release 和其他平台单独验收。
 
 ## 1. 决策与范围
@@ -293,7 +293,8 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 | M1 生命周期与刷新隔离 | 已完成 | 同上；准备节点复用、caret 独立层、宽度 epoch、隐藏停止 |
 | M2 自有文本布局可行性 | 已完成（可行性门槛通过；产品视图未替换） | [M2 结果](editor-performance-m2-results.md)；`artifacts/e2e/editor-m2-layout-core`、`editor-m2-private-vs-kit` |
 | M3 Writing 接入新布局 | 已完成；Writing 产品路径已切换 | [M3 结果](editor-performance-m3-results.md)；`artifacts/e2e/editor-m3-pre-*` |
-| M4–M7 | 未开始 | — |
+| M4 Preview 接入共享阅读布局 | 已完成；Preview 产品路径已切换 | [M4 结果](editor-performance-m4-results.md)；`artifacts/e2e/editor-m4-pre-*` |
+| M5–M7 | 未开始 | — |
 | GPUI Fast 采用 | 不采用默认后端 | 长单段落 p95 277 ms，明显差于 gpui-pre 52 ms |
 
 ### M0：可重复基线与最小测量入口（必做）
