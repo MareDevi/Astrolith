@@ -47,7 +47,8 @@ node scripts/editor-perf.mjs run \
 - `--backend pre|fast`：分别构建到独立的 `CARGO_TARGET_DIR`（`target/editor-perf/pre|fast`），避免构建产物互相覆盖。
 - `--scenario idle|cycle|scroll-input`：分别覆盖稳定窗口、六向模式切换、滚动与输入。
 - `--fullscreen-pairs N`：在驱动步骤之间用 Hyprland 全屏/平铺切换，只有 dispatcher 成功才计入 `manifest.metrics.fullscreen_pairs`。
-- `--fixture <id>`、`--cycles`、`--settle`、`--wait-document`、`--timeout` 控制负载与等待。
+- `--fixture <id>`、`--cycles`、`--settle`、`--wait-document`、`--timeout` 控制负载与等待；
+  `--test-id` 指定 artifact 目录与 manifest 标识，避免不同里程碑共用 M0 命名。
 
 每次运行都会创建独立的 `HOME`、`XDG_*`、偏好目录、恢复目录、runtime 目录和一个带 Astro discovery stub 的临时项目；fixture 通过启动参数作为条目打开，不经过文件浏览器。运行产物遵守 [E2E artifacts 合同](e2e-artifacts.md)：`manifest.json`、`command.txt`、`scenario.json`、`stdout.log`、`stderr.log`、`build.log`、`perf.json`。
 
@@ -62,6 +63,7 @@ node scripts/editor-perf.mjs ab --fixture history-single-paragraph-102420 --scen
 ## 4. 指标口径
 
 - `writer_frame`：WriterSurface 的 render、request-layout、prepaint、paint CPU 阶段；不含 compositor presentation。
+  M3 起 Writing 的布局 prepare（wrap/shape 预算）在 render 内执行，`layout_ms`/`prepaint_ms` 只覆盖 canvas 的尺寸与 bounds 记录。
 - `mode_handler`：`Shell::set_mode` 的 handler 时间。
 - `source_transaction`：会话 Change handler，从输入适配到 source/history/count 更新。
 - `parse_queue`：快照请求到后台解析任务真正开始之间的等待。
