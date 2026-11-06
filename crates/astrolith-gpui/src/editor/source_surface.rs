@@ -22,10 +22,11 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::highlighter::{HighlightTheme, SyntaxHighlighter};
 use gpui_kit::component::input::{self, EditorState, InputEvent, Rope, RopeExt};
 use gpui_kit::{
-    App, Bounds, ClipboardItem, Context, Div, Element, ElementId, Entity, EntityInputHandler,
-    Focusable, GlobalElementId, HighlightStyle, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point, Render, ScrollHandle, SharedString, Stateful, TestSupportExt,
-    TextAlign, TextRun, UTF16Selection, WeakEntity, Window, div, fill, point, prelude::*, px, size,
+    AnyElement, App, Bounds, ClipboardItem, Context, Div, Element, ElementId, Entity,
+    EntityInputHandler, Focusable, GlobalElementId, HighlightStyle, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, ScrollHandle, SharedString,
+    Stateful, TestSupportExt, TextAlign, TextRun, UTF16Selection, WeakEntity, Window, div, fill,
+    point, prelude::*, px, size,
 };
 use std::cell::RefCell;
 use std::ops::Range;
@@ -50,12 +51,29 @@ const HIGHLIGHT_SYNC_TIMEOUT: Duration = Duration::from_millis(2);
 const HIGHLIGHT_BACKGROUND_DEBOUNCE: Duration = Duration::from_millis(120);
 const GUTTER_PADDING: f32 = 10.;
 const GUTTER_GAP: f32 = 10.;
+/// Rows the completion menu paints at once; the window follows the selection.
+const COMPLETION_ROWS: usize = 12;
+const COMPLETION_ROW_HEIGHT: f32 = 22.;
+const COMPLETION_PADDING: f32 = 4.;
+const COMPLETION_MAX_WIDTH: f32 = 420.;
+const COMPLETION_MIN_WIDTH: f32 = 160.;
+const POPUP_GAP: f32 = 4.;
 
 #[derive(Clone, Copy, Default)]
 struct FrameGeometry {
     origin: Point<Pixels>,
     viewport: Bounds<Pixels>,
     width: f32,
+}
+
+/// Window-space placement for a caret-anchored overlay.
+#[derive(Clone, Copy)]
+struct PopupPlacement {
+    left: f32,
+    top: f32,
+    width: f32,
+    row_height: f32,
+    font_size: f32,
 }
 
 struct RenderState {
@@ -103,6 +121,9 @@ pub(crate) struct SourceSurface {
     blink_task: Option<gpui_kit::Task<()>>,
     blink_visible: bool,
     focused: bool,
+    /// Menu revision the selected completion row belongs to.
+    completion_revision: u64,
+    completion_selected: usize,
     _observe: gpui_kit::Subscription,
     _change: gpui_kit::Subscription,
 }
@@ -152,6 +173,8 @@ impl SourceSurface {
             blink_task: None,
             blink_visible: true,
             focused: false,
+            completion_revision: 0,
+            completion_selected: 0,
             _observe: observe,
             _change: change,
         }
@@ -582,8 +605,14 @@ impl SourceSurface {
         let root = movement!(root, input::SelectToStart, true, Document, true, false);
         let root = movement!(root, input::SelectToEnd, false, Document, true, false);
         macro_rules! navigation {
-            ($root:expr, $action:ty, $key:expr, $extend:expr, $paged:expr) => {
+            ($root:expr, $action:ty, $key:expr, $extend:expr, $paged:expr, $menu:expr) => {
                 $root.on_action(cx.listener(|this, _: &$action, window, cx| {
+                    if !$extend
+                        && !$paged
+                        && $menu.is_some_and(|delta| this.move_completion(delta, cx))
+                    {
+                        return;
+                    }
                     let steps = if $paged { page_rows(this, window) } else { 1 };
                     for _ in 0..steps {
                         if !this.navigate($key, $extend, window, cx) {
@@ -593,23 +622,45 @@ impl SourceSurface {
                 }))
             };
         }
-        let root = navigation!(root, input::MoveUp, "up", false, false);
-        let root = navigation!(root, input::MoveDown, "down", false, false);
-        let root = navigation!(root, input::MoveHome, "home", false, false);
-        let root = navigation!(root, input::MoveEnd, "end", false, false);
-        let root = navigation!(root, gpui_kit::base::actions::SelectUp, "up", true, false);
+        let root = navigation!(root, input::MoveUp, "up", false, false, Some(-1_isize));
+        let root = navigation!(root, input::MoveDown, "down", false, false, Some(1_isize));
+        let root = navigation!(root, input::MoveHome, "home", false, false, None::<isize>);
+        let root = navigation!(root, input::MoveEnd, "end", false, false, None::<isize>);
+        let root = navigation!(
+            root,
+            gpui_kit::base::actions::SelectUp,
+            "up",
+            true,
+            false,
+            None::<isize>
+        );
         let root = navigation!(
             root,
             gpui_kit::base::actions::SelectDown,
             "down",
             true,
-            false
+            false,
+            None::<isize>
         );
-        let root = navigation!(root, input::MovePageUp, "up", false, true);
-        let root = navigation!(root, input::MovePageDown, "down", false, true);
-        root.on_action(
-            cx.listener(|this, _: &input::Enter, window, cx| this.insert("\n", window, cx)),
-        )
+        let root = navigation!(root, input::MovePageUp, "up", false, true, None::<isize>);
+        let root = navigation!(
+            root,
+            input::MovePageDown,
+            "down",
+            false,
+            true,
+            None::<isize>
+        );
+        root.on_action(cx.listener(|this, _: &input::ShowCompletions, window, cx| {
+            this.editor
+                .update(cx, |editor, cx| editor.show_completions(window, cx));
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &input::Enter, window, cx| {
+            if !this.accept_completion(window, cx) {
+                this.insert("\n", window, cx);
+            }
+        }))
         .on_action(cx.listener(|this, _: &input::SelectAll, window, cx| {
             this.editor
                 .update(cx, |editor, cx| editor.select_all(window, cx));
@@ -638,6 +689,9 @@ impl SourceSurface {
             }
         }))
         .on_action(cx.listener(|this, _: &input::Escape, window, cx| {
+            if this.dismiss_completion(cx) {
+                return;
+            }
             this.editor
                 .update(cx, |editor, cx| editor.unmark_text(window, cx));
         }))
@@ -669,6 +723,172 @@ impl SourceSurface {
             position.x - geometry.origin.x - px(state.gutter),
             position.y - geometry.origin.y,
         ))
+    }
+
+    /// Paint the completion menu the retained editor model is presenting.
+    ///
+    /// The Kit editor element renders its own menu, so a host that owns the
+    /// visible text must mirror the same public overlay state: the items and
+    /// revisions come from `EditorState`, and the row geometry comes from this
+    /// surface's own shaped window.
+    fn completion_popup(
+        &mut self,
+        placement: PopupPlacement,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (open, revision, len) = {
+            let editor = self.editor.read(cx);
+            let menu = editor.completion_menu_state();
+            (menu.open, menu.revision(), menu.items.len())
+        };
+        if !open || len == 0 {
+            self.completion_selected = 0;
+            return None;
+        }
+        if revision != self.completion_revision {
+            self.completion_revision = revision;
+            self.completion_selected = 0;
+        }
+        self.completion_selected = self.completion_selected.min(len - 1);
+        let selected = self.completion_selected;
+        let start = (selected + 1).saturating_sub(COMPLETION_ROWS);
+        let end = (start + COMPLETION_ROWS).min(len);
+        let items = {
+            let editor = self.editor.read(cx);
+            editor.completion_menu_state().items[start..end].to_vec()
+        };
+        let theme = cx.theme();
+        let (popover, foreground, muted, active, border) = (
+            theme.popover,
+            theme.popover_foreground,
+            theme.muted_foreground,
+            theme.list_active,
+            theme.border,
+        );
+        let mut rows = Vec::with_capacity(items.len());
+        for (offset, item) in items.iter().enumerate() {
+            let index = start + offset;
+            let mut row = div()
+                .id(("completion-row", index as u64))
+                .h(px(placement.row_height))
+                .w_full()
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded(px(4.))
+                .when(index == selected, |row| row.bg(active))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(placement.font_size))
+                        .text_color(foreground)
+                        .child(SharedString::from(item.label.clone())),
+                );
+            if let Some(detail) = item.detail.clone() {
+                row = row.child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_size(px((placement.font_size - 2.).max(8.)))
+                        .text_color(muted)
+                        .child(SharedString::from(detail)),
+                );
+            }
+            let row = row.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    this.commit_completion(index, window, cx);
+                    cx.stop_propagation();
+                }),
+            );
+            rows.push(row.into_any_element());
+        }
+        Some(
+            div()
+                .id("source-completion-menu")
+                .absolute()
+                .left(px(placement.left))
+                .top(px(placement.top))
+                .w(px(placement.width))
+                .py(px(COMPLETION_PADDING))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(border)
+                .bg(popover)
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    /// Move the menu selection; `false` leaves the action to the caret.
+    fn move_completion(&mut self, delta: isize, cx: &mut Context<Self>) -> bool {
+        let len = {
+            let editor = self.editor.read(cx);
+            let menu = editor.completion_menu_state();
+            if !menu.open {
+                return false;
+            }
+            menu.items.len()
+        };
+        if len == 0 {
+            return false;
+        }
+        let next = (self.completion_selected as isize + delta).clamp(0, len as isize - 1);
+        self.completion_selected = next as usize;
+        cx.notify();
+        true
+    }
+
+    /// Insert the selected completion, replacing the text that opened the menu.
+    fn accept_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let open = {
+            let editor = self.editor.read(cx);
+            let menu = editor.completion_menu_state();
+            menu.open && !menu.items.is_empty()
+        };
+        if !open {
+            return false;
+        }
+        self.commit_completion(self.completion_selected, window, cx);
+        true
+    }
+
+    fn commit_completion(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((item, range)) = ({
+            let editor = self.editor.read(cx);
+            let menu = editor.completion_menu_state();
+            let end = editor.cursor();
+            menu.items
+                .get(index)
+                .cloned()
+                .map(|item| (item, menu.trigger_start_offset.unwrap_or(end)..end))
+        }) else {
+            return;
+        };
+        self.editor.update(cx, |editor, cx| {
+            editor.insert_completion(&item, range, window, cx);
+            editor.dismiss_completion_overlay(cx);
+        });
+        self.completion_selected = 0;
+        cx.notify();
+    }
+
+    /// Close the completion menu; `false` when none was open.
+    fn dismiss_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.editor.read(cx).completion_menu_state().open;
+        if !open {
+            return false;
+        }
+        self.editor
+            .update(cx, |editor, cx| editor.dismiss_completion_overlay(cx));
+        self.completion_selected = 0;
+        true
     }
 }
 
@@ -914,7 +1134,44 @@ impl Render for SourceSurface {
             prepare_elapsed,
             rendered: render_rest,
         };
-        let root = div()
+        let completion = {
+            let editor = self.editor.read(cx);
+            let menu = editor.completion_menu_state();
+            (focused && menu.open && !menu.items.is_empty()).then_some(menu.items.len())
+        };
+        let popup = completion.and_then(|len| {
+            let caret = self
+                .state
+                .borrow()
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.caret(cursor));
+            let (caret, caret_height) = caret?;
+            let rows = len.min(COMPLETION_ROWS);
+            let popup_width = COMPLETION_MAX_WIDTH
+                .min(width)
+                .max(COMPLETION_MIN_WIDTH.min(width));
+            let popup_height = rows as f32 * COMPLETION_ROW_HEIGHT + COMPLETION_PADDING * 2.;
+            let left =
+                (gutter + f32::from(caret.x) - scroll_x).clamp(0., (width - popup_width).max(0.));
+            let below = f32::from(caret.y) - scroll_y + f32::from(caret_height) + POPUP_GAP;
+            let top = if below + popup_height <= height {
+                below
+            } else {
+                (f32::from(caret.y) - scroll_y - popup_height - POPUP_GAP).max(0.)
+            };
+            self.completion_popup(
+                PopupPlacement {
+                    left,
+                    top,
+                    width: popup_width,
+                    row_height: COMPLETION_ROW_HEIGHT,
+                    font_size: f32::from(style.font_size),
+                },
+                cx,
+            )
+        });
+        let scroll_area = div()
             .id(("source-surface", self.editor.entity_id()))
             .size_full()
             .overflow_scroll()
@@ -923,6 +1180,7 @@ impl Render for SourceSurface {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.dismiss_completion(cx);
                     this.select(event.position, event.modifiers.shift, window, cx);
                     window.prevent_default();
                 }),
@@ -939,6 +1197,14 @@ impl Render for SourceSurface {
                     cx.notify();
                 }),
             );
+        let mut root = div()
+            .id(("source-surface-root", self.editor.entity_id()))
+            .size_full()
+            .relative()
+            .child(scroll_area);
+        if let Some(popup) = popup {
+            root = root.child(popup);
+        }
         let focus = self.editor.read(cx).focus_handle(cx);
         self.bind_commands(root.track_focus(&focus), cx)
             .test_support()
@@ -1404,6 +1670,54 @@ mod tests {
                 "one frame shapes only the visible window: {} bytes",
                 stats.shaped_bytes
             );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn completion_menu_mirrors_the_retained_overlay(cx: &mut TestAppContext) {
+        let (handle, surface) = mount_source(cx, "alp\n");
+        surface.update(cx, |surface, cx| {
+            let editor = surface.editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(3..3, cx);
+                editor.present_completion_items(
+                    0,
+                    "alp",
+                    vec![
+                        lsp_types::CompletionItem {
+                            label: "alpha".into(),
+                            ..Default::default()
+                        },
+                        lsp_types::CompletionItem {
+                            label: "alpine".into(),
+                            ..Default::default()
+                        },
+                    ],
+                    cx,
+                );
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        surface.read_with(cx, |surface, _| assert_eq!(surface.completion_selected, 0));
+        surface.update(cx, |surface, cx| {
+            assert!(
+                surface.move_completion(1, cx),
+                "the open menu owns MoveDown"
+            );
+        });
+        surface.read_with(cx, |surface, _| assert_eq!(surface.completion_selected, 1));
+        cx.update_window(handle.into(), |_, window, cx| {
+            surface.update(cx, |surface, cx| {
+                assert!(surface.accept_completion(window, cx));
+            });
+        })
+        .unwrap();
+        surface.read_with(cx, |surface, cx| {
+            assert_eq!(surface.editor.read(cx).text().to_string(), "alpine\n");
+            assert!(!surface.editor.read(cx).completion_menu_state().open);
         });
     }
 }
