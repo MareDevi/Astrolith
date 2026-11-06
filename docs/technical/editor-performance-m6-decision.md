@@ -3,6 +3,7 @@
 - 日期：2026-11-06。
 - 对应方案：[编辑器性能优化实施方案](editor-performance-implementation-plan.md) M6。
 - 状态：**评估完成，未通过**。Build 的 stock Kit `Editor` 在长单行 fixture 上远超帧预算；按方案进入 `SourceSurface` 接入。M6 的替换实施尚未完成。
+- SourceSurface 后续实施见 [SourceSurface 结果](editor-performance-m6-source-surface-results.md)：帧预算已通过，功能门槛未过，产品路径仍为 stock Editor。
 - 环境：Linux 7.3.1-1-cachyos x64，Hyprland/Wayland，scale 1，gpui-pre 后端，dev profile，无 profiler。
 - 证据：`artifacts/e2e/editor-m6-pre-build-*`、`artifacts/e2e/editor-m6-probe-build-wrap-*`。
 

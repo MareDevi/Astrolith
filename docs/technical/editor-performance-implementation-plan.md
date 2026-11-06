@@ -3,7 +3,7 @@
 - 日期：2026-11-06。
 - 基线提交：`8c9d7f3`（依赖升级）、`c54783f`（新版本性能诊断）。
 - 依赖基线：GPUI Kit/base/component 0.9.0、gpui-pre 0.3.11，全部使用发布包。
-- 状态：M0–M4 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)、[M4 结果](editor-performance-m4-results.md)）；Writing 与 Preview 已切换到自有布局，Build 仍走现有实现。M5 已按触发条件评估并保留现有输入桥（见 [M5 决策](editor-performance-m5-decision.md)）。M6 已完成 stock Editor 评估：长单行不达标，按方案进入 `SourceSurface` 接入，替换实施未完成（见 [M6 决策](editor-performance-m6-decision.md)）；M7 未开始。
+- 状态：M0–M4 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)、[M4 结果](editor-performance-m4-results.md)）；Writing 与 Preview 已切换到自有布局，Build 仍走现有实现。M5 已按触发条件评估并保留现有输入桥（见 [M5 决策](editor-performance-m5-decision.md)）。M6 已完成 stock Editor 评估并实现、验证 `SourceSurface` 的帧预算；因 LSP 浮层、折叠与搜索等能力仍未接入，Build 默认继续使用 stock Editor（见 [M6 决策](editor-performance-m6-decision.md)、[SourceSurface 结果](editor-performance-m6-source-surface-results.md)）；M7 未开始。
 - 目标环境：首先解决用户实际运行的 `mise run dev` 与 Hyprland/Wayland 场景；release 和其他平台单独验收。
 
 ## 1. 决策与范围
@@ -295,7 +295,7 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 | M3 Writing 接入新布局 | 已完成；Writing 产品路径已切换 | [M3 结果](editor-performance-m3-results.md)；`artifacts/e2e/editor-m3-pre-*` |
 | M4 Preview 接入共享阅读布局 | 已完成；Preview 产品路径已切换 | [M4 结果](editor-performance-m4-results.md)；`artifacts/e2e/editor-m4-pre-*` |
 | M5 Writing 输入内核迁移 | 已评估：保留现有输入桥，未触发迁移 | [M5 决策](editor-performance-m5-decision.md)；`artifacts/e2e/editor-m5-gate-*` |
-| M6 Build 长行决策与修复 | 评估完成：stock Editor 不达标，`SourceSurface` 接入未完成 | [M6 决策](editor-performance-m6-decision.md)；`artifacts/e2e/editor-m6-pre-build-*`、`editor-m6-probe-build-wrap-*` |
+| M6 Build 长行决策与修复 | 评估完成；`SourceSurface` 已实现并达到帧预算，Build 产品路径仍保留 stock Editor（功能门槛未过） | [M6 决策](editor-performance-m6-decision.md)、[SourceSurface 结果](editor-performance-m6-source-surface-results.md)；`artifacts/e2e/editor-m6-pre-build-*`、`editor-m6-surface-build-*` |
 | M7 解析增量化与收尾 | 未开始 | — |
 | GPUI Fast 采用 | 不采用默认后端 | 长单段落 p95 277 ms，明显差于 gpui-pre 52 ms |
 
@@ -389,7 +389,14 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 96 KB/2,956 块 p99 13.44 ms），但 1 MiB 单行 `prepaint` p95 2,744 ms，102 KB 单行在进入 Build、末尾输入与
 等宽字体变化时出现 110–123 ms 同步整形帧。公开 API 没有水平视口裁剪或行渲染器钩子；软换行对照仍产生
 2.64 s 首次整行测量。因此走“仍不达标”分支，接入 `SourceSurface`；证据、归因与实施边界见
-[M6 决策](editor-performance-m6-decision.md)，`SourceSurface` 实施尚未完成。
+[M6 决策](editor-performance-m6-decision.md)。
+
+**2026-11-06 SourceSurface 实施：帧预算通过，功能门槛未过。** debug build 的
+`ASTROLITH_SOURCE_SURFACE=1` 选择新 surface；1 MiB 单行帧 CPU 从 p95 2,744 ms 降到 3.19 ms
+（p99 4.80 ms），102 KB 单行 p99 从 116.20 ms 降到 0.72 ms，`shaping_bytes` 最大 6.9–7.9 KiB。
+LSP 浮层、折叠、搜索等仍由 Kit `Input` 元素承载，因此默认 Build 继续使用 stock Editor；
+能力接入完成前 M6 不关闭。证据与限制见
+[SourceSurface 结果](editor-performance-m6-source-surface-results.md)、`artifacts/e2e/editor-m6-surface-build-*`。
 
 - **达到指标：** 保留 stock Editor，记录依赖与性能边界；不进行无收益的源码编辑器重写。
 - **仍不达标：** 接入 `SourceSurface`，以源文本文字和高亮 run 使用共用布局核心；实现纵向可见行以及超长行内部的有界整形/水平命中。
