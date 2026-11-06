@@ -2,7 +2,7 @@
 
 - 日期：2026-11-06。
 - 对应方案：[编辑器性能优化实施方案](editor-performance-implementation-plan.md) M6。
-- 状态：**SourceSurface 已实现并通过帧预算；Build 产品路径仍保留 stock Editor。** 功能门槛（LSP 浮层、folding、搜索等）未通过，M6 不关闭。
+- 状态：**SourceSurface 已实现并通过帧预算；completion 浮层已由公开状态宿主接管，Build 产品路径仍保留 stock Editor。** 功能门槛（hover/code action/diagnostics/folding/搜索等）未全部通过，M6 不关闭。
 - 环境：Linux 7.3.1-1-cachyos x64，Hyprland/Wayland，scale 1，gpui-pre 0.3.11，dev profile，无 profiler。
 - 入口：debug 构建设置 `ASTROLITH_SOURCE_SURFACE=1` 时 Build 使用 SourceSurface；默认仍是 stock Kit `Editor`。perf harness 使用 `--source-surface` 记录该开关。
 - 证据：`artifacts/e2e/editor-m6-surface-build-*`。
@@ -61,6 +61,35 @@ SourceSurface 满足几何与性能门槛，但以下 Build 行为仍由 Kit `In
 - 默认继续使用 stock Editor；`ASTROLITH_SOURCE_SURFACE=1` 仅用于 A/B 与后续接入。
 - M6 仍为未完成；下一步必须先为上述能力选定可用的公开宿主方案或自行实现，再切换产品路径。
 - 不得用“复杂块回退 stock Editor”掩盖未完成项。
+
+### 3.1 公开宿主方案盘点（2026-11-06）
+
+Kit 的浮层控件（`input/popovers/*`）是 `pub(crate)`，无法直接复用；但 `EditorState` 将浮层**状态**与**提交入口**公开，宿主可以镜像同一份状态自行绘制：
+
+| 能力 | 公开 API | 宿主可行性 |
+| --- | --- | --- |
+| Completion 菜单 | `completion_menu_state()`（`open`/`items`/`query`/`trigger_start_offset`/`revision()`）、`insert_completion()`、`dismiss_completion_overlay()`、`show_completions()` | 已实施，见 §3.2 |
+| 输入触发的 completion 请求 | `EditorState::replace_text_in_range` 内部会走 `on_text_typed` 与 `Lsp::update` | 无需宿主接入，输入路径已具备 |
+| Hover popover | `hover_popover()`、`present_hover()`、`clear_hover_state()`、`Lsp::hover_provider` | 状态可读，但触发路径（`handle_mouse_move`/`handle_hover_definition`）是 `pub(crate)`；需宿主自行实现 debounce 与 provider 调用 |
+| Code action 菜单 | `code_action_menu_state()`、`present_code_actions()`、`perform_code_action()` | 菜单打开入口是 `pub(crate)`；宿主需自行调用 `Lsp::code_action_providers` 再 `present_code_actions` |
+| Diagnostic popover | `diagnostic_popover()`、`present_diagnostic()`、`diagnostics()`（`DiagnosticSet` 可遍历） | 可读可写，宿主自行做命中与绘制 |
+| Go to definition | `Lsp::definition_provider` | 导航实现（`go_to_definition`）是 `pub(crate)`，宿主需自行跳转 |
+| Folding | `display_map()`（只读）、`set_folding`/`unfold_at` | 折叠后的显示映射可读；SourceSurface 尚未按 `DisplayMap` 渲染 |
+
+结论：completion 可以完全由公开 API 承载；hover/code action/diagnostic/definition 的**呈现**可以自行实现，但它们的**触发时序**目前在 Kit 元素内部，宿主必须自己重建（provider 调用、去抖、范围解析）。这些能力在替换产品路径前必须逐项落地。
+
+### 3.2 已实施：completion 菜单宿主
+
+`SourceSurface` 现在镜像 `EditorState` 的公开 completion 状态：
+
+- 位置取自有布局的 caret（内容坐标 → 滚动后的窗口坐标），弹层在下方放不下时上移，并在视口内钳制；
+- 每帧最多绘制 12 行，选中行跟随 `completion_menu_state().revision()` 重置；键盘 `MoveUp`/`MoveDown` 在菜单打开时只改选中行，`Enter` 提交，`Escape` 关闭；
+- 点击行提交，点击编辑区关闭菜单；`ctrl-space`（`ShowCompletions`）绑定到 `show_completions()`；
+- 提交仍走 `insert_completion()`：`trigger_start_offset..cursor` 被替换，菜单由 `dismiss_completion_overlay()` 关闭，undo 与 source 事务语义不变；
+- 未整形（无 caret 几何）时不显示菜单，继续 fail-closed。
+
+验证：`completion_menu_mirrors_the_retained_overlay`（headless）覆盖状态镜像、键盘移动与提交区间；原生 `editor-m6-surface-build-completion-host` 重跑 build 场景确认渲染路径未回归。
+
 
 ## 4. 复现
 

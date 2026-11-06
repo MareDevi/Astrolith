@@ -295,7 +295,7 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 | M3 Writing 接入新布局 | 已完成；Writing 产品路径已切换 | [M3 结果](editor-performance-m3-results.md)；`artifacts/e2e/editor-m3-pre-*` |
 | M4 Preview 接入共享阅读布局 | 已完成；Preview 产品路径已切换 | [M4 结果](editor-performance-m4-results.md)；`artifacts/e2e/editor-m4-pre-*` |
 | M5 Writing 输入内核迁移 | 已评估：保留现有输入桥，未触发迁移 | [M5 决策](editor-performance-m5-decision.md)；`artifacts/e2e/editor-m5-gate-*` |
-| M6 Build 长行决策与修复 | 评估完成；`SourceSurface` 已实现并达到帧预算，Build 产品路径仍保留 stock Editor（功能门槛未过） | [M6 决策](editor-performance-m6-decision.md)、[SourceSurface 结果](editor-performance-m6-source-surface-results.md)；`artifacts/e2e/editor-m6-pre-build-*`、`editor-m6-surface-build-*` |
+| M6 Build 长行决策与修复 | 评估完成；`SourceSurface` 已实现并达到帧预算，completion 浮层已改由公开状态宿主绘制；Build 产品路径仍保留 stock Editor（hover/code action/diagnostics/folding/搜索未接入） | [M6 决策](editor-performance-m6-decision.md)、[SourceSurface 结果](editor-performance-m6-source-surface-results.md)；`artifacts/e2e/editor-m6-pre-build-*`、`editor-m6-surface-build-*`、`editor-m6-surface-build-completion-host` |
 | M7 解析增量化与收尾 | 本轮实施完成；已采用块级增量解析并删除 M2 对照原型。M6/Build 功能门槛、release 与原生 IME/平台矩阵仍未关闭 | [M7 结果](editor-performance-m7-results.md)；`artifacts/e2e/editor-m7-*` |
 | GPUI Fast 采用 | 不采用默认后端 | 长单段落 p95 277 ms，明显差于 gpui-pre 52 ms |
 
