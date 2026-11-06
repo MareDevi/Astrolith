@@ -298,3 +298,33 @@ fn appending_to_a_long_block_reuses_the_wrapped_prefix(cx: &mut TestAppContext) 
         );
     });
 }
+
+#[gpui_kit::test]
+fn resolved_runs_carry_heading_size_bold_italic_code_and_link(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        let document = parse("## Head **bold** *italic* `code` [link](https://example.com)\n");
+        let style = test_style();
+        let layout = TextLayout::new(document.clone(), style.clone(), px(600.));
+        let block = &layout.blocks[0];
+        let text = block.text.as_str();
+        assert_eq!(
+            block.font_size,
+            16. * 1.6,
+            "a level-2 heading shapes at the heading size"
+        );
+        let run_covering = |needle: &str| {
+            let start = text.find(needle).expect("fixture text");
+            block
+                .runs
+                .iter()
+                .find(|run| run.range.start <= start && start < run.range.end)
+                .expect("a run covers the styled text")
+        };
+        assert_eq!(run_covering("bold").font.weight, FontWeight::BOLD);
+        assert_eq!(run_covering("italic").font.style, FontStyle::Italic);
+        assert_eq!(run_covering("code").font.family, style.mono_font.family);
+        assert_eq!(run_covering("code").background, Some(style.code_background));
+        assert_eq!(run_covering("link").color, style.link);
+    });
+}

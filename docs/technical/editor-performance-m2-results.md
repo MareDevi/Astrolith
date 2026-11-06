@@ -15,7 +15,7 @@
 | 增量 reconcile：稳定块与安全编辑前缀复用 | `TextLayout::update` |
 | 开发专用原生对照入口 | `--spike=text-layout`，`text_layout/spike.rs` |
 | 计数器 | `astrolith::perf` 的 `text_layout_frame`、`text_layout_pending`、`text_layout_edit`、`text_layout_follow` |
-| 自动化测试 | `text_layout/tests.rs`（7 项，headless） |
+| 自动化测试 | `text_layout/tests.rs`（8 项，headless） |
 | 依赖 | `unicode-linebreak = 0.1.5`（图里已有，仅提升为直接依赖） |
 
 核心直接使用 GPUI 的 `WindowTextSystem::shape_line`、`TextRun`、`ShapedLine`，不经过 Kit Inline 的
@@ -73,7 +73,8 @@ fixture `history-single-paragraph-102420`（102,420 B，单段落，CJK/emoji/�
 - caret、hit-test、selection 与 IME 折叠范围使用同一行几何；
 - 未解析范围返回 `None`；
 - Fenwick 高度索引局部更新与按位置查找；
-- 未受影响的块在编辑后保持身份，长块追加只复用安全前缀。
+- 未受影响的块在编辑后保持身份，长块追加只复用安全前缀；
+- 标题字号、粗体、斜体、行内代码字体/背景与链接颜色按标记解析。
 
 ## 6. 未完成与限制
 
