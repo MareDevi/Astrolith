@@ -599,6 +599,22 @@ impl BlockLayout {
         while prefix > 0 && !old_text.is_char_boundary(prefix) {
             prefix -= 1;
         }
+        // Rendered bytes alone do not identify cached geometry or glyphs:
+        // adding Markdown delimiters can change runs without changing text.
+        let mut cursor = 0;
+        while cursor < prefix {
+            let before = old.run_at(cursor);
+            let after = self.run_at(cursor);
+            if before.font != after.font
+                || before.color != after.color
+                || before.background != after.background
+                || before.strikethrough != after.strikethrough
+            {
+                prefix = cursor;
+                break;
+            }
+            cursor = before.range.end.min(after.range.end).min(prefix);
+        }
         let safe = prefix.saturating_sub(EDIT_PREFIX_MARGIN);
         if safe == 0 {
             return 0;

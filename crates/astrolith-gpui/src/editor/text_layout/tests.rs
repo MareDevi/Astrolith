@@ -436,3 +436,33 @@ fn image_blocks_reserve_loaded_and_fallback_geometry(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui_kit::test]
+fn style_edits_invalidate_carried_rows(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        let text_system = WindowTextSystem::new(cx.text_system().clone());
+        let source = "plain text across several visual rows. ".repeat(20);
+        let mut layout = TextLayout::new(
+            parse(&source),
+            test_style(),
+            px(160.),
+            &ImageMetrics::default(),
+        );
+        prepare_all(&mut layout, &text_system, 800.);
+        assert!(layout.blocks[0].rows[0].shaped.is_some());
+        let before_weight = layout.blocks[0].run_at(0).font.weight;
+        layout.update(parse(&format!("**{}**", source.trim_end())));
+        assert_ne!(layout.blocks[0].run_at(0).font.weight, before_weight);
+        assert!(
+            layout.blocks[0].rows.is_empty(),
+            "changed font metrics invalidate old wrapping and glyphs"
+        );
+        prepare_all(&mut layout, &text_system, 800.);
+        layout.update(parse(&format!("~~**{}**~~", source.trim_end())));
+        assert!(
+            layout.blocks[0].rows.is_empty(),
+            "changed decorations invalidate old glyphs too"
+        );
+    });
+}
