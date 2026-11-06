@@ -288,6 +288,16 @@ pub struct WysiwygDocument {
     pub blocks: Vec<RichBlock>,
 }
 
+/// One applied incremental parse: the document plus how many blocks were
+/// reused unchanged from the previous revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IncrementalParse {
+    /// The reparsed document.
+    pub document: WysiwygDocument,
+    /// Blocks carried over from the previous document.
+    pub reused_blocks: usize,
+}
+
 /// One source line.
 struct Line {
     start: usize,
@@ -313,120 +323,128 @@ impl WysiwygDocument {
         }
         let lines = lines(source);
         let definitions = reference_definitions(source, &lines);
-        let mut blocks = Vec::new();
-        let mut index = 0;
-        while index < lines.len() {
-            if cancelled() {
-                return None;
-            }
-            let line = &lines[index];
-            let content = &source[line.start..line.content_end];
-            if content.trim().is_empty() {
-                index += 1;
-                continue;
-            }
-            let indent = content.len() - content.trim_start_matches(' ').len();
-            let rest = &content[indent..];
-            if indent <= 3 {
-                if let Some((block, next)) =
-                    footnote_definition(source, &lines, index, &definitions)
-                {
-                    blocks.push(block);
-                    index = next;
-                    continue;
-                }
-                if reference_definition(rest).is_some() {
-                    index += 1;
-                    continue;
-                }
-                if let Some((mut rows, next)) = table(source, &lines, index, &definitions) {
-                    blocks.append(&mut rows);
-                    index = next;
-                    continue;
-                }
-                if let Some((block, next)) = raw_flow(source, &lines, index) {
-                    blocks.push(block);
-                    index = next;
-                    continue;
-                }
-                if let Some(block) = fenced_code(source, &lines, index, line, rest) {
-                    index = block.next;
-                    blocks.push(block.block);
-                    continue;
-                }
-                if let Some((level, content_start)) = heading(rest, line, indent) {
-                    let content_end = trim_end(source, content_start, line.content_end);
-                    blocks.push(RichBlock {
-                        kind: BlockKind::Heading(level),
-                        source: line.start..line.end,
-                        content: content_start..content_end,
-                        text: inline(source, content_start..content_end, &definitions),
-                        cells: Vec::new(),
-                        depth: 0,
-                    });
-                    index += 1;
-                    continue;
-                }
-                if is_rule(rest) {
-                    blocks.push(RichBlock {
-                        kind: BlockKind::Rule,
-                        source: line.start..line.end,
-                        content: line.start..line.start,
-                        text: RichText::default(),
-                        cells: Vec::new(),
-                        depth: 0,
-                    });
-                    index += 1;
-                    continue;
-                }
-                if rest.starts_with('>') {
-                    let (block, next) = blockquote(source, &lines, index, indent, &definitions);
-                    blocks.push(block);
-                    index = next;
-                    continue;
-                }
-                if let Some((marker, content_start, ordered, number)) =
-                    list_marker(rest, line, indent)
-                {
-                    let content_end = trim_end(source, content_start, line.content_end);
-                    blocks.push(RichBlock {
-                        kind: BlockKind::ListItem { ordered, number },
-                        source: line.start..line.end,
-                        content: content_start..content_end,
-                        text: inline(source, content_start..content_end, &definitions),
-                        cells: Vec::new(),
-                        depth: indent / 2,
-                    });
-                    let _ = marker;
-                    index += 1;
-                    continue;
-                }
-            }
-            let (block, next) = paragraph(source, &lines, index, indent, &definitions);
-            blocks.push(standalone_image(block));
-            index = next;
-        }
-        if source.ends_with('\n')
-            && blocks
-                .last()
-                .is_none_or(|block| block.content.end < source.len())
-        {
-            // Keep the empty line opened by a trailing newline addressable, so
-            // pressing Enter at the end of the document puts the caret on a
-            // new line instead of at the end of the previous block.
-            blocks.push(RichBlock {
-                kind: BlockKind::Paragraph,
-                source: source.len()..source.len(),
-                content: source.len()..source.len(),
-                text: RichText::default(),
-                cells: Vec::new(),
-                depth: 0,
-            });
-        }
+        let mut blocks = parse_block_range(source, &lines, &definitions, 0, None, &mut cancelled)?;
+        append_trailing_paragraph(source, &mut blocks);
         if cancelled() {
             return None;
         }
         Some(Self { blocks })
+    }
+
+    /// Reparse only the blocks around one replacement, reusing every block
+    /// whose source bytes did not change.
+    ///
+    /// Returns `None` when the edit cannot be applied locally — a class change
+    /// such as an inserted fence that would swallow following blocks, or a
+    /// touched reference definition that can re-resolve links everywhere — so
+    /// the caller can fall back to [`Self::parse_cancellable`]. `old` and `new`
+    /// are the replaced and replacement ranges reported by the same diff; both
+    /// share their start offset. A single huge block still re-parses as a whole.
+    pub fn parse_incremental_cancellable(
+        source: &str,
+        previous_source: &str,
+        previous: &WysiwygDocument,
+        old: Range<usize>,
+        new: Range<usize>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Option<IncrementalParse> {
+        if cancelled() {
+            return None;
+        }
+        let blocks = &previous.blocks;
+        if blocks.is_empty()
+            || old.start != new.start
+            || old.start > old.end
+            || new.start > new.end
+            || old.end > previous_source.len()
+            || new.end > source.len()
+        {
+            return None;
+        }
+        // A reference definition can resolve links in any block, so an edit
+        // that touches one keeps the whole-document path.
+        if touches_reference_definition(previous_source, &old)
+            || touches_reference_definition(source, &new)
+        {
+            return None;
+        }
+        let delta = source.len() as isize - previous_source.len() as isize;
+        let first = blocks.partition_point(|block| block.source.end <= old.start);
+        let start_block = extend_table_back(blocks, first.saturating_sub(1));
+        let end_block = extend_table_forward(
+            blocks,
+            blocks
+                .partition_point(|block| block.source.start < old.end)
+                .min(blocks.len() - 1),
+        )
+        .max(start_block);
+        let anchor_start = blocks[start_block].source.start;
+        let anchor_end = if end_block + 1 == blocks.len() {
+            previous_source.len()
+        } else {
+            blocks[end_block].source.end
+        };
+        if anchor_start > old.start || anchor_end < old.end {
+            return None;
+        }
+        let segment_start = anchor_start;
+        let segment_end = if anchor_end == previous_source.len() {
+            source.len()
+        } else {
+            (anchor_end as isize + delta) as usize
+        };
+        if segment_end > source.len() || segment_end < new.end {
+            return None;
+        }
+
+        let lines = lines(source);
+        let definitions = reference_definitions(source, &lines);
+        let start_line = lines.partition_point(|line| line.start < segment_start);
+        let stop = (segment_end < source.len()).then_some(segment_end);
+        let segment = parse_block_range(
+            source,
+            &lines,
+            &definitions,
+            start_line,
+            stop,
+            &mut cancelled,
+        )?;
+
+        // A block unit may extend past the end anchor (a table row batch, an
+        // inserted fence, a merged paragraph); every old block it overlaps is
+        // superseded. Everything starting after its end is still reusable.
+        let segment_last_end = segment
+            .last()
+            .map_or(segment_start, |block| block.source.end);
+        let suffix_start = if segment_end == source.len() || segment_last_end >= source.len() {
+            blocks.len()
+        } else {
+            blocks
+                .partition_point(|block| {
+                    block.source.start < (segment_last_end as isize - delta) as usize
+                })
+                .max(end_block + 1)
+        };
+        let suffix = &blocks[suffix_start..];
+        let mut parsed_blocks = Vec::with_capacity(start_block + segment.len() + suffix.len());
+        parsed_blocks.extend(blocks[..start_block].iter().cloned());
+        parsed_blocks.extend(segment);
+        for block in suffix {
+            if cancelled() {
+                return None;
+            }
+            parsed_blocks.push(shift_block(block.clone(), delta));
+        }
+        if segment_end == source.len() || segment_last_end >= source.len() {
+            append_trailing_paragraph(source, &mut parsed_blocks);
+        }
+        let reused_blocks = start_block + suffix.len();
+        Some(IncrementalParse {
+            document: Self {
+                blocks: parsed_blocks,
+            },
+            reused_blocks,
+        })
     }
 
     /// The block that owns `source`, or the nearest block by distance.
@@ -535,6 +553,208 @@ fn lines(source: &str) -> Vec<Line> {
         });
     }
     lines
+}
+
+/// Parse blocks from `start`, stopping once a parsed block ends at or past the
+/// byte `stop` (or at the document end when `None`).
+///
+/// The block containing `stop` is parsed whole, so a unit such as a table or a
+/// fenced block is never cut in half. Cancellation is checked between blocks;
+/// one block is never interrupted midway.
+fn parse_block_range(
+    source: &str,
+    lines: &[Line],
+    definitions: &Definitions,
+    start: usize,
+    stop: Option<usize>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Option<Vec<RichBlock>> {
+    let mut blocks = Vec::new();
+    let mut index = start;
+    while index < lines.len() {
+        if cancelled() {
+            return None;
+        }
+        if let Some(stop) = stop {
+            if blocks
+                .last()
+                .is_some_and(|block: &RichBlock| block.source.end >= stop)
+            {
+                break;
+            }
+            if lines[index].start >= stop {
+                break;
+            }
+        }
+        let line = &lines[index];
+        let content = &source[line.start..line.content_end];
+        if content.trim().is_empty() {
+            index += 1;
+            continue;
+        }
+        let indent = content.len() - content.trim_start_matches(' ').len();
+        let rest = &content[indent..];
+        if indent <= 3 {
+            if let Some((block, next)) = footnote_definition(source, lines, index, definitions) {
+                blocks.push(block);
+                index = next;
+                continue;
+            }
+            if reference_definition(rest).is_some() {
+                index += 1;
+                continue;
+            }
+            if let Some((mut rows, next)) = table(source, lines, index, definitions) {
+                blocks.append(&mut rows);
+                index = next;
+                continue;
+            }
+            if let Some((block, next)) = raw_flow(source, lines, index) {
+                blocks.push(block);
+                index = next;
+                continue;
+            }
+            if let Some(block) = fenced_code(source, lines, index, line, rest) {
+                index = block.next;
+                blocks.push(block.block);
+                continue;
+            }
+            if let Some((level, content_start)) = heading(rest, line, indent) {
+                let content_end = trim_end(source, content_start, line.content_end);
+                blocks.push(RichBlock {
+                    kind: BlockKind::Heading(level),
+                    source: line.start..line.end,
+                    content: content_start..content_end,
+                    text: inline(source, content_start..content_end, definitions),
+                    cells: Vec::new(),
+                    depth: 0,
+                });
+                index += 1;
+                continue;
+            }
+            if is_rule(rest) {
+                blocks.push(RichBlock {
+                    kind: BlockKind::Rule,
+                    source: line.start..line.end,
+                    content: line.start..line.start,
+                    text: RichText::default(),
+                    cells: Vec::new(),
+                    depth: 0,
+                });
+                index += 1;
+                continue;
+            }
+            if rest.starts_with('>') {
+                let (block, next) = blockquote(source, lines, index, indent, definitions);
+                blocks.push(block);
+                index = next;
+                continue;
+            }
+            if let Some((marker, content_start, ordered, number)) = list_marker(rest, line, indent)
+            {
+                let content_end = trim_end(source, content_start, line.content_end);
+                blocks.push(RichBlock {
+                    kind: BlockKind::ListItem { ordered, number },
+                    source: line.start..line.end,
+                    content: content_start..content_end,
+                    text: inline(source, content_start..content_end, definitions),
+                    cells: Vec::new(),
+                    depth: indent / 2,
+                });
+                let _ = marker;
+                index += 1;
+                continue;
+            }
+        }
+        let (block, next) = paragraph(source, lines, index, indent, definitions);
+        blocks.push(standalone_image(block));
+        index = next;
+    }
+    Some(blocks)
+}
+
+/// Keep the empty line opened by a trailing newline addressable, so pressing
+/// Enter at the end of the document puts the caret on a new line instead of at
+/// the end of the previous block.
+fn append_trailing_paragraph(source: &str, blocks: &mut Vec<RichBlock>) {
+    if source.ends_with('\n')
+        && blocks
+            .last()
+            .is_none_or(|block| block.content.end < source.len())
+    {
+        blocks.push(RichBlock {
+            kind: BlockKind::Paragraph,
+            source: source.len()..source.len(),
+            content: source.len()..source.len(),
+            text: RichText::default(),
+            cells: Vec::new(),
+            depth: 0,
+        });
+    }
+}
+
+/// Widen a block index to the first row of its pipe table.
+fn extend_table_back(blocks: &[RichBlock], mut index: usize) -> usize {
+    while index > 0
+        && matches!(blocks[index].kind, BlockKind::TableRow { .. })
+        && matches!(blocks[index - 1].kind, BlockKind::TableRow { .. })
+    {
+        index -= 1;
+    }
+    index
+}
+
+/// Widen a block index to the last row of its pipe table.
+fn extend_table_forward(blocks: &[RichBlock], mut index: usize) -> usize {
+    while index + 1 < blocks.len()
+        && matches!(blocks[index].kind, BlockKind::TableRow { .. })
+        && matches!(blocks[index + 1].kind, BlockKind::TableRow { .. })
+    {
+        index += 1;
+    }
+    index
+}
+
+/// Move one reused block's source ranges by `delta` bytes.
+///
+/// Rendered offsets and marks are relative to the block's own text, so only
+/// the source mapping moves.
+fn shift_block(mut block: RichBlock, delta: isize) -> RichBlock {
+    let shift = |range: Range<usize>| {
+        let start = (range.start as isize + delta) as usize;
+        let end = (range.end as isize + delta) as usize;
+        start..end
+    };
+    block.source = shift(block.source);
+    block.content = shift(block.content);
+    for segment in &mut block.text.segments {
+        segment.source = shift(segment.source.clone());
+    }
+    for cell in &mut block.cells {
+        for segment in &mut cell.segments {
+            segment.source = shift(segment.source.clone());
+        }
+    }
+    block
+}
+
+/// Whether an edit range includes a line that is a link reference definition.
+///
+/// The span covers every line the replaced bytes touch plus the line at the
+/// replacement end, so a definition created or destroyed by merging lines is
+/// still detected. An unchanged definition elsewhere keeps its value.
+fn touches_reference_definition(source: &str, range: &Range<usize>) -> bool {
+    let start = range.start.min(source.len());
+    let end = range.end.min(source.len());
+    let from = source[..start].rfind('\n').map_or(0, |newline| newline + 1);
+    let to = source[end..]
+        .find('\n')
+        .map_or(source.len(), |newline| end + newline);
+    source[from..to].split('\n').any(|line| {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        indent <= 3 && reference_definition(&line[indent..]).is_some()
+    })
 }
 
 fn trim_end(source: &str, start: usize, mut end: usize) -> usize {
@@ -1812,5 +2032,151 @@ Second paragraph.
                 assert!(source.is_char_boundary(segment.source.end));
             }
         }
+    }
+
+    /// The replaced/replacement ranges a byte diff reports for `before`/`after`.
+    fn diff(before: &str, after: &str) -> (Range<usize>, Range<usize>) {
+        let (a, b) = (before.as_bytes(), after.as_bytes());
+        let mut prefix = 0;
+        while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
+            prefix += 1;
+        }
+        while !before.is_char_boundary(prefix) || !after.is_char_boundary(prefix) {
+            prefix -= 1;
+        }
+        let mut suffix = 0;
+        while suffix < a.len() - prefix
+            && suffix < b.len() - prefix
+            && a[a.len() - 1 - suffix] == b[b.len() - 1 - suffix]
+        {
+            suffix += 1;
+        }
+        while !before.is_char_boundary(before.len() - suffix)
+            || !after.is_char_boundary(after.len() - suffix)
+        {
+            suffix -= 1;
+        }
+        (prefix..before.len() - suffix, prefix..after.len() - suffix)
+    }
+
+    fn incremental(before: &str, after: &str) -> Option<IncrementalParse> {
+        let previous = WysiwygDocument::parse(before);
+        let (old, new) = diff(before, after);
+        WysiwygDocument::parse_incremental_cancellable(after, before, &previous, old, new, || false)
+    }
+
+    #[test]
+    fn incremental_parse_matches_full_parse_for_local_edits() {
+        let base = "# Title\n\nFirst **bold** paragraph.\nSecond line.\n\n- item one\n- item two\n\n> quote\n\n```rust\nfn main() {}\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n[^1]: footnote body\n";
+        let cases = [
+            ("First **bold**", "First **bold and bright**"),
+            ("Second line.", "Second."),
+            ("- item two\n", ""),
+            ("\n\n> quote", "> quote\n> more"),
+            ("fn main() {}", "fn run() {}"),
+            ("| 1 | 2 |", "| 1 | 3 |"),
+            ("# Title\n\n", "# Renamed\n\n"),
+            ("footnote body", "footnote text"),
+            ("\n\n- item one", "\n\n- item zero\n- item one"),
+            (
+                "| a | b |\n| - | - |\n| 1 | 2 |\n\n",
+                "| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |\n\n",
+            ),
+        ];
+        for (find, replace) in cases {
+            let before = base.to_owned();
+            let at = before.find(find).expect("edit target exists");
+            let mut after = before.clone();
+            after.replace_range(at..at + find.len(), replace);
+            let full = WysiwygDocument::parse(&after);
+            let applied = incremental(&before, &after)
+                .unwrap_or_else(|| panic!("incremental apply failed for {find:?}"));
+            assert_eq!(applied.document, full, "mismatch for {find:?}");
+        }
+    }
+
+    #[test]
+    fn incremental_parse_reuses_blocks_that_did_not_change() {
+        let before = "alpha\n\nbeta\n\ngamma\n\ndelta\n";
+        let after = "alpha!\n\nbeta\n\ngamma\n\ndelta\n";
+        let applied = incremental(before, after).expect("local edit applies");
+        assert_eq!(applied.document, WysiwygDocument::parse(after));
+        assert!(
+            applied.reused_blocks >= 3,
+            "unchanged blocks after the edit are carried over"
+        );
+    }
+
+    #[test]
+    fn incremental_parse_falls_back_for_reference_definition_edits() {
+        let before = "See [docs].\n\n[docs]: https://example.com\n";
+        let after = "See [docs].\n\n[docs]: https://example.org\n";
+        assert!(incremental(before, after).is_none());
+
+        let inserted =
+            "See [docs].\n\n[docs]: https://example.org\n\n[docs]: https://example.com\n";
+        assert!(incremental(before, inserted).is_none());
+    }
+
+    #[test]
+    fn incremental_parse_absorbs_a_block_that_crosses_the_end_anchor() {
+        // An opening fence inserted before `beta` swallows the following
+        // blocks; the spliced suffix must not keep the overridden ones.
+        let before = "alpha\n\nbeta\n\ngamma\n";
+        let after = "alpha\n\n```\nbeta\n\ngamma\n";
+        let applied = incremental(before, after).expect("the crossing unit applies");
+        assert_eq!(applied.document, WysiwygDocument::parse(after));
+        assert!(matches!(
+            applied.document.blocks[1].kind,
+            BlockKind::Code { .. }
+        ));
+    }
+
+    #[test]
+    fn incremental_parse_agrees_with_full_parse_over_random_edits() {
+        let base = "# Head\n\nIntro **bold** text.\nContinuation line.\n\n- one\n- two\n\n> quote\n\n```rust\nfn main() {}\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |\n\n[^n]: note body\n";
+        let pieces = [
+            "x", "中", "\n", "\n\n", "# ", "```\n", "| c |\n", "- ", "> ",
+        ];
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+        let mut applied = 0;
+        for _ in 0..400 {
+            let before = base.to_owned();
+            let mut after = before.clone();
+            let boundaries: Vec<usize> = after
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(after.len()))
+                .collect();
+            let start = boundaries[next() as usize % boundaries.len()];
+            let later: Vec<usize> = boundaries
+                .iter()
+                .copied()
+                .filter(|position| *position >= start)
+                .collect();
+            let end = later[next() as usize % later.len()];
+            let piece = pieces[next() as usize % pieces.len()];
+            match next() % 3 {
+                0 => after.insert_str(start, piece),
+                1 => {
+                    if end > start {
+                        after.replace_range(start..end, "");
+                    }
+                }
+                _ => after.replace_range(start..end, piece),
+            }
+            let full = WysiwygDocument::parse(&after);
+            if let Some(parsed) = incremental(&before, &after) {
+                assert_eq!(parsed.document, full, "mismatch after random edit");
+                applied += 1;
+            }
+        }
+        assert!(applied > 200, "most local edits must take the fast path");
     }
 }

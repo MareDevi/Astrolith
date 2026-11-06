@@ -60,8 +60,8 @@ pub use serialize::serialize_document;
 pub use tokens::{TokenSnapshot, TokenSummary, token_snapshot, token_summary};
 pub use version::DiskBaseline;
 pub use wysiwyg::{
-    BlockKind, ColumnAlign, InlineMark, InlineMarkKind, RichBlock, RichText, SourceSegment,
-    WysiwygDocument,
+    BlockKind, ColumnAlign, IncrementalParse, InlineMark, InlineMarkKind, RichBlock, RichText,
+    SourceSegment, WysiwygDocument,
 };
 
 #[cfg(test)]
