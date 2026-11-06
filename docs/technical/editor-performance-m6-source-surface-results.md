@@ -2,7 +2,7 @@
 
 - 日期：2026-11-06。
 - 对应方案：[编辑器性能优化实施方案](editor-performance-implementation-plan.md) M6。
-- 状态：**SourceSurface 已实现并通过帧预算；completion 浮层已由公开状态宿主接管，Build 产品路径仍保留 stock Editor。** 功能门槛（hover/code action/diagnostics/folding/搜索等）未全部通过，M6 不关闭。
+- 状态：**SourceSurface 已实现并通过帧预算；completion、diagnostics、hover 与 code action 浮层已由公开状态宿主接管，Build 产品路径仍保留 stock Editor。** 功能门槛（folding/搜索/overview ruler 等）未全部通过，M6 不关闭。
 - 环境：Linux 7.3.1-1-cachyos x64，Hyprland/Wayland，scale 1，gpui-pre 0.3.11，dev profile，无 profiler。
 - 入口：debug 构建设置 `ASTROLITH_SOURCE_SURFACE=1` 时 Build 使用 SourceSurface；默认仍是 stock Kit `Editor`。perf harness 使用 `--source-surface` 记录该开关。
 - 证据：`artifacts/e2e/editor-m6-surface-build-*`。
@@ -49,14 +49,13 @@
 
 ## 3. 功能边界（未通过替换门槛）
 
-SourceSurface 满足几何与性能门槛，但以下 Build 行为仍由 Kit `Input` 元素承担，当前 surface 尚未提供对应 UI/交互：
+SourceSurface 满足几何与性能门槛。completion、hover、code action 与 diagnostic 浮层已由 SourceSurface 通过公开状态绘制（见 §3.2–§3.4）；以下 Build 行为仍由 Kit `Input` 元素承担，surface 尚未提供对应 UI/交互：
 
-- LSP hover 与 code action 浮层的呈现；completion 与 diagnostic 浮层已由 SourceSurface 绘制（见 §3.2、§3.3）；
 - diagnostics overview ruler、折叠 gutter 与 folding 后的行映射；
 - 编辑器内搜索/替换、bracket matching、indent guides、auto-close/smart-indent 的可见反馈；
 - 真实 fcitx5 预编辑/候选窗口、物理键盘与剪贴板原生验收仍属 editor-04。
 
-`EditorState` 仍收到文本事务并保持 undo/selection/composition，但依赖元素渲染的浮层不会出现。因此：
+`EditorState` 仍收到文本事务并保持 undo/selection/composition，未接入的浮层与装饰不会出现。因此：
 
 - 默认继续使用 stock Editor；`ASTROLITH_SOURCE_SURFACE=1` 仅用于 A/B 与后续接入。
 - M6 仍为未完成；下一步必须先为上述能力选定可用的公开宿主方案或自行实现，再切换产品路径。
@@ -70,8 +69,8 @@ Kit 的浮层控件（`input/popovers/*`）是 `pub(crate)`，无法直接复用
 | --- | --- | --- |
 | Completion 菜单 | `completion_menu_state()`（`open`/`items`/`query`/`trigger_start_offset`/`revision()`）、`insert_completion()`、`dismiss_completion_overlay()`、`show_completions()` | 已实施，见 §3.2 |
 | 输入触发的 completion 请求 | `EditorState::replace_text_in_range` 内部会走 `on_text_typed` 与 `Lsp::update` | 无需宿主接入，输入路径已具备 |
-| Hover popover | `hover_popover()`、`present_hover()`、`clear_hover_state()`、`Lsp::hover_provider` | 状态可读，但触发路径（`handle_mouse_move`/`handle_hover_definition`）是 `pub(crate)`；需宿主自行实现 debounce 与 provider 调用 |
-| Code action 菜单 | `code_action_menu_state()`、`present_code_actions()`、`perform_code_action()` | 菜单打开入口是 `pub(crate)`；宿主需自行调用 `Lsp::code_action_providers` 再 `present_code_actions` |
+| Hover popover | `hover_popover()`、`present_hover()`、`clear_hover_state()`、`Lsp::hover_provider` | 已实施：宿主自行 debounce 并调用 provider，见 §3.4 |
+| Code action 菜单 | `code_action_menu_state()`、`present_code_actions()`、`perform_code_action()` | 已实施：宿主调用 `Lsp::code_action_providers` 后提交状态，见 §3.4 |
 | Diagnostic popover | `diagnostic_popover()`、`present_diagnostic()`、`diagnostics()`（`DiagnosticSet` 可遍历） | 可读可写，宿主自行做命中与绘制 |
 | Go to definition | `Lsp::definition_provider` | 导航实现（`go_to_definition`）是 `pub(crate)`，宿主需自行跳转 |
 | Folding | `display_map()`（只读）、`set_folding`/`unfold_at` | 折叠后的显示映射可读；SourceSurface 尚未按 `DisplayMap` 渲染 |
@@ -102,6 +101,17 @@ Kit 的浮层控件（`input/popovers/*`）是 `pub(crate)`，无法直接复用
 
 仍未接入：overview ruler 与 gutter 诊断标记；诊断未参与 M6 性能基线（`build` 场景未注入 LSP 诊断）。
 
+### 3.4 已实施：hover popover 与 code action 菜单
+
+Kit 把 hover/code action 的**触发时序**写在元素内部，SourceSurface 用公开 provider 与状态重建同一流程：
+
+- Hover：指针停在已整形文本上后等待 150 ms，再调用 `Lsp::hover_provider`；`symbol_range` 先取 `RopeExt::word_range`，再用响应里的 `range` 校正，结果写入 `present_hover()`。每次指针移动替换待处理任务，经过的位置不会发请求；同一 symbol 内移动直接复用现有浮层；Alt、离开整形区或文本变化调用 `clear_hover_state()`。
+- 浮层内容由 `HoverContents` 展平成 Markdown 交给 Kit `TextView`，锚定 symbol 起点的自有 caret 几何，视口内钳制并在下方放不下时上移；未整形时不显示，继续 fail-closed。
+- Code action：`ToggleCodeActions` 打开时，宿主调用 `Lsp::code_action_providers` 的 `code_actions()`（当前 selection range），把成功的响应包装为 `CodeActionItem` 后写入 `present_code_actions()`；菜单最多绘制 12 行，`MoveUp`/`MoveDown` 在菜单打开时改选中行，`Enter` 提交，`Escape` 与点击编辑区关闭，点击行提交。
+- 提交仍走 `perform_code_action(_, _, push_to_history = true)`，随后 `dismiss_code_action_overlay()`；undo 与 source 事务语义不变。文本变化会同时关闭菜单。
+
+验证：`hover_popover_mirrors_and_clears_the_retained_state`、`hover_contents_joins_marked_strings`、`code_action_menu_mirrors_the_retained_overlay`（headless）覆盖状态镜像、内容展平、键盘移动、提交与关闭；原生 `editor-m6-surface-build-overlay-hosts`（`complex-markdown`，132 帧，total p95 2.67 ms）确认新增浮层路径未影响渲染。真实 LSP hover/code action 往返仍属 editor-09，本轮未触发。
+
 ## 4. 复现
 
 ```sh
@@ -121,5 +131,6 @@ node scripts/editor-perf.mjs run \
 - release profile、gpui-fast 组合未测。
 - 折叠开关动作仍调用 `EditorState::set_folding`；SourceSurface 不读取折叠后的 display map，视觉上未生效。
 - 输入坐标验证停在 `EditorState` 适配器与 headless composition；真实 fcitx5 未执行。
+- hover 与 code action 的宿主只在 headless 测试中验证状态与绘制；真实语言服务器的往返、浮层候选位置与原生输入未在本轮场景触发（属 editor-09）。
 - 长 RTL/双向文本的窗口化命中只做字素/整形上下文保护，未做原生 bidi 视觉滚动验收。
 - 亮度/主题仅改色的失效路径依赖每帧样式比较；未用计数器单独统计。

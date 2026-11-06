@@ -295,7 +295,7 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 | M3 Writing 接入新布局 | 已完成；Writing 产品路径已切换 | [M3 结果](editor-performance-m3-results.md)；`artifacts/e2e/editor-m3-pre-*` |
 | M4 Preview 接入共享阅读布局 | 已完成；Preview 产品路径已切换 | [M4 结果](editor-performance-m4-results.md)；`artifacts/e2e/editor-m4-pre-*` |
 | M5 Writing 输入内核迁移 | 已评估：保留现有输入桥，未触发迁移 | [M5 决策](editor-performance-m5-decision.md)；`artifacts/e2e/editor-m5-gate-*` |
-| M6 Build 长行决策与修复 | 评估完成；`SourceSurface` 已实现并达到帧预算，completion 与 diagnostics（下划线 + hover popover）已改由公开状态宿主绘制；Build 产品路径仍保留 stock Editor（hover/code action/folding/搜索/overview ruler 未接入） | [M6 决策](editor-performance-m6-decision.md)、[SourceSurface 结果](editor-performance-m6-source-surface-results.md)；`artifacts/e2e/editor-m6-pre-build-*`、`editor-m6-surface-build-*`、`editor-m6-surface-build-completion-host` |
+| M6 Build 长行决策与修复 | 评估完成；`SourceSurface` 已实现并达到帧预算，completion、diagnostics（下划线 + hover popover）、LSP hover 与 code action 已改由公开状态宿主绘制；Build 产品路径仍保留 stock Editor（folding/搜索/overview ruler 未接入） | [M6 决策](editor-performance-m6-decision.md)、[SourceSurface 结果](editor-performance-m6-source-surface-results.md)；`artifacts/e2e/editor-m6-pre-build-*`、`editor-m6-surface-build-*`、`editor-m6-surface-build-completion-host` |
 | M7 解析增量化与收尾 | 本轮实施完成；已采用块级增量解析并删除 M2 对照原型。M6/Build 功能门槛、release 与原生 IME/平台矩阵仍未关闭 | [M7 结果](editor-performance-m7-results.md)；`artifacts/e2e/editor-m7-*` |
 | GPUI Fast 采用 | 不采用默认后端 | 长单段落 p95 277 ms，明显差于 gpui-pre 52 ms |
 
@@ -394,8 +394,8 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 **2026-11-06 SourceSurface 实施：帧预算通过，功能门槛未过。** debug build 的
 `ASTROLITH_SOURCE_SURFACE=1` 选择新 surface；1 MiB 单行帧 CPU 从 p95 2,744 ms 降到 3.19 ms
 （p99 4.80 ms），102 KB 单行 p99 从 116.20 ms 降到 0.72 ms，`shaping_bytes` 最大 6.9–7.9 KiB。
-LSP 浮层、折叠、搜索等仍由 Kit `Input` 元素承载，因此默认 Build 继续使用 stock Editor；
-能力接入完成前 M6 不关闭。证据与限制见
+completion、diagnostics、hover 与 code action 浮层已由公开状态宿主绘制；折叠、搜索与 overview ruler
+仍由 Kit `Input` 元素承载，因此默认 Build 继续使用 stock Editor；能力接入完成前 M6 不关闭。证据与限制见
 [SourceSurface 结果](editor-performance-m6-source-surface-results.md)、`artifacts/e2e/editor-m6-surface-build-*`。
 
 - **达到指标：** 保留 stock Editor，记录依赖与性能边界；不进行无收益的源码编辑器重写。
