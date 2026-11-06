@@ -33,9 +33,10 @@ Cache keys include text, full styling runs, font size and tab width. A resolved
 focused caret follows a shrinking viewport on both axes. Manual scrolling away
 from an unchanged caret remains allowed.
 
-Framework changes use published, pinned sources in `vendor/`, not edits to the
-user's Cargo registry. `gpui-kit` remains 0.8.1. See `vendor/PATCHES.md` for the
-transitive package versions, modified files and maintenance boundary.
+These measurements used local framework patches, later removed by the
+[unvendoring change](published-gpui-dependencies.md). They are historical results,
+not measurements of the current published dependency graph. `gpui-kit` remains
+0.8.1.
 
 ## Native development-profile evidence
 

@@ -311,6 +311,7 @@ name = "astrolith-document"
 version = "0.1.0"
 dependencies = [
  "astrolith-core",
+ "markdown",
  "ropey",
  "serde_json",
  "tempfile",
@@ -348,6 +349,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "unicode-segmentation",
  "ureq",
  "url",
 ]
@@ -2594,6 +2596,8 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d862bc8f2e27710039013d075ac4995892e9687ff207fa530f880cbcd513936f"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3049,6 +3053,8 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df4b5f8d0c278308df2f11e0bfe0212dd77d7848ce1bdc4b9d513334414396f6"
 dependencies = [
  "accesskit",
  "anyhow",

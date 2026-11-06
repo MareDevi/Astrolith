@@ -11,6 +11,7 @@
 //! `editor_host` seam: the host builds `BlockNode`s and receives per-leaf
 //! geometry for hit-testing and caret placement.
 
+mod commands;
 mod input;
 
 use super::text_change::TextChange;
@@ -50,6 +51,9 @@ struct FrameGeometry {
 /// The writing surface for one retained document session.
 pub(crate) struct WriterSurface {
     session: gpui_kit::WeakEntity<DocumentSession>,
+    caret_visible: bool,
+    caret_task: Option<gpui_kit::Task<()>>,
+    caret_state: Option<(bool, usize, Range<usize>)>,
     document: Arc<WysiwygDocument>,
     source: Rope,
     parsed_source: Rope,
@@ -104,6 +108,9 @@ impl WriterSurface {
     ) -> Self {
         Self {
             session,
+            caret_visible: true,
+            caret_task: None,
+            caret_state: None,
             document: Arc::new(WysiwygDocument::default()),
             source: Rope::new(),
             parsed_source: Rope::new(),
@@ -146,6 +153,17 @@ impl WriterSurface {
         // Line metrics changed, so every measured height is stale.
         self.heights.borrow_mut().fill(None);
         cx.notify();
+    }
+
+    pub(crate) fn observe_text(&mut self, source: Rope, cx: &mut Context<Self>) {
+        if self.requested_revision.is_some() && self.source == source {
+            return;
+        }
+        self.caret_state = None;
+        let revision = self
+            .requested_revision
+            .map_or(0, |revision| revision.wrapping_add(1));
+        self.set_snapshot(revision, source, cx);
     }
 
     /// Snapshot input changes outside rendering. At most one parse runs and
@@ -905,14 +923,7 @@ impl Render for WriterSurface {
             blocks.push(div().w_full().h(px(omitted.max(0.))).into_any_element());
         }
 
-        let caret = (focused
-            && selection.is_empty()
-            && session
-                .read(cx)
-                .editor
-                .read(cx)
-                .is_cursor_visible(window, cx))
-        .then_some(cursor);
+        let caret = (focused && selection.is_empty() && self.caret_visible).then_some(cursor);
         let caret_color = cx.theme().caret;
         let flow = RichFlow {
             child: Some(
@@ -968,8 +979,7 @@ impl Render for WriterSurface {
             .id(("input", editor.entity_id()))
             .size_full()
             .child(content);
-        editor
-            .update(cx, |editor, cx| editor.bind_input_actions(root, window, cx))
+        self.bind_commands(root.track_focus(&editor.read(cx).focus_handle(cx)), cx)
             .test_support()
             .into_any_element()
     }
@@ -1343,6 +1353,45 @@ mod tests {
         );
         session.read_with(cx, |session, _| {
             assert!(session.buffer.current_text().contains('中'));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn published_command_adapter_deletes_one_grapheme_and_undo_preserves_source(
+        cx: &mut TestAppContext,
+    ) {
+        let source = "---\ntitle: Exact\n---\nHello 👩🏽‍💻";
+        let (handle, session) = mount_writer(cx, source);
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                let end = session.projection.visible.len();
+                session.set_writer_selection(end, end, window, cx);
+            });
+            window.render_frame(cx);
+            window.press("backspace", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(
+                session.buffer.current_text(),
+                "---\ntitle: Exact\n---\nHello "
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press(
+                if cfg!(target_os = "macos") {
+                    "cmd-z"
+                } else {
+                    "ctrl-z"
+                },
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.buffer.current_text(), source)
         });
     }
 

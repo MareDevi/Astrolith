@@ -38,7 +38,7 @@ pub(crate) struct DocumentSession {
     source_subscriptions: Vec<Subscription>,
     /// A selection or mode change cannot create a text edit. Avoid scanning an
     /// unchanged rope at save, command and mode boundaries.
-    absorbed_text: Option<(gpui_kit::EntityId, u64)>,
+    absorbed_text: Option<(gpui_kit::EntityId, DocumentRevision, Rope)>,
     /// Previous absorbed input snapshot, used to find only the changed bytes.
     absorbed_writer_text: Rope,
     /// Rendered writing surface; the editor remains its input model.
@@ -301,11 +301,7 @@ impl DocumentSession {
             cx.new(|cx| WriterSurface::new(weak, style, cx))
         };
         writer.update(cx, |writer, cx| {
-            writer.set_snapshot(
-                editor.read(cx).text_revision(),
-                editor.read(cx).text().clone(),
-                cx,
-            )
+            writer.observe_text(editor.read(cx).text().clone(), cx)
         });
         let change = cx.subscribe_in(
             &editor,
@@ -320,10 +316,17 @@ impl DocumentSession {
         // typewriter centring follow the caret, so they refresh here and nowhere
         // near the render path.
         let cursor = cx.observe_in(&editor, window, |this, _editor, window, cx| {
-            let _ = window;
             if _editor.entity_id() == this.editor.entity_id() {
                 this.last_selection = this.current_source_selection(cx);
                 this.refresh_cursor(cx);
+                let editor = _editor.read(cx);
+                let state = (
+                    editor.focus_handle(cx).is_focused(window),
+                    editor.cursor(),
+                    editor.selected_range(),
+                );
+                this.writer
+                    .update(cx, |writer, cx| writer.refresh_caret(state, cx));
             }
         });
         // Losing focus is the writer's save trigger: the workspace turns it into
@@ -1324,10 +1327,9 @@ impl DocumentSession {
         }
         // Typography, focus dimming and typewriter scrolling belong to the
         // visible rich surface. The input model needs no second prose layer.
-        let revision = self.writer_editor.read(cx).text_revision();
         let text = self.writer_editor.read(cx).text().clone();
         self.writer.update(cx, |writer, cx| {
-            writer.set_snapshot(revision, text, cx);
+            writer.observe_text(text, cx);
             cx.notify();
         });
     }
@@ -1344,10 +1346,9 @@ impl DocumentSession {
             .cursor()
             .min(self.projection.visible.len());
         self.copyedit.refresh_cursor(&self.editor, cursor, cx);
-        let revision = self.writer_editor.read(cx).text_revision();
         let text = self.writer_editor.read(cx).text().clone();
         self.writer.update(cx, |writer, cx| {
-            writer.set_snapshot(revision, text, cx);
+            writer.observe_text(text, cx);
             cx.notify();
         });
     }
@@ -1559,9 +1560,10 @@ impl DocumentSession {
     fn absorb_with_intent(&mut self, cx: &App, intent: HistoryIntent) {
         let text_key = (
             self.editor.entity_id(),
-            self.editor.read(cx).text_revision(),
+            self.buffer.revision(),
+            self.editor.read(cx).text().clone(),
         );
-        if self.absorbed_text == Some(text_key) {
+        if self.absorbed_text.as_ref() == Some(&text_key) {
             return;
         }
         self.absorbed_text = Some(text_key);
@@ -1720,6 +1722,10 @@ impl DocumentSession {
             self.writer_revision = revision;
         }
         self.source_view = source;
+        if source {
+            self.writer
+                .update(cx, |writer, cx| writer.refresh_caret((false, 0, 0..0), cx));
+        }
         let selection = if source {
             source_selection.clone()
         } else {

@@ -12,7 +12,7 @@ use gpui_kit::{
 use super::{WriterSurface, block_key};
 
 impl WriterSurface {
-    fn input_model(&self, cx: &Context<Self>) -> Option<Entity<EditorState>> {
+    pub(super) fn input_model(&self, cx: &Context<Self>) -> Option<Entity<EditorState>> {
         Some(self.session.upgrade()?.read(cx).editor.clone())
     }
 

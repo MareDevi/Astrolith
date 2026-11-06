@@ -443,6 +443,9 @@ impl Render for WorkspacePanel {
                     .map(|session| session.read(cx).writer.clone());
                 let content = match writer {
                     Some(surface) => surface.into_any_element(),
+                    None if code => {
+                        crate::editor::source_viewport(editor.clone(), element.into_any_element())
+                    }
                     None => element.into_any_element(),
                 };
                 let mut body = if code {

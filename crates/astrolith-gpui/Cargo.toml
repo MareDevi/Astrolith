@@ -48,6 +48,7 @@ ureq.workspace = true
 ring.workspace = true
 base64.workspace = true
 tempfile = "3.27.0"
+unicode-segmentation = "=1.13.3"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

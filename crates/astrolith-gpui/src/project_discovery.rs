@@ -6339,8 +6339,8 @@ export const collections = {blog, dataAuthors};
             build.entity_id(),
             "source and projection retain separate display state"
         );
-        let writer_revision = writer.read_with(cx, |editor, _| editor.text_revision());
-        let build_revision = build.read_with(cx, |editor, _| editor.text_revision());
+        let writer_snapshot = writer.read_with(cx, |editor, _| editor.text().clone());
+        let build_snapshot = build.read_with(cx, |editor, _| editor.text().clone());
         for _ in 0..3 {
             cx.update_window(handle.into(), |_, window, cx| {
                 session.update(cx, |session, cx| session.set_source_view(false, window, cx));
@@ -6351,12 +6351,12 @@ export const collections = {blog, dataAuthors};
             .unwrap();
         }
         assert_eq!(
-            writer.read_with(cx, |editor, _| editor.text_revision()),
-            writer_revision
+            writer.read_with(cx, |editor, _| editor.text().clone()),
+            writer_snapshot
         );
         assert_eq!(
-            build.read_with(cx, |editor, _| editor.text_revision()),
-            build_revision
+            build.read_with(cx, |editor, _| editor.text().clone()),
+            build_snapshot
         );
         cx.update_window(handle.into(), |_, window, cx| {
             session.update(cx, |session, cx| session.set_source_view(false, window, cx))

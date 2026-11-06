@@ -15,6 +15,8 @@ pub mod copyedit;
 pub mod formatting;
 /// Lossless frontmatter parse and scalar field spans.
 pub mod parse;
+/// Source-preserving pages for a virtualized Markdown preview.
+pub mod preview_pages;
 /// Lossless writer projection and visible-to-source mapping.
 pub mod projection;
 /// Recovery records for unsaved document content.

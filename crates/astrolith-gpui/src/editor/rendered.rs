@@ -5,7 +5,12 @@
 //! rich-text view, so a Preview mode switch never touches the retained
 //! session, its selection or its history.
 
-use std::path::{Path, PathBuf};
+use astrolith_document::preview_pages::PreviewPages;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use astrolith_document::DocumentKind;
 use gpui_kit::component::text::{TextView, TextViewState};
@@ -20,6 +25,16 @@ use crate::editor::writing_modes::ProseStyle;
 
 pub(crate) struct RenderedDocument {
     state: Entity<TextViewState>,
+    focus: FocusHandle,
+    pages: Arc<PreviewPages>,
+    page_source: SharedString,
+    page_states: HashMap<usize, Entity<TextViewState>>,
+    page_subscriptions: HashMap<usize, gpui_kit::Subscription>,
+    list: gpui_kit::ListState,
+    parse_task: Option<gpui_kit::Task<()>>,
+    generation: u64,
+    select_all: bool,
+    list_width: std::rc::Rc<std::cell::Cell<Option<gpui_kit::Pixels>>>,
     text: SharedString,
     mdx: bool,
     unsupported: bool,
@@ -38,6 +53,16 @@ impl RenderedDocument {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         Self {
             state: cx.new(|cx| TextViewState::markdown("", cx)),
+            focus: cx.focus_handle(),
+            pages: Arc::default(),
+            page_source: SharedString::default(),
+            page_states: HashMap::new(),
+            page_subscriptions: HashMap::new(),
+            list: gpui_kit::ListState::new(0, gpui_kit::ListAlignment::Top, px(300.)),
+            parse_task: None,
+            generation: 0,
+            select_all: false,
+            list_width: Default::default(),
             text: SharedString::default(),
             mdx: false,
             unsupported: false,
@@ -104,8 +129,114 @@ impl RenderedDocument {
         {
             self.syncs += 1;
         }
-        self.state.update(cx, |state, cx| state.set_text(text, cx));
+        self.select_all = false;
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        let source = self.text.clone();
+        self.parse_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(80))
+                .await;
+            let work = source.clone();
+            let pages = cx
+                .background_spawn(async move { PreviewPages::parse(&work, mdx, 8 * 1024) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.pages = Arc::new(pages);
+                this.page_source = source;
+                this.page_states.clear();
+                this.page_subscriptions.clear();
+                this.list
+                    .reset_with_uniform_height(this.pages.ranges.len(), px(4096.));
+                if !this.pages.ranges.is_empty() {
+                    let text = this.pages.page_source(&this.page_source, 0);
+                    this.state.update(cx, |state, cx| state.set_text(&text, cx));
+                    this.retain_page(0, this.state.clone(), cx);
+                }
+                cx.notify();
+            });
+        }));
         cx.notify();
+    }
+
+    fn retain_page(&mut self, index: usize, state: Entity<TextViewState>, cx: &mut Context<Self>) {
+        self.page_subscriptions.insert(
+            index,
+            cx.observe(&state, move |this, _, cx| {
+                this.list.remeasure_items(index..index + 1);
+                cx.notify();
+            }),
+        );
+        self.page_states.insert(index, state);
+    }
+
+    fn render_page(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let state = if let Some(state) = self.page_states.get(&index) {
+            state.clone()
+        } else {
+            let text = self.pages.page_source(&self.page_source, index);
+            let state = cx.new(|cx| TextViewState::markdown(&text, cx));
+            if self.select_all {
+                state.update(cx, |state, cx| state.select_all(cx));
+            }
+            self.retain_page(index, state.clone(), cx);
+            state
+        };
+        // Retain a bounded neighbourhood of parsed page views while scrolling.
+        self.page_states
+            .retain(|&page, _| page.abs_diff(index) <= 16);
+        self.page_subscriptions
+            .retain(|&page, _| page.abs_diff(index) <= 16);
+        let style = self.prose_style(cx);
+        let root = self.root.clone();
+        let document = self.document.clone();
+        let pending = state.read(cx).rendered_text().is_empty();
+        let mut view = TextView::new(&state)
+            .selectable(true)
+            .scrollable(false)
+            .image_source(move |uri| match (&root, &document) {
+                (Some(root), Some(document)) => {
+                    preview_image_path(root, document, &uri.to_string())
+                        .map(|path| ImageSource::Resource(Resource::Path(path.into())))
+                        .unwrap_or_else(|| ImageSource::from(uri.clone()))
+                }
+                _ => ImageSource::from(uri.clone()),
+            })
+            .font_family(style.font_family.clone())
+            .text_size(px(style.font_size))
+            .line_height(gpui_kit::relative(style.line_height))
+            .w_full();
+        if self.mdx {
+            view = view.markdown_mdx();
+        }
+        div()
+            .w_full()
+            .min_h(if pending {
+                window.viewport_size().height
+            } else {
+                px(0.)
+            })
+            .child(view)
+            .into_any_element()
+    }
+
+    fn prose_style(&self, cx: &App) -> ProseStyle {
+        self.style.clone().unwrap_or_else(|| {
+            ProseStyle::new(
+                crate::theme::prose_font(cx),
+                16.,
+                2.,
+                crate::theme::default_prose_page_width_percent(),
+            )
+        })
     }
 
     /// Number of document installs performed, for the per-frame cost test.
@@ -122,8 +253,8 @@ impl RenderedDocument {
 
     /// Give the reading pane the keyboard so the hidden editor never receives
     /// typing after a mode switch.
-    pub(crate) fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.state.read(cx).focus_handle().clone()
+    pub(crate) fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus.clone()
     }
 }
 
@@ -142,36 +273,46 @@ impl Render for RenderedDocument {
                 ))
                 .into_any_element();
         }
-        let style = self.style.clone().unwrap_or_else(|| {
-            ProseStyle::new(
-                crate::theme::prose_font(cx),
-                16.,
-                2.,
-                crate::theme::default_prose_page_width_percent(),
-            )
-        });
-        let root = self.root.clone();
-        let document = self.document.clone();
-        let mut view = TextView::new(&self.state)
-            .selectable(true)
-            .scrollable(true)
-            .image_source(move |uri| match (&root, &document) {
-                (Some(root), Some(document)) => {
-                    preview_image_path(root, document, &uri.to_string())
-                        .map(|path| ImageSource::Resource(Resource::Path(path.into())))
-                        .unwrap_or_else(|| ImageSource::from(uri.clone()))
-                }
-                _ => ImageSource::from(uri.clone()),
-            })
-            .font_family(style.font_family.clone())
-            .text_size(px(style.font_size))
-            .line_height(gpui_kit::relative(style.line_height))
-            .size_full();
-        if self.mdx {
-            view = view.markdown_mdx();
-        }
+        let style = self.prose_style(cx);
+        let list_state = self.list.clone();
+        let list_width = self.list_width.clone();
+        let owner = cx.weak_entity();
+        let view = gpui_kit::list(
+            self.list.clone(),
+            cx.processor(|this, index, window, cx| this.render_page(index, window, cx)),
+        )
+        .size_full();
         div()
             .size_full()
+            .track_focus(&self.focus)
+            .key_context("TextView")
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::SelectAll, _, cx| {
+                    this.select_all = true;
+                    for state in this.page_states.values() {
+                        state.update(cx, |state, cx| state.select_all(cx));
+                    }
+                    cx.stop_propagation();
+                },
+            ))
+            .capture_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
+                    if this.select_all {
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                            this.text.to_string(),
+                        ));
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                if this.select_all {
+                    this.select_all = false;
+                    for state in this.page_states.values() {
+                        state.update(cx, |state, cx| state.clear_selection(cx));
+                    }
+                }
+            }))
             .overflow_hidden()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -184,7 +325,24 @@ impl Render for RenderedDocument {
                         .max_w(px(1200.))
                         .px(px(crate::theme::PROSE_INSET))
                         .py(px(crate::theme::PROSE_TOP))
-                        .child(view),
+                        .child(div().size_full().child(view).on_children_prepainted(
+                            move |bounds, _, cx| {
+                                let Some(bounds) = bounds.first() else {
+                                    return;
+                                };
+                                if list_width.replace(Some(bounds.size.width))
+                                    != Some(bounds.size.width)
+                                {
+                                    // Upstream clears height hints on width changes. Restore
+                                    // estimates after that layout, using only public APIs.
+                                    list_state.clone().with_uniform_item_height(px(4096.));
+                                    let owner = owner.clone();
+                                    cx.defer(move |cx| {
+                                        let _ = owner.update(cx, |_, cx| cx.notify());
+                                    });
+                                }
+                            },
+                        )),
                 ),
             )
             .into_any_element()
@@ -223,7 +381,10 @@ mod tests {
         struct SourceHost(gpui_kit::Entity<EditorState>);
         impl Render for SourceHost {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                Editor::new(&self.0).size_full()
+                crate::editor::source_viewport(
+                    self.0.clone(),
+                    Editor::new(&self.0).size_full().into_any_element(),
+                )
             }
         }
         let source = "中文🦀 é العربية **bold** `code` ".repeat(1_000);
@@ -256,8 +417,10 @@ mod tests {
             handle,
             gpui_kit::size(gpui_kit::px(600.), gpui_kit::px(500.)),
         );
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| {
-            window.render_frame(cx);
             window.render_frame(cx);
             let editor = editor.read(cx);
             assert_eq!(editor.value().as_ref(), format!("{source}终"));
@@ -279,7 +442,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    async fn preview_measures_visible_blocks_and_keeps_the_end_reachable_after_resize(
+    async fn preview_pages_leave_tail_unmeasured_and_keep_it_reachable_after_resize(
         cx: &mut gpui_kit::TestAppContext,
     ) {
         cx.executor().allow_parking();
@@ -299,9 +462,38 @@ mod tests {
             .await;
         cx.update_window(handle, |_, window, cx| window.render_frame(cx))
             .unwrap();
-        let list = state.read_with(cx, |state, _| state.list_state().clone());
+        cx.update_window(handle, |_, window, cx| {
+            let focus = preview.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+            window.render_frame(cx);
+            window.press(
+                if cfg!(target_os = "macos") {
+                    "cmd-a"
+                } else {
+                    "ctrl-a"
+                },
+                cx,
+            );
+            window.press(
+                if cfg!(target_os = "macos") {
+                    "cmd-c"
+                } else {
+                    "ctrl-c"
+                },
+                cx,
+            );
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some(source.clone())
+            );
+        })
+        .unwrap();
+        let list = preview.read_with(cx, |preview, _| preview.list.clone());
         let last = list.item_count() - 1;
-        assert!(last > 1_000);
+        assert!(
+            last > 1,
+            "long documents have multiple bounded source pages"
+        );
         assert!(
             list.bounds_for_item(last).is_none(),
             "first layout must not measure the document tail"

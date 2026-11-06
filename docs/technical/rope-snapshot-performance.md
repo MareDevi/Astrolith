@@ -32,9 +32,10 @@ the live EditorState; preedit snapshots also request parsing. Rich text can lag
 behind input until the latest parse completes. Parsing is still whole-document
 work, now outside the UI thread; it is not an incremental Markdown parser.
 
-No vendor or upstream GPUI patch was added by these changes. Existing vendor
-patches from the earlier responsiveness repair remain in this checkout, so these
-runs do not establish performance for an unpatched dependency graph.
+No vendor or upstream GPUI patch was added by these changes. At that measurement point, vendor patches from the earlier repair were still
+active. The subsequent [unvendoring change](published-gpui-dependencies.md) removes
+them. These historical runs do not establish performance for the current
+published dependency graph.
 
 ## Measured remaining input cost
 
