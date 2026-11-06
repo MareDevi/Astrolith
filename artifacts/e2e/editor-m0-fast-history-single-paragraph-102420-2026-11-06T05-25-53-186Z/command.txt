@@ -1,0 +1,1 @@
+/home/maredevi/Projects/Astrolith/target/editor-perf/fast/debug/astrolith-desktop /home/maredevi/Projects/Astrolith/artifacts/e2e/editor-m0-fast-history-single-paragraph-102420-2026-11-06T05-25-53-186Z/run/project/src/content/fixture.md
