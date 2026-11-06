@@ -1,7 +1,7 @@
 # Published GPUI dependencies — 2026-11-06
 
-Astrolith no longer vendors or patches GPUI packages. `gpui-kit = 0.8.1` remains
-pinned, with published `gpui-base = 0.8.1` and `gpui-pre = 0.3.10` restored to
+At commit `b85b34e`, Astrolith stopped vendoring or patching GPUI packages.
+That measurement snapshot pinned `gpui-kit = 0.8.1`, with published `gpui-base = 0.8.1` and `gpui-pre = 0.3.10` restored to
 registry sources and checksums in Cargo.lock. No Cargo registry files were edited.
 
 ## Application adapters

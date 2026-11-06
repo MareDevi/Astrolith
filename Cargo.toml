@@ -20,18 +20,18 @@ version = "0.1.0"
 publish = false
 
 [workspace.dependencies]
-gpui-kit = "=0.8.1"
+gpui-kit = "=0.9.0"
 tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "sync", "time", "net", "process", "io-util", "macros"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt", "json", "registry", "tracing-log"] }
 tracing-appender = "=0.2.5"
-trash = "=5.2.9"
+trash = "=5.3.0"
 chrono = "=0.4.45"
 futures = "=0.3.34"
 image = { version = "=0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 ureq = "=3.5.1"
 ring = "=0.17.14"
-base64 = "=0.22.1"
+base64 = "=0.23.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

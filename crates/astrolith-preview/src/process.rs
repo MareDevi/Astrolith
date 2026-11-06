@@ -492,10 +492,13 @@ mod windows_job {
     //! the `windows-sys` calls are `unsafe`.
     #![allow(unsafe_code)]
 
-    use std::io;
+    use std::{
+        io,
+        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    };
 
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE, TRUE},
+        Foundation::{HANDLE, TRUE},
         System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -506,7 +509,7 @@ mod windows_job {
     /// Owns a Job Object handle and closes it on drop.
     #[derive(Debug)]
     pub struct Job {
-        handle: HANDLE,
+        handle: OwnedHandle,
     }
 
     impl Job {
@@ -516,15 +519,17 @@ mod windows_job {
             // the job handle is owned by the returned wrapper.
             unsafe {
                 let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-                if handle == 0 {
+                if handle.is_null() {
                     return Err(io::Error::last_os_error());
                 }
-                let job = Job { handle };
+                let job = Job {
+                    handle: OwnedHandle::from_raw_handle(handle),
+                };
 
                 let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
                 info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
                 let set = SetInformationJobObject(
-                    job.handle,
+                    job.handle.as_raw_handle(),
                     JobObjectExtendedLimitInformation,
                     &info as *const _ as *const core::ffi::c_void,
                     std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
@@ -532,7 +537,7 @@ mod windows_job {
                 if set != TRUE {
                     return Err(io::Error::last_os_error());
                 }
-                if AssignProcessToJobObject(job.handle, process) == 0 {
+                if AssignProcessToJobObject(job.handle.as_raw_handle(), process) == 0 {
                     return Err(io::Error::last_os_error());
                 }
                 Ok(job)
@@ -543,37 +548,14 @@ mod windows_job {
         pub fn terminate(&self) {
             // Safety: `self.handle` is a live job handle.
             unsafe {
-                TerminateJobObject(self.handle, 1);
+                TerminateJobObject(self.handle.as_raw_handle(), 1);
             }
         }
     }
 
-    impl Drop for Job {
-        fn drop(&mut self) {
-            // Safety: the handle is owned by this wrapper and closed once.
-            unsafe {
-                CloseHandle(self.handle);
-            }
-        }
-    }
-
-    use std::os::windows::io::AsRawHandle;
-
-    /// Helper trait so `RunningProcess::spawn` reads a single raw handle value on
-    /// both platforms.
-    pub trait RawHandle {
-        fn raw_handle(&self) -> Option<HANDLE>;
-    }
-
-    impl RawHandle for tokio::process::Child {
-        fn raw_handle(&self) -> Option<HANDLE> {
-            Some(self.as_raw_handle() as HANDLE)
-        }
-    }
+    // OwnedHandle closes the owned job once and preserves Send/Sync across
+    // the preview service's worker boundary without a raw-pointer impl.
 }
-
-#[cfg(windows)]
-use windows_job::RawHandle as _;
 
 #[cfg(test)]
 mod tests {
