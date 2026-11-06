@@ -1,0 +1,136 @@
+{
+  "settle_ms": 1500,
+  "wait_document_ms": 15000,
+  "steps": [
+    {
+      "mode": "writing",
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": -4000,
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": 0,
+      "wait_ms": 350
+    },
+    {
+      "input": "中🦀",
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": -8000,
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": 0,
+      "wait_ms": 350
+    },
+    {
+      "input": "中🦀",
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": -12000,
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": 0,
+      "wait_ms": 350
+    },
+    {
+      "input": "中🦀",
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": -16000,
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": 0,
+      "wait_ms": 350
+    },
+    {
+      "input": "中🦀",
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": -20000,
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": 0,
+      "wait_ms": 350
+    },
+    {
+      "input": "中🦀",
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": -24000,
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": 0,
+      "wait_ms": 350
+    },
+    {
+      "input": "中🦀",
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": -28000,
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": 0,
+      "wait_ms": 350
+    },
+    {
+      "input": "中🦀",
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": -32000,
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": 0,
+      "wait_ms": 350
+    },
+    {
+      "input": "中🦀",
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": -36000,
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": 0,
+      "wait_ms": 350
+    },
+    {
+      "input": "中🦀",
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": -40000,
+      "wait_ms": 700
+    },
+    {
+      "scroll_y": 0,
+      "wait_ms": 350
+    },
+    {
+      "input": "中🦀",
+      "wait_ms": 700
+    },
+    {
+      "wait_ms": 300
+    },
+    {
+      "quit": true
+    }
+  ]
+}
