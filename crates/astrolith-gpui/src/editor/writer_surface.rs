@@ -980,6 +980,11 @@ impl Element for LayoutCanvas {
         _: &mut App,
     ) {
         let mut geometry = self.geometry.borrow_mut();
+        if (geometry.width - f32::from(bounds.size.width)).abs() > 0.5 {
+            // Render used the previous frame's measurement. Reconcile on the
+            // next frame even when short content has no pending layout work.
+            window.request_animation_frame();
+        }
         geometry.origin = bounds.origin;
         geometry.width = f32::from(bounds.size.width);
         geometry.viewport = bounds.intersect(&window.content_mask().bounds);
@@ -1450,6 +1455,33 @@ mod tests {
                 "one undo removes the whole composition"
             )
         });
+    }
+
+    #[gpui_kit::test]
+    fn short_writer_reconciles_width_on_the_next_frame(cx: &mut TestAppContext) {
+        let (handle, session) = mount_writer(cx, "Short paragraph.");
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        for width in [900., 1500., 900.] {
+            cx.simulate_window_resize(handle.into(), size(px(width), px(700.)));
+            cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+                .unwrap();
+            cx.update_window(handle.into(), |_, window, cx| {
+                assert!(
+                    window.simulate_next_frame(cx) > 0,
+                    "measured width changes must schedule reconciliation"
+                );
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+                .unwrap();
+            writer.read_with(cx, |writer, _| {
+                assert!(
+                    (writer.laid_out_width.unwrap() - writer.geometry.borrow().width).abs() <= 0.5,
+                    "short content must resize without waiting for typing or caret blink"
+                );
+            });
+        }
     }
 
     #[gpui_kit::test]

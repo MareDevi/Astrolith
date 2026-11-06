@@ -805,6 +805,11 @@ impl Element for PreviewCanvas {
         _: &mut App,
     ) {
         let mut geometry = self.geometry.borrow_mut();
+        if (geometry.width - f32::from(bounds.size.width)).abs() > 0.5 {
+            // Render used the previous frame's measurement. Reconcile on the
+            // next frame even when short content has no pending layout work.
+            window.request_animation_frame();
+        }
         geometry.origin = bounds.origin;
         geometry.width = f32::from(bounds.size.width);
         geometry.viewport = bounds.intersect(&window.content_mask().bounds);
@@ -1100,6 +1105,43 @@ mod tests {
         preview.read_with(cx, |preview, _| {
             assert!(preview.laid_out_width.is_some());
         });
+    }
+
+    #[gpui_kit::test]
+    fn short_preview_reconciles_width_on_the_next_frame(cx: &mut gpui_kit::TestAppContext) {
+        let (handle, preview) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |_, cx| {
+                cx.new(RenderedDocument::new)
+            })
+            .unwrap()
+        });
+        preview.update(cx, |preview, cx| {
+            preview.document = Arc::new(WysiwygDocument::parse("Short paragraph."));
+            preview.text = "Short paragraph.".into();
+            cx.notify();
+        });
+        for width in [900., 1500., 900.] {
+            cx.simulate_window_resize(handle, size(px(width), px(700.)));
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .unwrap();
+            cx.update_window(handle, |_, window, cx| {
+                assert!(
+                    window.simulate_next_frame(cx) > 0,
+                    "measured width changes must schedule reconciliation"
+                );
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .unwrap();
+            preview.read_with(cx, |preview, _| {
+                assert!(
+                    (preview.laid_out_width.unwrap() - preview.geometry.borrow().width).abs() <= 0.5,
+                    "stable short content must adopt its measured column width without input or scrolling"
+                );
+            });
+        }
     }
 
     #[test]
