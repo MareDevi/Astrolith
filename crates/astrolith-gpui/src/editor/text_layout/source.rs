@@ -73,10 +73,12 @@ pub(crate) trait SourceRuns {
 }
 
 /// Plain, unhighlighted runs.
+#[cfg(test)]
 pub(crate) struct PlainSourceRuns {
     pub(crate) style: Arc<SourceStyle>,
 }
 
+#[cfg(test)]
 impl SourceRuns for PlainSourceRuns {
     fn runs(&self, range: Range<usize>) -> Vec<TextRun> {
         if range.is_empty() {

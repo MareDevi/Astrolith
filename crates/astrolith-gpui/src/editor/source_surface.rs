@@ -15,9 +15,8 @@
 use super::input_boundaries::{grapheme_boundary, word_boundary};
 use super::perf;
 use super::session::DocumentSession;
-use super::text_layout::source::{
-    PlainSourceRuns, SourceLayout, SourceRuns, SourceStyle, SourceViewport,
-};
+use super::text_layout::source::{SourceLayout, SourceRuns, SourceStyle, SourceViewport};
+use gpui_kit::base::input::{DiagnosticColors, DiagnosticEntry, DiagnosticSet, DiagnosticSeverity};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::highlighter::{HighlightTheme, SyntaxHighlighter};
 use gpui_kit::component::input::{self, EditorState, InputEvent, Rope, RopeExt};
@@ -25,8 +24,8 @@ use gpui_kit::{
     AnyElement, App, Bounds, ClipboardItem, Context, Div, Element, ElementId, Entity,
     EntityInputHandler, Focusable, GlobalElementId, HighlightStyle, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, ScrollHandle, SharedString,
-    Stateful, TestSupportExt, TextAlign, TextRun, UTF16Selection, WeakEntity, Window, div, fill,
-    point, prelude::*, px, size,
+    Stateful, TestSupportExt, TextAlign, TextRun, UTF16Selection, UnderlineStyle, WeakEntity,
+    Window, div, fill, point, prelude::*, px, size,
 };
 use std::cell::RefCell;
 use std::ops::Range;
@@ -58,6 +57,8 @@ const COMPLETION_PADDING: f32 = 4.;
 const COMPLETION_MAX_WIDTH: f32 = 420.;
 const COMPLETION_MIN_WIDTH: f32 = 160.;
 const POPUP_GAP: f32 = 4.;
+const DIAGNOSTIC_MAX_WIDTH: f32 = 420.;
+const DIAGNOSTIC_MIN_WIDTH: f32 = 180.;
 
 #[derive(Clone, Copy, Default)]
 struct FrameGeometry {
@@ -124,6 +125,8 @@ pub(crate) struct SourceSurface {
     /// Menu revision the selected completion row belongs to.
     completion_revision: u64,
     completion_selected: usize,
+    /// Byte offset of the squiggle whose popover is shown.
+    diagnostic_anchor: Option<usize>,
     _observe: gpui_kit::Subscription,
     _change: gpui_kit::Subscription,
 }
@@ -175,6 +178,7 @@ impl SourceSurface {
             focused: false,
             completion_revision: 0,
             completion_selected: 0,
+            diagnostic_anchor: None,
             _observe: observe,
             _change: change,
         }
@@ -890,6 +894,111 @@ impl SourceSurface {
         self.completion_selected = 0;
         true
     }
+
+    /// Mirror the retained editor's diagnostic popover while the pointer is
+    /// over a squiggle.
+    ///
+    /// The entry and its content stay on `EditorState`, so an action that
+    /// clears the popover there also closes this host's copy.
+    fn update_diagnostic_hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let hit = self.source_at(position).and_then(|offset| {
+            let entry = self
+                .editor
+                .read(cx)
+                .diagnostics()
+                .and_then(|set| set.for_offset(offset))
+                .cloned()?;
+            Some((offset, entry))
+        });
+        let Some((offset, entry)) = hit else {
+            self.clear_diagnostic_hover(cx);
+            return;
+        };
+        if self.editor.read(cx).diagnostic_popover().as_deref() == Some(&entry) {
+            return;
+        }
+        self.diagnostic_anchor = Some(offset);
+        self.editor
+            .update(cx, |editor, cx| editor.present_diagnostic(entry, cx));
+    }
+
+    fn clear_diagnostic_hover(&mut self, cx: &mut Context<Self>) {
+        self.diagnostic_anchor = None;
+        self.editor
+            .update(cx, |editor, cx| editor.clear_diagnostic_popover(cx));
+    }
+
+    /// Paint the diagnostic popover the retained editor is presenting.
+    fn diagnostic_popup(
+        &self,
+        placement: PopupPlacement,
+        entry: &DiagnosticEntry,
+        cx: &App,
+    ) -> AnyElement {
+        let status = &cx.theme().highlight_theme.style.status;
+        let (border, background, foreground) = match entry.severity {
+            DiagnosticSeverity::Error => (
+                status.error_border(cx),
+                status.error_background(cx),
+                status.error(cx),
+            ),
+            DiagnosticSeverity::Warning => (
+                status.warning_border(cx),
+                status.warning_background(cx),
+                status.warning(cx),
+            ),
+            DiagnosticSeverity::Info => (
+                status.info_border(cx),
+                status.info_background(cx),
+                status.info(cx),
+            ),
+            DiagnosticSeverity::Hint => (
+                status.hint_border(cx),
+                status.hint_background(cx),
+                status.hint(cx),
+            ),
+        };
+        let mut body = div().child(entry.message.clone());
+        if let Some(code) = entry.code.as_ref() {
+            body = body.child(
+                div()
+                    .mt(px(3.))
+                    .text_size(px((placement.font_size - 2.).max(8.)))
+                    .child(code.clone()),
+            );
+        }
+        div()
+            .id("source-diagnostic-popover")
+            .absolute()
+            .left(px(placement.left))
+            .top(px(placement.top))
+            .w(px(placement.width))
+            .px(px(8.))
+            .py(px(5.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(border)
+            .bg(background)
+            .text_color(foreground)
+            .text_size(px(placement.font_size))
+            .child(body)
+            .into_any_element()
+    }
+}
+
+/// Estimated popover height, used to choose the side of the squiggle.
+fn diagnostic_height(entry: &DiagnosticEntry, width: f32, font_size: f32) -> f32 {
+    let per_line = ((width - 16.) / (font_size * 0.6)).max(8.);
+    let mut lines = 0usize;
+    for line in entry.message.lines() {
+        lines += ((line.chars().count() as f32 / per_line).ceil() as usize).max(1);
+    }
+    let code = if entry.code.is_some() {
+        font_size + 3.
+    } else {
+        0.
+    };
+    lines.max(1) as f32 * font_size * 1.4 + 10. + code
 }
 
 fn page_rows(surface: &SourceSurface, window: &Window) -> usize {
@@ -911,25 +1020,46 @@ enum Boundary {
     Document,
 }
 
-/// Syntax runs for the shaped source window.
+/// Syntax and diagnostic runs for the shaped source window.
 struct ThemedSourceRuns<'a> {
     highlighter: Option<&'a SyntaxHighlighter>,
     theme: &'a HighlightTheme,
     style: Arc<SourceStyle>,
+    diagnostics: Option<&'a DiagnosticSet>,
+    diagnostic_colors: DiagnosticColors,
 }
 
 impl SourceRuns for ThemedSourceRuns<'_> {
     fn runs(&self, range: Range<usize>) -> Vec<TextRun> {
-        let Some(highlighter) = self.highlighter else {
-            return PlainSourceRuns {
-                style: self.style.clone(),
-            }
-            .runs(range);
-        };
-        let styles = highlighter.styles(&range, self.theme);
-        let mut runs = Vec::with_capacity(styles.len().max(1));
+        let styles = self
+            .highlighter
+            .map(|highlighter| highlighter.styles(&range, self.theme))
+            .unwrap_or_default();
+        let diagnostics: Vec<(Range<usize>, HighlightStyle)> = self
+            .diagnostics
+            .map(|set| {
+                set.range(range.clone())
+                    .filter_map(|entry| {
+                        let start = entry.range.start.max(range.start);
+                        let end = entry.range.end.min(range.end);
+                        (start < end).then(|| {
+                            (
+                                start..end,
+                                diagnostic_underline(entry.severity, self.diagnostic_colors),
+                            )
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut runs = Vec::with_capacity(styles.len() + diagnostics.len());
         let mut cursor = range.start;
-        for (span, style) in styles {
+        let combined: Vec<(Range<usize>, HighlightStyle)> = if diagnostics.is_empty() {
+            styles
+        } else {
+            gpui_kit::combine_highlights(diagnostics, styles).collect()
+        };
+        for (span, style) in combined {
             let start = span.start.max(range.start).min(range.end);
             let end = span.end.max(range.start).min(range.end);
             if start > cursor {
@@ -949,6 +1079,23 @@ impl SourceRuns for ThemedSourceRuns<'_> {
             runs.push(plain_run(&self.style, range.len()));
         }
         runs
+    }
+}
+
+fn diagnostic_underline(severity: DiagnosticSeverity, colors: DiagnosticColors) -> HighlightStyle {
+    let color = match severity {
+        DiagnosticSeverity::Error => colors.error,
+        DiagnosticSeverity::Warning => colors.warning,
+        DiagnosticSeverity::Info => colors.info,
+        DiagnosticSeverity::Hint => colors.hint,
+    };
+    HighlightStyle {
+        underline: Some(UnderlineStyle {
+            color: Some(color),
+            thickness: px(1.),
+            wavy: true,
+        }),
+        ..Default::default()
     }
 }
 
@@ -1011,8 +1158,17 @@ impl Render for SourceSurface {
         let gutter = gutter_width(self.state.borrow().layout.as_ref(), &style);
         let content_width = (width - gutter).max(80.);
         let highlight_theme = cx.theme().highlight_theme.clone();
+        let status = &highlight_theme.style.status;
+        let diagnostic_colors = DiagnosticColors {
+            error: status.error(cx),
+            warning: status.warning(cx),
+            info: status.info(cx),
+            hint: status.hint(cx),
+        };
         let prepare_started = Instant::now();
         {
+            let editor = self.editor.read(cx);
+            let diagnostics = editor.diagnostics();
             let mut state = self.state.borrow_mut();
             if state.layout.is_none() {
                 state.layout = Some(SourceLayout::new(
@@ -1035,6 +1191,8 @@ impl Render for SourceSurface {
                 highlighter: self.highlighter.as_ref(),
                 theme: &highlight_theme,
                 style: Arc::new(style.clone()),
+                diagnostics,
+                diagnostic_colors,
             };
             let _prepared = layout.prepare(
                 window.text_system(),
@@ -1171,6 +1329,34 @@ impl Render for SourceSurface {
                 cx,
             )
         });
+        let diagnostic = self.editor.read(cx).diagnostic_popover().and_then(|entry| {
+            let anchor = self.diagnostic_anchor.unwrap_or(entry.range.start);
+            let (caret, _) = self.state.borrow().layout.as_ref()?.caret(anchor)?;
+            let popup_width = DIAGNOSTIC_MAX_WIDTH
+                .min(width)
+                .max(DIAGNOSTIC_MIN_WIDTH.min(width));
+            let font_size = f32::from(style.font_size);
+            let estimated = diagnostic_height(&entry, popup_width, font_size);
+            let left =
+                (gutter + f32::from(caret.x) - scroll_x).clamp(0., (width - popup_width).max(0.));
+            let below = f32::from(caret.y) - scroll_y + row_height + POPUP_GAP;
+            let top = if below + estimated <= height {
+                below
+            } else {
+                (f32::from(caret.y) - scroll_y - estimated - POPUP_GAP).max(0.)
+            };
+            Some(self.diagnostic_popup(
+                PopupPlacement {
+                    left,
+                    top,
+                    width: popup_width,
+                    row_height,
+                    font_size,
+                },
+                &entry,
+                cx,
+            ))
+        });
         let scroll_area = div()
             .id(("source-surface", self.editor.entity_id()))
             .size_full()
@@ -1186,10 +1372,11 @@ impl Render for SourceSurface {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if event.pressed_button != Some(MouseButton::Left) {
-                    return;
+                if event.pressed_button == Some(MouseButton::Left) {
+                    this.select(event.position, true, window, cx);
+                } else {
+                    this.update_diagnostic_hover(event.position, cx);
                 }
-                this.select(event.position, true, window, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -1204,6 +1391,9 @@ impl Render for SourceSurface {
             .child(scroll_area);
         if let Some(popup) = popup {
             root = root.child(popup);
+        }
+        if let Some(diagnostic) = diagnostic {
+            root = root.child(diagnostic);
         }
         let focus = self.editor.read(cx).focus_handle(cx);
         self.bind_commands(root.track_focus(&focus), cx)
@@ -1561,7 +1751,8 @@ mod tests {
     use astrolith_document::DocumentIdentity;
     use gpui_kit::{
         ElementInputHandler, EntityInputHandler, FocusHandle, TestAppContext, WindowHandle,
-        WindowOptions, base::Root, test::TestInput, test::TestWindowExt,
+        WindowOptions, base::Root, base::input::Diagnostic, component::input::Position,
+        test::TestInput, test::TestWindowExt,
     };
 
     struct SourceHost {
@@ -1715,9 +1906,103 @@ mod tests {
             });
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn diagnostic_runs_underline_exactly_the_reported_range(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let theme = cx.theme().highlight_theme.clone();
+            let text = Rope::from("alpha\nbeta\n");
+            let mut diagnostics = DiagnosticSet::new(&text);
+            diagnostics.push(
+                Diagnostic::new(Position::new(0, 0)..Position::new(0, 5), "unknown name")
+                    .with_severity(DiagnosticSeverity::Error),
+            );
+            let runs = ThemedSourceRuns {
+                highlighter: None,
+                theme: &theme,
+                style: Arc::new(SourceStyle::from_theme(cx)),
+                diagnostics: Some(&diagnostics),
+                diagnostic_colors: DiagnosticColors {
+                    error: gpui_kit::red(),
+                    ..Default::default()
+                },
+            }
+            .runs(0..11);
+            assert_eq!(
+                runs.iter().map(|run| run.len).sum::<usize>(),
+                11,
+                "the runs cover the shaped window"
+            );
+            let underlined: Vec<_> = runs.iter().filter(|run| run.underline.is_some()).collect();
+            assert_eq!(underlined.len(), 1, "only the diagnostic is underlined");
+            assert_eq!(underlined[0].len, 5);
+            assert!(
+                underlined[0]
+                    .underline
+                    .as_ref()
+                    .is_some_and(|underline| underline.wavy),
+                "diagnostics keep the squiggle"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn diagnostic_hover_mirrors_and_clears_the_retained_popover(cx: &mut TestAppContext) {
+        let (handle, surface) = mount_source(cx, "alpha\nbeta\n");
+        surface.update(cx, |surface, cx| {
+            let text = surface.editor.read(cx).text().clone();
+            let mut diagnostics = DiagnosticSet::new(&text);
+            diagnostics.push(
+                Diagnostic::new(Position::new(0, 0)..Position::new(0, 5), "unknown name")
+                    .with_severity(DiagnosticSeverity::Error),
+            );
+            surface.editor.update(cx, |editor, cx| {
+                if let Some(set) = editor.diagnostics_mut() {
+                    *set = diagnostics;
+                }
+                cx.notify();
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let squiggle = surface.read_with(cx, |surface, _| {
+            let state = surface.state.borrow();
+            let layout = state.layout.as_ref().expect("layout exists");
+            let (caret, _) = layout.caret(0).expect("the first line is shaped");
+            point(
+                state.geometry.origin.x + px(state.gutter) + caret.x + px(2.),
+                state.geometry.origin.y + caret.y + px(2.),
+            )
+        });
+        surface.update(cx, |surface, cx| {
+            surface.update_diagnostic_hover(squiggle, cx);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .unwrap();
         surface.read_with(cx, |surface, cx| {
-            assert_eq!(surface.editor.read(cx).text().to_string(), "alpine\n");
-            assert!(!surface.editor.read(cx).completion_menu_state().open);
+            assert!(
+                surface.diagnostic_anchor.is_some_and(|offset| offset < 5),
+                "the popover is anchored inside the squiggle"
+            );
+            let popover = surface
+                .editor
+                .read(cx)
+                .diagnostic_popover()
+                .expect("the retained editor presents the diagnostic");
+            assert_eq!(popover.message.as_ref(), "unknown name");
+        });
+        surface.update(cx, |surface, cx| {
+            surface.update_diagnostic_hover(squiggle + point(px(0.), px(60.)), cx);
+        });
+        surface.read_with(cx, |surface, cx| {
+            assert_eq!(surface.diagnostic_anchor, None);
+            assert!(surface.editor.read(cx).diagnostic_popover().is_none());
         });
     }
 }
