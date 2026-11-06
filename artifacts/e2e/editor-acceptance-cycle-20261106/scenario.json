@@ -1,0 +1,108 @@
+{
+  "settle_ms": 2000,
+  "wait_document_ms": 15000,
+  "steps": [
+    {
+      "mode": "writing",
+      "wait_ms": 700
+    },
+    {
+      "mode": "build",
+      "wait_ms": 700
+    },
+    {
+      "mode": "build",
+      "wait_ms": 700
+    },
+    {
+      "mode": "preview",
+      "wait_ms": 700
+    },
+    {
+      "mode": "preview",
+      "wait_ms": 700
+    },
+    {
+      "mode": "writing",
+      "wait_ms": 700
+    },
+    {
+      "mode": "writing",
+      "wait_ms": 700
+    },
+    {
+      "mode": "preview",
+      "wait_ms": 700
+    },
+    {
+      "mode": "preview",
+      "wait_ms": 700
+    },
+    {
+      "mode": "build",
+      "wait_ms": 700
+    },
+    {
+      "mode": "build",
+      "wait_ms": 700
+    },
+    {
+      "mode": "writing",
+      "wait_ms": 700
+    },
+    {
+      "mode": "writing",
+      "wait_ms": 700
+    },
+    {
+      "mode": "build",
+      "wait_ms": 700
+    },
+    {
+      "mode": "build",
+      "wait_ms": 700
+    },
+    {
+      "mode": "preview",
+      "wait_ms": 700
+    },
+    {
+      "mode": "preview",
+      "wait_ms": 700
+    },
+    {
+      "mode": "writing",
+      "wait_ms": 700
+    },
+    {
+      "mode": "writing",
+      "wait_ms": 700
+    },
+    {
+      "mode": "preview",
+      "wait_ms": 700
+    },
+    {
+      "mode": "preview",
+      "wait_ms": 700
+    },
+    {
+      "mode": "build",
+      "wait_ms": 700
+    },
+    {
+      "mode": "build",
+      "wait_ms": 700
+    },
+    {
+      "mode": "writing",
+      "wait_ms": 700
+    },
+    {
+      "wait_ms": 300
+    },
+    {
+      "quit": true
+    }
+  ]
+}

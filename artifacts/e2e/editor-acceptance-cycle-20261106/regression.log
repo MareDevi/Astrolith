@@ -1,0 +1,26 @@
+   Compiling astrolith-gpui v0.1.0 (/home/maredevi/Projects/Astrolith/crates/astrolith-gpui)
+mbx[progress]: 15s elapsed; 0 hits, 0 misses, 0 bypassed, 1 not looked up; ~0s compiler work saved
+mbx[warning]: result was not stored: rustc search path kind is not cacheable yet: native
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.28s
+     Running unittests src/lib.rs (target/debug/deps/astrolith_gpui-ae737e407366a7b9)
+
+running 1 test
+test editor::text_layout::tests::acceptance_style_change_must_invalidate_carried_shapes ... FAILED
+
+failures:
+
+---- editor::text_layout::tests::acceptance_style_change_must_invalidate_carried_shapes stdout ----
+
+thread 'editor::text_layout::tests::acceptance_style_change_must_invalidate_carried_shapes' (293627) panicked at crates/astrolith-gpui/src/editor/text_layout/tests.rs:452:9:
+changed font weight must discard old shaped glyphs and wrapping
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    editor::text_layout::tests::acceptance_style_change_must_invalidate_carried_shapes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 475 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p astrolith-gpui --lib`
+mbx[cache]: 0 hits, 0 misses, 1 not looked up; 0 B downloaded, 0 B uploaded, 0 B stored locally
+mbx[savings]: has quietly disposed of 124.2 GiB logical of build leftovers. nobody saw anything.
