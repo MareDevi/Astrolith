@@ -1,0 +1,1598 @@
+//! Application-owned viewport text layout.
+//!
+//! This is the M2 feasibility core: it wraps the rendered writer text into
+//! visual rows with GPUI's own text system, shapes only the rows that intersect
+//! the viewport plus overscan, and answers hit-test, caret, selection and IME
+//! geometry from the same row snapshot. It does not go through the Kit Inline
+//! retained-layout table or the Kit `TextView`, and it does not replace any
+//! product view.
+//!
+//! Contracts:
+//!
+//! - Wrapping works on rendered bytes only; it never rewrites source or
+//!   inserts hard line breaks.
+//! - A row always starts and ends on a grapheme boundary at a legal line-break
+//!   opportunity (or a mandatory newline), so shaping never starts mid-cluster.
+//! - Wrapping is resumable: a block that is not fully wrapped stores the row in
+//!   progress, so a long block is measured in bounded slices across frames.
+//! - Rows outside the viewport are wrapped but not shaped; glyph geometry and
+//!   painted lines exist only for the prepared viewport.
+//! - Unresolved ranges fail closed: hit-test, caret and IME queries return
+//!   `None` instead of inventing geometry from an estimate.
+//! - Block positions come from a height index that is updated locally, never
+//!   rebuilt from every block each frame.
+
+use std::ops::Range;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use astrolith_document::{BlockKind, InlineMark, InlineMarkKind, RichBlock, WysiwygDocument};
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::{
+    App, Bounds, Font, FontStyle, FontWeight, Hsla, Pixels, Point, ShapedLine, SharedString,
+    StrikethroughStyle, TextAlign, TextRun, Window, WindowTextSystem, fill, font, point, px, size,
+};
+use unicode_segmentation::UnicodeSegmentation;
+
+#[cfg(debug_assertions)]
+pub(crate) mod spike;
+#[cfg(test)]
+mod tests;
+
+/// Work allowed for one prepared viewport.
+pub(crate) const LAYOUT_BUDGET: Duration = Duration::from_millis(4);
+/// Share of the budget spent discovering rows before glyphs get shaped.
+const WRAP_BUDGET_SHARE: f32 = 0.5;
+/// Graphemes measured between two budget checks.
+const BUDGET_CHECK_GRAPHEMES: usize = 16;
+/// Bytes of preceding text shaped as context so joining and ligatures survive
+/// a row boundary.
+const LINE_CONTEXT_BYTES: usize = 24;
+/// Bytes of line-break opportunities computed at once.
+const BREAK_CHUNK_BYTES: usize = 16 * 1024;
+/// Shaped rows kept outside the viewport before their glyphs are dropped.
+const SHAPE_RETENTION_SCREENS: f32 = 2.;
+/// Multiplier converting the byte length of one visual row into a fallback
+/// estimate before any row of a block has been measured.
+const FALLBACK_BYTES_PER_GLYPH: f32 = 1.5;
+/// Bytes before an edit prefix that a row may still reuse: line-break and
+/// shaping context never reaches further back, so the trimmed prefix is safe.
+const EDIT_PREFIX_MARGIN: usize = 8;
+
+/// Resolved document presentation used by the layout core.
+///
+/// The values are plain data so a width/style/revision change can be detected
+/// by equality and the layout rebuilt with the new epoch.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LayoutStyle {
+    pub(crate) font: Font,
+    pub(crate) mono_font: Font,
+    pub(crate) font_size: Pixels,
+    pub(crate) line_height: f32,
+    pub(crate) foreground: Hsla,
+    pub(crate) muted_foreground: Hsla,
+    pub(crate) link: Hsla,
+    pub(crate) code_background: Hsla,
+    pub(crate) selection: Hsla,
+    pub(crate) caret: Hsla,
+    pub(crate) border: Hsla,
+}
+
+impl LayoutStyle {
+    /// Resolve the writer's prose style against the active theme.
+    pub(crate) fn from_app(prose: &crate::editor::writing_modes::ProseStyle, cx: &App) -> Self {
+        let theme = cx.theme();
+        Self {
+            font: font(prose.font_family.clone()),
+            mono_font: font(theme.mono_font_family.clone()),
+            font_size: px(prose.font_size),
+            line_height: prose.line_height,
+            foreground: theme.foreground,
+            muted_foreground: theme.muted_foreground,
+            link: theme.link,
+            code_background: theme.muted,
+            selection: theme.selection,
+            caret: theme.caret,
+            border: theme.border,
+        }
+    }
+
+    /// Font size used by a heading level, matching the current block chrome.
+    fn block_font_size(&self, kind: &BlockKind) -> Pixels {
+        match kind {
+            BlockKind::Heading(level) => self.font_size * heading_scale(*level),
+            _ => self.font_size,
+        }
+    }
+}
+
+fn heading_scale(level: u8) -> f32 {
+    match level {
+        1 => 2.0,
+        2 => 1.6,
+        3 => 1.4,
+        4 => 1.2,
+        5 => 1.1,
+        _ => 1.05,
+    }
+}
+
+/// One rendered byte position: an offset in a block's visible text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Hit {
+    pub(crate) block: usize,
+    pub(crate) rendered: usize,
+}
+
+/// A directional selection in rendered text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Selection {
+    pub(crate) anchor: Hit,
+    pub(crate) focus: Hit,
+}
+
+impl Selection {
+    fn ordered(self) -> (Hit, Hit) {
+        if self.anchor <= self.focus {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.anchor == self.focus
+    }
+}
+
+/// A caret box in content coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Caret {
+    pub(crate) origin: Point<Pixels>,
+    pub(crate) height: Pixels,
+    pub(crate) color: Hsla,
+}
+
+/// A viewport in content pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Viewport {
+    /// Content pixels scrolled above the viewport top.
+    pub(crate) scroll: f32,
+    pub(crate) height: f32,
+}
+
+/// Per-preparation work, for the opt-in performance harness.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LayoutStats {
+    pub(crate) wrapped_rows: usize,
+    pub(crate) wrapped_bytes: usize,
+    pub(crate) shaped_rows: usize,
+    pub(crate) shaped_bytes: usize,
+    pub(crate) reused_rows: usize,
+    pub(crate) pending: bool,
+}
+
+/// The result of preparing one viewport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Prepared {
+    /// Block range that has geometry for the viewport.
+    pub(crate) blocks: Range<usize>,
+    /// Wrapping or shaping stopped before covering the viewport.
+    pub(crate) pending: bool,
+}
+
+/// Why a block's wrapping is advanced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WrapTarget {
+    /// Enough measured rows to cover a viewport on this block.
+    Rows(usize),
+    /// Rows covering a rendered offset.
+    Rendered(usize),
+}
+
+/// Bounded work for one viewport's rows.
+struct ViewportWork<'a> {
+    text_system: &'a WindowTextSystem,
+    scroll: f32,
+    height: f32,
+    overscan: f32,
+    deadline: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedRun {
+    range: Range<usize>,
+    font: Font,
+    color: Hsla,
+    background: Option<Hsla>,
+    strikethrough: bool,
+}
+
+impl ResolvedRun {
+    fn text_run(&self, len: usize) -> TextRun {
+        TextRun {
+            len,
+            font: self.font.clone(),
+            color: self.color,
+            background_color: self.background,
+            underline: None,
+            strikethrough: self.strikethrough.then(|| StrikethroughStyle {
+                thickness: px(1.),
+                color: Some(self.color),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Row {
+    /// Rendered byte range covered by this visual row.
+    range: Range<usize>,
+    /// Offset from the block content top.
+    y: f32,
+    height: f32,
+    /// Shaped glyphs, only for rows retained around the prepared viewport.
+    shaped: Option<ShapedLine>,
+}
+
+/// A row whose graphemes are being measured.
+#[derive(Clone, Debug)]
+struct PartialRow {
+    start: usize,
+    scan: usize,
+    width: f32,
+    last_break: Option<(usize, f32)>,
+    break_cursor: usize,
+}
+
+struct BlockLayout {
+    kind: BlockKind,
+    depth: usize,
+    /// Rendered text this block was laid out from, for edit reuse.
+    text: SharedString,
+    marks: Vec<InlineMark>,
+    fingerprint: u64,
+    text_len: usize,
+    font_size: f32,
+    row_height: f32,
+    runs: Vec<ResolvedRun>,
+    base: ResolvedRun,
+    rows: Vec<Row>,
+    /// Rendered byte offset where the next row starts.
+    scanned: usize,
+    partial: Option<PartialRow>,
+    complete: bool,
+    /// Sorted byte offsets at which a line break is allowed.
+    breaks: Vec<usize>,
+    break_scanned: usize,
+    /// Sum of measured row byte lengths, for the remaining-height estimate.
+    row_bytes: usize,
+    /// Bytes per row used before this block has any measured row.
+    fallback_row_bytes: f32,
+    /// Block content starts this far right of the column.
+    x_offset: f32,
+    chrome_top: f32,
+    chrome_bottom: f32,
+    gap: f32,
+    marker_offset: f32,
+    marker: Option<SharedString>,
+    marker_line: Option<ShapedLine>,
+}
+
+impl BlockLayout {
+    fn new(block: &RichBlock, style: &LayoutStyle, width: Pixels) -> Self {
+        let font_size = f32::from(style.block_font_size(&block.kind));
+        let row_height = font_size * style.line_height;
+        let mono_all = matches!(block.kind, BlockKind::Code { .. });
+        let base_color = match block.kind {
+            BlockKind::Quote => style.muted_foreground,
+            _ => style.foreground,
+        };
+        let base_font = if mono_all {
+            style.mono_font.clone()
+        } else {
+            style.font.clone()
+        };
+        let base = ResolvedRun {
+            range: 0..0,
+            font: base_font,
+            color: base_color,
+            background: None,
+            strikethrough: false,
+        };
+        let runs = resolve_runs(block, style, mono_all, &base);
+        let gap = f32::from(style.font_size) * 0.75;
+        let (x_offset, chrome_top, chrome_bottom, marker_offset, marker) = match &block.kind {
+            BlockKind::ListItem { ordered, number } => {
+                let marker = if *ordered {
+                    format!("{number}.")
+                } else {
+                    "•".to_owned()
+                };
+                let indent = block.depth as f32 * 20.;
+                (
+                    indent + 18.,
+                    0.,
+                    0.,
+                    indent,
+                    Some(SharedString::from(marker)),
+                )
+            }
+            BlockKind::Quote => (12., 0., 0., 0., None),
+            BlockKind::Code { .. } => (0., 8., 8., 0., None),
+            BlockKind::Rule => (0., 6., 7., 0., None),
+            BlockKind::Heading(_) | BlockKind::Paragraph => (0., 0., 0., 0., None),
+        };
+        let fallback_row_bytes =
+            (f32::from(width) / (font_size * 0.55)).max(8.) * FALLBACK_BYTES_PER_GLYPH;
+        let text = SharedString::from(block.text.text.clone());
+        let marks = block.text.marks.clone();
+        let fingerprint = block_fingerprint(&block.kind, block.depth, &text, &marks);
+        let mut this = Self {
+            kind: block.kind.clone(),
+            depth: block.depth,
+            text,
+            marks,
+            fingerprint,
+            text_len: block.text.text.len(),
+            font_size,
+            row_height,
+            runs,
+            base,
+            rows: Vec::new(),
+            scanned: 0,
+            partial: None,
+            complete: false,
+            breaks: Vec::new(),
+            break_scanned: 0,
+            row_bytes: 0,
+            fallback_row_bytes,
+            x_offset,
+            chrome_top,
+            chrome_bottom,
+            gap,
+            marker_offset,
+            marker,
+            marker_line: None,
+        };
+        if block.text.text.is_empty() {
+            this.rows.push(Row {
+                range: 0..0,
+                y: 0.,
+                height: row_height,
+                shaped: None,
+            });
+            this.complete = true;
+        }
+        this
+    }
+
+    fn matches(&self, block: &RichBlock) -> bool {
+        self.kind == block.kind
+            && self.depth == block.depth
+            && self.text.as_ref() == block.text.text
+            && self.marks == block.text.marks
+    }
+
+    /// Carry rows that end safely before the common prefix of an edit.
+    fn carry_prefix(&mut self, old: &BlockLayout, block: &RichBlock) -> usize {
+        let old_text = old.text.as_str();
+        let new_text = block.text.text.as_str();
+        let mut prefix = 0;
+        for (left, right) in old_text.bytes().zip(new_text.bytes()) {
+            if left != right {
+                break;
+            }
+            prefix += 1;
+        }
+        while prefix > 0 && !old_text.is_char_boundary(prefix) {
+            prefix -= 1;
+        }
+        let safe = prefix.saturating_sub(EDIT_PREFIX_MARGIN);
+        if safe == 0 {
+            return 0;
+        }
+        let reuse_count = old
+            .rows
+            .iter()
+            .take_while(|row| row.range.end <= safe)
+            .count();
+        if reuse_count == 0 {
+            return 0;
+        }
+        self.rows = old.rows[..reuse_count].to_vec();
+        self.row_bytes = self.rows.iter().map(|row| row.range.len()).sum();
+        self.scanned = self.rows.last().map_or(0, |row| row.range.end);
+        let boundary = self.rows.last().map_or(0, |row| row.range.end);
+        self.breaks = old
+            .breaks
+            .iter()
+            .copied()
+            .take_while(|offset| *offset <= boundary)
+            .collect();
+        self.break_scanned = boundary;
+        self.partial = None;
+        self.complete = false;
+        reuse_count
+    }
+
+    fn push_row(&mut self, range: Range<usize>) {
+        let y = self.rows.last().map_or(0., |row| row.y + row.height);
+        self.row_bytes += range.len();
+        self.rows.push(Row {
+            range,
+            y,
+            height: self.row_height,
+            shaped: None,
+        });
+    }
+
+    fn run_at(&self, offset: usize) -> &ResolvedRun {
+        if self.runs.is_empty() {
+            return &self.base;
+        }
+        let index = self
+            .runs
+            .partition_point(|run| run.range.end <= offset)
+            .min(self.runs.len() - 1);
+        &self.runs[index]
+    }
+
+    fn runs_for(&self, range: Range<usize>) -> Vec<TextRun> {
+        let mut runs = Vec::new();
+        let mut cursor = range.start;
+        for run in &self.runs {
+            if run.range.end <= range.start {
+                continue;
+            }
+            if run.range.start >= range.end {
+                break;
+            }
+            let start = run.range.start.max(range.start);
+            let end = run.range.end.min(range.end);
+            if start > cursor {
+                runs.push(self.base.text_run(start - cursor));
+            }
+            runs.push(run.text_run(end - start));
+            cursor = end;
+        }
+        if cursor < range.end {
+            runs.push(self.base.text_run(range.end - cursor));
+        }
+        runs
+    }
+
+    /// Compute line-break opportunities up to `upto`.
+    fn ensure_breaks(&mut self, text: &str, upto: usize) {
+        while self.break_scanned < upto && self.break_scanned < text.len() {
+            let rest = &text[self.break_scanned..];
+            let mut end = rest.len().min(BREAK_CHUNK_BYTES);
+            while end < rest.len() && !rest.is_char_boundary(end) {
+                end += 1;
+            }
+            let (safe, _) = unicode_linebreak::split_at_safe(&rest[..end]);
+            let boundary = if safe.is_empty() { end } else { safe.len() };
+            for (offset, _) in unicode_linebreak::linebreaks(&rest[..boundary]) {
+                // `linebreaks` always reports the end of its input; that is not
+                // a real opportunity in the middle of the text.
+                if offset == boundary && boundary < rest.len() {
+                    continue;
+                }
+                self.breaks.push(self.break_scanned + offset);
+            }
+            self.break_scanned += boundary;
+            if boundary == 0 {
+                break;
+            }
+        }
+    }
+
+    /// Measured row height plus an estimate for the unwrapped tail.
+    fn height(&self) -> f32 {
+        let measured = self.rows.len() as f32 * self.row_height;
+        let tail_rows = if self.complete {
+            0.
+        } else {
+            let remaining = self.text_len.saturating_sub(self.scanned);
+            let average = if self.rows.is_empty() {
+                self.fallback_row_bytes
+            } else {
+                (self.row_bytes as f32 / self.rows.len() as f32).max(1.)
+            };
+            (remaining as f32 / average).ceil().max(1.)
+        };
+        self.chrome_top + measured + tail_rows * self.row_height + self.chrome_bottom + self.gap
+    }
+
+    fn row_index_for_offset(&self, rendered: usize) -> Option<usize> {
+        if self.rows.is_empty() {
+            return None;
+        }
+        let index = self
+            .rows
+            .partition_point(|row| row.range.start <= rendered)
+            .saturating_sub(1);
+        let row = self.rows.get(index)?;
+        if rendered > row.range.end {
+            // The offset lies beyond the wrapped prefix; the row that will
+            // hold it does not exist yet.
+            return None;
+        }
+        Some(index)
+    }
+
+    fn cursor_at(&self, offset: usize) -> usize {
+        self.breaks
+            .partition_point(|candidate| *candidate <= offset)
+    }
+
+    /// Advance wrapping until `target` is met, the block ends or the budget
+    /// expires. Returns whether the target is met.
+    fn advance(
+        &mut self,
+        text: &str,
+        width: Pixels,
+        target: WrapTarget,
+        text_system: &WindowTextSystem,
+        deadline: Instant,
+        examined: &mut usize,
+    ) -> bool {
+        if self.complete {
+            return true;
+        }
+        match target {
+            WrapTarget::Rows(rows) if self.rows.len() >= rows => return true,
+            WrapTarget::Rendered(offset) if self.scanned > offset => return true,
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        {
+            let mut partial = self.partial.take().unwrap_or_else(|| PartialRow {
+                start: self.scanned,
+                scan: self.scanned,
+                width: 0.,
+                last_break: None,
+                break_cursor: self.cursor_at(self.scanned),
+            });
+            let mut checks = 0usize;
+            loop {
+                if let WrapTarget::Rows(rows) = target
+                    && self.rows.len() >= rows
+                {
+                    self.scanned = partial.start;
+                    self.partial = Some(partial);
+                    return true;
+                }
+                if let WrapTarget::Rendered(offset) = target
+                    && partial.start > offset
+                {
+                    self.scanned = partial.start;
+                    self.partial = Some(partial);
+                    return true;
+                }
+                if partial.scan >= text.len() {
+                    if partial.scan > partial.start {
+                        self.push_row(partial.start..partial.scan);
+                    } else if text.ends_with('\n') {
+                        self.push_row(partial.scan..partial.scan);
+                    }
+                    self.scanned = text.len();
+                    self.complete = true;
+                    self.partial = None;
+                    return true;
+                }
+                if text.as_bytes()[partial.scan] == b'\n' {
+                    self.push_row(partial.start..partial.scan);
+                    let next = partial.scan + 1;
+                    partial = PartialRow {
+                        start: next,
+                        scan: next,
+                        width: 0.,
+                        last_break: None,
+                        break_cursor: self.cursor_at(next),
+                    };
+                } else {
+                    let glyph_len = next_grapheme_len(text, partial.scan);
+                    let grapheme = &text[partial.scan..partial.scan + glyph_len];
+                    let next = partial.scan + glyph_len;
+                    *examined += glyph_len;
+                    let run = self.run_at(partial.scan);
+                    let advance = grapheme_width(text_system, grapheme, run, self.font_size);
+                    self.ensure_breaks(text, next);
+                    while partial.break_cursor < self.breaks.len()
+                        && self.breaks[partial.break_cursor] <= next
+                    {
+                        partial.break_cursor += 1;
+                    }
+                    partial.width += f32::from(advance);
+                    if self.breaks.get(partial.break_cursor.saturating_sub(1)) == Some(&next) {
+                        partial.last_break = Some((next, partial.width));
+                    }
+                    if partial.width > f32::from(width) && next > partial.start {
+                        match partial.last_break {
+                            Some((offset, _)) if offset > partial.start && offset < next => {
+                                self.push_row(partial.start..offset);
+                                partial = PartialRow {
+                                    start: offset,
+                                    scan: offset,
+                                    width: 0.,
+                                    last_break: None,
+                                    break_cursor: self.cursor_at(offset),
+                                };
+                            }
+                            Some((offset, _)) if offset == next => {
+                                self.push_row(partial.start..next);
+                                partial = PartialRow {
+                                    start: next,
+                                    scan: next,
+                                    width: 0.,
+                                    last_break: None,
+                                    break_cursor: partial.break_cursor,
+                                };
+                            }
+                            _ if partial.scan == partial.start => {
+                                // One grapheme wider than the column still
+                                // gets its own row instead of looping.
+                                self.push_row(partial.start..next);
+                                partial = PartialRow {
+                                    start: next,
+                                    scan: next,
+                                    width: 0.,
+                                    last_break: None,
+                                    break_cursor: partial.break_cursor,
+                                };
+                            }
+                            _ => {
+                                self.push_row(partial.start..partial.scan);
+                                partial = PartialRow {
+                                    start: partial.scan,
+                                    scan: partial.scan,
+                                    width: 0.,
+                                    last_break: None,
+                                    break_cursor: self.cursor_at(partial.scan),
+                                };
+                            }
+                        }
+                    } else {
+                        partial.scan = next;
+                    }
+                }
+                checks += 1;
+                if checks.is_multiple_of(BUDGET_CHECK_GRAPHEMES) && Instant::now() >= deadline {
+                    self.scanned = partial.start;
+                    self.partial = Some(partial);
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+fn next_grapheme_len(text: &str, offset: usize) -> usize {
+    text[offset..].graphemes(true).next().map_or(1, str::len)
+}
+
+/// Start of the grapheme before `offset`.
+fn previous_grapheme_start(text: &str, offset: usize) -> usize {
+    text[..offset]
+        .grapheme_indices(true)
+        .next_back()
+        .map_or(0, |(index, _)| index)
+}
+
+/// Shape a single grapheme for wrapping. Single-code-point graphemes use the
+/// text system's cached per-character advance, which is also what GPUI's own
+/// line wrapper measures; clusters (combining marks, emoji sequences) are
+/// shaped whole so they keep their cluster advance.
+fn grapheme_width(
+    text_system: &WindowTextSystem,
+    grapheme: &str,
+    run: &ResolvedRun,
+    font_size: f32,
+) -> Pixels {
+    let mut chars = grapheme.chars();
+    if let (Some(character), None) = (chars.next(), chars.next()) {
+        let font_id = text_system.resolve_font(&run.font);
+        return text_system.layout_width(font_id, px(font_size), character);
+    }
+    text_system
+        .shape_line(
+            SharedString::from(grapheme.to_owned()),
+            px(font_size),
+            &[run.text_run(grapheme.len())],
+            None,
+        )
+        .width()
+}
+
+fn resolve_runs(
+    block: &RichBlock,
+    style: &LayoutStyle,
+    mono_all: bool,
+    base: &ResolvedRun,
+) -> Vec<ResolvedRun> {
+    let text = &block.text.text;
+    let len = text.len();
+    if len == 0 {
+        return Vec::new();
+    }
+    let mut cuts = vec![0, len];
+    let mut events = Vec::with_capacity(block.text.marks.len() * 2);
+    for (index, mark) in block.text.marks.iter().enumerate() {
+        let start = mark.range.start.min(len);
+        let end = mark.range.end.min(len);
+        if start < end {
+            cuts.extend([start, end]);
+            events.extend([(start, true, index), (end, false, index)]);
+        }
+    }
+    events.sort_unstable();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut runs = Vec::with_capacity(cuts.len().saturating_sub(1));
+    let mut event_index = 0;
+    let mut active = std::collections::BTreeSet::new();
+    for pair in cuts.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        if start >= end {
+            continue;
+        }
+        while let Some(&(offset, entering, index)) = events.get(event_index) {
+            if offset > start {
+                break;
+            }
+            if entering {
+                active.insert(index);
+            } else {
+                active.remove(&index);
+            }
+            event_index += 1;
+        }
+        let mut bold = false;
+        let mut italic = false;
+        let mut strikethrough = false;
+        let mut code = false;
+        let mut link = false;
+        for index in &active {
+            match &block.text.marks[*index].kind {
+                InlineMarkKind::Bold => bold = true,
+                InlineMarkKind::Italic => italic = true,
+                InlineMarkKind::Strikethrough => strikethrough = true,
+                InlineMarkKind::Code => code = true,
+                InlineMarkKind::Link(_) => link = true,
+                InlineMarkKind::Image(_) => italic = true,
+            }
+        }
+        let mut font = if mono_all || code {
+            style.mono_font.clone()
+        } else {
+            base.font.clone()
+        };
+        if bold {
+            font.weight = FontWeight::BOLD;
+        }
+        if italic {
+            font.style = FontStyle::Italic;
+        }
+        runs.push(ResolvedRun {
+            range: start..end,
+            font,
+            color: if link { style.link } else { base.color },
+            background: code.then_some(style.code_background),
+            strikethrough,
+        });
+    }
+    runs
+}
+
+/// Work reused by [`TextLayout::update`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct UpdateOutcome {
+    pub(crate) reused_blocks: usize,
+    pub(crate) reused_rows: usize,
+    pub(crate) rebuilt_blocks: usize,
+}
+
+fn block_fingerprint(kind: &BlockKind, depth: usize, text: &str, marks: &[InlineMark]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(kind).hash(&mut hasher);
+    depth.hash(&mut hasher);
+    text.hash(&mut hasher);
+    for mark in marks {
+        mark.range.hash(&mut hasher);
+        std::mem::discriminant(&mark.kind).hash(&mut hasher);
+        match &mark.kind {
+            InlineMarkKind::Link(url) | InlineMarkKind::Image(url) => url.hash(&mut hasher),
+            _ => {}
+        }
+    }
+    hasher.finish()
+}
+
+/// Line breaking opportunities and heights for every block.
+pub(crate) struct TextLayout {
+    document: Arc<WysiwygDocument>,
+    style: Arc<LayoutStyle>,
+    width: Pixels,
+    blocks: Vec<BlockLayout>,
+    heights: HeightIndex,
+    stats: LayoutStats,
+}
+
+impl TextLayout {
+    /// Build a layout for one accepted document revision and width epoch.
+    pub(crate) fn new(
+        document: Arc<WysiwygDocument>,
+        style: Arc<LayoutStyle>,
+        width: Pixels,
+    ) -> Self {
+        let width = width.max(px(1.));
+        let blocks: Vec<BlockLayout> = document
+            .blocks
+            .iter()
+            .map(|block| BlockLayout::new(block, &style, width))
+            .collect();
+        let mut heights = HeightIndex::new(blocks.len());
+        for (index, block) in blocks.iter().enumerate() {
+            heights.set(index, f64::from(block.height()));
+        }
+        Self {
+            document,
+            style,
+            width,
+            blocks,
+            heights,
+            stats: LayoutStats::default(),
+        }
+    }
+
+    pub(crate) fn document(&self) -> &WysiwygDocument {
+        &self.document
+    }
+
+    pub(crate) fn stats(&self) -> LayoutStats {
+        self.stats
+    }
+
+    /// Total content height in pixels.
+    pub(crate) fn total_height(&self) -> f32 {
+        self.heights.total() as f32
+    }
+
+    pub(crate) fn block_top(&self, index: usize) -> f32 {
+        self.heights.prefix(index) as f32
+    }
+
+    pub(crate) fn block_at_y(&self, y: f32) -> Option<usize> {
+        self.heights.block_at(f64::from(y))
+    }
+
+    /// Content position of `hit`, or `None` while its row is unresolved.
+    pub(crate) fn caret(&self, hit: Hit) -> Option<Caret> {
+        let block = self.blocks.get(hit.block)?;
+        let row_index = block.row_index_for_offset(hit.rendered)?;
+        let row = block.rows.get(row_index)?;
+        let shaped = row.shaped.as_ref()?;
+        let local = hit
+            .rendered
+            .saturating_sub(row.range.start)
+            .min(row.range.len());
+        let x = shaped.x_for_index(local);
+        let padding = (row.height - f32::from(shaped.ascent) - f32::from(shaped.descent)) * 0.5;
+        let y = self.block_top(hit.block) + block.chrome_top + row.y + padding;
+        Some(Caret {
+            origin: point(px(block.x_offset) + x, px(y)),
+            height: (shaped.ascent + shaped.descent).max(px(2.)),
+            color: self.style.caret,
+        })
+    }
+
+    /// Bounds of a rendered range in content coordinates.
+    ///
+    /// A collapsed range yields the caret box, which is what native IME
+    /// candidate placement consumes.
+    pub(crate) fn bounds_for_range(&self, anchor: Hit, focus: Hit) -> Option<Bounds<Pixels>> {
+        let selection = Selection { anchor, focus };
+        if selection.is_empty() {
+            let caret = self.caret(focus)?;
+            return Some(Bounds::new(caret.origin, size(px(1.), caret.height)));
+        }
+        let quads = self.selection_quads(selection);
+        quads.into_iter().reduce(|left, right| left.union(&right))
+    }
+
+    /// Selection rectangles in content coordinates, one per affected row.
+    pub(crate) fn selection_quads(&self, selection: Selection) -> Vec<Bounds<Pixels>> {
+        let (start, end) = selection.ordered();
+        if self.blocks.is_empty() {
+            return Vec::new();
+        }
+        let first = start.block.min(self.blocks.len() - 1);
+        let last = end.block.min(self.blocks.len() - 1);
+        let mut quads = Vec::new();
+        for index in first..=last {
+            let block = &self.blocks[index];
+            let block_top = self.block_top(index);
+            let start_offset = if index == start.block {
+                start.rendered
+            } else {
+                0
+            };
+            let end_offset = if index == end.block {
+                end.rendered
+            } else {
+                block.text_len
+            };
+            if start_offset >= end_offset {
+                continue;
+            }
+            for row in &block.rows {
+                let row_start = row.range.start.max(start_offset);
+                let row_end = row.range.end.min(end_offset);
+                if row_start >= row_end {
+                    continue;
+                }
+                let Some(shaped) = row.shaped.as_ref() else {
+                    continue;
+                };
+                let local_start = row_start - row.range.start;
+                let local_end = row_end - row.range.start;
+                let left = shaped.x_for_index(local_start);
+                let right = shaped.x_for_index(local_end);
+                let y = block_top + block.chrome_top + row.y;
+                quads.push(Bounds::new(
+                    point(px(block.x_offset) + left, px(y)),
+                    size((right - left).max(px(1.)), px(row.height)),
+                ));
+            }
+        }
+        quads
+    }
+
+    /// Rendered byte position under a content-space point, if the row has
+    /// been shaped.
+    pub(crate) fn hit_test(&self, position: Point<Pixels>) -> Option<Hit> {
+        let y = f32::from(position.y);
+        let block_index = self.block_at_y(y)?;
+        let block = self.blocks.get(block_index)?;
+        let local = y - self.block_top(block_index) - block.chrome_top;
+        let row_index = row_index_at(block, local);
+        let row = block.rows.get(row_index)?;
+        let shaped = row.shaped.as_ref()?;
+        let x = f32::from(position.x) - block.x_offset;
+        let index = shaped.closest_index_for_x(px(x)).min(row.range.len());
+        Some(Hit {
+            block: block_index,
+            rendered: row.range.start + index,
+        })
+    }
+
+    /// Nearest caret on the visual row above or below `hit`.
+    pub(crate) fn vertical_target(&self, hit: Hit, up: bool) -> Option<Hit> {
+        let caret = self.caret(hit)?;
+        let step = self.blocks.get(hit.block)?.row_height;
+        let target_y = f32::from(caret.origin.y) + if up { -step } else { step };
+        let block_index = self.block_at_y(target_y)?;
+        let block = self.blocks.get(block_index)?;
+        let local = target_y - self.block_top(block_index) - block.chrome_top;
+        let row_index = row_index_at(block, local);
+        let row = block.rows.get(row_index)?;
+        let shaped = row.shaped.as_ref()?;
+        let x = f32::from(caret.origin.x) - block.x_offset;
+        let index = shaped.closest_index_for_x(px(x)).min(row.range.len());
+        Some(Hit {
+            block: block_index,
+            rendered: row.range.start + index,
+        })
+    }
+
+    /// Reconcile this layout with a new accepted document revision.
+    ///
+    /// Unchanged blocks keep their rows, breaks and shaped lines even when an
+    /// insertion shifts their index. The block that changed keeps the rows
+    /// before a safe edit prefix, so a local edit does not re-wrap the whole
+    /// document.
+    pub(crate) fn update(&mut self, document: Arc<WysiwygDocument>) -> UpdateOutcome {
+        let width = self.width;
+        let style = &self.style;
+        let mut old: Vec<Option<BlockLayout>> = std::mem::take(&mut self.blocks)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut by_fingerprint: std::collections::HashMap<u64, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (index, block) in old.iter().enumerate() {
+            if let Some(block) = block {
+                by_fingerprint
+                    .entry(block.fingerprint)
+                    .or_default()
+                    .push(index);
+            }
+        }
+        let mut outcome = UpdateOutcome::default();
+        let mut blocks = Vec::with_capacity(document.blocks.len());
+        for (index, block) in document.blocks.iter().enumerate() {
+            let fingerprint = block_fingerprint(
+                &block.kind,
+                block.depth,
+                &block.text.text,
+                &block.text.marks,
+            );
+            let mut reused = None;
+            if let Some(candidates) = by_fingerprint.get_mut(&fingerprint) {
+                while let Some(candidate) = candidates.pop() {
+                    if old[candidate]
+                        .as_ref()
+                        .is_some_and(|layout| layout.matches(block))
+                    {
+                        reused = old[candidate].take();
+                        break;
+                    }
+                }
+            }
+            if let Some(layout) = reused {
+                outcome.reused_blocks += 1;
+                outcome.reused_rows += layout.rows.len();
+                blocks.push(layout);
+            } else {
+                let mut rebuilt = BlockLayout::new(block, style, width);
+                if let Some(candidate) = old.get_mut(index).and_then(Option::take)
+                    && candidate.kind == rebuilt.kind
+                    && candidate.depth == rebuilt.depth
+                {
+                    let carried = rebuilt.carry_prefix(&candidate, block);
+                    outcome.reused_rows += carried;
+                }
+                outcome.rebuilt_blocks += 1;
+                blocks.push(rebuilt);
+            }
+        }
+        self.blocks = blocks;
+        self.document = document;
+        self.heights = HeightIndex::new(self.blocks.len());
+        for (index, block) in self.blocks.iter().enumerate() {
+            self.heights.set(index, f64::from(block.height()));
+        }
+        self.stats = LayoutStats::default();
+        outcome
+    }
+
+    /// Wrap and shape the viewport with a bounded work budget.
+    ///
+    /// Only the rows this viewport needs are wrapped; the rest of a long block
+    /// keeps an estimated height until a later frame needs it.
+    pub(crate) fn prepare(
+        &mut self,
+        window: &Window,
+        viewport: Viewport,
+        caret: Option<Hit>,
+        overscan: f32,
+    ) -> Prepared {
+        self.prepare_with(window.text_system(), viewport, caret, overscan)
+    }
+
+    /// Prepare with an explicit text system, for headless layout tests.
+    pub(crate) fn prepare_with(
+        &mut self,
+        text_system: &WindowTextSystem,
+        viewport: Viewport,
+        caret: Option<Hit>,
+        overscan: f32,
+    ) -> Prepared {
+        self.stats = LayoutStats::default();
+        let started = Instant::now();
+        let deadline = started + LAYOUT_BUDGET;
+        let wrap_deadline = started + LAYOUT_BUDGET.mul_f32(WRAP_BUDGET_SHARE);
+        let scroll = viewport.scroll.max(0.);
+        let top = (scroll - overscan).max(0.);
+        let bottom = scroll + viewport.height + overscan;
+        let start = self.block_at_y(top).unwrap_or(0);
+        let end = self
+            .block_at_y(bottom)
+            .map_or(self.blocks.len(), |index| index + 1);
+        let mut pending = false;
+
+        if let Some(hit) = caret.filter(|hit| hit.block < self.blocks.len())
+            && !self.advance(
+                hit.block,
+                WrapTarget::Rendered(hit.rendered),
+                text_system,
+                wrap_deadline,
+            )
+        {
+            pending = true;
+        }
+
+        let work = ViewportWork {
+            text_system,
+            scroll,
+            height: viewport.height,
+            overscan,
+            deadline,
+        };
+        for index in start..end {
+            if Instant::now() < wrap_deadline {
+                let block_top = self.block_top(index);
+                let block = &self.blocks[index];
+                let local_top = (top - block_top - block.chrome_top).max(0.);
+                let rows_above = (local_top / block.row_height).ceil() as usize;
+                let visible_rows =
+                    ((viewport.height + 2. * overscan) / block.row_height).ceil() as usize + 2;
+                let needed = rows_above + visible_rows;
+                if !self.advance(index, WrapTarget::Rows(needed), text_system, wrap_deadline) {
+                    pending = true;
+                }
+            } else {
+                pending = true;
+            }
+            self.shape_visible(index, &work, &mut pending);
+            if Instant::now() >= deadline {
+                pending = true;
+                break;
+            }
+        }
+        if let Some(hit) = caret.filter(|hit| hit.block < self.blocks.len()) {
+            self.shape_caret_row(hit, text_system, deadline, &mut pending);
+        }
+
+        self.stats.pending = pending;
+        Prepared {
+            blocks: start..end.max(start),
+            pending,
+        }
+    }
+
+    fn advance(
+        &mut self,
+        index: usize,
+        target: WrapTarget,
+        text_system: &WindowTextSystem,
+        deadline: Instant,
+    ) -> bool {
+        let width = self.width;
+        let document = &self.document;
+        let block = &mut self.blocks[index];
+        let text = &document.blocks[index].text.text;
+        let before_rows = block.rows.len();
+        let mut examined = 0usize;
+        let met = block.advance(text, width, target, text_system, deadline, &mut examined);
+        self.stats.wrapped_rows += block.rows.len() - before_rows;
+        self.stats.wrapped_bytes += examined;
+        if block.rows.len() != before_rows || block.complete {
+            self.heights.set(index, f64::from(block.height()));
+        }
+        met
+    }
+
+    /// Shape the row that holds the caret even when it is outside the viewport.
+    ///
+    /// Following the caret to a far position needs that row's geometry before
+    /// the viewport can scroll to it; painting only the current viewport would
+    /// leave the target unresolved.
+    fn shape_caret_row(
+        &mut self,
+        hit: Hit,
+        text_system: &WindowTextSystem,
+        deadline: Instant,
+        pending: &mut bool,
+    ) {
+        let Some(row_index) = self
+            .blocks
+            .get(hit.block)
+            .and_then(|block| block.row_index_for_offset(hit.rendered))
+        else {
+            *pending = true;
+            return;
+        };
+        if self.blocks[hit.block].rows[row_index].shaped.is_some() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            *pending = true;
+            return;
+        }
+        let document = &self.document;
+        let text = &document.blocks[hit.block].text.text;
+        let shaped = {
+            let block = &self.blocks[hit.block];
+            shape_row(block, text, &block.rows[row_index], text_system)
+        };
+        self.stats.shaped_rows += 1;
+        self.stats.shaped_bytes += self.blocks[hit.block].rows[row_index].range.len();
+        self.blocks[hit.block].rows[row_index].shaped = Some(shaped);
+    }
+
+    fn shape_visible(&mut self, index: usize, work: &ViewportWork<'_>, pending: &mut bool) {
+        let block_top = self.block_top(index);
+        let content_top = work.scroll - work.overscan;
+        let content_bottom = work.scroll + work.height + work.overscan;
+        let document = &self.document;
+        let text = &document.blocks[index].text.text;
+        let rows = self.blocks[index].rows.len();
+        let first_local = content_top - block_top - self.blocks[index].chrome_top;
+        let first_row = if first_local <= 0. {
+            0
+        } else {
+            ((first_local / self.blocks[index].row_height).floor() as usize).min(rows)
+        };
+        for row_index in first_row..rows {
+            let (y, height, has_shaped, range_len) = {
+                let block = &self.blocks[index];
+                let row = &block.rows[row_index];
+                (
+                    block_top + block.chrome_top + row.y,
+                    row.height,
+                    row.shaped.is_some(),
+                    row.range.len(),
+                )
+            };
+            if y + height < content_top {
+                continue;
+            }
+            if y > content_bottom {
+                break;
+            }
+            if has_shaped {
+                self.stats.reused_rows += 1;
+                continue;
+            }
+            if Instant::now() >= work.deadline {
+                *pending = true;
+                break;
+            }
+            let shaped = {
+                let block = &self.blocks[index];
+                shape_row(block, text, &block.rows[row_index], work.text_system)
+            };
+            self.stats.shaped_rows += 1;
+            self.stats.shaped_bytes += range_len;
+            self.blocks[index].rows[row_index].shaped = Some(shaped);
+        }
+        // Drop glyphs far outside the viewport; their rows and heights remain.
+        let keep_top = work.scroll - work.overscan - work.height * SHAPE_RETENTION_SCREENS;
+        let keep_bottom =
+            work.scroll + work.height + work.overscan + work.height * SHAPE_RETENTION_SCREENS;
+        let block = &mut self.blocks[index];
+        for row in &mut block.rows {
+            if row.shaped.is_none() {
+                continue;
+            }
+            let y = block_top + block.chrome_top + row.y;
+            if y + row.height < keep_top || y > keep_bottom {
+                row.shaped = None;
+            }
+        }
+    }
+
+    /// Paint the prepared viewport. Returns the number of rows painted.
+    ///
+    /// `origin` is the window position of content coordinate (0, 0); clipping
+    /// comes from the current content mask, so glyphs never spill over chrome
+    /// outside the scroll viewport.
+    pub(crate) fn paint(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+        origin: Point<Pixels>,
+        selection: Option<Selection>,
+        caret: Option<Hit>,
+    ) -> usize {
+        let clip = window.content_mask().bounds;
+        let content_top = f32::from(clip.top() - origin.y);
+        let content_bottom = f32::from(clip.bottom() - origin.y);
+        if content_bottom <= content_top || clip.size.width <= px(0.) {
+            return 0;
+        }
+        let first = self.block_at_y(content_top).unwrap_or(0);
+        let last = self
+            .block_at_y(content_bottom)
+            .unwrap_or(self.blocks.len().saturating_sub(1));
+        let quads = selection
+            .filter(|selection| !selection.is_empty())
+            .map(|selection| self.selection_quads(selection))
+            .unwrap_or_default();
+        let visible = Bounds::new(
+            point(clip.left() - origin.x, px(content_top)),
+            size(clip.size.width, px((content_bottom - content_top).max(0.))),
+        );
+        let mut painted = 0usize;
+        for index in first..=last {
+            if self.blocks.is_empty() {
+                break;
+            }
+            let block_top = self.block_top(index);
+            let block_height = self.heights.values[index] as f32;
+            if block_top > content_bottom {
+                break;
+            }
+            if block_top + block_height < content_top {
+                continue;
+            }
+            self.paint_chrome(window, cx, origin, index, block_top);
+            let (x_offset, chrome_top) = {
+                let block = &self.blocks[index];
+                (block.x_offset, block.chrome_top)
+            };
+            let row_count = self.blocks[index].rows.len();
+            for row_index in 0..row_count {
+                let (row_y, row_height, shaped) = {
+                    let block = &self.blocks[index];
+                    let row = &block.rows[row_index];
+                    let y = block_top + chrome_top + row.y;
+                    if y + row.height < content_top || y > content_bottom {
+                        continue;
+                    }
+                    match row.shaped.clone() {
+                        Some(shaped) => (y, row.height, shaped),
+                        None => continue,
+                    }
+                };
+                let row_origin = point(origin.x + px(x_offset), origin.y + px(row_y));
+                let row_bounds = Bounds::new(
+                    point(px(x_offset), px(row_y)),
+                    size(px(f32::from(self.width)), px(row_height)),
+                );
+                let _ = shaped.paint_background(
+                    row_origin,
+                    px(row_height),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+                for quad in quads.iter().filter(|quad| quad.intersects(&row_bounds)) {
+                    let clipped = quad.intersect(&row_bounds).intersect(&visible);
+                    if clipped.size.width > px(0.) && clipped.size.height > px(0.) {
+                        window.paint_quad(fill(clipped, self.style.selection.opacity(0.35)));
+                    }
+                }
+                let _ = shaped.paint(
+                    row_origin,
+                    px(row_height),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+                painted += 1;
+            }
+        }
+        if let Some(hit) = caret
+            && let Some(caret) = self.caret(hit)
+        {
+            let bounds = Bounds::new(
+                point(origin.x + caret.origin.x, origin.y + caret.origin.y),
+                size(px(1.5), caret.height),
+            );
+            if bounds.intersects(&Bounds::new(
+                origin,
+                size(clip.size.width, px(content_bottom - content_top)),
+            )) {
+                window.paint_quad(fill(bounds, caret.color));
+            }
+        }
+        painted
+    }
+
+    fn paint_chrome(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+        origin: Point<Pixels>,
+        index: usize,
+        block_top: f32,
+    ) {
+        let width = f32::from(self.width);
+        let code_background = self.style.code_background;
+        let border = self.style.border;
+        let style_font = self.style.font.clone();
+        let muted = self.style.muted_foreground;
+        let block = &mut self.blocks[index];
+        let rows_height = block.rows.len() as f32 * block.row_height;
+        match block.kind {
+            BlockKind::Code { .. } => {
+                let bounds = Bounds::new(
+                    point(origin.x, origin.y + px(block_top)),
+                    size(
+                        px(width),
+                        px(block.chrome_top + rows_height + block.chrome_bottom),
+                    ),
+                );
+                window.paint_quad(fill(bounds, code_background));
+            }
+            BlockKind::Rule => {
+                let bounds = Bounds::new(
+                    point(origin.x, origin.y + px(block_top + block.chrome_top)),
+                    size(px(width), px(1.)),
+                );
+                window.paint_quad(fill(bounds, border));
+            }
+            BlockKind::Quote => {
+                let bounds = Bounds::new(
+                    point(origin.x, origin.y + px(block_top + block.chrome_top)),
+                    size(px(2.), px(rows_height)),
+                );
+                window.paint_quad(fill(bounds, border));
+            }
+            BlockKind::ListItem { .. } => {
+                if block.marker_line.is_none()
+                    && let Some(marker) = block.marker.clone()
+                {
+                    let run = ResolvedRun {
+                        range: 0..0,
+                        font: style_font,
+                        color: muted,
+                        background: None,
+                        strikethrough: false,
+                    };
+                    block.marker_line = Some(window.text_system().shape_line(
+                        marker.clone(),
+                        px(block.font_size),
+                        &[run.text_run(marker.len())],
+                        None,
+                    ));
+                }
+                if let Some(line) = block.marker_line.as_ref() {
+                    let marker_origin = point(
+                        origin.x + px(block.marker_offset),
+                        origin.y + px(block_top + block.chrome_top),
+                    );
+                    let _ = line.paint(
+                        marker_origin,
+                        px(block.row_height),
+                        TextAlign::Right,
+                        Some(px(18.)),
+                        window,
+                        cx,
+                    );
+                }
+            }
+            BlockKind::Heading(_) | BlockKind::Paragraph => {}
+        }
+    }
+
+    /// Content height of the whole document for a scroll range.
+    pub(crate) fn max_scroll(&self, viewport_height: f32) -> f32 {
+        (self.total_height() - viewport_height).max(0.)
+    }
+
+    /// Rows discovered so far, across every block.
+    pub(crate) fn measured_rows(&self) -> usize {
+        self.blocks.iter().map(|block| block.rows.len()).sum()
+    }
+
+    /// Bytes of one block that still need wrapping.
+    pub(crate) fn pending_bytes(&self, block: usize) -> usize {
+        self.blocks.get(block).map_or(0, |block| {
+            if block.complete {
+                0
+            } else {
+                block.text_len.saturating_sub(block.scanned)
+            }
+        })
+    }
+}
+
+fn row_index_at(block: &BlockLayout, local_y: f32) -> usize {
+    if local_y <= 0. {
+        0
+    } else {
+        (local_y / block.row_height).floor() as usize
+    }
+}
+
+/// Shape one visual row, keeping shaping context from the same text line.
+fn shape_row(
+    block: &BlockLayout,
+    text: &str,
+    row: &Row,
+    text_system: &WindowTextSystem,
+) -> ShapedLine {
+    let mut context_start = row.range.start.saturating_sub(LINE_CONTEXT_BYTES);
+    while context_start > 0 && !text.is_char_boundary(context_start) {
+        context_start -= 1;
+    }
+    if let Some(newline) = text[..row.range.start].rfind('\n') {
+        context_start = context_start.max(newline + 1);
+    }
+    // The context must end on a grapheme boundary too; otherwise shaping the
+    // slice would split a cluster and the split would not align to a glyph.
+    if context_start < row.range.start {
+        let mut boundary = context_start;
+        for (offset, _) in text[context_start..row.range.start].grapheme_indices(true) {
+            let absolute = context_start + offset;
+            if absolute <= row.range.start {
+                boundary = absolute;
+            } else {
+                break;
+            }
+        }
+        context_start = boundary;
+    }
+    let slice = &text[context_start..row.range.end];
+    let runs = block.runs_for(context_start..row.range.end);
+    let shaped = text_system.shape_line(
+        SharedString::from(slice.to_owned()),
+        px(block.font_size),
+        &runs,
+        None,
+    );
+    let (_, line) = shaped.split_at(row.range.start - context_start);
+    line
+}
+
+/// Fenwick tree over block heights.
+///
+/// Width/scroll edits update one block's height; the tree keeps block-position
+/// queries cheap without rebuilding a prefix sum over every block.
+struct HeightIndex {
+    values: Vec<f64>,
+    tree: Vec<f64>,
+}
+
+impl HeightIndex {
+    fn new(len: usize) -> Self {
+        Self {
+            values: vec![0.; len],
+            tree: vec![0.; len + 1],
+        }
+    }
+
+    fn set(&mut self, index: usize, value: f64) {
+        if index >= self.values.len() {
+            return;
+        }
+        let delta = value - self.values[index];
+        if delta == 0. {
+            return;
+        }
+        self.values[index] = value;
+        let mut cursor = index + 1;
+        while cursor <= self.values.len() {
+            self.tree[cursor] += delta;
+            cursor += cursor.isolate_lowest_one();
+        }
+    }
+
+    fn prefix(&self, count: usize) -> f64 {
+        let mut cursor = count.min(self.values.len());
+        let mut sum = 0.;
+        while cursor > 0 {
+            sum += self.tree[cursor];
+            cursor -= cursor.isolate_lowest_one();
+        }
+        sum
+    }
+
+    fn total(&self) -> f64 {
+        self.prefix(self.values.len())
+    }
+
+    fn block_at(&self, y: f64) -> Option<usize> {
+        let len = self.values.len();
+        if len == 0 {
+            return None;
+        }
+        if y < 0. {
+            return Some(0);
+        }
+        if y >= self.total() {
+            return Some(len - 1);
+        }
+        let mut index = 0usize;
+        let mut remaining = y;
+        let mut bit = 1usize << (usize::BITS - 1 - len.leading_zeros());
+        while bit > 0 {
+            let next = index + bit;
+            if next <= len && self.tree[next] <= remaining {
+                index = next;
+                remaining -= self.tree[next];
+            }
+            bit >>= 1;
+        }
+        Some(index.min(len - 1))
+    }
+}

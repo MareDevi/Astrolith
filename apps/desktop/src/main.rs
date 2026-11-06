@@ -70,10 +70,23 @@ fn main() {
             {
                 let editor_spike = std::env::args().any(|argument| argument == "--spike=editor");
                 let layout_spike = std::env::args().any(|argument| argument == "--spike=layout");
-                if layout_spike {
+                let text_layout_spike =
+                    std::env::args().any(|argument| argument == "--spike=text-layout");
+                if text_layout_spike {
+                    tracing::info!("starting the text layout spike");
+                } else if layout_spike {
                     tracing::info!("starting the layout spike");
                 } else if editor_spike {
                     tracing::info!("starting the editor spike");
+                }
+
+                if text_layout_spike {
+                    if let Err(error) = astrolith_gpui::open_text_layout_spike(cx) {
+                        tracing::error!(error = %format_args!("{error:#}"), "could not open the text layout spike");
+                        eprintln!("Could not open the text layout spike: {error:#}");
+                        std::process::exit(1);
+                    }
+                    return;
                 }
 
                 if layout_spike {

@@ -23,3 +23,12 @@ mod ui;
 mod update;
 mod url_scheme;
 pub use shell::open;
+
+/// Open the development-only text layout comparison window.
+///
+/// It renders one fixture in the application-owned layout core and can swap to
+/// the Kit `TextView` for the same source. Release builds do not compile it.
+#[cfg(debug_assertions)]
+pub fn open_text_layout_spike(cx: &mut gpui_kit::App) -> anyhow::Result<()> {
+    editor::text_layout::spike::open(cx)
+}

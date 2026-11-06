@@ -58,6 +58,9 @@ ring.workspace = true
 base64.workspace = true
 tempfile = "3.27.0"
 unicode-segmentation = "=1.13.3"
+# UAX #14 line-break opportunities. GPUI keeps its own ICU segmenter private,
+# and this package is already in the dependency graph (cosmic-text, gpui-base).
+unicode-linebreak = "=0.1.5"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

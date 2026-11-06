@@ -127,3 +127,57 @@ pub(crate) fn epoch_ms() -> u128 {
         .unwrap_or_default()
         .as_millis()
 }
+
+/// Emit one prepared application-owned text layout viewport.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn text_layout(
+    mode: &str,
+    stats: crate::editor::text_layout::LayoutStats,
+    prepare: Duration,
+    rows: usize,
+    blocks: usize,
+    total_height: f32,
+    pending_bytes: usize,
+    width: f32,
+    scroll: f32,
+) {
+    if !enabled() {
+        return;
+    }
+    let sequence = FRAME_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    tracing::info!(
+        target: "astrolith::perf",
+        event = "text_layout_frame",
+        sequence,
+        mode,
+        blocks,
+        rows,
+        wrapped_rows = stats.wrapped_rows,
+        wrapped_bytes = stats.wrapped_bytes,
+        shaped_rows = stats.shaped_rows,
+        shaped_bytes = stats.shaped_bytes,
+        reused_rows = stats.reused_rows,
+        pending = stats.pending,
+        pending_bytes,
+        total_height,
+        width,
+        scroll,
+        prepare_ms = millis(prepare),
+        "application text layout"
+    );
+}
+
+/// Emit one incremental reconcile of the application text layout.
+pub(crate) fn text_layout_edit(outcome: crate::editor::text_layout::UpdateOutcome) {
+    if !enabled() {
+        return;
+    }
+    tracing::info!(
+        target: "astrolith::perf",
+        event = "text_layout_edit",
+        reused_blocks = outcome.reused_blocks,
+        reused_rows = outcome.reused_rows,
+        rebuilt_blocks = outcome.rebuilt_blocks,
+        "application text layout edit"
+    );
+}

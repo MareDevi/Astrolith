@@ -14,6 +14,7 @@ pub(crate) mod selection_toolbar;
 pub(crate) mod session;
 mod source_viewport;
 mod text_change;
+pub(crate) mod text_layout;
 pub(crate) use source_viewport::source_viewport;
 pub(crate) mod writer_chrome;
 pub(crate) mod writer_surface;
