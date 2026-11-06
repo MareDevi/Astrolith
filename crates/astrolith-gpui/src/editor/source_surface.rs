@@ -72,6 +72,12 @@ struct FrameGeometry {
     width: f32,
 }
 
+/// A symbol whose definitions the modifier-hover query resolved.
+struct DefinitionHover {
+    symbol_range: Range<usize>,
+    locations: Vec<lsp_types::LocationLink>,
+}
+
 /// Window-space placement for a caret-anchored overlay.
 #[derive(Clone, Copy)]
 struct PopupPlacement {
@@ -134,6 +140,9 @@ pub(crate) struct SourceSurface {
     diagnostic_anchor: Option<usize>,
     /// Pending debounced hover request; replaced on every pointer move.
     hover_task: Option<gpui_kit::Task<anyhow::Result<()>>>,
+    /// Symbol and locations from the last modifier-hover definition query.
+    definition: Option<DefinitionHover>,
+    definition_task: Option<gpui_kit::Task<anyhow::Result<()>>>,
     /// Menu revision the selected code action row belongs to.
     code_action_revision: u64,
     code_action_selected: usize,
@@ -167,6 +176,7 @@ impl SourceSurface {
                 this.sync_text(&text);
                 this.schedule_highlight(text, cx);
                 this.clear_hover(cx);
+                this.clear_definition(cx);
                 this.dismiss_code_actions(cx);
                 cx.notify();
             }
@@ -193,6 +203,8 @@ impl SourceSurface {
             completion_selected: 0,
             diagnostic_anchor: None,
             hover_task: None,
+            definition: None,
+            definition_task: None,
             code_action_revision: 0,
             code_action_selected: 0,
             _observe: observe,
@@ -673,7 +685,10 @@ impl SourceSurface {
             true,
             None::<isize>
         );
-        root.on_action(cx.listener(|this, _: &input::ShowCompletions, window, cx| {
+        root.on_action(cx.listener(|this, _: &input::GoToDefinition, window, cx| {
+            this.go_to_definition(window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &input::ShowCompletions, window, cx| {
             this.editor
                 .update(cx, |editor, cx| editor.show_completions(window, cx));
             cx.notify();
@@ -963,13 +978,21 @@ impl SourceSurface {
         &mut self,
         position: Point<Pixels>,
         alt: bool,
+        secondary: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if alt {
             self.clear_hover(cx);
+            self.clear_definition(cx);
             return;
         }
+        if secondary {
+            self.clear_hover(cx);
+            self.update_definition_hover(position, window, cx);
+            return;
+        }
+        self.clear_definition(cx);
         let Some(offset) = self.source_at(position) else {
             self.clear_hover(cx);
             return;
@@ -1018,6 +1041,113 @@ impl SourceSurface {
             self.editor
                 .update(cx, |editor, cx| editor.clear_hover_state(cx));
         }
+    }
+
+    /// Resolve definitions for the symbol under a modifier-held pointer.
+    ///
+    /// The Kit element keeps this state private, so the host stores the same
+    /// range/location pair: the underline comes from its own shaped runs and a
+    /// secondary click jumps through the public provider.
+    fn update_definition_hover(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(offset) = self.source_at(position) else {
+            self.clear_definition(cx);
+            return;
+        };
+        let Some(provider) = self.editor.read(cx).lsp().definition_provider.clone() else {
+            return;
+        };
+        if self
+            .definition
+            .as_ref()
+            .is_some_and(|definition| definition.symbol_range.contains(&offset))
+        {
+            return;
+        }
+        let text = self.editor.read(cx).text().clone();
+        let mut symbol_range = text.word_range(offset).unwrap_or(offset..offset);
+        self.definition_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let response = this.update_in(cx, |_, window, cx| {
+                provider.definitions(&text, offset, window, cx)
+            })?;
+            let locations = response.await?;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(first) = locations.first() {
+                    if let Some(range) = first.origin_selection_range {
+                        let text = this.editor.read(cx).text().clone();
+                        let start = text.position_to_offset(&range.start);
+                        let end = text.position_to_offset(&range.end);
+                        symbol_range = start..end;
+                    }
+                    this.definition = Some(DefinitionHover {
+                        symbol_range,
+                        locations,
+                    });
+                } else {
+                    this.definition = None;
+                }
+                cx.notify();
+            });
+            Ok(())
+        }));
+    }
+
+    fn clear_definition(&mut self, cx: &mut Context<Self>) {
+        self.definition_task = None;
+        if self.definition.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Resolve and follow the definition at the caret (F12).
+    fn go_to_definition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let offset = self.editor.read(cx).cursor();
+        let Some(provider) = self.editor.read(cx).lsp().definition_provider.clone() else {
+            return;
+        };
+        let editor = self.editor.clone();
+        self.definition_task = Some(cx.spawn_in(window, async move |_, cx| {
+            let response = editor.update_in(cx, |editor, window, cx| {
+                provider.definitions(editor.text(), offset, window, cx)
+            })?;
+            let locations = response.await?;
+            editor.update_in(cx, |editor, window, cx| {
+                if let Some(location) = locations.first() {
+                    jump_to_definition(editor, location, window, cx);
+                }
+            })?;
+            Ok(())
+        }));
+    }
+
+    /// Follow the already-resolved definition under a secondary click.
+    fn follow_definition_at(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(offset) = self.source_at(position) else {
+            return false;
+        };
+        let Some(location) = self.definition.as_ref().and_then(|definition| {
+            definition
+                .symbol_range
+                .contains(&offset)
+                .then(|| definition.locations.first().cloned())
+                .flatten()
+        }) else {
+            return false;
+        };
+        self.clear_definition(cx);
+        self.editor.update(cx, |editor, cx| {
+            jump_to_definition(editor, &location, window, cx)
+        });
+        true
     }
 
     /// Paint the hover popover the retained editor is presenting.
@@ -1281,6 +1411,39 @@ impl SourceSurface {
     }
 }
 
+/// Follow an LSP definition the way the Kit editor does: let the host show
+/// external/virtual documents first, then open URLs or move the selection.
+fn jump_to_definition(
+    editor: &mut EditorState,
+    location: &lsp_types::LocationLink,
+    window: &mut Window,
+    cx: &mut Context<EditorState>,
+) {
+    let external = matches!(
+        location.target_uri.scheme().map(|scheme| scheme.as_str()),
+        Some("http" | "https")
+    );
+    if let Some(handler) = editor.lsp().show_document.clone() {
+        let params = lsp_types::ShowDocumentParams {
+            uri: location.target_uri.clone(),
+            external: Some(external),
+            take_focus: Some(true),
+            selection: Some(location.target_selection_range),
+        };
+        if handler(&params, window, cx) {
+            return;
+        }
+    }
+    if external {
+        cx.open_url(&location.target_uri.to_string());
+        return;
+    }
+    let text = editor.text().clone();
+    let start = text.position_to_offset(&location.target_selection_range.start);
+    let end = text.position_to_offset(&location.target_selection_range.end);
+    editor.set_selected_range(start..end, cx);
+}
+
 /// Flatten LSP hover contents into the Markdown the popover presents.
 fn hover_contents(hover: &lsp_types::Hover) -> SharedString {
     let marked = |value: &lsp_types::MarkedString| match value {
@@ -1349,6 +1512,8 @@ struct ThemedSourceRuns<'a> {
     style: Arc<SourceStyle>,
     diagnostics: Option<&'a DiagnosticSet>,
     diagnostic_colors: DiagnosticColors,
+    /// The symbol range the modifier-hover definition query resolved.
+    definition: Option<&'a (Range<usize>, HighlightStyle)>,
 }
 
 impl SourceRuns for ThemedSourceRuns<'_> {
@@ -1374,12 +1539,20 @@ impl SourceRuns for ThemedSourceRuns<'_> {
                     .collect()
             })
             .unwrap_or_default();
-        let mut runs = Vec::with_capacity(styles.len() + diagnostics.len());
+        let mut extras = diagnostics;
+        if let Some((span, style)) = self.definition {
+            let start = span.start.max(range.start);
+            let end = span.end.min(range.end);
+            if start < end {
+                extras.push((start..end, *style));
+            }
+        }
+        let mut runs = Vec::with_capacity(styles.len() + extras.len());
         let mut cursor = range.start;
-        let combined: Vec<(Range<usize>, HighlightStyle)> = if diagnostics.is_empty() {
+        let combined: Vec<(Range<usize>, HighlightStyle)> = if extras.is_empty() {
             styles
         } else {
-            gpui_kit::combine_highlights(diagnostics, styles).collect()
+            gpui_kit::combine_highlights(extras, styles).collect()
         };
         for (span, style) in combined {
             let start = span.start.max(range.start).min(range.end);
@@ -1487,6 +1660,15 @@ impl Render for SourceSurface {
             info: status.info(cx),
             hint: status.hint(cx),
         };
+        let definition_run = self.definition.as_ref().map(|definition| {
+            let mut style = highlight_theme.style("link_text").unwrap_or_default();
+            style.underline = Some(UnderlineStyle {
+                color: style.color,
+                thickness: px(1.),
+                wavy: false,
+            });
+            (definition.symbol_range.clone(), style)
+        });
         let prepare_started = Instant::now();
         {
             let editor = self.editor.read(cx);
@@ -1515,6 +1697,7 @@ impl Render for SourceSurface {
                 style: Arc::new(style.clone()),
                 diagnostics,
                 diagnostic_colors,
+                definition: definition_run.as_ref(),
             };
             let _prepared = layout.prepare(
                 window.text_system(),
@@ -1759,6 +1942,13 @@ impl Render for SourceSurface {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if event.modifiers.secondary(cx)
+                        && this.follow_definition_at(event.position, window, cx)
+                    {
+                        cx.stop_propagation();
+                        window.prevent_default();
+                        return;
+                    }
                     this.dismiss_completion(cx);
                     this.select(event.position, event.modifiers.shift, window, cx);
                     window.prevent_default();
@@ -1768,7 +1958,13 @@ impl Render for SourceSurface {
                 if event.pressed_button == Some(MouseButton::Left) {
                     this.select(event.position, true, window, cx);
                 } else {
-                    this.update_hover(event.position, event.modifiers.alt, window, cx);
+                    this.update_hover(
+                        event.position,
+                        event.modifiers.alt,
+                        event.modifiers.secondary(cx),
+                        window,
+                        cx,
+                    );
                     this.update_diagnostic_hover(event.position, cx);
                 }
             }))
@@ -2422,6 +2618,84 @@ mod tests {
         });
     }
 
+    struct FixedDefinitions;
+
+    impl input::DefinitionProvider for FixedDefinitions {
+        fn definitions(
+            &self,
+            _text: &Rope,
+            _offset: usize,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> gpui_kit::Task<anyhow::Result<Vec<lsp_types::LocationLink>>> {
+            gpui_kit::Task::ready(Ok(vec![lsp_types::LocationLink {
+                target_uri: "file:///docs.md".parse().expect("a document URI"),
+                target_range: lsp_types::Range::new(
+                    lsp_types::Position::new(1, 0),
+                    lsp_types::Position::new(1, 4),
+                ),
+                target_selection_range: lsp_types::Range::new(
+                    lsp_types::Position::new(1, 0),
+                    lsp_types::Position::new(1, 4),
+                ),
+                origin_selection_range: None,
+            }]))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn definition_request_moves_the_selection(cx: &mut TestAppContext) {
+        let (handle, surface) = mount_source(cx, "alpha\nbeta\n");
+        surface.update(cx, |surface, cx| {
+            surface.editor.update(cx, |editor, _| {
+                editor.lsp_mut().definition_provider = Some(Rc::new(FixedDefinitions));
+            });
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            surface.update(cx, |surface, cx| surface.go_to_definition(window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        surface.read_with(cx, |surface, cx| {
+            assert_eq!(
+                surface.editor.read(cx).selected_range(),
+                6..10,
+                "F12 selects the returned target range in the same document"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn definition_hover_underlines_the_resolved_symbol(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let theme = cx.theme().highlight_theme.clone();
+            let mut style = theme.style("link_text").unwrap_or_default();
+            style.underline = Some(UnderlineStyle {
+                color: style.color,
+                thickness: px(1.),
+                wavy: false,
+            });
+            let definition = (0..5, style);
+            let runs = ThemedSourceRuns {
+                highlighter: None,
+                theme: &theme,
+                style: Arc::new(SourceStyle::from_theme(cx)),
+                diagnostics: None,
+                diagnostic_colors: DiagnosticColors::default(),
+                definition: Some(&definition),
+            }
+            .runs(0..11);
+            let underlined: Vec<_> = runs.iter().filter(|run| run.underline.is_some()).collect();
+            assert_eq!(
+                underlined.len(),
+                1,
+                "only the resolved symbol is underlined"
+            );
+            assert_eq!(underlined[0].len, 5);
+        });
+    }
+
     #[gpui_kit::test]
     fn diagnostic_runs_underline_exactly_the_reported_range(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -2442,6 +2716,7 @@ mod tests {
                     error: gpui_kit::red(),
                     ..Default::default()
                 },
+                definition: None,
             }
             .runs(0..11);
             assert_eq!(
