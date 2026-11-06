@@ -1,0 +1,39 @@
+{
+  "settle_ms": 2000,
+  "wait_document_ms": 15000,
+  "steps": [
+    {
+      "mode": "build",
+      "wait_ms": 700
+    },
+    {
+      "wait_ms": 700
+    },
+    {
+      "find_query": "ordinary",
+      "wait_ms": 700
+    },
+    {
+      "find_next": 1,
+      "wait_ms": 700
+    },
+    {
+      "find_next": 1,
+      "wait_ms": 700
+    },
+    {
+      "find_replace_all": "common",
+      "wait_ms": 700
+    },
+    {
+      "find_close": true,
+      "wait_ms": 700
+    },
+    {
+      "wait_ms": 300
+    },
+    {
+      "quit": true
+    }
+  ]
+}

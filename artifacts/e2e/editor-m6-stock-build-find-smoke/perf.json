@@ -1,0 +1,151 @@
+{
+  "schema": "astrolith.editor-perf.metrics/1",
+  "test_id": "editor-m6-stock-build-find-smoke",
+  "backend": "pre",
+  "fixture": "complex-markdown",
+  "metrics": {
+    "build_ms": 10542,
+    "writer_repaints": {
+      "samples": 0,
+      "paint_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "caret_blinks_max": 0
+    },
+    "writer_frames": {
+      "samples": 17,
+      "total_ms": {
+        "p50": 0.616579,
+        "p95": 10.730222000000001,
+        "p99": 10.730222000000001,
+        "max": 10.730222000000001
+      },
+      "render_ms": {
+        "p50": 0.285171,
+        "p95": 9.900386000000001,
+        "max": 9.900386000000001
+      },
+      "layout_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "prepaint_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "paint_ms": {
+        "p50": 0.32971900000000004,
+        "p95": 1.194786,
+        "max": 1.194786
+      },
+      "blocks_rendered_max": 35,
+      "blocks_total_max": 2956,
+      "nodes_built_total": 0,
+      "nodes_reused_total": 0,
+      "geometry_leaves_max": 0,
+      "shaping_bytes_max": 365,
+      "caret_blinks_max": 5
+    },
+    "build_frames": {
+      "samples": 15,
+      "total_ms": {
+        "p50": 2.291982,
+        "p95": 13.345030000000001,
+        "p99": 13.345030000000001,
+        "max": 13.345030000000001
+      },
+      "prepare_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "layout_ms": {
+        "p50": 0.30293,
+        "p95": 7.111567,
+        "max": 7.111567
+      },
+      "prepaint_ms": {
+        "p50": 1.555911,
+        "p95": 7.415131000000001,
+        "max": 7.415131000000001
+      },
+      "paint_ms": {
+        "p50": 0.35319300000000003,
+        "p95": 6.449535,
+        "max": 6.449535
+      }
+    },
+    "driver_steps": {
+      "samples": 9,
+      "p50": 0.070665,
+      "p95": 2.2743580000000003,
+      "max": 2.2743580000000003
+    },
+    "mode_handlers": {
+      "samples": 1,
+      "p50": 0.46119899999999997,
+      "p95": 0.46119899999999997,
+      "max": 0.46119899999999997
+    },
+    "change_handlers": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "parse_queue_vs_install": {
+      "samples": 1,
+      "p50": 0.0007899999999999999,
+      "p95": 0.0007899999999999999,
+      "max": 0.0007899999999999999
+    },
+    "parse_runs": {
+      "samples": 1,
+      "bytes": {
+        "p50": 98304,
+        "max": 98304
+      },
+      "reused_blocks": {
+        "p50": 0,
+        "max": 0
+      },
+      "incremental_samples": 0,
+      "ms": {
+        "p50": 16.964225,
+        "p95": 16.964225,
+        "max": 16.964225
+      }
+    },
+    "document_convergence": {
+      "initial_install_ms": {
+        "samples": 1,
+        "p50": 31.619648,
+        "p95": 31.619648,
+        "max": 31.619648
+      },
+      "edit_install_ms": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "layout_reconcile_ms": {
+        "p50": 9.444231,
+        "p95": 9.444231,
+        "max": 9.444231
+      }
+    },
+    "document_close": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "cpu": null,
+    "fullscreen_pairs": 0
+  }
+}
