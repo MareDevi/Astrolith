@@ -12,6 +12,7 @@
 | `crates/astrolith-gpui/src/editor/perf.rs` | 默认关闭的计数与分阶段计时，target 为 `astrolith::perf` |
 | `crates/astrolith-gpui/src/shell/perf.rs` | 仅开发构建：读取 `ASTROLITH_PERF_SCENARIO`，驱动模式、滚动、输入和退出 |
 | `gpui-fast` feature | `astrolith-gpui` / `astrolith-desktop` 的可选后端切换，不改变默认构建 |
+| `--spike=text-layout` | 开发专用 M2 对照窗口：应用自有视口布局与 Kit `TextView` 同一 source 的 A/B，不替换产品视图 |
 
 计数器只在 `ASTROLITH_EDITOR_PERF=1` 时输出，且只记录数字：块数、准备好的节点数、缓存复用数、交给整形的字节数、几何叶子数、以及 render/layout/prepaint/paint 各阶段毫秒。不记录正文、选择或预编辑内容。
 
@@ -68,7 +69,26 @@ node scripts/editor-perf.mjs ab --fixture history-single-paragraph-102420 --scen
 
 Preview 与 Build 仍由 Kit TextView/Editor 内部完成布局；本基线通过 CPU 采样和外部时间观察，不伪造应用内分阶段计时。
 
-## 5. 限制
+## 5. M2 文本布局对照入口
+
+```sh
+node scripts/editor-perf.mjs fixtures
+ASTROLITH_EDITOR_PERF=1 \
+ASTROLITH_TEXT_LAYOUT_FIXTURE=target/editor-perf/fixtures/history-single-paragraph-102420.md \
+ASTROLITH_TEXT_LAYOUT_STEPS='[{"wait_ms":900,"log":true},{"scroll":0.5,"wait_ms":500,"log":true},{"quit":true}]' \
+ASTROLITH_TEXT_LAYOUT_EXIT_MS=8000 \
+target/debug/astrolith-desktop --spike=text-layout
+```
+
+- `ASTROLITH_TEXT_LAYOUT_MODE=private|kit`：启动时选择自有布局或 Kit `TextView`；窗口内 `Tab` 切换。
+- `ASTROLITH_TEXT_LAYOUT_STEPS`：`wait_ms`、`scroll`（可滚动范围的比例）、`caret`（`start|end`）、
+  `mode`、`size`（窗口逻辑像素）、`insert`（在光标处插入一个字）、`log`、`quit`。
+- 输出 `text_layout_frame`（wrap/shape 行数与字节数、phase 时间、pending）、`text_layout_pending`
+  （冷定位边界与待处理字节）、`text_layout_edit`（复用块/行）与 `text_layout_follow`（光标跟随）。
+- 入口只编译 development 构建；release 遇到 `--spike=` 仍直接拒绝。结果与限制见
+  [M2 结果](editor-performance-m2-results.md)。
+
+## 6. 限制
 
 - 脚本输入走真实 `WriterSurface` 的 `EntityInputHandler`，但不等于物理键盘或 fcitx5 候选窗口验收。
 - 单次 GPUI shaping 调用不可被时间预算中断；本入口只测量，不改变算法。

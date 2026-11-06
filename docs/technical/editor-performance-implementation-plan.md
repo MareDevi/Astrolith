@@ -3,7 +3,7 @@
 - 日期：2026-11-06。
 - 基线提交：`8c9d7f3`（依赖升级）、`c54783f`（新版本性能诊断）。
 - 依赖基线：GPUI Kit/base/component 0.9.0、gpui-pre 0.3.11，全部使用发布包。
-- 状态：M0 与 M1 已实施并产出原生基线（见 [M0/M1 结果](editor-performance-m0-m1-results.md)）；M2 起未开始。本文其余阶段仍是目标与验收路线，不代表已完成。
+- 状态：M0–M2 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)）；M3 起未开始。M2 通过的是可行性门槛，产品视图仍走现有实现。
 - 目标环境：首先解决用户实际运行的 `mise run dev` 与 Hyprland/Wayland 场景；release 和其他平台单独验收。
 
 ## 1. 决策与范围
@@ -291,7 +291,7 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 | --- | --- | --- |
 | M0 基线、fixture、隔离驱动、后端 A/B、字体栈 profile A/B | 已完成；字体栈优化已采用 | [M0/M1 结果](editor-performance-m0-m1-results.md)、`artifacts/e2e/editor-m0-*` |
 | M1 生命周期与刷新隔离 | 已完成 | 同上；准备节点复用、caret 独立层、宽度 epoch、隐藏停止 |
-| M2 自有文本布局可行性 | 未开始（决策门要求进入） | 单段落 p95 52 ms，未达 16.7 ms |
+| M2 自有文本布局可行性 | 已完成（可行性门槛通过；产品视图未替换） | [M2 结果](editor-performance-m2-results.md)；`artifacts/e2e/editor-m2-layout-core`、`editor-m2-private-vs-kit` |
 | M3–M7 | 未开始 | — |
 | GPUI Fast 采用 | 不采用默认后端 | 长单段落 p95 277 ms，明显差于 gpui-pre 52 ms |
 
