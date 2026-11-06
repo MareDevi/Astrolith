@@ -1,0 +1,109 @@
+{
+  "schema": "astrolith.editor-perf.metrics/1",
+  "test_id": "editor-m6-surface-build-plain-long-line-1mib",
+  "backend": "pre",
+  "fixture": "plain-long-line-1mib",
+  "metrics": {
+    "build_ms": 284,
+    "writer_repaints": {
+      "samples": 0,
+      "paint_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "caret_blinks_max": 0
+    },
+    "writer_frames": {
+      "samples": 18,
+      "total_ms": {
+        "p50": 0.6213339999999999,
+        "p95": 3.2261919999999997,
+        "p99": 3.2261919999999997,
+        "max": 3.2261919999999997
+      },
+      "render_ms": {
+        "p50": 0.109915,
+        "p95": 2.4581109999999997,
+        "max": 2.4581109999999997
+      },
+      "layout_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "prepaint_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "paint_ms": {
+        "p50": 0.50462,
+        "p95": 1.179138,
+        "max": 1.179138
+      },
+      "blocks_rendered_max": 1,
+      "blocks_total_max": 1,
+      "nodes_built_total": 0,
+      "nodes_reused_total": 0,
+      "geometry_leaves_max": 0,
+      "shaping_bytes_max": 6912,
+      "caret_blinks_max": 5
+    },
+    "build_frames": {
+      "samples": 957,
+      "total_ms": {
+        "p50": 2.2226120000000003,
+        "p95": 3.18767,
+        "p99": 4.803768,
+        "max": 28.65078
+      },
+      "prepare_ms": {
+        "p50": 0.011056999999999999,
+        "p95": 0.020728,
+        "max": 19.149134
+      },
+      "layout_ms": {
+        "p50": 2.158006,
+        "p95": 3.0400739999999997,
+        "max": 9.375395
+      },
+      "prepaint_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "paint_ms": {
+        "p50": 0.051639,
+        "p95": 0.06832300000000001,
+        "max": 0.811105
+      }
+    },
+    "driver_steps": {
+      "samples": 19,
+      "p50": 0.022712,
+      "p95": 6.367474,
+      "max": 6.367474
+    },
+    "mode_handlers": {
+      "samples": 1,
+      "p50": 6.10782,
+      "p95": 6.10782,
+      "max": 6.10782
+    },
+    "change_handlers": {
+      "samples": 2,
+      "p50": 26.298018,
+      "p95": 28.020349,
+      "max": 28.020349
+    },
+    "parse_queue_vs_install": {
+      "samples": 1,
+      "p50": 0.001308,
+      "p95": 0.001308,
+      "max": 0.001308
+    },
+    "cpu": null,
+    "fullscreen_pairs": 0
+  }
+}
