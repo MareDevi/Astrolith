@@ -208,6 +208,17 @@ impl RichText {
     }
 }
 
+/// Horizontal alignment of one table column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnAlign {
+    /// Default alignment.
+    Left,
+    /// Centered cells.
+    Center,
+    /// Trailing alignment.
+    Right,
+}
+
 /// What a block is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlockKind {
@@ -231,6 +242,26 @@ pub enum BlockKind {
     },
     /// Thematic break; it has no editable text.
     Rule,
+    /// One GFM pipe-table row. Cells live in [`RichBlock::cells`].
+    TableRow {
+        /// Whether this is the header row.
+        header: bool,
+        /// Alignment of every column.
+        align: Vec<ColumnAlign>,
+    },
+    /// A footnote definition; the label is drawn as a marker.
+    Footnote {
+        /// The label after `[^`.
+        label: String,
+    },
+    /// Raw HTML or MDX flow content, shown without interpretation.
+    Raw,
+    /// A standalone image; the reader sees the picture, the writer its alt
+    /// text.
+    Image {
+        /// Destination as written in the Markdown source.
+        url: String,
+    },
 }
 
 /// One rendered block.
@@ -244,6 +275,8 @@ pub struct RichBlock {
     pub content: Range<usize>,
     /// Rendered content and its source mapping.
     pub text: RichText,
+    /// Table cells in column order; empty for every other block kind.
+    pub cells: Vec<RichText>,
     /// Indentation level for quotes and lists.
     pub depth: usize,
 }
@@ -279,6 +312,7 @@ impl WysiwygDocument {
             return None;
         }
         let lines = lines(source);
+        let definitions = reference_definitions(source, &lines);
         let mut blocks = Vec::new();
         let mut index = 0;
         while index < lines.len() {
@@ -293,62 +327,83 @@ impl WysiwygDocument {
             }
             let indent = content.len() - content.trim_start_matches(' ').len();
             let rest = &content[indent..];
-            if indent <= 3
-                && let Some(block) = fenced_code(source, &lines, index, line, rest)
-            {
-                index = block.next;
-                blocks.push(block.block);
-                continue;
-            }
-            if indent <= 3
-                && let Some((level, content_start)) = heading(rest, line, indent)
-            {
-                let content_end = trim_end(source, content_start, line.content_end);
-                blocks.push(RichBlock {
-                    kind: BlockKind::Heading(level),
-                    source: line.start..line.end,
-                    content: content_start..content_end,
-                    text: inline(source, content_start..content_end),
-                    depth: 0,
-                });
-                index += 1;
-                continue;
-            }
-            if indent <= 3 && is_rule(rest) {
-                blocks.push(RichBlock {
-                    kind: BlockKind::Rule,
-                    source: line.start..line.end,
-                    content: line.start..line.start,
-                    text: RichText::default(),
-                    depth: 0,
-                });
-                index += 1;
-                continue;
-            }
-            if indent <= 3 && rest.starts_with('>') {
-                let (block, next) = blockquote(source, &lines, index, indent);
-                blocks.push(block);
-                index = next;
-                continue;
-            }
-            if indent <= 3
-                && let Some((marker, content_start, ordered, number)) =
+            if indent <= 3 {
+                if let Some((block, next)) =
+                    footnote_definition(source, &lines, index, &definitions)
+                {
+                    blocks.push(block);
+                    index = next;
+                    continue;
+                }
+                if reference_definition(rest).is_some() {
+                    index += 1;
+                    continue;
+                }
+                if let Some((mut rows, next)) = table(source, &lines, index, &definitions) {
+                    blocks.append(&mut rows);
+                    index = next;
+                    continue;
+                }
+                if let Some((block, next)) = raw_flow(source, &lines, index) {
+                    blocks.push(block);
+                    index = next;
+                    continue;
+                }
+                if let Some(block) = fenced_code(source, &lines, index, line, rest) {
+                    index = block.next;
+                    blocks.push(block.block);
+                    continue;
+                }
+                if let Some((level, content_start)) = heading(rest, line, indent) {
+                    let content_end = trim_end(source, content_start, line.content_end);
+                    blocks.push(RichBlock {
+                        kind: BlockKind::Heading(level),
+                        source: line.start..line.end,
+                        content: content_start..content_end,
+                        text: inline(source, content_start..content_end, &definitions),
+                        cells: Vec::new(),
+                        depth: 0,
+                    });
+                    index += 1;
+                    continue;
+                }
+                if is_rule(rest) {
+                    blocks.push(RichBlock {
+                        kind: BlockKind::Rule,
+                        source: line.start..line.end,
+                        content: line.start..line.start,
+                        text: RichText::default(),
+                        cells: Vec::new(),
+                        depth: 0,
+                    });
+                    index += 1;
+                    continue;
+                }
+                if rest.starts_with('>') {
+                    let (block, next) = blockquote(source, &lines, index, indent, &definitions);
+                    blocks.push(block);
+                    index = next;
+                    continue;
+                }
+                if let Some((marker, content_start, ordered, number)) =
                     list_marker(rest, line, indent)
-            {
-                let content_end = trim_end(source, content_start, line.content_end);
-                blocks.push(RichBlock {
-                    kind: BlockKind::ListItem { ordered, number },
-                    source: line.start..line.end,
-                    content: content_start..content_end,
-                    text: inline(source, content_start..content_end),
-                    depth: indent / 2,
-                });
-                let _ = marker;
-                index += 1;
-                continue;
+                {
+                    let content_end = trim_end(source, content_start, line.content_end);
+                    blocks.push(RichBlock {
+                        kind: BlockKind::ListItem { ordered, number },
+                        source: line.start..line.end,
+                        content: content_start..content_end,
+                        text: inline(source, content_start..content_end, &definitions),
+                        cells: Vec::new(),
+                        depth: indent / 2,
+                    });
+                    let _ = marker;
+                    index += 1;
+                    continue;
+                }
             }
-            let (block, next) = paragraph(source, &lines, index, indent);
-            blocks.push(block);
+            let (block, next) = paragraph(source, &lines, index, indent, &definitions);
+            blocks.push(standalone_image(block));
             index = next;
         }
         if source.ends_with('\n')
@@ -364,6 +419,7 @@ impl WysiwygDocument {
                 source: source.len()..source.len(),
                 content: source.len()..source.len(),
                 text: RichText::default(),
+                cells: Vec::new(),
                 depth: 0,
             });
         }
@@ -606,6 +662,7 @@ fn fenced_code(
             source: opening.start..block_end,
             content: content_start..content_end,
             text: RichText::linear(source, content_start..content_end),
+            cells: Vec::new(),
             depth: 0,
         },
         next,
@@ -617,7 +674,13 @@ struct FencedBlock {
     next: usize,
 }
 
-fn blockquote(source: &str, lines: &[Line], index: usize, indent: usize) -> (RichBlock, usize) {
+fn blockquote(
+    source: &str,
+    lines: &[Line],
+    index: usize,
+    indent: usize,
+    definitions: &Definitions,
+) -> (RichBlock, usize) {
     let mut next = index;
     let mut text = RichText::default();
     let mut content_start = 0;
@@ -641,7 +704,7 @@ fn blockquote(source: &str, lines: &[Line], index: usize, indent: usize) -> (Ric
         } else {
             text.push_newline(previous_end..line.start);
         }
-        text.append(inline(source, start..end));
+        text.append(inline(source, start..end, definitions));
         content_end = end;
         previous_end = line.end;
         next += 1;
@@ -653,13 +716,20 @@ fn blockquote(source: &str, lines: &[Line], index: usize, indent: usize) -> (Ric
             source: source_start..lines[next.saturating_sub(1)].end,
             content: content_start..content_end,
             text,
+            cells: Vec::new(),
             depth: 1,
         },
         next,
     )
 }
 
-fn paragraph(source: &str, lines: &[Line], index: usize, indent: usize) -> (RichBlock, usize) {
+fn paragraph(
+    source: &str,
+    lines: &[Line],
+    index: usize,
+    indent: usize,
+    definitions: &Definitions,
+) -> (RichBlock, usize) {
     let mut next = index;
     let mut text = RichText::default();
     let mut content_start = 0;
@@ -668,7 +738,10 @@ fn paragraph(source: &str, lines: &[Line], index: usize, indent: usize) -> (Rich
     let mut previous_end = 0;
     while let Some(line) = lines.get(next) {
         let content = &source[line.start..line.content_end];
-        if content.trim().is_empty() || (next > index && starts_block(source, line)) {
+        if content.trim().is_empty()
+            || (next > index
+                && (starts_block(source, line) || table_row_start(source, lines, next)))
+        {
             break;
         }
         let start = line.start;
@@ -679,7 +752,7 @@ fn paragraph(source: &str, lines: &[Line], index: usize, indent: usize) -> (Rich
         } else {
             text.push_newline(previous_end..line.start);
         }
-        text.append(inline(source, start..end));
+        text.append(inline(source, start..end, definitions));
         content_end = end;
         previous_end = line.end;
         next += 1;
@@ -690,6 +763,7 @@ fn paragraph(source: &str, lines: &[Line], index: usize, indent: usize) -> (Rich
             source: lines[index].start + indent..lines[next.saturating_sub(1)].end,
             content: content_start..content_end,
             text,
+            cells: Vec::new(),
             depth: 0,
         },
         next,
@@ -712,18 +786,370 @@ fn starts_block(source: &str, line: &Line) -> bool {
         || list_marker(rest, line, indent).is_some()
         || rest.starts_with("```")
         || rest.starts_with("~~~")
+        || rest.starts_with('<')
+        || footnote_marker(rest).is_some()
+        || reference_definition(rest).is_some()
+}
+
+/// Link reference definitions collected from the document, keyed by their
+/// normalized label.
+type Definitions = std::collections::HashMap<String, String>;
+
+/// A paragraph that contains nothing but one image becomes a picture block.
+fn standalone_image(mut block: RichBlock) -> RichBlock {
+    if block.kind != BlockKind::Paragraph {
+        return block;
+    }
+    let text = &block.text.text;
+    let start = text.len() - text.trim_start().len();
+    let end = text.trim_end().len();
+    let Some(mark) = block.text.marks.iter().find(|mark| {
+        matches!(mark.kind, InlineMarkKind::Image(_))
+            && mark.range.start <= start
+            && mark.range.end >= end
+    }) else {
+        return block;
+    };
+    let InlineMarkKind::Image(url) = &mark.kind else {
+        return block;
+    };
+    block.kind = BlockKind::Image { url: url.clone() };
+    block
+}
+
+/// Whether `offset` sits after an odd number of backslashes.
+fn is_escaped(text: &str, offset: usize) -> bool {
+    let mut count = 0;
+    let mut cursor = offset;
+    while cursor > 0 && text.as_bytes()[cursor - 1] == b'\\' {
+        count += 1;
+        cursor -= 1;
+    }
+    count % 2 == 1
+}
+
+/// Split one table line into trimmed cell ranges, ignoring escaped pipes and
+/// pipes inside code spans.
+fn split_cells(source: &str, start: usize, end: usize) -> Vec<Range<usize>> {
+    let text = &source[start..end];
+    let mut cells = Vec::new();
+    let mut cell_start = 0;
+    let mut cursor = 0;
+    let mut code_run = 0usize;
+    while cursor < text.len() {
+        let byte = text.as_bytes()[cursor];
+        if byte == b'`' {
+            let run = text.as_bytes()[cursor..]
+                .iter()
+                .take_while(|byte| **byte == b'`')
+                .count();
+            if code_run == 0 {
+                code_run = run;
+            } else if run == code_run {
+                code_run = 0;
+            }
+            cursor += run;
+            continue;
+        }
+        if byte == b'|' && code_run == 0 && !is_escaped(text, cursor) {
+            cells.push(cell_start..cursor);
+            cell_start = cursor + 1;
+        }
+        cursor += 1;
+    }
+    cells.push(cell_start..text.len());
+    // A leading or trailing pipe delimits the row instead of creating an
+    // empty cell.
+    if cells.first().is_some_and(|range| range.is_empty()) {
+        cells.remove(0);
+    }
+    if cells.last().is_some_and(|range| range.is_empty()) {
+        cells.pop();
+    }
+    cells
+        .into_iter()
+        .map(|range| {
+            let mut cell_start = start + range.start;
+            let mut cell_end = start + range.end;
+            while cell_start < cell_end && source.as_bytes()[cell_start].is_ascii_whitespace() {
+                cell_start += 1;
+            }
+            while cell_end > cell_start && source.as_bytes()[cell_end - 1].is_ascii_whitespace() {
+                cell_end -= 1;
+            }
+            cell_start..cell_end
+        })
+        .collect()
+}
+
+fn table_delimiter(content: &str) -> Option<Vec<ColumnAlign>> {
+    if !content.contains('|') {
+        return None;
+    }
+    let mut align = Vec::new();
+    for cell in split_cells(content, 0, content.len()) {
+        let cell = content[cell].trim();
+        if cell.is_empty() || !cell.chars().any(|character| character == '-') {
+            return None;
+        }
+        let left = cell.starts_with(':');
+        let right = cell.ends_with(':');
+        align.push(match (left, right) {
+            (true, true) => ColumnAlign::Center,
+            (false, true) => ColumnAlign::Right,
+            _ => ColumnAlign::Left,
+        });
+        if !cell.chars().all(|character| matches!(character, '-' | ':')) {
+            return None;
+        }
+    }
+    (!align.is_empty()).then_some(align)
+}
+
+fn table_row_start(source: &str, lines: &[Line], index: usize) -> bool {
+    let Some(line) = lines.get(index) else {
+        return false;
+    };
+    let content = &source[line.start..line.content_end];
+    if !content.contains('|') {
+        return false;
+    }
+    lines
+        .get(index + 1)
+        .and_then(|next| {
+            let next = &source[next.start..next.content_end];
+            table_delimiter(next.trim_start())
+        })
+        .is_some()
+}
+
+/// Parse a GFM pipe table into one block per row.
+fn table(
+    source: &str,
+    lines: &[Line],
+    index: usize,
+    definitions: &Definitions,
+) -> Option<(Vec<RichBlock>, usize)> {
+    if !table_row_start(source, lines, index) {
+        return None;
+    }
+    let delimiter_line = &lines[index + 1];
+    let align =
+        table_delimiter(source[delimiter_line.start..delimiter_line.content_end].trim_start())?;
+    let mut blocks = Vec::new();
+    let mut row_indexes = vec![index];
+    let mut next = index + 2;
+    while let Some(line) = lines.get(next) {
+        let content = &source[line.start..line.content_end];
+        if content.trim().is_empty() || !content.contains('|') {
+            break;
+        }
+        row_indexes.push(next);
+        next += 1;
+    }
+    for row_index in row_indexes {
+        let line = &lines[row_index];
+        let content_start = line.start;
+        let content_end = line.content_end;
+        let ranges = split_cells(source, content_start, content_end);
+        let header = row_index == index;
+        let mut cells = Vec::with_capacity(align.len());
+        for (column, align_kind) in align.iter().enumerate() {
+            let mut cell = match ranges.get(column) {
+                Some(range) => inline(source, range.clone(), definitions),
+                None => RichText::default(),
+            };
+            if header {
+                let len = cell.text.len();
+                cell.mark(0..len, InlineMarkKind::Bold);
+            }
+            let _ = align_kind;
+            cells.push(cell);
+        }
+        let mut text = RichText::default();
+        for (column, cell) in cells.iter().enumerate() {
+            if column > 0 {
+                let separator = ranges
+                    .get(column - 1)
+                    .map_or(content_start..content_start, |range| range.end..range.end);
+                text.push_run("\t", separator, false);
+            }
+            text.append(cell.clone());
+        }
+        blocks.push(RichBlock {
+            kind: BlockKind::TableRow {
+                header,
+                align: align.clone(),
+            },
+            source: line.start..line.end,
+            content: content_start..content_end,
+            text,
+            cells,
+            depth: 0,
+        });
+    }
+    Some((blocks, next))
+}
+
+fn footnote_definition(
+    source: &str,
+    lines: &[Line],
+    index: usize,
+    definitions: &Definitions,
+) -> Option<(RichBlock, usize)> {
+    let line = &lines[index];
+    let content = &source[line.start..line.content_end];
+    let indent = content.len() - content.trim_start_matches(' ').len();
+    let rest = &content[indent..];
+    let label = footnote_marker(rest)?;
+    let after_marker = indent + rest.find(']')? + 1;
+    let colon = content[after_marker..].find(':')?;
+    let body_start = line.start + after_marker + colon + 1;
+    let body_start = body_start
+        + (content[after_marker + colon + 1..].len()
+            - content[after_marker + colon + 1..].trim_start().len());
+    let mut text = inline(source, body_start..line.content_end, definitions);
+    let mut next = index + 1;
+    let mut previous_end = line.end;
+    while let Some(continuation) = lines.get(next) {
+        let continuation_text = &source[continuation.start..continuation.content_end];
+        if continuation_text.trim().is_empty()
+            || !(continuation_text.starts_with("  ") || continuation_text.starts_with('\t'))
+        {
+            break;
+        }
+        let start =
+            continuation.start + (continuation_text.len() - continuation_text.trim_start().len());
+        text.push_newline(previous_end..continuation.start);
+        text.append(inline(source, start..continuation.content_end, definitions));
+        previous_end = continuation.end;
+        next += 1;
+    }
+    Some((
+        RichBlock {
+            kind: BlockKind::Footnote {
+                label: label.to_owned(),
+            },
+            source: line.start..lines[next - 1].end,
+            content: body_start..lines[next - 1].content_end,
+            text,
+            cells: Vec::new(),
+            depth: 0,
+        },
+        next,
+    ))
+}
+
+/// Raw HTML or MDX flow, kept verbatim as one block until a blank line.
+fn raw_flow(source: &str, lines: &[Line], index: usize) -> Option<(RichBlock, usize)> {
+    let line = &lines[index];
+    let content = &source[line.start..line.content_end];
+    let indent = content.len() - content.trim_start_matches(' ').len();
+    let rest = &content[indent..];
+    if !(rest.starts_with('<') || rest.starts_with('{')) {
+        return None;
+    }
+    let start = line.start + indent;
+    let mut next = index + 1;
+    let mut end = line.content_end;
+    while let Some(line) = lines.get(next) {
+        let content = &source[line.start..line.content_end];
+        if content.trim().is_empty() {
+            break;
+        }
+        end = line.content_end;
+        next += 1;
+    }
+    Some((
+        RichBlock {
+            kind: BlockKind::Raw,
+            source: start..lines[next - 1].end,
+            content: start..end,
+            text: RichText::linear(source, start..end),
+            cells: Vec::new(),
+            depth: 0,
+        },
+        next,
+    ))
+}
+
+fn normalize_label(label: &str) -> String {
+    label
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// A `[label]: destination` definition; footnote definitions are excluded.
+fn reference_definition(rest: &str) -> Option<(&str, &str)> {
+    let inner = rest.strip_prefix('[')?;
+    if inner.starts_with('^') {
+        return None;
+    }
+    let close = inner.find(']')?;
+    let label = &inner[..close];
+    if label.trim().is_empty() || label.contains('[') {
+        return None;
+    }
+    let after = inner[close + 1..].strip_prefix(':')?;
+    let destination = after.split_whitespace().next()?;
+    let destination = destination
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or(destination);
+    if destination.is_empty() {
+        return None;
+    }
+    Some((label, destination))
+}
+
+/// `[^label]:` prefix of a footnote definition.
+fn footnote_marker(rest: &str) -> Option<&str> {
+    let inner = rest.strip_prefix("[^")?;
+    let close = inner.find(']')?;
+    let label = &inner[..close];
+    if label.trim().is_empty() {
+        return None;
+    }
+    inner[close + 1..].strip_prefix(':')?;
+    Some(label)
+}
+
+fn reference_definitions(source: &str, lines: &[Line]) -> Definitions {
+    let mut definitions = Definitions::new();
+    for line in lines {
+        let content = &source[line.start..line.content_end];
+        let indent = content.len() - content.trim_start_matches(' ').len();
+        if indent > 3 {
+            continue;
+        }
+        if let Some((label, destination)) = reference_definition(&content[indent..]) {
+            definitions
+                .entry(normalize_label(label))
+                .or_insert_with(|| destination.to_owned());
+        }
+    }
+    definitions
 }
 
 /// Parse one block's content range into rendered inline text.
-fn inline(source: &str, range: Range<usize>) -> RichText {
+fn inline(source: &str, range: Range<usize>, definitions: &Definitions) -> RichText {
     let mut text = RichText::default();
     let slice = &source[range.clone()];
     let mut index = 0;
-    parse_inline(slice, range.start, &mut text, &mut index, 0);
+    parse_inline(slice, range.start, &mut text, &mut index, 0, definitions);
     text
 }
 
-fn parse_inline(text: &str, base: usize, out: &mut RichText, index: &mut usize, depth: usize) {
+fn parse_inline(
+    text: &str,
+    base: usize,
+    out: &mut RichText,
+    index: &mut usize,
+    depth: usize,
+    definitions: &Definitions,
+) {
     if depth > 8 {
         push_plain(text, base, out, index, text.len());
         return;
@@ -743,7 +1169,7 @@ fn parse_inline(text: &str, base: usize, out: &mut RichText, index: &mut usize, 
                 }
             }
             b'*' | b'_' => {
-                if !emphasis(text, base, out, index, depth) {
+                if !emphasis(text, base, out, index, depth, definitions) {
                     push_char(text, base, out, index);
                 }
             }
@@ -756,17 +1182,18 @@ fn parse_inline(text: &str, base: usize, out: &mut RichText, index: &mut usize, 
                     depth,
                     "~~",
                     InlineMarkKind::Strikethrough,
+                    definitions,
                 ) {
                     push_char(text, base, out, index);
                 }
             }
             b'!' if bytes.get(*index + 1) == Some(&b'[') => {
-                if !link_or_image(text, base, out, index, true) {
+                if !link_or_image(text, base, out, index, true, definitions) {
                     push_char(text, base, out, index);
                 }
             }
             b'[' => {
-                if !link_or_image(text, base, out, index, false) {
+                if !link_or_image(text, base, out, index, false, definitions) {
                     push_char(text, base, out, index);
                 }
             }
@@ -866,7 +1293,14 @@ fn code_span(text: &str, base: usize, out: &mut RichText, index: &mut usize) -> 
     true
 }
 
-fn emphasis(text: &str, base: usize, out: &mut RichText, index: &mut usize, depth: usize) -> bool {
+fn emphasis(
+    text: &str,
+    base: usize,
+    out: &mut RichText,
+    index: &mut usize,
+    depth: usize,
+    definitions: &Definitions,
+) -> bool {
     let bytes = text.as_bytes();
     let marker = bytes[*index];
     let run = bytes[*index..]
@@ -900,7 +1334,7 @@ fn emphasis(text: &str, base: usize, out: &mut RichText, index: &mut usize, dept
     let start = out.text.len();
     let mut inner = *index + width;
     let end = close;
-    parse_inline(&text[..end], base, out, &mut inner, depth + 1);
+    parse_inline(&text[..end], base, out, &mut inner, depth + 1, definitions);
     // `parse_inline` was given a shortened slice; skip the bytes already parsed.
     *index = end + width;
     let range = start..out.text.len();
@@ -915,6 +1349,7 @@ fn emphasis(text: &str, base: usize, out: &mut RichText, index: &mut usize, dept
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn wrapped(
     text: &str,
     base: usize,
@@ -923,6 +1358,7 @@ fn wrapped(
     depth: usize,
     delimiter: &str,
     kind: InlineMarkKind,
+    definitions: &Definitions,
 ) -> bool {
     let start = *index;
     let content_start = start + delimiter.len();
@@ -935,7 +1371,7 @@ fn wrapped(
     }
     let rendered_start = out.text.len();
     let mut inner = content_start;
-    parse_inline(&text[..end], base, out, &mut inner, depth + 1);
+    parse_inline(&text[..end], base, out, &mut inner, depth + 1, definitions);
     let range = rendered_start..out.text.len();
     out.mark(range, kind);
     *index = end + delimiter.len();
@@ -948,32 +1384,61 @@ fn link_or_image(
     out: &mut RichText,
     index: &mut usize,
     image: bool,
+    definitions: &Definitions,
 ) -> bool {
     let label_open = if image { *index + 2 } else { *index + 1 };
     let Some(label_close) = find_unescaped(text, label_open, ']') else {
         return false;
     };
-    if text.as_bytes().get(label_close + 1) != Some(&b'(') {
-        return false;
-    }
-    let Some(destination_close) = matching_parenthesis(text, label_close + 1) else {
-        return false;
+    let label = &text[label_open..label_close];
+    let next = text.as_bytes().get(label_close + 1).copied();
+    let (destination, end) = match next {
+        Some(b'(') => {
+            let Some(destination_close) = matching_parenthesis(text, label_close + 1) else {
+                return false;
+            };
+            (
+                text[label_close + 2..destination_close]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_owned(),
+                destination_close + 1,
+            )
+        }
+        Some(b'[') => {
+            let Some(reference_close) = find_unescaped(text, label_close + 2, ']') else {
+                return false;
+            };
+            let reference = &text[label_close + 2..reference_close];
+            let reference = if reference.trim().is_empty() {
+                label
+            } else {
+                reference
+            };
+            let Some(destination) = definitions.get(&normalize_label(reference)) else {
+                return false;
+            };
+            (destination.clone(), reference_close + 1)
+        }
+        _ => {
+            let Some(destination) = definitions.get(&normalize_label(label)) else {
+                return false;
+            };
+            (destination.clone(), label_close + 1)
+        }
     };
-    let destination = text[label_close + 2..destination_close]
-        .split_whitespace()
-        .next()
-        .unwrap_or("");
     let rendered_start = out.text.len();
     let mut inner = label_open;
-    parse_inline(&text[..label_close], base, out, &mut inner, 0);
+    parse_inline(&text[..label_close], base, out, &mut inner, 0, definitions);
     let range = rendered_start..out.text.len();
     let kind = if image {
-        InlineMarkKind::Image(destination.to_owned())
+        InlineMarkKind::Image(destination)
     } else {
-        InlineMarkKind::Link(destination.to_owned())
+        InlineMarkKind::Link(destination)
     };
     out.mark(range, kind);
-    *index = destination_close + 1;
+    *index = end;
     true
 }
 
@@ -1218,6 +1683,114 @@ Second paragraph.
         let text = &document.blocks[0].text;
         assert_eq!(text.nearest_rendered_offset(0), 0);
         assert_eq!(text.nearest_rendered_offset(10), text.text.len());
+    }
+
+    #[test]
+    fn tables_become_rows_with_aligned_cells() {
+        let source = "| a | b |\n| :-- | --: |\n| 中 | **文** |\n";
+        let document = WysiwygDocument::parse(source);
+        assert_eq!(document.blocks.len(), 3, "header, body, trailing empty");
+        let header = &document.blocks[0];
+        assert_eq!(
+            header.kind,
+            BlockKind::TableRow {
+                header: true,
+                align: vec![ColumnAlign::Left, ColumnAlign::Right],
+            }
+        );
+        assert_eq!(
+            header
+                .cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert!(
+            header.cells[0]
+                .marks
+                .iter()
+                .any(|mark| mark.kind == InlineMarkKind::Bold),
+            "header cells are bold"
+        );
+        let row = &document.blocks[1];
+        assert_eq!(
+            row.cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<Vec<_>>(),
+            ["中", "文"]
+        );
+        assert!(row.cells[1].marks.iter().any(|mark| {
+            mark.kind == InlineMarkKind::Bold && &row.cells[1].text[mark.range.clone()] == "文"
+        }));
+        let source_range = row.cells[0].source_range(0..3).unwrap();
+        assert_eq!(&source[source_range], "中");
+    }
+
+    #[test]
+    fn reference_links_and_definitions_are_resolved_and_hidden() {
+        let source = "Read [the docs][r] and ![cover][img].\n\n[r]: https://example.com/ref \"T\"\n[img]: ./cover.png\n";
+        let document = WysiwygDocument::parse(source);
+        assert_eq!(
+            document.blocks.len(),
+            2,
+            "definitions render nothing; the trailing newline keeps an empty line"
+        );
+        let block = &document.blocks[0];
+        assert_eq!(block.text.text, "Read the docs and cover.");
+        assert!(
+            block
+                .text
+                .marks
+                .iter()
+                .any(|mark| mark.kind == InlineMarkKind::Link("https://example.com/ref".to_owned()))
+        );
+        assert!(
+            block
+                .text
+                .marks
+                .iter()
+                .any(|mark| mark.kind == InlineMarkKind::Image("./cover.png".to_owned()))
+        );
+    }
+
+    #[test]
+    fn footnotes_and_raw_flow_keep_their_content() {
+        let source = "Text[^1].\n\n[^1]: Footnote **body**.\n\n<Callout tone=\"note\">\nMDX block\n</Callout>\n";
+        let document = WysiwygDocument::parse(source);
+        assert!(
+            document.blocks[0].text.text.contains("[^1]"),
+            "reference stays visible as text"
+        );
+        let footnote = document
+            .blocks
+            .iter()
+            .find(|block| matches!(block.kind, BlockKind::Footnote { .. }))
+            .expect("footnote definition");
+        assert_eq!(&source[footnote.content.clone()], "Footnote **body**.");
+        assert_eq!(footnote.text.text, "Footnote body.");
+        let raw = document
+            .blocks
+            .iter()
+            .find(|block| block.kind == BlockKind::Raw)
+            .expect("raw MDX block");
+        assert!(raw.text.text.starts_with("<Callout"));
+        assert!(raw.text.text.contains("MDX block"));
+        assert!(raw.text.text.ends_with("</Callout>"));
+    }
+
+    #[test]
+    fn a_standalone_image_becomes_a_picture_block() {
+        let source = "![cover](./cover.png)\n";
+        let document = WysiwygDocument::parse(source);
+        assert_eq!(
+            document.blocks[0].kind,
+            BlockKind::Image {
+                url: "./cover.png".to_owned()
+            }
+        );
+        assert_eq!(document.blocks[0].text.text, "cover");
     }
 
     #[test]

@@ -301,6 +301,16 @@ function scenarioFor(options) {
         pushMode(to);
       }
     }
+  } else if (name === 'preview') {
+    pushMode('preview');
+    steps.push({ wait_ms: pause });
+    for (let step = 0; step < Number(options.cycles ?? 3); step += 1) {
+      steps.push({ scroll_y: 1200 * (step + 1), wait_ms: pause });
+      steps.push({ scroll_y: 0, wait_ms: pause / 2 });
+    }
+  } else if (name === 'preview-idle') {
+    pushMode('preview');
+    steps.push({ wait_ms: Number(options.duration ?? 8000) });
   } else if (name === 'build-idle') {
     pushMode('build');
     steps.push({ wait_ms: Number(options.duration ?? 8000) });

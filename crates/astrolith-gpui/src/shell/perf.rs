@@ -145,10 +145,13 @@ impl Shell {
             };
         }
         let session = self.project.read(cx).active_session(cx);
-        if let Some(y) = step.scroll_y
-            && let Some(session) = session.clone()
-        {
-            session.update(cx, |session, cx| session.perf_scroll(y, cx));
+        if let Some(y) = step.scroll_y {
+            if self.mode == WorkspaceMode::Preview {
+                self.rendered
+                    .update(cx, |rendered, cx| rendered.set_scroll_offset(y, cx));
+            } else if let Some(session) = session.clone() {
+                session.update(cx, |session, cx| session.perf_scroll(y, cx));
+            }
         }
         if let Some(text) = step.input.as_deref()
             && let Some(session) = session

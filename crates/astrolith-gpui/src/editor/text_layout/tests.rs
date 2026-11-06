@@ -17,6 +17,7 @@ fn test_style() -> Arc<LayoutStyle> {
         border: gpui_kit::black(),
         background: gpui_kit::black(),
         heading: gpui_kit::black(),
+        render_images: false,
     })
 }
 
@@ -37,7 +38,7 @@ fn rows_stay_on_grapheme_and_break_boundaries(cx: &mut TestAppContext) {
                       a\textra e\u{301}👍🏽👩\u{200d}💻 tail\n\
                       aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let document = parse(source);
-        let mut layout = TextLayout::new(document.clone(), test_style(), px(160.));
+        let mut layout = TextLayout::new(document.clone(), test_style(), px(160.), &ImageMetrics::default());
         prepare_all(&mut layout, &text_system, 10_000.);
         assert_eq!(layout.blocks.len(), document.blocks.len());
         for (index, block) in layout.blocks.iter().enumerate() {
@@ -90,7 +91,12 @@ fn long_block_wraps_and_shapes_only_the_viewport(cx: &mut TestAppContext) {
         }
         let document = parse(&source);
         assert_eq!(document.blocks.len(), 1, "one semantic paragraph");
-        let mut layout = TextLayout::new(document.clone(), test_style(), px(600.));
+        let mut layout = TextLayout::new(
+            document.clone(),
+            test_style(),
+            px(600.),
+            &ImageMetrics::default(),
+        );
         let prepared = layout.prepare_with(
             &text_system,
             Viewport {
@@ -149,7 +155,12 @@ fn caret_hit_test_and_selection_use_the_same_row_geometry(cx: &mut TestAppContex
         let text_system = WindowTextSystem::new(cx.text_system().clone());
         let document =
             parse("A short paragraph with enough words to wrap onto a second visual row.\n");
-        let mut layout = TextLayout::new(document.clone(), test_style(), px(120.));
+        let mut layout = TextLayout::new(
+            document.clone(),
+            test_style(),
+            px(120.),
+            &ImageMetrics::default(),
+        );
         prepare_all(&mut layout, &text_system, 2000.);
         let block = &layout.blocks[0];
         assert!(block.rows.len() >= 2, "the fixture wraps");
@@ -198,7 +209,8 @@ fn unresolved_geometry_fails_closed(cx: &mut TestAppContext) {
         let text_system = WindowTextSystem::new(cx.text_system().clone());
         let source = "长".repeat(400_000);
         let document = parse(&source);
-        let mut layout = TextLayout::new(document, test_style(), px(600.));
+        let mut layout =
+            TextLayout::new(document, test_style(), px(600.), &ImageMetrics::default());
         let prepared = layout.prepare_with(
             &text_system,
             Viewport {
@@ -248,7 +260,12 @@ fn local_edit_reuses_unchanged_blocks_and_the_safe_prefix(cx: &mut TestAppContex
         let source = "First paragraph stays untouched.\n\n\
                       Second paragraph changes here.\n\n\
                       Third paragraph stays untouched.";
-        let mut layout = TextLayout::new(parse(source), test_style(), px(320.));
+        let mut layout = TextLayout::new(
+            parse(source),
+            test_style(),
+            px(320.),
+            &ImageMetrics::default(),
+        );
         prepare_all(&mut layout, &text_system, 800.);
         let first_rows = layout.blocks[0].rows.len();
         let third_rows = layout.blocks[2].rows.len();
@@ -275,7 +292,12 @@ fn appending_to_a_long_block_reuses_the_wrapped_prefix(cx: &mut TestAppContext) 
         gpui_kit::init(cx);
         let text_system = WindowTextSystem::new(cx.text_system().clone());
         let mut source = "长".repeat(50_000);
-        let mut layout = TextLayout::new(parse(&source), test_style(), px(400.));
+        let mut layout = TextLayout::new(
+            parse(&source),
+            test_style(),
+            px(400.),
+            &ImageMetrics::default(),
+        );
         prepare_all(&mut layout, &text_system, 300.);
         let measured = layout.blocks[0].rows.len();
         assert!(measured > 0, "the viewport measured part of the block");
@@ -307,7 +329,12 @@ fn resolved_runs_carry_heading_size_bold_italic_code_and_link(cx: &mut TestAppCo
         gpui_kit::init(cx);
         let document = parse("## Head **bold** *italic* `code` [link](https://example.com)\n");
         let style = test_style();
-        let layout = TextLayout::new(document.clone(), style.clone(), px(600.));
+        let layout = TextLayout::new(
+            document.clone(),
+            style.clone(),
+            px(600.),
+            &ImageMetrics::default(),
+        );
         let block = &layout.blocks[0];
         let text = block.text.as_str();
         assert_eq!(
@@ -328,5 +355,84 @@ fn resolved_runs_carry_heading_size_bold_italic_code_and_link(cx: &mut TestAppCo
         assert_eq!(run_covering("code").font.family, style.mono_font.family);
         assert_eq!(run_covering("code").background, Some(style.code_background));
         assert_eq!(run_covering("link").color, style.link);
+    });
+}
+
+#[gpui_kit::test]
+fn table_cells_wrap_and_share_one_row_geometry(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        let text_system = WindowTextSystem::new(cx.text_system().clone());
+        let source =
+            "| 中文长段落 | b |\n| --- | --- |\n| 一行很长的表格单元格内容需要换行 | 文 |\n";
+        let document = parse(source);
+        let mut layout = TextLayout::new(
+            document.clone(),
+            test_style(),
+            px(240.),
+            &ImageMetrics::default(),
+        );
+        prepare_all(&mut layout, &text_system, 4_000.);
+        let row = &layout.blocks[1];
+        assert!(row.is_table());
+        assert_eq!(row.cells.len(), 2);
+        assert!(row.cells.iter().all(|cell| !cell.rows.is_empty()));
+        let top = layout.block_top(1);
+        let cell_start = row.cell_starts[1];
+        let hit = layout
+            .hit_test(point(px(row.cells[1].x_offset + 2.), px(top + 10.)))
+            .expect("the second cell has shaped geometry");
+        assert_eq!(hit.block, 1);
+        assert!(hit.rendered >= cell_start);
+        let caret = layout
+            .caret(Hit {
+                block: 1,
+                rendered: cell_start,
+            })
+            .expect("the cell start has a caret");
+        assert!(
+            f32::from(caret.origin.x) >= row.cells[1].x_offset,
+            "cell carets use the column origin"
+        );
+        let quads = layout.selection_quads(Selection {
+            anchor: Hit {
+                block: 1,
+                rendered: 0,
+            },
+            focus: Hit {
+                block: 1,
+                rendered: cell_start,
+            },
+        });
+        assert!(!quads.is_empty(), "selection covers the first cell");
+    });
+}
+
+#[gpui_kit::test]
+fn image_blocks_reserve_loaded_and_fallback_geometry(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        let source = "![cover](./cover.png)\n";
+        let document = parse(source);
+        let style = Arc::new((*test_style()).clone().with_images(true));
+        let mut images = ImageMetrics::default();
+        images.insert("./cover.png".to_owned(), (800., 400.));
+        let mut layout = TextLayout::new(document.clone(), style, px(400.), &images);
+        assert_eq!(layout.blocks[0].image.as_ref().unwrap().height, 200.);
+        assert!(layout.set_image_metrics(&ImageMetrics::default()));
+        assert_eq!(
+            layout.blocks[0].image.as_ref().unwrap().height,
+            400. * IMAGE_FALLBACK_ASPECT
+        );
+        assert!(layout.blocks[0].image.is_some());
+        layout.prepare_with(
+            &WindowTextSystem::new(cx.text_system().clone()),
+            Viewport {
+                scroll: 0.,
+                height: 1_000.,
+            },
+            None,
+            0.,
+        );
     });
 }

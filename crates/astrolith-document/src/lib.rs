@@ -16,7 +16,6 @@ pub mod formatting;
 /// Lossless frontmatter parse and scalar field spans.
 pub mod parse;
 /// Source-preserving pages for a virtualized Markdown preview.
-pub mod preview_pages;
 /// Lossless writer projection and visible-to-source mapping.
 pub mod projection;
 /// Recovery records for unsaved document content.
@@ -61,7 +60,8 @@ pub use serialize::serialize_document;
 pub use tokens::{TokenSnapshot, TokenSummary, token_snapshot, token_summary};
 pub use version::DiskBaseline;
 pub use wysiwyg::{
-    BlockKind, InlineMark, InlineMarkKind, RichBlock, RichText, SourceSegment, WysiwygDocument,
+    BlockKind, ColumnAlign, InlineMark, InlineMarkKind, RichBlock, RichText, SourceSegment,
+    WysiwygDocument,
 };
 
 #[cfg(test)]

@@ -26,7 +26,9 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use astrolith_document::{BlockKind, InlineMark, InlineMarkKind, RichBlock, WysiwygDocument};
+use astrolith_document::{
+    BlockKind, ColumnAlign, InlineMark, InlineMarkKind, RichBlock, RichText, WysiwygDocument,
+};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{
     App, Bounds, Font, FontStyle, FontWeight, Hsla, Pixels, Point, ShapedLine, SharedString,
@@ -58,6 +60,19 @@ const FALLBACK_BYTES_PER_GLYPH: f32 = 1.5;
 /// Bytes before an edit prefix that a row may still reuse: line-break and
 /// shaping context never reaches further back, so the trimmed prefix is safe.
 const EDIT_PREFIX_MARGIN: usize = 8;
+/// Horizontal padding inside one table cell.
+const TABLE_CELL_PADDING: f32 = 8.;
+/// Vertical padding above and below one table row's cells.
+const TABLE_ROW_PADDING: f32 = 6.;
+/// Height reserved for an image whose intrinsic size is not known yet.
+const IMAGE_FALLBACK_ASPECT: f32 = 9. / 16.;
+/// Largest height a picture may reserve in the reading column.
+const IMAGE_MAX_HEIGHT: f32 = 900.;
+/// Height of the alt-text strip when an image resource failed to load.
+const IMAGE_FAILED_HEIGHT: f32 = 32.;
+
+/// Intrinsic image sizes, keyed by destination, in device pixels.
+pub(crate) type ImageMetrics = std::collections::HashMap<String, (f32, f32)>;
 
 /// Resolved document presentation used by the layout core.
 ///
@@ -78,6 +93,9 @@ pub(crate) struct LayoutStyle {
     pub(crate) border: Hsla,
     pub(crate) background: Hsla,
     pub(crate) heading: Hsla,
+    /// Paint standalone images instead of their alt text. Writing keeps the
+    /// alt text so the source stays editable; the reading pane shows pictures.
+    pub(crate) render_images: bool,
 }
 
 impl LayoutStyle {
@@ -98,7 +116,14 @@ impl LayoutStyle {
             border: theme.border,
             background: theme.background,
             heading: crate::theme::prose_heading_color(cx),
+            render_images: false,
         }
+    }
+
+    /// Paint standalone images, for the read-only preview.
+    pub(crate) fn with_images(mut self, render_images: bool) -> Self {
+        self.render_images = render_images;
+        self
     }
 
     /// Font metrics that decide wrapping and row heights.
@@ -107,12 +132,14 @@ impl LayoutStyle {
             && self.mono_font == other.mono_font
             && self.font_size == other.font_size
             && self.line_height == other.line_height
+            && self.render_images == other.render_images
     }
 
     /// Font size used by a heading level, matching the current block chrome.
     fn block_font_size(&self, kind: &BlockKind) -> Pixels {
         match kind {
             BlockKind::Heading(level) => self.font_size * heading_scale(*level),
+            BlockKind::TableRow { header: true, .. } => self.font_size,
             _ => self.font_size,
         }
     }
@@ -172,6 +199,12 @@ pub(crate) struct Decoration {
     pub(crate) block: usize,
     pub(crate) range: Range<usize>,
     pub(crate) color: Hsla,
+}
+
+/// Paints image blocks into the layout's content coordinates.
+pub(crate) trait LayoutImagePainter {
+    /// Paint `url` into `bounds`; return whether the image was ready.
+    fn paint(&self, url: &str, bounds: Bounds<Pixels>, window: &mut Window) -> bool;
 }
 
 /// A viewport in content pixels.
@@ -298,24 +331,119 @@ struct BlockLayout {
     marker_offset: f32,
     marker: Option<SharedString>,
     marker_line: Option<ShapedLine>,
+    /// Cells of one table row, each laid out in its own column slice.
+    cells: Vec<BlockLayout>,
+    /// Rendered offset where each table cell starts in `text`.
+    cell_starts: Vec<usize>,
+    /// Width of this block's column slice when it is a table cell.
+    column_width: f32,
+    /// Horizontal alignment inside a table cell.
+    text_align: TextAlign,
+    /// Picture geometry when this block paints an image.
+    image: Option<ImageSpec>,
+}
+
+#[derive(Clone, Debug)]
+struct ImageSpec {
+    url: String,
+    width: f32,
+    height: f32,
 }
 
 impl BlockLayout {
-    fn new(block: &RichBlock, style: &LayoutStyle, width: Pixels) -> Self {
-        let font_size = f32::from(style.block_font_size(&block.kind));
+    fn new(block: &RichBlock, style: &LayoutStyle, width: Pixels, images: &ImageMetrics) -> Self {
+        let mut this = Self::build(block.kind.clone(), block.depth, &block.text, style, width);
+        if let BlockKind::TableRow { align, .. } = &block.kind {
+            let columns = align.len().max(1);
+            let cell_width =
+                (f32::from(width) - TABLE_CELL_PADDING * 2. * columns as f32) / columns as f32;
+            let cell_width = cell_width.max(32.);
+            let mut start = 0;
+            for (column, cell) in block.cells.iter().enumerate() {
+                if column > 0 {
+                    start += 1;
+                }
+                this.cell_starts.push(start);
+                let mut layout = Self::build(
+                    BlockKind::Paragraph,
+                    block.depth,
+                    cell,
+                    style,
+                    px(cell_width),
+                );
+                layout.column_width = cell_width;
+                layout.text_align = match align.get(column).copied().unwrap_or(ColumnAlign::Left) {
+                    ColumnAlign::Left => TextAlign::Left,
+                    ColumnAlign::Center => TextAlign::Center,
+                    ColumnAlign::Right => TextAlign::Right,
+                };
+                layout.x_offset =
+                    column as f32 * (cell_width + TABLE_CELL_PADDING * 2.) + TABLE_CELL_PADDING;
+                start += cell.text.len();
+                this.cells.push(layout);
+            }
+            while this.cells.len() < columns {
+                let mut layout = Self::build(
+                    BlockKind::Paragraph,
+                    block.depth,
+                    &RichText::default(),
+                    style,
+                    px(cell_width),
+                );
+                layout.column_width = cell_width;
+                layout.x_offset = this.cells.len() as f32 * (cell_width + TABLE_CELL_PADDING * 2.)
+                    + TABLE_CELL_PADDING;
+                layout.text_len = 0;
+                this.cells.push(layout);
+            }
+        }
+        if let BlockKind::Image { url } = &block.kind
+            && style.render_images
+        {
+            let available = f32::from(width).max(1.);
+            let (mut image_width, mut image_height) = match images.get(url) {
+                Some((image_width, image_height)) if *image_width > 0. && *image_height > 0. => {
+                    let scale = (available / image_width).min(1.);
+                    (*image_width * scale, *image_height * scale)
+                }
+                Some((0., 0.)) => (available, IMAGE_FAILED_HEIGHT),
+                _ => (available, available * IMAGE_FALLBACK_ASPECT),
+            };
+            image_width = image_width.min(available).max(1.);
+            image_height = image_height.clamp(1., IMAGE_MAX_HEIGHT);
+            this.image = Some(ImageSpec {
+                url: url.clone(),
+                width: image_width,
+                height: image_height,
+            });
+            // The picture replaces its alt text; no glyph row is prepared.
+            this.rows.clear();
+            this.complete = true;
+        }
+        this
+    }
+
+    fn build(
+        kind: BlockKind,
+        depth: usize,
+        text: &RichText,
+        style: &LayoutStyle,
+        width: Pixels,
+    ) -> Self {
+        let font_size = f32::from(style.block_font_size(&kind));
         let row_height = font_size * style.line_height;
-        let mono_all = matches!(block.kind, BlockKind::Code { .. });
-        let base = base_run(&block.kind, style);
-        let runs = resolve_runs(&block.text.text, &block.text.marks, style, mono_all, &base);
+        let mono_all = matches!(kind, BlockKind::Code { .. });
+        let base = base_run(&kind, style);
+        let runs = resolve_runs(&text.text, &text.marks, style, mono_all, &base);
         let gap = f32::from(style.font_size) * 0.75;
-        let (x_offset, chrome_top, chrome_bottom, marker_offset, marker) = match &block.kind {
+        let (x_offset, chrome_top, chrome_bottom, marker_offset, marker) = match &kind {
             BlockKind::ListItem { ordered, number } => {
                 let marker = if *ordered {
                     format!("{number}.")
                 } else {
                     "•".to_owned()
                 };
-                let indent = block.depth as f32 * 20.;
+                let indent = depth as f32 * 20.;
                 (
                     indent + 18.,
                     0.,
@@ -327,20 +455,30 @@ impl BlockLayout {
             BlockKind::Quote => (12., 0., 0., 0., None),
             BlockKind::Code { .. } => (0., 8., 8., 0., None),
             BlockKind::Rule => (0., 6., 7., 0., None),
+            BlockKind::Footnote { label } => (
+                28.,
+                0.,
+                0.,
+                0.,
+                Some(SharedString::from(format!("[{label}]"))),
+            ),
+            BlockKind::Raw => (12., 0., 0., 0., None),
+            BlockKind::TableRow { .. } => (0., TABLE_ROW_PADDING, TABLE_ROW_PADDING, 0., None),
+            BlockKind::Image { .. } => (0., 0., 0., 0., None),
             BlockKind::Heading(_) | BlockKind::Paragraph => (0., 0., 0., 0., None),
         };
         let fallback_row_bytes =
             (f32::from(width) / (font_size * 0.55)).max(8.) * FALLBACK_BYTES_PER_GLYPH;
-        let text = SharedString::from(block.text.text.clone());
-        let marks = block.text.marks.clone();
-        let fingerprint = block_fingerprint(&block.kind, block.depth, &text, &marks);
+        let marks = text.marks.clone();
+        let text = SharedString::from(text.text.clone());
+        let fingerprint = block_fingerprint(&kind, depth, &text, &marks);
         let mut this = Self {
-            kind: block.kind.clone(),
-            depth: block.depth,
+            kind,
+            depth,
             text,
             marks,
             fingerprint,
-            text_len: block.text.text.len(),
+            text_len: 0,
             font_size,
             row_height,
             runs,
@@ -360,8 +498,14 @@ impl BlockLayout {
             marker_offset,
             marker,
             marker_line: None,
+            cells: Vec::new(),
+            cell_starts: Vec::new(),
+            column_width: f32::from(width),
+            text_align: TextAlign::Left,
+            image: None,
         };
-        if block.text.text.is_empty() {
+        this.text_len = this.text.len();
+        if this.text.is_empty() {
             this.rows.push(Row {
                 range: 0..0,
                 y: 0.,
@@ -385,6 +529,62 @@ impl BlockLayout {
         let mono_all = matches!(self.kind, BlockKind::Code { .. });
         self.base = base_run(&self.kind, style);
         self.runs = resolve_runs(&self.text, &self.marks, style, mono_all, &self.base);
+        for cell in &mut self.cells {
+            cell.update_style(style);
+        }
+    }
+
+    /// Horizontal offset of a shaped row inside this block's column.
+    fn align_offset(&self, width: Pixels) -> Pixels {
+        let column = px(self.column_width);
+        match self.text_align {
+            TextAlign::Left => px(0.),
+            TextAlign::Center => (column - width) * 0.5,
+            TextAlign::Right => column - width,
+        }
+    }
+
+    fn is_table(&self) -> bool {
+        matches!(self.kind, BlockKind::TableRow { .. })
+    }
+
+    /// Offset range of one cell in the row's joined text.
+    fn cell_range(&self, cell: usize) -> Range<usize> {
+        let start = self.cell_starts.get(cell).copied().unwrap_or(0);
+        let end = self
+            .cells
+            .get(cell)
+            .map_or(start, |layout| start + layout.text_len);
+        start..end
+    }
+
+    /// Cell and local offset for one rendered offset in a table row.
+    fn cell_offset(&self, rendered: usize) -> (usize, usize) {
+        let cell = self
+            .cell_starts
+            .partition_point(|start| *start <= rendered)
+            .saturating_sub(1);
+        let start = self.cell_starts.get(cell).copied().unwrap_or(0);
+        (cell, rendered.saturating_sub(start))
+    }
+
+    /// Height of this block's text, without the trailing block gap.
+    fn text_height(&self) -> f32 {
+        let tail_rows = if self.complete {
+            0.
+        } else {
+            let remaining = self.text_len.saturating_sub(self.scanned);
+            let average = if self.rows.is_empty() {
+                self.fallback_row_bytes
+            } else {
+                (self.row_bytes as f32 / self.rows.len() as f32).max(1.)
+            };
+            (remaining as f32 / average).ceil().max(1.)
+        };
+        self.chrome_top
+            + self.rows.len() as f32 * self.row_height
+            + tail_rows * self.row_height
+            + self.chrome_bottom
     }
 
     /// Carry rows that end safely before the common prefix of an edit.
@@ -502,19 +702,18 @@ impl BlockLayout {
 
     /// Measured row height plus an estimate for the unwrapped tail.
     fn height(&self) -> f32 {
-        let measured = self.rows.len() as f32 * self.row_height;
-        let tail_rows = if self.complete {
-            0.
-        } else {
-            let remaining = self.text_len.saturating_sub(self.scanned);
-            let average = if self.rows.is_empty() {
-                self.fallback_row_bytes
-            } else {
-                (self.row_bytes as f32 / self.rows.len() as f32).max(1.)
-            };
-            (remaining as f32 / average).ceil().max(1.)
-        };
-        self.chrome_top + measured + tail_rows * self.row_height + self.chrome_bottom + self.gap
+        if let Some(image) = &self.image {
+            return image.height + self.gap;
+        }
+        if self.is_table() {
+            let cells = self
+                .cells
+                .iter()
+                .map(|cell| cell.text_height())
+                .fold(0f32, f32::max);
+            return self.chrome_top + cells + self.chrome_bottom + self.gap;
+        }
+        self.text_height() + self.gap
     }
 
     fn row_index_for_offset(&self, rendered: usize) -> Option<usize> {
@@ -532,6 +731,92 @@ impl BlockLayout {
             return None;
         }
         Some(index)
+    }
+
+    /// Caret point and height for a rendered offset inside this block, with
+    /// `top` as the block's content top in document coordinates.
+    fn caret_at(&self, top: f32, rendered: usize) -> Option<(Point<Pixels>, Pixels)> {
+        if self.is_table() {
+            let (cell, local) = self.cell_offset(rendered);
+            let cell = self.cells.get(cell)?;
+            return cell.caret_at(top + self.chrome_top, local);
+        }
+        let row_index = self.row_index_for_offset(rendered)?;
+        let row = self.rows.get(row_index)?;
+        let shaped = row.shaped.as_ref()?;
+        let local = rendered
+            .saturating_sub(row.range.start)
+            .min(row.range.len());
+        let x = shaped.x_for_index(local) + self.align_offset(shaped.width());
+        let padding = (row.height - f32::from(shaped.ascent) - f32::from(shaped.descent)) * 0.5;
+        let y = top + self.chrome_top + row.y + padding;
+        Some((
+            point(px(self.x_offset) + x, px(y)),
+            (shaped.ascent + shaped.descent).max(px(2.)),
+        ))
+    }
+
+    /// Rendered offset under a point relative to the block's content top.
+    fn hit_test_at(&self, x: f32, local_y: f32) -> Option<usize> {
+        if self.is_table() {
+            let cell_index = self
+                .cells
+                .iter()
+                .rposition(|cell| x >= cell.x_offset - TABLE_CELL_PADDING)
+                .unwrap_or(0);
+            let cell = self.cells.get(cell_index)?;
+            let local = cell.hit_test_at(x, local_y)?;
+            return Some(self.cell_starts.get(cell_index).copied().unwrap_or(0) + local);
+        }
+        let row_index = row_index_at(self, local_y);
+        let row = self.rows.get(row_index)?;
+        let shaped = row.shaped.as_ref()?;
+        let index = shaped
+            .closest_index_for_x(px(x - self.x_offset) - self.align_offset(shaped.width()))
+            .min(row.range.len());
+        Some(row.range.start + index)
+    }
+
+    /// Selection rectangles covering `range` inside this block.
+    fn range_quads(&self, top: f32, range: Range<usize>) -> Vec<Bounds<Pixels>> {
+        if self.is_table() {
+            let mut quads = Vec::new();
+            for (cell_index, cell) in self.cells.iter().enumerate() {
+                let cell_range = self.cell_range(cell_index);
+                let start = range.start.max(cell_range.start);
+                let end = range.end.min(cell_range.end);
+                if start >= end {
+                    continue;
+                }
+                quads.extend(cell.range_quads(
+                    top + self.chrome_top,
+                    start - cell_range.start..end - cell_range.start,
+                ));
+            }
+            return quads;
+        }
+        let mut quads = Vec::new();
+        for row in &self.rows {
+            let row_start = row.range.start.max(range.start);
+            let row_end = row.range.end.min(range.end);
+            if row_start >= row_end {
+                continue;
+            }
+            let Some(shaped) = row.shaped.as_ref() else {
+                continue;
+            };
+            let local_start = row_start - row.range.start;
+            let local_end = row_end - row.range.start;
+            let offset = self.align_offset(shaped.width());
+            let left = shaped.x_for_index(local_start) + offset;
+            let right = shaped.x_for_index(local_end) + offset;
+            let y = top + self.chrome_top + row.y;
+            quads.push(Bounds::new(
+                point(px(self.x_offset) + left, px(y)),
+                size((right - left).max(px(1.)), px(row.height)),
+            ));
+        }
+        quads
     }
 
     fn cursor_at(&self, offset: usize) -> usize {
@@ -722,7 +1007,7 @@ fn grapheme_width(
 
 /// The unmarked run of a block: font, colour and weight before inline marks.
 fn base_run(kind: &BlockKind, style: &LayoutStyle) -> ResolvedRun {
-    let mono_all = matches!(kind, BlockKind::Code { .. });
+    let mono_all = matches!(kind, BlockKind::Code { .. } | BlockKind::Raw);
     let mut font = if mono_all {
         style.mono_font.clone()
     } else {
@@ -733,7 +1018,8 @@ fn base_run(kind: &BlockKind, style: &LayoutStyle) -> ResolvedRun {
             font.weight = FontWeight::BOLD;
             style.heading
         }
-        BlockKind::Quote => style.muted_foreground,
+        BlockKind::Quote | BlockKind::Footnote { .. } => style.muted_foreground,
+        BlockKind::Raw => style.muted_foreground,
         _ => style.foreground,
     };
     ResolvedRun {
@@ -858,6 +1144,7 @@ pub(crate) struct TextLayout {
     blocks: Vec<BlockLayout>,
     heights: HeightIndex,
     stats: LayoutStats,
+    images: ImageMetrics,
 }
 
 impl TextLayout {
@@ -866,12 +1153,13 @@ impl TextLayout {
         document: Arc<WysiwygDocument>,
         style: Arc<LayoutStyle>,
         width: Pixels,
+        images: &ImageMetrics,
     ) -> Self {
         let width = width.max(px(1.));
         let blocks: Vec<BlockLayout> = document
             .blocks
             .iter()
-            .map(|block| BlockLayout::new(block, &style, width))
+            .map(|block| BlockLayout::new(block, &style, width, images))
             .collect();
         let mut heights = HeightIndex::new(blocks.len());
         for (index, block) in blocks.iter().enumerate() {
@@ -884,7 +1172,46 @@ impl TextLayout {
             blocks,
             heights,
             stats: LayoutStats::default(),
+            images: images.clone(),
         }
+    }
+
+    /// Adopt newly loaded intrinsic image sizes. Only picture blocks change
+    /// height, so the rest of the measured rows stay valid.
+    pub(crate) fn set_image_metrics(&mut self, images: &ImageMetrics) -> bool {
+        if *images == self.images {
+            return false;
+        }
+        self.images = images.clone();
+        let mut changed = false;
+        for (index, block) in self.blocks.iter_mut().enumerate() {
+            let BlockKind::Image { url } = &block.kind else {
+                continue;
+            };
+            let image = block.image.as_mut();
+            let Some(image) = image else {
+                continue;
+            };
+            let available = f32::from(self.width).max(1.);
+            let (next_width, next_height) = match images.get(url) {
+                Some((width, height)) if *width > 0. && *height > 0. => {
+                    let scale = (available / width).min(1.);
+                    (
+                        (width * scale).min(available).max(1.),
+                        (height * scale).clamp(1., IMAGE_MAX_HEIGHT),
+                    )
+                }
+                Some((0., 0.)) => (available, IMAGE_FAILED_HEIGHT),
+                _ => (available, available * IMAGE_FALLBACK_ASPECT),
+            };
+            if (image.width - next_width).abs() > 0.5 || (image.height - next_height).abs() > 0.5 {
+                image.width = next_width;
+                image.height = next_height;
+                self.heights.set(index, f64::from(block.height()));
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub(crate) fn document(&self) -> &WysiwygDocument {
@@ -936,19 +1263,10 @@ impl TextLayout {
     /// Content position of `hit`, or `None` while its row is unresolved.
     pub(crate) fn caret(&self, hit: Hit) -> Option<Caret> {
         let block = self.blocks.get(hit.block)?;
-        let row_index = block.row_index_for_offset(hit.rendered)?;
-        let row = block.rows.get(row_index)?;
-        let shaped = row.shaped.as_ref()?;
-        let local = hit
-            .rendered
-            .saturating_sub(row.range.start)
-            .min(row.range.len());
-        let x = shaped.x_for_index(local);
-        let padding = (row.height - f32::from(shaped.ascent) - f32::from(shaped.descent)) * 0.5;
-        let y = self.block_top(hit.block) + block.chrome_top + row.y + padding;
+        let (origin, height) = block.caret_at(self.block_top(hit.block), hit.rendered)?;
         Some(Caret {
-            origin: point(px(block.x_offset) + x, px(y)),
-            height: (shaped.ascent + shaped.descent).max(px(2.)),
+            origin,
+            height,
             color: self.style.caret,
         })
     }
@@ -1001,28 +1319,7 @@ impl TextLayout {
         let Some(block) = self.blocks.get(index) else {
             return Vec::new();
         };
-        let block_top = self.block_top(index);
-        let mut quads = Vec::new();
-        for row in &block.rows {
-            let row_start = row.range.start.max(range.start);
-            let row_end = row.range.end.min(range.end);
-            if row_start >= row_end {
-                continue;
-            }
-            let Some(shaped) = row.shaped.as_ref() else {
-                continue;
-            };
-            let local_start = row_start - row.range.start;
-            let local_end = row_end - row.range.start;
-            let left = shaped.x_for_index(local_start);
-            let right = shaped.x_for_index(local_end);
-            let y = block_top + block.chrome_top + row.y;
-            quads.push(Bounds::new(
-                point(px(block.x_offset) + left, px(y)),
-                size((right - left).max(px(1.)), px(row.height)),
-            ));
-        }
-        quads
+        block.range_quads(self.block_top(index), range)
     }
 
     /// Rendered byte position under a content-space point, if the row has
@@ -1031,15 +1328,11 @@ impl TextLayout {
         let y = f32::from(position.y);
         let block_index = self.block_at_y(y)?;
         let block = self.blocks.get(block_index)?;
-        let local = y - self.block_top(block_index) - block.chrome_top;
-        let row_index = row_index_at(block, local);
-        let row = block.rows.get(row_index)?;
-        let shaped = row.shaped.as_ref()?;
-        let x = f32::from(position.x) - block.x_offset;
-        let index = shaped.closest_index_for_x(px(x)).min(row.range.len());
+        let local = y - self.block_top(block_index);
+        let rendered = block.hit_test_at(f32::from(position.x), local)?;
         Some(Hit {
             block: block_index,
-            rendered: row.range.start + index,
+            rendered,
         })
     }
 
@@ -1048,18 +1341,7 @@ impl TextLayout {
         let caret = self.caret(hit)?;
         let step = self.blocks.get(hit.block)?.row_height;
         let target_y = f32::from(caret.origin.y) + if up { -step } else { step };
-        let block_index = self.block_at_y(target_y)?;
-        let block = self.blocks.get(block_index)?;
-        let local = target_y - self.block_top(block_index) - block.chrome_top;
-        let row_index = row_index_at(block, local);
-        let row = block.rows.get(row_index)?;
-        let shaped = row.shaped.as_ref()?;
-        let x = f32::from(caret.origin.x) - block.x_offset;
-        let index = shaped.closest_index_for_x(px(x)).min(row.range.len());
-        Some(Hit {
-            block: block_index,
-            rendered: row.range.start + index,
-        })
+        self.hit_test(point(caret.origin.x, px(target_y)))
     }
 
     /// Reconcile this layout with a new accepted document revision.
@@ -1111,7 +1393,7 @@ impl TextLayout {
                 outcome.reused_rows += layout.rows.len();
                 blocks.push(layout);
             } else {
-                let mut rebuilt = BlockLayout::new(block, style, width);
+                let mut rebuilt = BlockLayout::new(block, style, width, &self.images);
                 if let Some(candidate) = old.get_mut(index).and_then(Option::take)
                     && candidate.kind == rebuilt.kind
                     && candidate.depth == rebuilt.depth
@@ -1228,9 +1510,31 @@ impl TextLayout {
         let width = self.width;
         let document = &self.document;
         let block = &mut self.blocks[index];
-        let text = &document.blocks[index].text.text;
         let before_rows = block.rows.len();
         let mut examined = 0usize;
+        if block.is_table() {
+            let mut met = true;
+            for cell in &mut block.cells {
+                let text = std::mem::take(&mut cell.text);
+                let before = cell.rows.len();
+                met &= cell.advance(
+                    &text,
+                    px(cell.column_width),
+                    target,
+                    text_system,
+                    deadline,
+                    &mut examined,
+                );
+                self.stats.wrapped_rows += cell.rows.len() - before;
+                cell.text = text;
+            }
+            self.stats.wrapped_bytes += examined;
+            if block.rows.len() != before_rows || !block.cells.is_empty() {
+                self.heights.set(index, f64::from(block.height()));
+            }
+            return met;
+        }
+        let text = &document.blocks[index].text.text;
         let met = block.advance(text, width, target, text_system, deadline, &mut examined);
         self.stats.wrapped_rows += block.rows.len() - before_rows;
         self.stats.wrapped_bytes += examined;
@@ -1252,78 +1556,98 @@ impl TextLayout {
         deadline: Instant,
         pending: &mut bool,
     ) {
-        let Some(row_index) = self
-            .blocks
-            .get(hit.block)
-            .and_then(|block| block.row_index_for_offset(hit.rendered))
-        else {
+        let Some(block) = self.blocks.get_mut(hit.block) else {
             *pending = true;
             return;
         };
-        if self.blocks[hit.block].rows[row_index].shaped.is_some() {
+        if block.is_table() {
+            let (cell_index, local) = block.cell_offset(hit.rendered);
+            let Some(cell) = block.cells.get_mut(cell_index) else {
+                *pending = true;
+                return;
+            };
+            let Some(row_index) = cell.row_index_for_offset(local) else {
+                *pending = true;
+                return;
+            };
+            if Instant::now() >= deadline {
+                *pending = true;
+                return;
+            }
+            let text = std::mem::take(&mut cell.text);
+            let (did_shape, bytes) = shape_row_in(cell, &text, row_index, text_system);
+            cell.text = text;
+            if did_shape {
+                self.stats.shaped_rows += 1;
+                self.stats.shaped_bytes += bytes;
+            }
+            return;
+        }
+        let Some(row_index) = block.row_index_for_offset(hit.rendered) else {
+            *pending = true;
+            return;
+        };
+        if block.rows[row_index].shaped.is_some() {
             return;
         }
         if Instant::now() >= deadline {
             *pending = true;
             return;
         }
-        let document = &self.document;
-        let text = &document.blocks[hit.block].text.text;
-        let shaped = {
-            let block = &self.blocks[hit.block];
-            shape_row(block, text, &block.rows[row_index], text_system)
-        };
-        self.stats.shaped_rows += 1;
-        self.stats.shaped_bytes += self.blocks[hit.block].rows[row_index].range.len();
-        self.blocks[hit.block].rows[row_index].shaped = Some(shaped);
+        let text = &self.document.blocks[hit.block].text.text;
+        let (did_shape, bytes) = shape_row_in(block, text, row_index, text_system);
+        if did_shape {
+            self.stats.shaped_rows += 1;
+            self.stats.shaped_bytes += bytes;
+        }
     }
 
     fn shape_visible(&mut self, index: usize, work: &ViewportWork<'_>, pending: &mut bool) {
         let block_top = self.block_top(index);
         let content_top = work.scroll - work.overscan;
         let content_bottom = work.scroll + work.height + work.overscan;
-        let document = &self.document;
-        let text = &document.blocks[index].text.text;
-        let rows = self.blocks[index].rows.len();
-        let first_local = content_top - block_top - self.blocks[index].chrome_top;
-        let first_row = if first_local <= 0. {
-            0
-        } else {
-            ((first_local / self.blocks[index].row_height).floor() as usize).min(rows)
-        };
-        for row_index in first_row..rows {
-            let (y, height, has_shaped, range_len) = {
-                let block = &self.blocks[index];
-                let row = &block.rows[row_index];
-                (
-                    block_top + block.chrome_top + row.y,
-                    row.height,
-                    row.shaped.is_some(),
-                    row.range.len(),
-                )
-            };
-            if y + height < content_top {
-                continue;
+        if self.blocks[index].is_table() {
+            let mut rows = 0usize;
+            let mut shaped = 0usize;
+            let mut bytes = 0usize;
+            let block = &mut self.blocks[index];
+            for cell in &mut block.cells {
+                let text = std::mem::take(&mut cell.text);
+                let (cell_rows, cell_shaped, cell_bytes) = shape_rows_in(
+                    cell,
+                    &text,
+                    block_top + block.chrome_top,
+                    content_top,
+                    content_bottom,
+                    work,
+                    pending,
+                );
+                cell.text = text;
+                rows += cell_rows;
+                shaped += cell_shaped;
+                bytes += cell_bytes;
             }
-            if y > content_bottom {
-                break;
-            }
-            if has_shaped {
-                self.stats.reused_rows += 1;
-                continue;
-            }
-            if Instant::now() >= work.deadline {
-                *pending = true;
-                break;
-            }
-            let shaped = {
-                let block = &self.blocks[index];
-                shape_row(block, text, &block.rows[row_index], work.text_system)
-            };
-            self.stats.shaped_rows += 1;
-            self.stats.shaped_bytes += range_len;
-            self.blocks[index].rows[row_index].shaped = Some(shaped);
+            self.stats.reused_rows += rows;
+            self.stats.shaped_rows += shaped;
+            self.stats.shaped_bytes += bytes;
+            return;
         }
+        let text = &self.document.blocks[index].text.text;
+        let (rows, shaped, bytes) = {
+            let block = &mut self.blocks[index];
+            shape_rows_in(
+                block,
+                text,
+                block_top,
+                content_top,
+                content_bottom,
+                work,
+                pending,
+            )
+        };
+        self.stats.reused_rows += rows;
+        self.stats.shaped_rows += shaped;
+        self.stats.shaped_bytes += bytes;
         // Drop glyphs far outside the viewport; their rows and heights remain.
         let keep_top = work.scroll - work.overscan - work.height * SHAPE_RETENTION_SCREENS;
         let keep_bottom =
@@ -1355,6 +1679,7 @@ impl TextLayout {
         caret: Option<Hit>,
         decorations: &[Decoration],
         dimmed: &[usize],
+        images: Option<&dyn LayoutImagePainter>,
     ) -> usize {
         let clip = window.content_mask().bounds;
         let content_top = f32::from(clip.top() - origin.y);
@@ -1397,61 +1722,92 @@ impl TextLayout {
                         .map(move |quad| (quad, decoration.color))
                 })
                 .collect();
-            let (x_offset, chrome_top) = {
-                let block = &self.blocks[index];
-                (block.x_offset, block.chrome_top)
-            };
-            let row_count = self.blocks[index].rows.len();
-            for row_index in 0..row_count {
-                let (row_y, row_height, shaped) = {
-                    let block = &self.blocks[index];
-                    let row = &block.rows[row_index];
-                    let y = block_top + chrome_top + row.y;
-                    if y + row.height < content_top || y > content_bottom {
-                        continue;
-                    }
-                    match row.shaped.clone() {
-                        Some(shaped) => (y, row.height, shaped),
-                        None => continue,
-                    }
-                };
-                let row_origin = point(origin.x + px(x_offset), origin.y + px(row_y));
-                let row_bounds = Bounds::new(
-                    point(px(x_offset), px(row_y)),
-                    size(px(f32::from(self.width)), px(row_height)),
+            if let Some(spec) = self.blocks[index].image.clone() {
+                let bounds = Bounds::new(
+                    point(origin.x, origin.y + px(block_top)),
+                    size(px(spec.width), px(spec.height)),
                 );
-                let _ = shaped.paint_background(
-                    row_origin,
-                    px(row_height),
-                    TextAlign::Left,
-                    None,
+                let painted_image =
+                    images.is_some_and(|painter| painter.paint(&spec.url, bounds, window));
+                if painted_image {
+                    painted += 1;
+                } else {
+                    let placeholder = bounds.intersect(&visible);
+                    if placeholder.size.width > px(0.) && placeholder.size.height > px(0.) {
+                        window.paint_quad(fill(placeholder, self.style.code_background));
+                    }
+                    // Until the picture loads, its alt text names the block.
+                    if self.blocks[index].marker_line.is_none() {
+                        let alt = self.blocks[index].text.clone();
+                        if !alt.is_empty() {
+                            let font = self.style.font.clone();
+                            let color = self.style.muted_foreground;
+                            let run = ResolvedRun {
+                                range: 0..0,
+                                font,
+                                color,
+                                background: None,
+                                strikethrough: false,
+                            };
+                            let line = window.text_system().shape_line(
+                                alt.clone(),
+                                self.style.font_size,
+                                &[run.text_run(alt.len())],
+                                None,
+                            );
+                            self.blocks[index].marker_line = Some(line);
+                        }
+                    }
+                    if let Some(line) = self.blocks[index].marker_line.as_ref() {
+                        let _ = line.paint(
+                            point(origin.x + px(12.), origin.y + px(block_top + 12.)),
+                            px(f32::from(self.style.font_size) * self.style.line_height),
+                            TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        );
+                    }
+                }
+            }
+            let chrome_top = self.blocks[index].chrome_top;
+            let has_image = self.blocks[index].image.is_some();
+            let cell_count = self.blocks[index].cells.len();
+            if has_image {
+                // Painted above; the alt text only exists for source mapping.
+            } else if cell_count > 0 {
+                for cell_index in 0..cell_count {
+                    let cell = &self.blocks[index].cells[cell_index];
+                    painted += paint_block_rows(
+                        cell,
+                        origin,
+                        block_top + chrome_top,
+                        &quads,
+                        &decoration_quads,
+                        &visible,
+                        content_top,
+                        content_bottom,
+                        self.style.selection,
+                        window,
+                        cx,
+                    );
+                }
+            } else {
+                let width = f32::from(self.width);
+                painted += paint_block_rows(
+                    &self.blocks[index],
+                    origin,
+                    block_top,
+                    &quads,
+                    &decoration_quads,
+                    &visible,
+                    content_top,
+                    content_bottom,
+                    self.style.selection,
                     window,
                     cx,
                 );
-                for (quad, color) in decoration_quads
-                    .iter()
-                    .filter(|(quad, _)| quad.intersects(&row_bounds))
-                {
-                    let clipped = quad.intersect(&row_bounds).intersect(&visible);
-                    if clipped.size.width > px(0.) && clipped.size.height > px(0.) {
-                        window.paint_quad(fill(clipped, *color));
-                    }
-                }
-                for quad in quads.iter().filter(|quad| quad.intersects(&row_bounds)) {
-                    let clipped = quad.intersect(&row_bounds).intersect(&visible);
-                    if clipped.size.width > px(0.) && clipped.size.height > px(0.) {
-                        window.paint_quad(fill(clipped, self.style.selection.opacity(0.35)));
-                    }
-                }
-                let _ = shaped.paint(
-                    row_origin,
-                    px(row_height),
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
-                painted += 1;
+                let _ = width;
             }
             if dimmed.contains(&index) {
                 let block = &self.blocks[index];
@@ -1562,7 +1918,79 @@ impl TextLayout {
                     );
                 }
             }
-            BlockKind::Heading(_) | BlockKind::Paragraph => {}
+            BlockKind::Footnote { .. } => {
+                if block.marker_line.is_none()
+                    && let Some(marker) = block.marker.clone()
+                {
+                    let run = ResolvedRun {
+                        range: 0..0,
+                        font: style_font,
+                        color: muted,
+                        background: None,
+                        strikethrough: false,
+                    };
+                    block.marker_line = Some(window.text_system().shape_line(
+                        marker.clone(),
+                        px(block.font_size),
+                        &[run.text_run(marker.len())],
+                        None,
+                    ));
+                }
+                if let Some(line) = block.marker_line.as_ref() {
+                    let marker_origin = point(
+                        origin.x + px(block.marker_offset),
+                        origin.y + px(block_top + block.chrome_top),
+                    );
+                    let _ = line.paint(
+                        marker_origin,
+                        px(block.row_height),
+                        TextAlign::Left,
+                        Some(px(18.)),
+                        window,
+                        cx,
+                    );
+                }
+            }
+            BlockKind::Raw => {
+                let bounds = Bounds::new(
+                    point(origin.x, origin.y + px(block_top + block.chrome_top)),
+                    size(px(2.), px(rows_height)),
+                );
+                window.paint_quad(fill(bounds, border));
+            }
+            BlockKind::TableRow { header, .. } => {
+                let row_width = f32::from(self.width);
+                let row_height = (block.height() - block.gap).max(1.);
+                if header {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(origin.x, origin.y + px(block_top)),
+                            size(px(row_width), px(row_height)),
+                        ),
+                        code_background,
+                    ));
+                }
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(origin.x, origin.y + px(block_top + row_height - 1.)),
+                        size(px(row_width), px(1.)),
+                    ),
+                    border,
+                ));
+                for cell in block.cells.iter().skip(1) {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(
+                                origin.x + px(cell.x_offset - TABLE_CELL_PADDING * 0.5),
+                                origin.y + px(block_top),
+                            ),
+                            size(px(1.), px(row_height)),
+                        ),
+                        border,
+                    ));
+                }
+            }
+            BlockKind::Image { .. } | BlockKind::Heading(_) | BlockKind::Paragraph => {}
         }
     }
 
@@ -1579,7 +2007,14 @@ impl TextLayout {
     /// Bytes of one block that still need wrapping.
     pub(crate) fn pending_bytes(&self, block: usize) -> usize {
         self.blocks.get(block).map_or(0, |block| {
-            if block.complete {
+            if block.is_table() {
+                return block
+                    .cells
+                    .iter()
+                    .map(|cell| cell.text_len.saturating_sub(cell.scanned))
+                    .sum();
+            }
+            if block.complete || block.image.is_some() {
                 0
             } else {
                 block.text_len.saturating_sub(block.scanned)
@@ -1594,6 +2029,148 @@ fn row_index_at(block: &BlockLayout, local_y: f32) -> usize {
     } else {
         (local_y / block.row_height).floor() as usize
     }
+}
+
+/// Paint every shaped row of one block slice (a whole block or one cell).
+#[allow(clippy::too_many_arguments)]
+fn paint_block_rows(
+    block: &BlockLayout,
+    origin: Point<Pixels>,
+    top: f32,
+    quads: &[Bounds<Pixels>],
+    decorations: &[(Bounds<Pixels>, Hsla)],
+    visible: &Bounds<Pixels>,
+    content_top: f32,
+    content_bottom: f32,
+    selection_color: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) -> usize {
+    let mut painted = 0usize;
+    for row in &block.rows {
+        let row_y = top + block.chrome_top + row.y;
+        if row_y + row.height < content_top || row_y > content_bottom {
+            continue;
+        }
+        let Some(shaped) = row.shaped.clone() else {
+            continue;
+        };
+        let row_origin = point(
+            origin.x + px(block.x_offset) + block.align_offset(shaped.width()),
+            origin.y + px(row_y),
+        );
+        let row_bounds = Bounds::new(
+            point(px(block.x_offset), px(row_y)),
+            size(px(block.column_width), px(row.height)),
+        );
+        let _ = shaped.paint_background(
+            row_origin,
+            px(row.height),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+        for (quad, color) in decorations
+            .iter()
+            .filter(|(quad, _)| quad.intersects(&row_bounds))
+        {
+            let clipped = quad.intersect(&row_bounds).intersect(visible);
+            if clipped.size.width > px(0.) && clipped.size.height > px(0.) {
+                window.paint_quad(fill(clipped, *color));
+            }
+        }
+        for quad in quads.iter().filter(|quad| quad.intersects(&row_bounds)) {
+            let clipped = quad.intersect(&row_bounds).intersect(visible);
+            if clipped.size.width > px(0.) && clipped.size.height > px(0.) {
+                window.paint_quad(fill(clipped, selection_color.opacity(0.35)));
+            }
+        }
+        let _ = shaped.paint(
+            row_origin,
+            px(row.height),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+        painted += 1;
+    }
+    painted
+}
+
+/// Shape one row that is not yet shaped.
+fn shape_row_in(
+    block: &mut BlockLayout,
+    text: &str,
+    row_index: usize,
+    text_system: &WindowTextSystem,
+) -> (bool, usize) {
+    if block.rows[row_index].shaped.is_some() {
+        return (false, 0);
+    }
+    let shaped = {
+        let row = &block.rows[row_index];
+        shape_row(block, text, row, text_system)
+    };
+    let bytes = block.rows[row_index].range.len();
+    block.rows[row_index].shaped = Some(shaped);
+    (true, bytes)
+}
+
+/// Shape every row intersecting the viewport, under the frame budget.
+#[allow(clippy::too_many_arguments)]
+fn shape_rows_in(
+    block: &mut BlockLayout,
+    text: &str,
+    block_top: f32,
+    content_top: f32,
+    content_bottom: f32,
+    work: &ViewportWork<'_>,
+    pending: &mut bool,
+) -> (usize, usize, usize) {
+    let rows = block.rows.len();
+    let first_local = content_top - block_top - block.chrome_top;
+    let first_row = if first_local <= 0. {
+        0
+    } else {
+        ((first_local / block.row_height).floor() as usize).min(rows)
+    };
+    let mut reused = 0usize;
+    let mut shaped = 0usize;
+    let mut bytes = 0usize;
+    for row_index in first_row..rows {
+        let (y, height, has_shaped, range_len) = {
+            let row = &block.rows[row_index];
+            (
+                block_top + block.chrome_top + row.y,
+                row.height,
+                row.shaped.is_some(),
+                row.range.len(),
+            )
+        };
+        if y + height < content_top {
+            continue;
+        }
+        if y > content_bottom {
+            break;
+        }
+        if has_shaped {
+            reused += 1;
+            continue;
+        }
+        if Instant::now() >= work.deadline {
+            *pending = true;
+            break;
+        }
+        let (did_shape, shaped_bytes) = shape_row_in(block, text, row_index, work.text_system);
+        if did_shape {
+            shaped += 1;
+            bytes += shaped_bytes;
+        }
+        let _ = range_len;
+    }
+    (reused, shaped, bytes)
 }
 
 /// Shape one visual row, keeping shaping context from the same text line.

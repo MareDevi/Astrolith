@@ -23,6 +23,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::ImageMetrics;
 use astrolith_document::WysiwygDocument;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::text::{TextView, TextViewState};
@@ -161,6 +162,7 @@ impl TextLayoutSpike {
             document.clone(),
             style.clone(),
             px(600.),
+            &ImageMetrics::default(),
         )));
         let this = Self {
             source,
@@ -497,6 +499,7 @@ impl Render for TextLayoutSpike {
                 self.document.clone(),
                 self.style.clone(),
                 width,
+                &ImageMetrics::default(),
             )));
             self.content_bounds.borrow_mut().take();
             self.logged_pending = false;
@@ -687,6 +690,7 @@ impl Element for LayoutCanvas {
             self.caret,
             &[],
             &[],
+            None,
         );
     }
 }

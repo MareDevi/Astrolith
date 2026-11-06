@@ -297,6 +297,7 @@ impl WriterSurface {
                 self.document.clone(),
                 style.clone(),
                 px(width),
+                &super::text_layout::ImageMetrics::default(),
             ));
             self.laid_out_width = Some(width);
             self.layout_style = Some(style);
@@ -328,6 +329,14 @@ impl WriterSurface {
         self.pending_edit
             .as_ref()
             .map_or(Some(source), |edit| edit.to_current(source))
+    }
+
+    /// The accepted parsed document and the exact text it was built from, so
+    /// the read-only preview can reuse it instead of parsing the revision
+    /// again.
+    pub(crate) fn shared_document(&self) -> Option<(String, Arc<WysiwygDocument>)> {
+        self.document_revision
+            .map(|_| (self.parsed_text.clone(), self.document.clone()))
     }
 
     pub(super) fn parsed_offset(&self, offset: usize) -> usize {
@@ -976,6 +985,7 @@ impl Element for LayoutCanvas {
                 self.caret,
                 &self.decorations,
                 &self.dimmed,
+                None,
             )
         });
         if std::mem::replace(&mut self.painted, true) {
