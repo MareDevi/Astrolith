@@ -1,0 +1,120 @@
+{
+  "schema": "astrolith.e2e.manifest/1",
+  "test_id": "editor-m4-pre-preview-complex-markdown",
+  "title": "Native pre baseline: complex-markdown",
+  "purpose": "M0 baseline for the editor performance plan: repeatable fixture, isolated launch, counters and phase timings.",
+  "status": "passed",
+  "layer": "L2 real process",
+  "started_at": "2026-11-06T08:12:37.797Z",
+  "duration_s": 11.128,
+  "source": "2026-11-06T08:12:51.217544Z  INFO main astrolith_gpui::shell: crates/astrolith-gpui/src/shell.rs:108: GPUI backend selected for this build gpui_fast=false",
+  "environment": {
+    "os": "Linux 7.3.1-1-cachyos",
+    "arch": "x64",
+    "backend": "pre",
+    "features": [],
+    "session": "wayland",
+    "wayland_display": "wayland-1",
+    "scale": null,
+    "profiled": false
+  },
+  "fixture": {
+    "id": "complex-markdown",
+    "bytes": 98304,
+    "sha256": "0670b9d7a5b04efe37d9a39e9bdbbbb4a50cfd14f234082aad17f1470003eb45",
+    "generated": "target/editor-perf/fixtures/complex-markdown.mdx",
+    "shape": "tables, footnotes, references, HTML/MDX, images, fences"
+  },
+  "command": "/home/maredevi/Projects/Astrolith/target/editor-perf/pre/debug/astrolith-desktop /tmp/astrolith-editor-perf-ZqbVcF/project/src/content/fixture.mdx",
+  "repro": "node scripts/editor-perf.mjs run --fixture complex-markdown --backend pre --scenario preview",
+  "expected": "The document opens at a startup entry, the scripted steps complete, and numeric writer frames, mode, change and parse spans are recorded.",
+  "observed": "document opened through a startup entry; writer frames sampled: 16",
+  "evidence": {
+    "stdout": "artifacts/e2e/editor-m4-pre-preview-complex-markdown/stdout.log",
+    "stderr": "artifacts/e2e/editor-m4-pre-preview-complex-markdown/stderr.log",
+    "build_log": "artifacts/e2e/editor-m4-pre-preview-complex-markdown/build.log",
+    "scenario": "artifacts/e2e/editor-m4-pre-preview-complex-markdown/scenario.json",
+    "traces": "not captured in this run"
+  },
+  "metrics": {
+    "build_ms": 13389,
+    "writer_repaints": {
+      "samples": 0,
+      "paint_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "caret_blinks_max": 0
+    },
+    "writer_frames": {
+      "samples": 16,
+      "total_ms": {
+        "p50": 0.5883470000000001,
+        "p95": 11.345351,
+        "p99": 11.345351,
+        "max": 11.345351
+      },
+      "render_ms": {
+        "p50": 0.274155,
+        "p95": 9.864987000000001,
+        "max": 9.864987000000001
+      },
+      "layout_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "prepaint_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "paint_ms": {
+        "p50": 0.254664,
+        "p95": 2.566955,
+        "max": 2.566955
+      },
+      "blocks_rendered_max": 35,
+      "blocks_total_max": 2956,
+      "nodes_built_total": 0,
+      "nodes_reused_total": 0,
+      "geometry_leaves_max": 0,
+      "shaping_bytes_max": 365,
+      "caret_blinks_max": 4
+    },
+    "driver_steps": {
+      "samples": 8,
+      "p50": 0.017045,
+      "p95": 0.452098,
+      "max": 0.452098
+    },
+    "mode_handlers": {
+      "samples": 1,
+      "p50": 0.038646,
+      "p95": 0.038646,
+      "max": 0.038646
+    },
+    "change_handlers": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "parse_queue_vs_install": {
+      "samples": 1,
+      "p50": 0.001111,
+      "p95": 0.001111,
+      "max": 0.001111
+    },
+    "cpu": null,
+    "fullscreen_pairs": 0
+  },
+  "limitations": [
+    "Scripted actions call the real writer input adapter; physical keyboard and IME candidate windows are not exercised.",
+    "Frame timings cover the writer request-layout through paint CPU phases; compositor presentation is excluded.",
+    "No Hyprland fullscreen/resize actions were requested for this run.",
+    "Preview and Build use Kit TextView/Editor internals and are measured externally in this baseline."
+  ],
+  "rerun_notes": "Run the same command with an isolated preferences directory; do not compare across different fixtures or fonts."
+}
