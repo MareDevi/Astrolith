@@ -221,6 +221,25 @@ pub(crate) fn span(event: &'static str, name: &str, elapsed: Duration) {
     );
 }
 
+/// Emit one completed worker parse: its whole-document CPU time and input size.
+///
+/// The parse runs off the UI thread, so this measures convergence work, not a
+/// frame. `document_ready` covers the queue wait plus this parse plus the
+/// layout reconcile that installs it.
+pub(crate) fn parse_run(bytes: usize, reused_blocks: usize, elapsed: Duration) {
+    if !enabled() {
+        return;
+    }
+    tracing::info!(
+        target: "astrolith::perf",
+        event = "parse_run",
+        bytes,
+        reused_blocks,
+        ms = millis(elapsed),
+        "writer parse"
+    );
+}
+
 /// Monotonic timestamp in nanoseconds since the process started, for
 /// correlating an in-app action with the harness's wall clock.
 pub(crate) fn monotonic_ns() -> u128 {

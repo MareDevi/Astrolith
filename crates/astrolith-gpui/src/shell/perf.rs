@@ -64,6 +64,9 @@ struct Step {
     resize_height: Option<f32>,
     #[serde(default)]
     input: Option<String>,
+    /// Close the active document. Only valid while it has no unsaved edits.
+    #[serde(default)]
+    close: bool,
     #[serde(default)]
     quit: bool,
 }
@@ -154,6 +157,8 @@ impl Shell {
             "font".to_owned()
         } else if step.resize_width.is_some() || step.resize_height.is_some() {
             "resize".to_owned()
+        } else if step.close {
+            "close".to_owned()
         } else if step.quit {
             "quit".to_owned()
         } else {
@@ -242,6 +247,12 @@ impl Shell {
                     writer.replace_text_in_range(None, text, window, cx);
                 });
             }
+        }
+        if step.close {
+            let started = Instant::now();
+            self.project
+                .update(cx, |project, cx| project.close_active(window, cx));
+            perf::span("document_close", "close_active", started.elapsed());
         }
         perf::span("driver_step", &label, started.elapsed());
         if step.quit {

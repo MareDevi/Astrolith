@@ -31,7 +31,7 @@ use crate::editor::writing_modes::ProseStyle;
 
 /// Parsed document and the exact visible text it was built from, produced by
 /// the writer surface for the same accepted revision.
-pub(crate) type SharedDocument = Option<(String, Arc<WysiwygDocument>)>;
+pub(crate) type SharedDocument = Option<(Arc<String>, Arc<WysiwygDocument>)>;
 
 pub(crate) struct RenderedDocument {
     focus: FocusHandle,
@@ -180,7 +180,7 @@ impl RenderedDocument {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         if let Some((shared_text, shared_document)) = shared
-            && shared_text == text
+            && shared_text.as_str() == text
         {
             self.install(generation, shared_document, cx);
             cx.notify();
@@ -202,7 +202,7 @@ impl RenderedDocument {
                             writer
                                 .read(cx)
                                 .shared_document()
-                                .filter(|(text, _)| text == source.as_ref())
+                                .filter(|(text, _)| text.as_str() == source.as_ref())
                                 .map(|(_, document)| document),
                         )
                     });

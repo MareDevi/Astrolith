@@ -77,12 +77,15 @@ pub(crate) struct WriterSurface {
     document: Arc<WysiwygDocument>,
     source: Rope,
     parsed_source: Rope,
-    parsed_text: String,
+    /// Exact text the accepted document was parsed from, shared with tasks.
+    parsed_text: Arc<String>,
     requested_revision: Option<u64>,
     pending_edit: Option<TextChange>,
     pending_snapshot: Option<(u64, Rope)>,
     /// When the latest snapshot was requested, to report queue wait.
     parse_queued_at: Option<Instant>,
+    /// When the accepted snapshot was requested, for document convergence.
+    snapshot_started_at: Option<Instant>,
     parse_task: Option<gpui_kit::Task<()>>,
     parse_cancel: Arc<AtomicBool>,
     style: ProseStyle,
@@ -131,11 +134,12 @@ impl WriterSurface {
             geometry,
             source: Rope::new(),
             parsed_source: Rope::new(),
-            parsed_text: String::new(),
+            parsed_text: Arc::new(String::new()),
             requested_revision: None,
             pending_edit: None,
             pending_snapshot: None,
             parse_queued_at: None,
+            snapshot_started_at: None,
             parse_task: None,
             parse_cancel: Arc::new(AtomicBool::new(false)),
             style,
@@ -210,6 +214,7 @@ impl WriterSurface {
         self.source = source.clone();
         self.pending_snapshot = Some((revision, source));
         self.parse_queued_at = perf::start();
+        self.snapshot_started_at = Some(Instant::now());
         self.start_parse(cx);
     }
 
@@ -225,27 +230,34 @@ impl WriterSurface {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         self.parse_cancel = cancel.clone();
+        // The diff must map the text the accepted document was built from to
+        // this snapshot, not an older pending revision.
+        let previous_text = self.parsed_text.clone();
+        let previous_document = self.document.clone();
+        let change = TextChange::between(&self.parsed_source, &source);
         let work = cx.background_spawn(async move {
             if cancel.load(Ordering::Relaxed) {
                 return None;
             }
             let started = std::time::Instant::now();
             let text = source.to_string();
-            let document =
-                WysiwygDocument::parse_cancellable(&text, || cancel.load(Ordering::Relaxed))?;
-            tracing::debug!(revision, bytes = source.len(), parse_ms = started.elapsed().as_secs_f64() * 1_000.,
+            let parsed = parse_snapshot(&text, &previous_text, &previous_document, change, &cancel)?;
+            let elapsed = started.elapsed();
+            tracing::debug!(revision, bytes = source.len(), parse_ms = elapsed.as_secs_f64() * 1_000.,
+                reused_blocks = parsed.1,
                 thread = ?std::thread::current().id(), "parsed writer snapshot off thread");
-            Some((source, text, document))
+            Some((source, text, parsed.0, parsed.1, elapsed))
         });
         self.parse_task = Some(cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.parse_task = None;
-                if this.requested_revision == Some(revision)
-                    && let Some((source, text, document)) = result
-                {
-                    this.install_document(revision, source, text, document, cx);
-                    cx.notify();
+                if let Some((source, text, document, reused_blocks, parsed)) = result {
+                    perf::parse_run(source.len(), reused_blocks, parsed);
+                    if this.requested_revision == Some(revision) {
+                        this.install_document(revision, source, text, document, cx);
+                        cx.notify();
+                    }
                 }
                 this.start_parse(cx);
             });
@@ -260,16 +272,27 @@ impl WriterSurface {
         document: WysiwygDocument,
         cx: &mut Context<Self>,
     ) {
+        let first_install = self.document_revision.is_none();
         self.document_revision = Some(revision);
         self.parsed_source = source;
-        self.parsed_text = text;
+        self.parsed_text = Arc::new(text);
         self.pending_edit = None;
         self.document = Arc::new(document);
         // Unchanged blocks keep their rows and shaped lines across the edit;
         // the edited block keeps the safe row prefix.
+        let reconcile = Instant::now();
         if let Some(layout) = self.layout.borrow_mut().as_mut() {
             let outcome = layout.update(self.document.clone());
             perf::text_layout_edit(outcome);
+        }
+        if let Some(started) = self.snapshot_started_at.take() {
+            perf::span("document_ready", "layout_reconcile", reconcile.elapsed());
+            let event = if first_install {
+                "initial_install"
+            } else {
+                "edit_install"
+            };
+            perf::span("document_ready", event, started.elapsed());
         }
         self.last_cursor = None;
         self.caret.update(cx, |caret, cx| caret.clear(cx));
@@ -334,7 +357,7 @@ impl WriterSurface {
     /// The accepted parsed document and the exact text it was built from, so
     /// the read-only preview can reuse it instead of parsing the revision
     /// again.
-    pub(crate) fn shared_document(&self) -> Option<(String, Arc<WysiwygDocument>)> {
+    pub(crate) fn shared_document(&self) -> Option<(Arc<String>, Arc<WysiwygDocument>)> {
         self.document_revision
             .map(|_| (self.parsed_text.clone(), self.document.clone()))
     }
@@ -755,7 +778,7 @@ impl Render for WriterSurface {
             }
         }
         let dimmed = if modes.focus {
-            let sentence = cursor_sentence(&self.parsed_text, cursor);
+            let sentence = cursor_sentence(self.parsed_text.as_str(), cursor);
             sentence
                 .as_ref()
                 .map(|sentence| {
@@ -1177,6 +1200,37 @@ impl Element for CaretLayer {
     }
 }
 
+/// Parse one snapshot off the UI thread.
+///
+/// A local edit reuses unchanged blocks through the incremental path. Edits the
+/// incremental parser declines (a touched reference definition, or a missing
+/// diff) take the whole-document path, so this never exposes a partial tree.
+fn parse_snapshot(
+    text: &str,
+    previous_text: &str,
+    previous: &WysiwygDocument,
+    change: Option<TextChange>,
+    cancel: &AtomicBool,
+) -> Option<(WysiwygDocument, usize)> {
+    if let Some(change) = change {
+        if let Some(parsed) = WysiwygDocument::parse_incremental_cancellable(
+            text,
+            previous_text,
+            previous,
+            change.old,
+            change.new,
+            || cancel.load(Ordering::Relaxed),
+        ) {
+            return Some((parsed.document, parsed.reused_blocks));
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+    }
+    WysiwygDocument::parse_cancellable(text, || cancel.load(Ordering::Relaxed))
+        .map(|document| (document, 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1252,7 +1306,8 @@ mod tests {
             writer.set_snapshot(101, Rope::from_str("intermediate に"), cx);
             writer.set_snapshot(102, Rope::from_str("# New 日本語🦀\n"), cx);
             assert_eq!(
-                writer.parsed_text, "# Original\n",
+                writer.parsed_text.as_str(),
+                "# Original\n",
                 "input does not synchronously parse"
             );
         });
