@@ -6,10 +6,10 @@ use std::ops::Range;
 use gpui_kit::component::input::{EditorState, RopeExt};
 use gpui_kit::{
     Bounds, ClipboardItem, Context, ElementInputHandler, Entity, EntityInputHandler, Focusable,
-    Pixels, Point, UTF16Selection, Window, px, size,
+    Pixels, Point, UTF16Selection, Window, point, px, size,
 };
 
-use super::{WriterSurface, block_key};
+use super::WriterSurface;
 
 impl WriterSurface {
     pub(super) fn input_model(&self, cx: &Context<Self>) -> Option<Entity<EditorState>> {
@@ -114,12 +114,15 @@ impl EntityInputHandler for WriterSurface {
         let editor = self.input_model(cx)?;
         let source = editor.read(cx).text().offset_utf16_to_offset(range.start);
         let (block, rendered) = self.document.caret_location(self.parsed_offset(source))?;
-        let geometry = self.geometry.borrow();
-        let leaf = geometry.leaves.get(&block_key(block))?;
-        let origin = leaf.position_for_index(rendered);
+        let layout = self.layout.borrow();
+        let caret = layout.as_ref()?.caret(super::Hit { block, rendered })?;
+        let geometry = *self.geometry.borrow();
         Some(Bounds::new(
-            origin,
-            size(px(1.5), leaf.caret_height().max(px(2.))),
+            point(
+                geometry.origin.x + caret.origin.x,
+                geometry.origin.y + caret.origin.y,
+            ),
+            size(px(1.5), caret.height.max(px(2.))),
         ))
     }
 

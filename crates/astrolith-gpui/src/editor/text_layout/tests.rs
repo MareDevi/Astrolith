@@ -15,6 +15,8 @@ fn test_style() -> Arc<LayoutStyle> {
         selection: gpui_kit::black(),
         caret: gpui_kit::black(),
         border: gpui_kit::black(),
+        background: gpui_kit::black(),
+        heading: gpui_kit::black(),
     })
 }
 

@@ -76,6 +76,8 @@ pub(crate) struct LayoutStyle {
     pub(crate) selection: Hsla,
     pub(crate) caret: Hsla,
     pub(crate) border: Hsla,
+    pub(crate) background: Hsla,
+    pub(crate) heading: Hsla,
 }
 
 impl LayoutStyle {
@@ -94,7 +96,17 @@ impl LayoutStyle {
             selection: theme.selection,
             caret: theme.caret,
             border: theme.border,
+            background: theme.background,
+            heading: crate::theme::prose_heading_color(cx),
         }
+    }
+
+    /// Font metrics that decide wrapping and row heights.
+    pub(crate) fn metrics_eq(&self, other: &Self) -> bool {
+        self.font == other.font
+            && self.mono_font == other.mono_font
+            && self.font_size == other.font_size
+            && self.line_height == other.line_height
     }
 
     /// Font size used by a heading level, matching the current block chrome.
@@ -150,6 +162,15 @@ impl Selection {
 pub(crate) struct Caret {
     pub(crate) origin: Point<Pixels>,
     pub(crate) height: Pixels,
+    pub(crate) color: Hsla,
+}
+
+/// A painted range of one block's rendered text, such as a Copyedit or
+/// placeholder highlight.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Decoration {
+    pub(crate) block: usize,
+    pub(crate) range: Range<usize>,
     pub(crate) color: Hsla,
 }
 
@@ -284,23 +305,8 @@ impl BlockLayout {
         let font_size = f32::from(style.block_font_size(&block.kind));
         let row_height = font_size * style.line_height;
         let mono_all = matches!(block.kind, BlockKind::Code { .. });
-        let base_color = match block.kind {
-            BlockKind::Quote => style.muted_foreground,
-            _ => style.foreground,
-        };
-        let base_font = if mono_all {
-            style.mono_font.clone()
-        } else {
-            style.font.clone()
-        };
-        let base = ResolvedRun {
-            range: 0..0,
-            font: base_font,
-            color: base_color,
-            background: None,
-            strikethrough: false,
-        };
-        let runs = resolve_runs(block, style, mono_all, &base);
+        let base = base_run(&block.kind, style);
+        let runs = resolve_runs(&block.text.text, &block.text.marks, style, mono_all, &base);
         let gap = f32::from(style.font_size) * 0.75;
         let (x_offset, chrome_top, chrome_bottom, marker_offset, marker) = match &block.kind {
             BlockKind::ListItem { ordered, number } => {
@@ -372,6 +378,13 @@ impl BlockLayout {
             && self.depth == block.depth
             && self.text.as_ref() == block.text.text
             && self.marks == block.text.marks
+    }
+
+    /// Re-resolve colours and fonts for a style whose metrics did not change.
+    fn update_style(&mut self, style: &LayoutStyle) {
+        let mono_all = matches!(self.kind, BlockKind::Code { .. });
+        self.base = base_run(&self.kind, style);
+        self.runs = resolve_runs(&self.text, &self.marks, style, mono_all, &self.base);
     }
 
     /// Carry rows that end safely before the common prefix of an edit.
@@ -707,20 +720,45 @@ fn grapheme_width(
         .width()
 }
 
+/// The unmarked run of a block: font, colour and weight before inline marks.
+fn base_run(kind: &BlockKind, style: &LayoutStyle) -> ResolvedRun {
+    let mono_all = matches!(kind, BlockKind::Code { .. });
+    let mut font = if mono_all {
+        style.mono_font.clone()
+    } else {
+        style.font.clone()
+    };
+    let color = match kind {
+        BlockKind::Heading(_) => {
+            font.weight = FontWeight::BOLD;
+            style.heading
+        }
+        BlockKind::Quote => style.muted_foreground,
+        _ => style.foreground,
+    };
+    ResolvedRun {
+        range: 0..0,
+        font,
+        color,
+        background: None,
+        strikethrough: false,
+    }
+}
+
 fn resolve_runs(
-    block: &RichBlock,
+    text: &str,
+    marks: &[InlineMark],
     style: &LayoutStyle,
     mono_all: bool,
     base: &ResolvedRun,
 ) -> Vec<ResolvedRun> {
-    let text = &block.text.text;
     let len = text.len();
     if len == 0 {
         return Vec::new();
     }
     let mut cuts = vec![0, len];
-    let mut events = Vec::with_capacity(block.text.marks.len() * 2);
-    for (index, mark) in block.text.marks.iter().enumerate() {
+    let mut events = Vec::with_capacity(marks.len() * 2);
+    for (index, mark) in marks.iter().enumerate() {
         let start = mark.range.start.min(len);
         let end = mark.range.end.min(len);
         if start < end {
@@ -756,7 +794,7 @@ fn resolve_runs(
         let mut code = false;
         let mut link = false;
         for index in &active {
-            match &block.text.marks[*index].kind {
+            match &marks[*index].kind {
                 InlineMarkKind::Bold => bold = true,
                 InlineMarkKind::Italic => italic = true,
                 InlineMarkKind::Strikethrough => strikethrough = true,
@@ -857,6 +895,31 @@ impl TextLayout {
         self.stats
     }
 
+    pub(crate) fn style(&self) -> &LayoutStyle {
+        &self.style
+    }
+
+    /// Adopt a new presentation without discarding wrapping when the font
+    /// metrics are unchanged. Shaped rows are dropped so the next viewport
+    /// frame paints the new colours; the document is not re-parsed and rows
+    /// are not re-wrapped.
+    pub(crate) fn set_style(&mut self, style: Arc<LayoutStyle>) {
+        if *self.style == *style {
+            return;
+        }
+        if !self.style.metrics_eq(&style) {
+            return;
+        }
+        self.style = style.clone();
+        for block in &mut self.blocks {
+            block.update_style(&style);
+            for row in &mut block.rows {
+                row.shaped = None;
+            }
+            block.marker_line = None;
+        }
+    }
+
     /// Total content height in pixels.
     pub(crate) fn total_height(&self) -> f32 {
         self.heights.total() as f32
@@ -914,8 +977,6 @@ impl TextLayout {
         let last = end.block.min(self.blocks.len() - 1);
         let mut quads = Vec::new();
         for index in first..=last {
-            let block = &self.blocks[index];
-            let block_top = self.block_top(index);
             let start_offset = if index == start.block {
                 start.rendered
             } else {
@@ -924,30 +985,42 @@ impl TextLayout {
             let end_offset = if index == end.block {
                 end.rendered
             } else {
-                block.text_len
+                self.blocks[index].text_len
             };
             if start_offset >= end_offset {
                 continue;
             }
-            for row in &block.rows {
-                let row_start = row.range.start.max(start_offset);
-                let row_end = row.range.end.min(end_offset);
-                if row_start >= row_end {
-                    continue;
-                }
-                let Some(shaped) = row.shaped.as_ref() else {
-                    continue;
-                };
-                let local_start = row_start - row.range.start;
-                let local_end = row_end - row.range.start;
-                let left = shaped.x_for_index(local_start);
-                let right = shaped.x_for_index(local_end);
-                let y = block_top + block.chrome_top + row.y;
-                quads.push(Bounds::new(
-                    point(px(block.x_offset) + left, px(y)),
-                    size((right - left).max(px(1.)), px(row.height)),
-                ));
+            quads.extend(self.block_range_quads(index, start_offset..end_offset));
+        }
+        quads
+    }
+
+    /// Rectangles one rendered range of one block covers, in content
+    /// coordinates. Rows without glyphs contribute nothing.
+    fn block_range_quads(&self, index: usize, range: Range<usize>) -> Vec<Bounds<Pixels>> {
+        let Some(block) = self.blocks.get(index) else {
+            return Vec::new();
+        };
+        let block_top = self.block_top(index);
+        let mut quads = Vec::new();
+        for row in &block.rows {
+            let row_start = row.range.start.max(range.start);
+            let row_end = row.range.end.min(range.end);
+            if row_start >= row_end {
+                continue;
             }
+            let Some(shaped) = row.shaped.as_ref() else {
+                continue;
+            };
+            let local_start = row_start - row.range.start;
+            let local_end = row_end - row.range.start;
+            let left = shaped.x_for_index(local_start);
+            let right = shaped.x_for_index(local_end);
+            let y = block_top + block.chrome_top + row.y;
+            quads.push(Bounds::new(
+                point(px(block.x_offset) + left, px(y)),
+                size((right - left).max(px(1.)), px(row.height)),
+            ));
         }
         quads
     }
@@ -1272,6 +1345,7 @@ impl TextLayout {
     /// `origin` is the window position of content coordinate (0, 0); clipping
     /// comes from the current content mask, so glyphs never spill over chrome
     /// outside the scroll viewport.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn paint(
         &mut self,
         window: &mut Window,
@@ -1279,6 +1353,8 @@ impl TextLayout {
         origin: Point<Pixels>,
         selection: Option<Selection>,
         caret: Option<Hit>,
+        decorations: &[Decoration],
+        dimmed: &[usize],
     ) -> usize {
         let clip = window.content_mask().bounds;
         let content_top = f32::from(clip.top() - origin.y);
@@ -1312,6 +1388,15 @@ impl TextLayout {
                 continue;
             }
             self.paint_chrome(window, cx, origin, index, block_top);
+            let decoration_quads: Vec<(Bounds<Pixels>, Hsla)> = decorations
+                .iter()
+                .filter(|decoration| decoration.block == index)
+                .flat_map(|decoration| {
+                    self.block_range_quads(index, decoration.range.clone())
+                        .into_iter()
+                        .map(move |quad| (quad, decoration.color))
+                })
+                .collect();
             let (x_offset, chrome_top) = {
                 let block = &self.blocks[index];
                 (block.x_offset, block.chrome_top)
@@ -1343,6 +1428,15 @@ impl TextLayout {
                     window,
                     cx,
                 );
+                for (quad, color) in decoration_quads
+                    .iter()
+                    .filter(|(quad, _)| quad.intersects(&row_bounds))
+                {
+                    let clipped = quad.intersect(&row_bounds).intersect(&visible);
+                    if clipped.size.width > px(0.) && clipped.size.height > px(0.) {
+                        window.paint_quad(fill(clipped, *color));
+                    }
+                }
                 for quad in quads.iter().filter(|quad| quad.intersects(&row_bounds)) {
                     let clipped = quad.intersect(&row_bounds).intersect(&visible);
                     if clipped.size.width > px(0.) && clipped.size.height > px(0.) {
@@ -1358,6 +1452,24 @@ impl TextLayout {
                     cx,
                 );
                 painted += 1;
+            }
+            if dimmed.contains(&index) {
+                let block = &self.blocks[index];
+                let rows_height = block.rows.len() as f32 * block.row_height;
+                let bounds = Bounds::new(
+                    point(origin.x, origin.y + px(block_top)),
+                    size(
+                        px(f32::from(self.width)),
+                        px(block.chrome_top + rows_height + block.chrome_bottom),
+                    ),
+                );
+                let bounds = bounds.intersect(&Bounds::new(
+                    origin,
+                    size(clip.size.width, px(content_bottom - content_top)),
+                ));
+                if bounds.size.width > px(0.) && bounds.size.height > px(0.) {
+                    window.paint_quad(fill(bounds, self.style.background.opacity(0.65)));
+                }
             }
         }
         if let Some(hit) = caret

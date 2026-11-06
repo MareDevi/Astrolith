@@ -679,8 +679,14 @@ impl Element for LayoutCanvas {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.layout
-            .borrow_mut()
-            .paint(window, cx, bounds.origin, self.selection, self.caret);
+        self.layout.borrow_mut().paint(
+            window,
+            cx,
+            bounds.origin,
+            self.selection,
+            self.caret,
+            &[],
+            &[],
+        );
     }
 }

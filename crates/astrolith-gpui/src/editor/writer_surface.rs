@@ -2,23 +2,25 @@
 //!
 //! The retained [`EditorState`] remains the input model: it owns the cursor,
 //! selection, IME composition and undo integration. This view renders the same
-//! writer projection as rendered Markdown blocks, paints the caret and
-//! selection itself, and maps pointer positions back into the editor's byte
-//! offsets. Markdown syntax (heading hashes, emphasis markers, list bullets,
-//! link destinations and fences) is not painted; the source stays byte-exact.
+//! writer projection through the application-owned viewport text layout, paints
+//! the caret and selection itself, and maps pointer positions back into the
+//! editor's byte offsets. Markdown syntax (heading hashes, emphasis markers,
+//! list bullets, link destinations and fences) is not painted; the source
+//! stays byte-exact.
 //!
-//! Block rendering and leaf geometry come from the pinned GPUI Kit
-//! `editor_host` seam: the host builds `BlockNode`s and receives per-leaf
-//! geometry for hit-testing and caret placement.
+//! Only the visible visual rows and their overscan are wrapped and shaped.
+//! Long blocks advance across frames under a bounded budget, and geometry for
+//! hit-testing, the caret, selection and IME comes from the same row snapshot
+//! that paints.
 
 mod commands;
 mod input;
 
 use super::perf;
 use super::text_change::TextChange;
+use super::text_layout::{Caret, Decoration, Hit, LayoutStyle, Selection, TextLayout, Viewport};
 use gpui_kit::component::input::Rope;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{
@@ -27,27 +29,34 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use astrolith_document::{BlockKind, WysiwygDocument, cursor_sentence};
-use gpui_kit::base::text::editor_host::{
-    BlockNode, CodeBlock, FlowPosition, InlineNode, LeafGeometry, LinkMark, Paragraph,
-    RenderContext, Span, TextMark, collect_leaf_geometry,
-};
-use gpui_kit::component::{ActiveTheme, StyledExt};
+use astrolith_document::{WysiwygDocument, cursor_sentence};
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    AnyElement, App, Bounds, Context, Element, ElementId, Focusable, GlobalElementId, Hsla,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render,
-    ScrollHandle, SharedString, TestSupportExt, Window, div, fill, point, prelude::*, px, relative,
-    size,
+    App, Bounds, Context, Element, ElementId, Focusable, GlobalElementId, Hsla, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, ScrollHandle,
+    TestSupportExt, Window, div, fill, point, prelude::*, px, relative, size,
 };
 
 use crate::editor::session::DocumentSession;
 use crate::editor::writing_modes::ProseStyle;
 
-/// One frame's laid-out leaves and viewport.
-#[derive(Default)]
+/// One frame's content placement and clipped viewport in window coordinates.
+#[derive(Clone, Copy)]
 struct FrameGeometry {
-    leaves: HashMap<u64, LeafGeometry>,
+    origin: Point<Pixels>,
     viewport: Bounds<Pixels>,
+    /// Width of the laid-out content column.
+    width: f32,
+}
+
+impl Default for FrameGeometry {
+    fn default() -> Self {
+        Self {
+            origin: point(px(0.), px(0.)),
+            viewport: Bounds::new(point(px(0.), px(0.)), size(px(0.), px(0.))),
+            width: 0.,
+        }
+    }
 }
 
 /// The writing surface for one retained document session.
@@ -57,12 +66,11 @@ pub(crate) struct WriterSurface {
     /// Caret painting and blinking live in this child entity, so a blink never
     /// invalidates the text layout.
     caret: gpui_kit::Entity<CaretOverlay>,
-    /// Prepared Kit nodes for the accepted document revision. Rebuilding them
-    /// every frame creates a fresh inline state per block, which also defeats
-    /// the upstream retained-layout table.
-    nodes: HashMap<usize, BlockNode>,
-    node_revision: Option<u64>,
-    /// Content width the measured heights belong to.
+    /// Application-owned layout for the accepted document revision. Rebuilt
+    /// only when the width or font metrics change.
+    layout: Rc<RefCell<Option<TextLayout>>>,
+    layout_style: Option<Arc<LayoutStyle>>,
+    /// Content width the current layout was built for.
     laid_out_width: Option<f32>,
     /// Last frame's measured writer work, for the opt-in counters.
     frame_stats: perf::Frame,
@@ -82,33 +90,18 @@ pub(crate) struct WriterSurface {
     scroll: ScrollHandle,
     /// Source offset where the current drag began.
     drag_anchor: Option<usize>,
-    /// Measured leaf height of every block the last frame rendered.
-    ///
-    /// `None` means the block has not been laid out since the document last
-    /// changed; its height is estimated from the block kind, text length and
-    /// the prose style instead.
-    heights: Rc<RefCell<Vec<Option<f32>>>>,
-    /// Prefix sum of the estimated heights, in content pixels.
-    prefix: Vec<f32>,
     /// Buffer revision the parsed document was built from.
     document_revision: Option<u64>,
     last_cursor: Option<usize>,
-    /// Content width from the last laid-out frame, for the line estimate.
-    content_width: Option<f32>,
-    /// Number of blocks the last frame laid out, for the windowing tests.
-    #[cfg(test)]
-    rendered_blocks: usize,
-    /// Global block range the last frame laid out, for the windowing tests.
-    #[cfg(test)]
-    rendered_range: Range<usize>,
-    /// The block range of the very first layout, for the windowing tests.
-    #[cfg(test)]
-    first_rendered_range: Option<Range<usize>>,
+    /// Keep following the caret until its row is visible; a user scroll after
+    /// that leaves the viewport alone.
+    follow_caret: bool,
+    /// Block indices dimmed by Focus mode in the last frame, for the tests.
     #[cfg(test)]
     dimmed_blocks: Vec<usize>,
-    /// Number of prepared nodes built since the last accepted revision.
+    /// Layout rebuilds since construction, for the tests.
     #[cfg(test)]
-    prepared_builds: usize,
+    layout_builds: usize,
 }
 
 impl Drop for WriterSurface {
@@ -124,13 +117,14 @@ impl WriterSurface {
         cx: &mut Context<Self>,
     ) -> Self {
         let geometry = Rc::new(RefCell::new(FrameGeometry::default()));
-        let caret = cx.new(|cx| CaretOverlay::new(geometry.clone(), cx));
+        let layout = Rc::new(RefCell::new(None));
+        let caret = cx.new(|cx| CaretOverlay::new(layout.clone(), geometry.clone(), cx));
         Self {
             session,
             caret_state: None,
             caret,
-            nodes: HashMap::new(),
-            node_revision: None,
+            layout,
+            layout_style: None,
             laid_out_width: None,
             frame_stats: perf::Frame::default(),
             document: Arc::new(WysiwygDocument::default()),
@@ -147,26 +141,19 @@ impl WriterSurface {
             style,
             scroll: ScrollHandle::new(),
             drag_anchor: None,
-            heights: Rc::new(RefCell::new(Vec::new())),
-            prefix: Vec::new(),
             document_revision: None,
             last_cursor: None,
-            content_width: None,
-            #[cfg(test)]
-            rendered_blocks: 0,
-            #[cfg(test)]
-            rendered_range: 0..0,
-            #[cfg(test)]
-            first_rendered_range: None,
+            follow_caret: false,
             #[cfg(test)]
             dimmed_blocks: Vec::new(),
             #[cfg(test)]
-            prepared_builds: 0,
+            layout_builds: 0,
         }
     }
 
     pub(crate) fn request_caret_follow(&mut self) {
         self.last_cursor = None;
+        self.follow_caret = true;
     }
 
     /// Stop the caret blink while the writing surface is not on screen.
@@ -194,11 +181,9 @@ impl WriterSurface {
             return;
         }
         self.style = style;
-        // A font or line-metric change invalidates every measured height. The
-        // prepared nodes keep their text and marks; the render context carries
-        // the new style.
-        self.heights.borrow_mut().fill(None);
-        self.laid_out_width = None;
+        // The next render compares font metrics; a colour-only change keeps
+        // the wrapped rows and only re-shapes the visible ones.
+        self.last_cursor = None;
         cx.notify();
     }
 
@@ -280,23 +265,60 @@ impl WriterSurface {
         self.parsed_text = text;
         self.pending_edit = None;
         self.document = Arc::new(document);
-        // A new accepted revision invalidates prepared style runs. They are
-        // rebuilt lazily for the blocks the next frames actually render.
-        self.nodes.clear();
-        self.node_revision = Some(revision);
-        self.geometry.borrow_mut().leaves.clear();
+        // Unchanged blocks keep their rows and shaped lines across the edit;
+        // the edited block keeps the safe row prefix.
+        if let Some(layout) = self.layout.borrow_mut().as_mut() {
+            let outcome = layout.update(self.document.clone());
+            perf::text_layout_edit(outcome);
+        }
         self.last_cursor = None;
         self.caret.update(cx, |caret, cx| caret.clear(cx));
-        // Keep the measured heights across an edit: clearing them would make
-        // the first frame after every keystroke render the whole document
-        // again. The vector only grows or shrinks; blocks that moved keep an
-        // approximate height until they are laid out and remeasured.
-        let blocks = self.document.blocks.len();
-        let mut heights = self.heights.borrow_mut();
-        heights.truncate(blocks);
-        heights.resize(blocks, None);
-        drop(heights);
-        self.prefix.clear();
+    }
+
+    /// Reuse the current layout for one accepted document revision.
+    ///
+    /// The layout is rebuilt only when the column width or the shaping font
+    /// metrics change. Colour-only changes restyle the resolved runs.
+    fn sync_layout(&mut self, width: f32, cx: &App) {
+        let style = Arc::new(LayoutStyle::from_app(&self.style, cx));
+        let width = width.max(1.);
+        let mut slot = self.layout.borrow_mut();
+        let rebuild = match slot.as_ref() {
+            None => true,
+            Some(layout) => {
+                !layout.style().metrics_eq(&style)
+                    || self
+                        .laid_out_width
+                        .is_some_and(|previous| (previous - width).abs() > 0.5)
+            }
+        };
+        if rebuild {
+            *slot = Some(TextLayout::new(
+                self.document.clone(),
+                style.clone(),
+                px(width),
+            ));
+            self.laid_out_width = Some(width);
+            self.layout_style = Some(style);
+            #[cfg(test)]
+            {
+                self.layout_builds += 1;
+            }
+            return;
+        }
+        if let Some(layout) = slot.as_mut()
+            && *layout.style() != *style
+        {
+            layout.set_style(style.clone());
+        }
+        self.layout_style = Some(style);
+        self.laid_out_width = Some(width);
+    }
+
+    /// The parsed hit for a source offset in the accepted document.
+    fn hit_for_source(&self, source: usize) -> Option<Hit> {
+        let (block, rendered) = self.document.caret_location(source)?;
+        Some(Hit { block, rendered })
     }
 
     /// Source offset under a window position.
@@ -340,9 +362,22 @@ impl WriterSurface {
         if self.pending_edit.is_some() {
             return None;
         }
-        let geometry = self.geometry.borrow();
-        let bounds = Self::selection_bounds(&self.document, selection, &geometry.leaves)?;
-        Some((bounds, geometry.viewport))
+        let geometry = *self.geometry.borrow();
+        let layout = self.layout.borrow();
+        let layout = layout.as_ref()?;
+        let anchor = self.hit_for_source(selection.start)?;
+        let focus = self.hit_for_source(selection.end)?;
+        let bounds = layout.bounds_for_range(anchor, focus)?;
+        Some((
+            Bounds::new(
+                point(
+                    geometry.origin.x + bounds.origin.x,
+                    geometry.origin.y + bounds.origin.y,
+                ),
+                bounds.size,
+            ),
+            geometry.viewport,
+        ))
     }
 
     /// Move the editor selection along the rendered layout.
@@ -394,7 +429,14 @@ impl WriterSurface {
                 .get(block)
                 .map(|block| (block, block.text.text.len()))
                 .map(|(_, len)| (block, len)),
-            "up" | "down" => self.vertical_target(block, rendered, key == "up"),
+            "up" | "down" => {
+                let hit = Hit { block, rendered };
+                let layout = self.layout.borrow();
+                layout
+                    .as_ref()
+                    .and_then(|layout| layout.vertical_target(hit, key == "up"))
+                    .map(|hit| (hit.block, hit.rendered))
+            }
             _ => return false,
         };
         let Some((next_block, next_rendered)) = destination else {
@@ -418,58 +460,18 @@ impl WriterSurface {
         true
     }
 
-    fn vertical_target(&self, block: usize, rendered: usize, up: bool) -> Option<(usize, usize)> {
-        let geometry = self.geometry.borrow();
-        let leaf = geometry.leaves.get(&block_key(block))?;
-        let caret = leaf.position_for_index(rendered);
-        let target_y = if up {
-            caret.y - leaf.line_height()
-        } else {
-            caret.y + leaf.line_height()
-        };
-        let best = geometry
-            .leaves
-            .iter()
-            .map(|(key, leaf)| {
-                let index = leaf.index_for_position(point(caret.x, target_y));
-                let at = leaf.position_for_index(index);
-                let dy = (f32::from(at.y) - f32::from(target_y)).abs();
-                let dx = (f32::from(at.x) - f32::from(caret.x)).abs();
-                (*key, index, at, dy, dx)
-            })
-            .filter(|(_, _, at, _, _)| at.y != caret.y)
-            .min_by(|left, right| {
-                left.3
-                    .partial_cmp(&right.3)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(
-                        left.4
-                            .partial_cmp(&right.4)
-                            .unwrap_or(std::cmp::Ordering::Equal),
-                    )
-            })?;
-        Some(((best.0 as usize).saturating_sub(1), best.1))
-    }
-
     fn location_at(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
-        let geometry = self.geometry.borrow();
-        let (key, leaf) = geometry.leaves.iter().min_by(|(_, left), (_, right)| {
-            distance(left.bounds(), position)
-                .partial_cmp(&distance(right.bounds(), position))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })?;
-        let block = (*key as usize).saturating_sub(1);
-        let rendered = leaf
-            .index_for_position(position)
-            .min(self.document.blocks.get(block)?.text.text.len());
-        Some((block, rendered))
+        let geometry = *self.geometry.borrow();
+        let layout = self.layout.borrow();
+        let layout = layout.as_ref()?;
+        let hit = layout.hit_test(point(
+            position.x - geometry.origin.x,
+            position.y - geometry.origin.y,
+        ))?;
+        Some((hit.block, hit.rendered))
     }
 
     /// The viewport height the visible window is derived from.
-    ///
-    /// The flow's own layout bounds are the fallback, but a scrolled child can
-    /// report its full content height; the window can never be taller than the
-    /// window it paints into, so the two are intersected.
     fn effective_viewport_height(&self, window: &Window) -> f32 {
         let geometry = f32::from(self.geometry.borrow().viewport.size.height);
         let window_height = f32::from(window.viewport_size().height);
@@ -478,83 +480,6 @@ impl WriterSurface {
         } else {
             window_height
         }
-    }
-
-    /// Prefix sum of every block's height, estimated or measured.
-    ///
-    /// Height zero is the content top; the last entry is the total content
-    /// height the spacers and rendered blocks add up to.
-    fn build_prefix(&mut self, document: &WysiwygDocument) {
-        let width = self.content_width.unwrap_or(640.);
-        let line_height = self.style.font_size * self.style.line_height;
-        let gap = paragraph_gap_px(self.style.font_size);
-        self.prefix.clear();
-        self.prefix.reserve(document.blocks.len() + 1);
-        self.prefix.push(0.);
-        let mut y = 0.;
-        for (index, block) in document.blocks.iter().enumerate() {
-            y += match self.heights.borrow().get(index).copied().flatten() {
-                Some(measured) => measured + gap,
-                None => estimate_block_height(block, width, self.style.font_size, line_height, gap),
-            };
-            self.prefix.push(y);
-        }
-    }
-
-    /// The block range worth laying out for the current scroll position.
-    ///
-    /// The first frame uses height estimates just like a resized frame. Only
-    /// the visible run and its overscan are laid out. A changed caret includes
-    /// its block and one neighbour on each side. A caret far outside the window (a programmatic jump) moves the
-    /// scroll to its estimated position instead of rendering every block in
-    /// between.
-    fn visible_block_range(
-        &mut self,
-        document: &WysiwygDocument,
-        cursor: usize,
-        viewport_height: f32,
-        follow_cursor: bool,
-    ) -> Range<usize> {
-        let total = document.blocks.len();
-        if total == 0 {
-            return 0..0;
-        }
-        self.build_prefix(document);
-        let overscan = WINDOW_OVERSCAN_PX + 2. * self.style.font_size * self.style.line_height;
-        let scroll = (-f32::from(self.scroll.offset().y)).max(0.);
-        let top = (scroll - overscan).max(0.);
-        let bottom = scroll + viewport_height + overscan;
-        let start = self.prefix.partition_point(|y| *y <= top).saturating_sub(1);
-        let mut end = self.prefix.partition_point(|y| *y < bottom).min(total);
-        let mut start = start.min(total);
-        end = end.max(start + 1).min(total);
-
-        if !follow_cursor {
-            return start..end;
-        }
-        let Some((caret, _)) = document.caret_location(cursor) else {
-            return start..end;
-        };
-        if (start..end).contains(&caret) {
-            start = start.min(caret.saturating_sub(1));
-            end = end.max((caret + 2).min(total));
-            return start..end;
-        }
-        let caret_y = self.prefix.get(caret).copied().unwrap_or(0.);
-        let window_start = caret.saturating_sub(1);
-        let limit = caret_y + viewport_height + overscan;
-        let window_end = self
-            .prefix
-            .partition_point(|y| *y < limit)
-            .max(window_start + 1)
-            .min(total);
-        let max = f32::from(self.scroll.max_offset().y);
-        let target = clamp_scroll_offset(-(caret_y - viewport_height * 0.3), max);
-        if px(target) != self.scroll.offset().y {
-            self.scroll
-                .set_offset(point(self.scroll.offset().x, px(target)));
-        }
-        window_start..window_end
     }
 
     /// Map a pointer position to a source offset and update the selection.
@@ -606,40 +531,27 @@ impl WriterSurface {
     }
 
     /// Keep the caret in view; typewriter mode centres it.
-    fn adjust_scroll(
-        &mut self,
-        document: &WysiwygDocument,
-        cursor: usize,
-        typewriter: bool,
-        viewport_height: f32,
-    ) {
-        let geometry = self.geometry.borrow();
-        let Some((block, rendered)) = document.caret_location(cursor) else {
+    fn adjust_scroll(&mut self, caret: Option<Caret>, typewriter: bool, viewport_height: f32) {
+        let Some(caret) = caret else {
             return;
         };
-        let Some(leaf) = geometry.leaves.get(&block_key(block)) else {
-            return;
-        };
-        let caret = leaf.position_for_index(rendered);
-        let height = leaf.caret_height();
-        let viewport = geometry.viewport;
-        if viewport.size.height <= px(0.) || viewport_height <= 0. {
+        if viewport_height <= 0. {
             return;
         }
         let offset = self.scroll.offset();
-        // Both positions are from the same laid-out frame and include scrolling.
-        let content_y = f32::from(caret.y) - f32::from(viewport.origin.y);
+        let scroll = (-f32::from(offset.y)).max(0.);
+        let content_y = f32::from(caret.origin.y) - scroll;
         let mut target = f32::from(offset.y);
         if typewriter {
-            let centre = (viewport_height - f32::from(height)) / 2.;
+            let centre = (viewport_height - f32::from(caret.height)) / 2.;
             target += centre - content_y;
         } else {
             let top = 20.;
             let bottom = viewport_height - 28.;
             if content_y < top {
                 target += top - content_y;
-            } else if content_y + f32::from(height) > bottom {
-                target -= content_y + f32::from(height) - bottom;
+            } else if content_y + f32::from(caret.height) > bottom {
+                target -= content_y + f32::from(caret.height) - bottom;
             }
         }
         let max = f32::from(self.scroll.max_offset().y);
@@ -649,102 +561,15 @@ impl WriterSurface {
         }
     }
 
-    fn selection_bounds(
-        document: &WysiwygDocument,
-        selection: &Range<usize>,
-        geometry: &HashMap<u64, LeafGeometry>,
-    ) -> Option<Bounds<Pixels>> {
-        if selection.is_empty() {
-            return None;
+    /// Keep the scroll offset inside a content height that changed.
+    fn clamp_scroll(&mut self, total_height: f32, viewport_height: f32) {
+        let max = (total_height - viewport_height).max(0.);
+        let offset = self.scroll.offset();
+        if f32::from(offset.y) < -max {
+            self.scroll.set_offset(point(offset.x, px(-max)));
         }
-        let mut bounds: Option<Bounds<Pixels>> = None;
-        for (key, leaf) in geometry {
-            let Some(block) = document.blocks.get((*key as usize).saturating_sub(1)) else {
-                continue;
-            };
-            if block.source.end < selection.start || block.source.start > selection.end {
-                continue;
-            }
-            let start = if selection.start <= block.content.start {
-                0
-            } else {
-                block.text.nearest_rendered_offset(selection.start)
-            };
-            let end = if selection.end >= block.content.end {
-                block.text.text.len()
-            } else {
-                block.text.nearest_rendered_offset(selection.end)
-            };
-            let start_point = leaf.position_for_index(start);
-            let end_point = leaf.position_for_index(end);
-            let leaf_bounds = Bounds::new(
-                point(
-                    start_point.x.min(end_point.x),
-                    start_point.y.min(end_point.y),
-                ),
-                size(
-                    (start_point.x - end_point.x).abs().max(px(2.)),
-                    (end_point.y - start_point.y).abs() + leaf.line_height(),
-                ),
-            );
-            bounds = Some(match bounds {
-                Some(existing) => existing.union(&leaf_bounds),
-                None => leaf_bounds,
-            });
-        }
-        bounds
     }
 }
-
-fn block_key(index: usize) -> u64 {
-    index as u64 + 1
-}
-
-/// Extra pixels rendered above and below the viewport.
-const WINDOW_OVERSCAN_PX: f32 = 400.;
-
-/// Gap the block renderer leaves below a paragraph, at the default 0.75 rem.
-fn paragraph_gap_px(font_size: f32) -> f32 {
-    font_size * 0.75
-}
-
-/// A deterministic height estimate for a block that has not been laid out.
-///
-/// The estimate only has to keep the scroll range and the rendered window
-/// consistent; measured heights replace it as soon as the block is visible.
-/// Line counts come from the byte length and an average glyph width, which
-/// overestimates CJK text (safe: it renders a little more, never less).
-fn estimate_block_height(
-    block: &astrolith_document::RichBlock,
-    width: f32,
-    font_size: f32,
-    line_height: f32,
-    gap: f32,
-) -> f32 {
-    let characters_per_line = (width / (font_size * 0.55)).max(8.);
-    let (scale, extra) = match block.kind {
-        BlockKind::Heading(level) => (heading_scale(level), 0.),
-        BlockKind::Rule => (1., 1. + 12.),
-        BlockKind::Code { .. } => (1., 12.),
-        BlockKind::ListItem { .. } | BlockKind::Quote | BlockKind::Paragraph => (1., 0.),
-    };
-    let lines = (block.text.text.len() as f32 / characters_per_line)
-        .ceil()
-        .max(1.);
-    lines * line_height * scale + gap + extra
-}
-
-fn heading_scale(level: u8) -> f32 {
-    match level {
-        1 => 2.0,
-        2 => 1.6,
-        3 => 1.4,
-        4 => 1.2,
-        5 => 1.1,
-        _ => 1.05,
-    }
-}
-
 /// Clamp a scroll translation to GPUI's convention: 0 at the top, negative
 /// while scrolling down, bounded by the positive `max` distance.
 fn clamp_scroll_offset(target: f32, max: f32) -> f32 {
@@ -797,29 +622,6 @@ fn following_rendered(
     None
 }
 
-fn distance(bounds: Bounds<Pixels>, position: Point<Pixels>) -> f32 {
-    if bounds.contains(&position) {
-        return 0.;
-    }
-    let dx = if position.x < bounds.origin.x {
-        bounds.origin.x - position.x
-    } else if position.x > bounds.right() {
-        position.x - bounds.right()
-    } else {
-        px(0.)
-    };
-    let dy = if position.y < bounds.origin.y {
-        bounds.origin.y - position.y
-    } else if position.y > bounds.bottom() {
-        position.y - bounds.bottom()
-    } else {
-        px(0.)
-    };
-    let dx = f32::from(dx);
-    let dy = f32::from(dy);
-    dx * dx + dy * dy
-}
-
 impl Render for WriterSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let render_started = Instant::now();
@@ -851,189 +653,153 @@ impl Render for WriterSurface {
         };
         let document = self.document.clone();
         let viewport_height = self.effective_viewport_height(window);
-        let content_width = f32::from(self.geometry.borrow().viewport.size.width);
-        self.content_width = (content_width > 0.).then_some(content_width);
-        // A width change re-wraps every block. Measured heights belong to the
-        // previous width epoch, so keep them only until a new width is known.
-        if content_width > 0.
-            && self
-                .laid_out_width
-                .is_some_and(|previous| (previous - content_width).abs() > 0.5)
-        {
-            self.heights.borrow_mut().fill(None);
-            self.prefix.clear();
-        }
-        if content_width > 0. {
-            self.laid_out_width = Some(content_width);
-        }
+        let content_width = self.geometry.borrow().width;
+        let width = if content_width > 0. {
+            content_width
+        } else {
+            (f32::from(window.viewport_size().width) * 0.7).max(240.)
+        };
+        self.sync_layout(width, cx);
+        let scroll = (-f32::from(self.scroll.offset().y)).max(0.);
+        let caret_hit = document
+            .caret_location(cursor)
+            .map(|(block, rendered)| Hit { block, rendered });
+        let selection_hits = if selection.is_empty() {
+            None
+        } else {
+            self.hit_for_source(selection.start)
+                .zip(self.hit_for_source(selection.end))
+                .map(|(anchor, focus)| Selection { anchor, focus })
+        };
+        let prepare_started = Instant::now();
+        let (prepared, layout_stats, rows, caret, total_height, pending_bytes) = {
+            let mut slot = self.layout.borrow_mut();
+            let layout = slot
+                .as_mut()
+                .expect("the layout is created before it is read");
+            let prepared = layout.prepare(
+                window,
+                Viewport {
+                    scroll,
+                    height: viewport_height,
+                },
+                caret_hit,
+                viewport_height * 0.5,
+            );
+            (
+                prepared,
+                layout.stats(),
+                layout.measured_rows(),
+                caret_hit.and_then(|hit| layout.caret(hit)),
+                layout.total_height(),
+                caret_hit.map_or(0, |hit| layout.pending_bytes(hit.block)),
+            )
+        };
+        let prepare_elapsed = prepare_started.elapsed();
+        perf::text_layout(
+            "writer",
+            layout_stats,
+            prepare_elapsed,
+            rows,
+            document.blocks.len(),
+            total_height,
+            pending_bytes,
+            width,
+            scroll,
+        );
+
         let follow_cursor = self.last_cursor != Some(cursor);
         self.last_cursor = Some(cursor);
         if follow_cursor {
-            self.adjust_scroll(
-                &document,
-                cursor,
-                focused && modes.typewriter,
-                viewport_height,
-            );
+            self.follow_caret = true;
         }
-        let rendered = self.visible_block_range(&document, cursor, viewport_height, follow_cursor);
-        #[cfg(test)]
-        {
-            self.rendered_blocks = rendered.len();
-            self.rendered_range = rendered.clone();
-            if self.document_revision.is_some() {
-                self.first_rendered_range
-                    .get_or_insert_with(|| rendered.clone());
-            }
-        }
-        let style = self.style.clone();
-        let mut decorations: HashMap<u64, Vec<(Range<usize>, Hsla)>> = HashMap::new();
-        let selection_color = cx.theme().selection.opacity(0.35);
-        let placeholder_color = cx.theme().primary.opacity(0.18);
-        // Focus mode dims every block outside the cursor sentence. The sentence
-        // is only scanned when the mode is on; the rendered window is all that
-        // needs the predicate.
-        let focus_sentence = if modes.focus {
-            cursor_sentence(&self.parsed_text, cursor)
-        } else {
-            None
-        };
-
-        // Prepared nodes survive until the next accepted revision. Rebuilding
-        // them per frame also rebuilt each inline state, so the retained text
-        // layout table could never hit.
-        if self.node_revision != self.document_revision {
-            self.nodes.clear();
-            self.node_revision = self.document_revision;
-        }
-        let mut stats = perf::Frame {
-            blocks_total: document.blocks.len(),
-            blocks_rendered: rendered.len(),
-            ..perf::Frame::default()
-        };
-        for index in rendered.clone() {
-            let block = &document.blocks[index];
-            stats.shaping_bytes += block.text.text.len();
-            match self.nodes.entry(index) {
-                std::collections::hash_map::Entry::Occupied(_) => stats.nodes_reused += 1,
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(build_block_node(block, index));
-                    stats.nodes_built += 1;
-                    #[cfg(test)]
-                    {
-                        self.prepared_builds += 1;
-                    }
+        if self.follow_caret {
+            self.adjust_scroll(caret, focused && modes.typewriter, viewport_height);
+            if let Some(caret) = caret {
+                let scroll = (-f32::from(self.scroll.offset().y)).max(0.);
+                let top = f32::from(caret.origin.y);
+                let bottom = top + f32::from(caret.height);
+                if top >= scroll && bottom <= scroll + viewport_height {
+                    self.follow_caret = false;
                 }
             }
-            if !selection.is_empty() {
-                add_source_decoration(
-                    &mut decorations,
-                    index,
-                    block,
-                    selection.clone(),
-                    selection_color,
-                    false,
-                );
-            }
+        }
+        self.clamp_scroll(total_height, viewport_height);
+        if prepared.pending || follow_cursor || self.follow_caret {
+            window.request_animation_frame();
+        }
+
+        let mut decorations = Vec::new();
+        if self.pending_edit.is_none() {
+            let placeholder_color = cx.theme().primary.opacity(0.18);
             for (range, color) in &copyedit {
-                add_source_decoration(&mut decorations, index, block, range.clone(), *color, false);
+                push_source_decoration(&mut decorations, &document, range.clone(), *color, false);
             }
             for range in &placeholders {
-                add_source_decoration(
+                push_source_decoration(
                     &mut decorations,
-                    index,
-                    block,
+                    &document,
                     range.clone(),
                     placeholder_color,
                     true,
                 );
             }
         }
-
-        stats.decorations = decorations.values().map(Vec::len).sum();
-        let refs: Vec<&BlockNode> = rendered.clone().map(|index| &self.nodes[&index]).collect();
-        let render_context = RenderContext::from_app(cx).with_body_font_size(px(style.font_size));
-        let inherited_style = render_context.style().clone();
-        let heading_color = crate::theme::prose_heading_color(cx);
-        let text_style = inherited_style
-            .clone()
-            .with_heading(move |level| inherited_style.heading(level).text_color(heading_color));
-        let render_context = render_context.with_style(text_style);
-        let mut blocks: Vec<AnyElement> = Vec::with_capacity(rendered.len() + 2);
-        // The omitted blocks keep their scroll range through spacers whose
-        // heights are the same estimates the window was computed from.
-        let total = document.blocks.len();
-        let prefix = &self.prefix;
-        if rendered.start > 0 && prefix.len() == total + 1 {
-            blocks.push(
-                div()
-                    .w_full()
-                    .h(px(prefix[rendered.start]))
-                    .into_any_element(),
-            );
-        }
-        #[cfg(test)]
-        self.dimmed_blocks.clear();
-        for (local, index) in rendered.clone().enumerate() {
-            let block = &document.blocks[index];
-            let element = refs[local].render(
-                local,
-                FlowPosition::at(&refs, local, local + 1 == refs.len()),
-                &render_context,
-                window,
-                cx,
-            );
-            let dimmed = modes.focus
-                && focus_sentence.as_ref().is_none_or(|sentence| {
-                    !(sentence.start < block.source.end && sentence.end > block.source.start)
-                });
-            #[cfg(test)]
-            if dimmed {
-                self.dimmed_blocks.push(index);
-            }
-            blocks.push(block_wrapper(block, element, dimmed, cx));
-        }
-        if rendered.end < total && prefix.len() == total + 1 {
-            let omitted = prefix[total] - prefix[rendered.end];
-            blocks.push(div().w_full().h(px(omitted.max(0.))).into_any_element());
-        }
-
-        // The caret is a sibling entity: blinking only invalidates its own
-        // paint layer, never this text layout.
-        let caret_target = if focused && selection.is_empty() {
-            document
-                .caret_location(cursor)
-                .map(|(block, rendered)| CaretTarget {
-                    block,
-                    rendered,
-                    color: cx.theme().caret,
+        let dimmed = if modes.focus {
+            let sentence = cursor_sentence(&self.parsed_text, cursor);
+            sentence
+                .as_ref()
+                .map(|sentence| {
+                    document
+                        .blocks
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, block)| {
+                            !(sentence.start < block.source.end
+                                && sentence.end > block.source.start)
+                        })
+                        .map(|(index, _)| index)
+                        .collect()
                 })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        #[cfg(test)]
+        {
+            self.dimmed_blocks = dimmed.clone();
+        }
+
+        let caret_target = if focused && selection.is_empty() {
+            caret_hit.map(|hit| CaretTarget {
+                hit,
+                color: cx.theme().caret,
+            })
         } else {
             None
         };
-        stats.caret_blinks = self.caret.read(cx).blinks;
+        let caret_blinks = self.caret.read(cx).blinks;
         self.caret
             .update(cx, |caret, cx| caret.set_target(caret_target, cx));
-        self.frame_stats = stats;
-        let render_elapsed = render_started.elapsed();
-        let flow = RichFlow {
-            child: Some(
-                div()
-                    .w_full()
-                    .font_family(style.font_family.clone())
-                    .text_size(px(style.font_size))
-                    .line_height(relative(style.line_height))
-                    .children(blocks)
-                    .into_any_element(),
-            ),
-            decorations,
+        self.frame_stats = perf::Frame {
+            blocks_total: document.blocks.len(),
+            blocks_rendered: prepared.blocks.len(),
+            shaping_bytes: layout_stats.shaped_bytes,
+            decorations: decorations.len(),
+            caret_blinks,
+            ..perf::Frame::default()
+        };
+        let canvas = LayoutCanvas {
+            layout: self.layout.clone(),
             geometry: self.geometry.clone(),
-            heights: self.heights.clone(),
+            selection: selection_hits,
+            caret: caret_hit,
+            decorations,
+            dimmed,
             input: cx.entity(),
-            stats,
-            render_elapsed,
-            layout_elapsed: std::time::Duration::ZERO,
-            repainted: false,
+            stats: self.frame_stats,
+            render_elapsed: render_started.elapsed(),
+            painted: false,
         };
         let content = div()
             .id("writer-wysiwyg-content")
@@ -1041,7 +807,7 @@ impl Render for WriterSurface {
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
-            .child(flow)
+            .child(canvas)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -1078,205 +844,59 @@ impl Render for WriterSurface {
     }
 }
 
-fn build_block_node(block: &astrolith_document::RichBlock, index: usize) -> BlockNode {
-    let key = block_key(index);
-    let paragraph = paragraph_for(block, key);
-    match &block.kind {
-        BlockKind::Heading(level) => BlockNode::Heading {
-            level: *level,
-            children: paragraph,
-            span: None,
-        },
-        BlockKind::Paragraph | BlockKind::ListItem { .. } | BlockKind::Quote => {
-            BlockNode::Paragraph(paragraph)
-        }
-        BlockKind::Code { language } => BlockNode::CodeBlock(CodeBlock::new(
-            block.text.text.clone().into(),
-            (!language.is_empty()).then(|| SharedString::from(language.clone())),
-            None::<Span>,
-        )),
-        BlockKind::Rule => BlockNode::HorizontalRule { span: None },
-    }
-}
-
-fn paragraph_for(block: &astrolith_document::RichBlock, key: u64) -> Paragraph {
-    let mut paragraph = Paragraph::default();
-    if block.text.text.is_empty() {
-        paragraph.push(InlineNode::new(""));
-    } else {
-        paragraph.push(InlineNode::new(block.text.text.clone()).marks(mark_runs(&block.text)));
-    }
-    paragraph.with_leaf_key(key)
-}
-
-fn mark_runs(text: &astrolith_document::RichText) -> Vec<(Range<usize>, TextMark)> {
-    let mut cuts = vec![0, text.text.len()];
-    let mut events = Vec::with_capacity(text.marks.len() * 2);
-    for (index, mark) in text.marks.iter().enumerate() {
-        let start = mark.range.start.min(text.text.len());
-        let end = mark.range.end.min(text.text.len());
-        if start < end {
-            cuts.extend([start, end]);
-            events.extend([(start, true, index), (end, false, index)]);
-        }
-    }
-    events.sort_unstable();
-    let mut event_index = 0;
-    let mut active = BTreeSet::new();
-    cuts.sort_unstable();
-    cuts.dedup();
-    let mut runs = Vec::new();
-    for pair in cuts.windows(2) {
-        let start = pair[0];
-        let end = pair[1];
-        if start >= end {
-            continue;
-        }
-        while let Some(&(offset, entering, index)) = events.get(event_index) {
-            if offset > start {
-                break;
-            }
-            if entering {
-                active.insert(index);
-            } else {
-                active.remove(&index);
-            }
-            event_index += 1;
-        }
-        let mut style = TextMark::default();
-        for index in &active {
-            let mark = &text.marks[*index];
-            {
-                match &mark.kind {
-                    astrolith_document::InlineMarkKind::Bold => style.bold = true,
-                    astrolith_document::InlineMarkKind::Italic => style.italic = true,
-                    astrolith_document::InlineMarkKind::Strikethrough => style.strikethrough = true,
-                    astrolith_document::InlineMarkKind::Code => style.code = true,
-                    astrolith_document::InlineMarkKind::Link(url) => {
-                        style.link = Some(LinkMark {
-                            url: url.clone().into(),
-                            identifier: None,
-                            title: None,
-                        });
-                    }
-                    astrolith_document::InlineMarkKind::Image(_) => style.italic = true,
-                }
-            }
-        }
-        runs.push((start..end, style));
-    }
-    runs
-}
-
-fn block_wrapper(
-    block: &astrolith_document::RichBlock,
-    element: AnyElement,
-    dimmed: bool,
-    cx: &mut App,
-) -> AnyElement {
-    let mut wrapper = div().w_full();
-    match &block.kind {
-        BlockKind::ListItem { ordered, number } => {
-            let marker = if *ordered {
-                format!("{number}.")
-            } else {
-                "•".to_owned()
-            };
-            return div()
-                .w_full()
-                .pl(px(block.depth as f32 * 20.))
-                .h_flex()
-                .items_start()
-                .gap_2()
-                .when(dimmed, |this| this.opacity(0.35))
-                .child(
-                    div()
-                        .min_w(px(18.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(marker),
-                )
-                .child(div().flex_1().min_w_0().child(element))
-                .into_any_element();
-        }
-        BlockKind::Quote => {
-            wrapper = wrapper
-                .pl(px(12.))
-                .border_l_2()
-                .border_color(cx.theme().border)
-                .text_color(cx.theme().muted_foreground);
-        }
-        BlockKind::Code { .. } => {
-            wrapper = wrapper.my(px(6.));
-        }
-        BlockKind::Rule => {
-            wrapper = wrapper.py(px(6.));
-        }
-        BlockKind::Heading(_) | BlockKind::Paragraph => {}
-    }
-    wrapper
-        .when(dimmed, |this| this.opacity(0.35))
-        .child(element)
-        .into_any_element()
-}
-
-/// Clip a source range to one block and record it under the leaf key.
-fn add_source_decoration(
-    decorations: &mut HashMap<u64, Vec<(Range<usize>, Hsla)>>,
-    index: usize,
-    block: &astrolith_document::RichBlock,
+/// Clip a source range to every block it covers and record the rendered
+/// range as a paint decoration.
+fn push_source_decoration(
+    decorations: &mut Vec<Decoration>,
+    document: &WysiwygDocument,
     source: Range<usize>,
     color: Hsla,
     anchor_empty: bool,
 ) {
-    if source.end < block.source.start || source.start > block.source.end {
-        return;
-    }
-    let start = if source.start <= block.content.start {
-        0
-    } else {
-        block.text.nearest_rendered_offset(source.start)
-    };
-    let end = if source.end >= block.content.end {
-        block.text.text.len()
-    } else {
-        block.text.nearest_rendered_offset(source.end)
-    };
-    if start < end {
-        decorations
-            .entry(block_key(index))
-            .or_default()
-            .push((start..end, color));
-    } else if anchor_empty && start < block.text.text.len() {
-        decorations
-            .entry(block_key(index))
-            .or_default()
-            .push((start..(start + 1), color));
+    for (index, block) in document.blocks.iter().enumerate() {
+        if source.end < block.source.start || source.start > block.source.end {
+            continue;
+        }
+        let start = if source.start <= block.content.start {
+            0
+        } else {
+            block.text.nearest_rendered_offset(source.start)
+        };
+        let end = if source.end >= block.content.end {
+            block.text.text.len()
+        } else {
+            block.text.nearest_rendered_offset(source.end)
+        };
+        let range = if start < end {
+            start..end
+        } else if anchor_empty && start < block.text.text.len() {
+            start..(start + 1)
+        } else {
+            continue;
+        };
+        decorations.push(Decoration {
+            block: index,
+            range,
+            color,
+        });
     }
 }
 
-/// Renders blocks, collects leaf geometry and reports frame work.
-struct RichFlow {
-    child: Option<AnyElement>,
-    decorations: HashMap<u64, Vec<(Range<usize>, Hsla)>>,
+/// The viewport-height canvas that paints the prepared rows.
+struct LayoutCanvas {
+    layout: Rc<RefCell<Option<TextLayout>>>,
     geometry: Rc<RefCell<FrameGeometry>>,
-    /// Per-block measured heights, owned by the surface across frames.
-    heights: Rc<RefCell<Vec<Option<f32>>>>,
+    selection: Option<Selection>,
+    caret: Option<Hit>,
+    decorations: Vec<Decoration>,
+    dimmed: Vec<usize>,
     input: gpui_kit::Entity<WriterSurface>,
     stats: perf::Frame,
     render_elapsed: std::time::Duration,
-    layout_elapsed: std::time::Duration,
-    /// A frame where this element was painted from the previous render tree.
-    /// GPUI only re-renders views that were invalidated; a caret blink paints
-    /// the cached flow without repeating its render/layout/prepaint phases.
-    repainted: bool,
+    painted: bool,
 }
 
-struct Prepaint {
-    leaves: HashMap<u64, LeafGeometry>,
-    prepaint_elapsed: std::time::Duration,
-}
-
-impl IntoElement for RichFlow {
+impl IntoElement for LayoutCanvas {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -1284,9 +904,9 @@ impl IntoElement for RichFlow {
     }
 }
 
-impl Element for RichFlow {
-    type RequestLayoutState = AnyElement;
-    type PrepaintState = Prepaint;
+impl Element for LayoutCanvas {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -1302,12 +922,20 @@ impl Element for RichFlow {
         _: Option<&gpui_kit::InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
-    ) -> (LayoutId, AnyElement) {
-        let started = Instant::now();
-        let mut child = self.child.take().expect("flow child is laid out once");
-        let layout = child.request_layout(window, cx);
-        self.layout_elapsed = started.elapsed();
-        (layout, child)
+    ) -> (LayoutId, ()) {
+        let height = self
+            .layout
+            .borrow()
+            .as_ref()
+            .map_or(1., |layout| layout.total_height().max(1.));
+        let style = gpui_kit::Style {
+            size: size(
+                gpui_kit::Length::Definite(relative(1.0)),
+                gpui_kit::Length::Definite(px(height).into()),
+            ),
+            ..Default::default()
+        };
+        (window.request_layout(style, [], cx), ())
     }
 
     fn prepaint(
@@ -1315,62 +943,49 @@ impl Element for RichFlow {
         _: Option<&GlobalElementId>,
         _: Option<&gpui_kit::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        child: &mut AnyElement,
+        _: &mut (),
         window: &mut Window,
-        cx: &mut App,
-    ) -> Prepaint {
-        let started = Instant::now();
-        let decorations = std::mem::take(&mut self.decorations);
-        let (_, leaves) = collect_leaf_geometry(decorations, || child.prepaint(window, cx));
-        let prepaint_elapsed = started.elapsed();
-        // Leaf height is independent of the scroll position, so a frame that
-        // laid a block out is enough to measure it for later windows.
-        {
-            let mut heights = self.heights.borrow_mut();
-            for (key, leaf) in &leaves {
-                if let Some(slot) = heights.get_mut((*key as usize).saturating_sub(1)) {
-                    *slot = Some(f32::from(leaf.bounds().size.height));
-                }
-            }
-        }
-        *self.geometry.borrow_mut() = FrameGeometry {
-            leaves: leaves.clone(),
-            viewport: bounds.intersect(&window.content_mask().bounds),
-        };
-        Prepaint {
-            leaves,
-            prepaint_elapsed,
-        }
+        _: &mut App,
+    ) {
+        let mut geometry = self.geometry.borrow_mut();
+        geometry.origin = bounds.origin;
+        geometry.width = f32::from(bounds.size.width);
+        geometry.viewport = bounds.intersect(&window.content_mask().bounds);
     }
 
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&gpui_kit::InspectorElementId>,
-        _: Bounds<Pixels>,
-        child: &mut AnyElement,
-        prepaint: &mut Prepaint,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {
         let started = Instant::now();
+        let viewport = self.geometry.borrow().viewport;
         let input = self.input.clone();
-        input.update(cx, |input, cx| {
-            input.register_input(input.geometry.borrow().viewport, window, cx)
+        input.update(cx, |input, cx| input.register_input(viewport, window, cx));
+        self.layout.borrow_mut().as_mut().map(|layout| {
+            layout.paint(
+                window,
+                cx,
+                bounds.origin,
+                self.selection,
+                self.caret,
+                &self.decorations,
+                &self.dimmed,
+            )
         });
-        child.paint(window, cx);
-        let mut stats = self.stats;
-        stats.geometry_leaves = prepaint.leaves.len();
-        // Only the first paint of a render tree reports render/layout/prepaint.
-        // A repaint from the same tree must not repeat stale phase durations.
-        if std::mem::replace(&mut self.repainted, true) {
-            perf::frame_repaint(stats, started.elapsed());
+        if std::mem::replace(&mut self.painted, true) {
+            perf::frame_repaint(self.stats, started.elapsed());
         } else {
             perf::frame(
-                stats,
+                self.stats,
                 self.render_elapsed,
-                self.layout_elapsed,
-                prepaint.prepaint_elapsed,
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
                 started.elapsed(),
             );
         }
@@ -1380,16 +995,16 @@ impl Element for RichFlow {
 /// Where the caret is drawn for the current layout epoch.
 #[derive(Clone, Copy, PartialEq)]
 struct CaretTarget {
-    block: usize,
-    rendered: usize,
+    hit: Hit,
     color: Hsla,
 }
 
 /// Caret paint layer.
 ///
 /// Blinking toggles `visible` and invalidates this entity only. The text
-/// layout, parsed document and prepared nodes are not touched.
+/// layout, parsed document and prepared rows are not touched.
 struct CaretOverlay {
+    layout: Rc<RefCell<Option<TextLayout>>>,
     geometry: Rc<RefCell<FrameGeometry>>,
     target: Option<CaretTarget>,
     visible: bool,
@@ -1398,8 +1013,13 @@ struct CaretOverlay {
 }
 
 impl CaretOverlay {
-    fn new(geometry: Rc<RefCell<FrameGeometry>>, _cx: &mut Context<Self>) -> Self {
+    fn new(
+        layout: Rc<RefCell<Option<TextLayout>>>,
+        geometry: Rc<RefCell<FrameGeometry>>,
+        _cx: &mut Context<Self>,
+    ) -> Self {
         Self {
+            layout,
             geometry,
             target: None,
             visible: true,
@@ -1450,6 +1070,7 @@ impl CaretOverlay {
 impl Render for CaretOverlay {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         CaretLayer {
+            layout: self.layout.clone(),
             geometry: self.geometry.clone(),
             target: if self.visible { self.target } else { None },
         }
@@ -1458,6 +1079,7 @@ impl Render for CaretOverlay {
 }
 
 struct CaretLayer {
+    layout: Rc<RefCell<Option<TextLayout>>>,
     geometry: Rc<RefCell<FrameGeometry>>,
     target: Option<CaretTarget>,
 }
@@ -1520,12 +1142,22 @@ impl Element for CaretLayer {
         let Some(target) = self.target else {
             return;
         };
-        let geometry = self.geometry.borrow();
-        let Some(leaf) = geometry.leaves.get(&block_key(target.block)) else {
+        let geometry = *self.geometry.borrow();
+        let caret = self
+            .layout
+            .borrow()
+            .as_ref()
+            .and_then(|layout| layout.caret(target.hit));
+        let Some(caret) = caret else {
             return;
         };
-        let origin = leaf.position_for_index(target.rendered);
-        let bounds = Bounds::new(origin, size(px(1.5), leaf.caret_height().max(px(2.))));
+        let bounds = Bounds::new(
+            point(
+                geometry.origin.x + caret.origin.x,
+                geometry.origin.y + caret.origin.y,
+            ),
+            size(px(1.5), caret.height.max(px(2.))),
+        );
         // Clipped by the flow's own viewport instead of painting over the
         // chrome when the caret has scrolled away.
         if !geometry.viewport.intersects(&bounds) {
@@ -1767,32 +1399,38 @@ mod tests {
             session.update(cx, |session, cx| {
                 session.set_writer_selection(end, end, window, cx)
             });
-            window.render_frame(cx);
-            window.render_frame(cx);
+            for _ in 0..80 {
+                window.render_frame(cx);
+            }
         })
         .unwrap();
         writer.read_with(cx, |writer, _| {
             assert!(writer.scroll.offset().y < px(-1_000.));
+            let layout = writer.layout.borrow();
+            let layout = layout.as_ref().unwrap();
+            let (block, rendered) = writer.document.caret_location(end).unwrap();
+            let caret = layout.caret(Hit { block, rendered }).unwrap();
             let geometry = writer.geometry.borrow();
-            let leaf = geometry.leaves.get(&block_key(0)).unwrap();
-            assert!(leaf.bounds().size.height > px(1_000.));
-            let rendered_end = writer.document.blocks[0].text.text.len();
-            let caret = leaf.position_for_index(rendered_end);
-            assert!(geometry.viewport.contains(&caret));
+            assert!(layout.total_height() > px(1_000.).into());
+            assert!(geometry.viewport.contains(&point(
+                geometry.origin.x + caret.origin.x,
+                geometry.origin.y + caret.origin.y
+            )));
         });
         cx.simulate_window_resize(handle.into(), size(px(900.), px(700.)));
         cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            window.render_frame(cx);
+            for _ in 0..80 {
+                window.render_frame(cx);
+            }
         })
         .unwrap();
         writer.read_with(cx, |writer, _| {
-            let geometry = writer.geometry.borrow();
-            let leaf = geometry.leaves.get(&block_key(0)).unwrap();
+            let layout = writer.layout.borrow();
+            let layout = layout.as_ref().unwrap();
+            let (block, rendered) = writer.document.caret_location(end).unwrap();
             assert!(
-                leaf.position_for_index(writer.document.blocks[0].text.text.len())
-                    .y
-                    >= leaf.bounds().top()
+                layout.caret(Hit { block, rendered }).is_some(),
+                "the end caret keeps geometry after a resize"
             );
         });
     }
@@ -1844,19 +1482,15 @@ Second sentence.
             window.render_frame(cx);
         })
         .unwrap();
-        let (index, offset) = writer.read_with(cx, |writer, _| {
-            let geometry = writer.geometry.borrow();
-            let (key, _) = geometry
-                .leaves
-                .iter()
-                .find(|(_, leaf)| {
-                    let bounds = leaf.bounds();
-                    bounds.top() > geometry.viewport.center().y + px(30.)
-                        && bounds.bottom() < geometry.viewport.bottom() - px(30.)
-                })
-                .expect("a visible paragraph below the centre");
-            let index = (*key as usize) - 1;
-            (index, writer.document.blocks[index].content.start)
+        let offset = writer.read_with(cx, |writer, _| {
+            let layout = writer.layout.borrow();
+            let layout = layout.as_ref().unwrap();
+            let scroll = (-f32::from(writer.scroll.offset().y)).max(0.);
+            let viewport = f32::from(writer.geometry.borrow().viewport.size.height);
+            let block = layout
+                .block_at_y(scroll + viewport * 0.6)
+                .expect("a block below the centre");
+            writer.document.blocks[block].content.start
         });
         cx.update_window(handle.into(), |_, window, cx| {
             session.update(cx, |session, cx| {
@@ -1876,15 +1510,20 @@ Second sentence.
                     cx,
                 )
             });
-            window.render_frame(cx);
-            window.render_frame(cx);
+            for _ in 0..4 {
+                window.render_frame(cx);
+            }
         })
         .unwrap();
         writer.read_with(cx, |writer, _| {
-            let geometry = writer.geometry.borrow();
-            let leaf = geometry.leaves.get(&block_key(index)).unwrap();
-            let centre = leaf.position_for_index(0).y + leaf.caret_height() / 2.;
-            assert!((f32::from(centre - geometry.viewport.center().y)).abs() < 2.);
+            let layout = writer.layout.borrow();
+            let layout = layout.as_ref().unwrap();
+            let (block, rendered) = writer.document.caret_location(offset).unwrap();
+            let caret = layout.caret(Hit { block, rendered }).unwrap();
+            let scroll = (-f32::from(writer.scroll.offset().y)).max(0.);
+            let viewport = f32::from(writer.geometry.borrow().viewport.size.height);
+            let centre = f32::from(caret.origin.y) - scroll + f32::from(caret.height) / 2.;
+            assert!((centre - viewport / 2.).abs() < 3.);
         });
         assert_eq!(
             session.read_with(cx, |session, cx| session.editor.read(cx).cursor()),
@@ -1905,7 +1544,10 @@ Second sentence.
         cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
             .unwrap();
         writer.read_with(cx, |writer, _| {
-            assert!(writer.rendered_range.start > 0);
+            let layout = writer.layout.borrow();
+            let layout = layout.as_ref().unwrap();
+            let scroll = (-f32::from(writer.scroll.offset().y)).max(0.);
+            assert!(layout.block_at_y(scroll).unwrap() > 0);
             assert!(writer.scroll.offset().y < px(-1_000.));
         });
     }
@@ -1926,40 +1568,23 @@ Second sentence.
         let writer = session.read_with(cx, |session, _| session.writer.clone());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-        })
-        .unwrap();
-        let (total, first) = writer.read_with(cx, |writer, _| {
-            (
-                writer.document.blocks.len(),
-                writer
-                    .first_rendered_range
-                    .clone()
-                    .expect("a frame has been laid out"),
-            )
-        });
-        assert!(
-            first.len() < total,
-            "the first frame must also stay windowed"
-        );
-        assert!(first.contains(&0));
-        cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
         })
         .unwrap();
-        writer.read_with(cx, |writer, _| {
+        let total = writer.read_with(cx, |writer, _| {
+            let layout = writer.layout.borrow();
+            let layout = layout.as_ref().unwrap();
             assert!(
-                writer.rendered_blocks < total,
-                "later frames render a window, not all {total} blocks"
+                layout.measured_rows() < writer.document.blocks.len(),
+                "the first frames wrap a viewport, not every block"
             );
-            assert!(
-                writer.rendered_range.contains(&0),
-                "the caret block stays rendered: {:?}",
-                writer.rendered_range
-            );
+            assert_eq!(layout.block_at_y(0.), Some(0));
+            writer.document.blocks.len()
         });
+        assert!(total > 1_000);
 
-        // An edit keeps the measured heights, so the first frame after a
-        // keystroke stays windowed instead of rendering the whole document.
+        // A local edit reuses the untouched blocks and keeps the frame
+        // windowed instead of wrapping the whole document.
         cx.update_window(handle.into(), |_, window, cx| {
             let editor = session.read_with(cx, |session, _| session.editor.clone());
             editor.update(cx, |editor, cx| {
@@ -1971,9 +1596,11 @@ Second sentence.
         })
         .unwrap();
         writer.read_with(cx, |writer, _| {
+            let layout = writer.layout.borrow();
+            let layout = layout.as_ref().unwrap();
             assert!(
-                writer.rendered_blocks < writer.document.blocks.len(),
-                "an edit must not fall back to a full render"
+                layout.measured_rows() < writer.document.blocks.len(),
+                "an edit must not fall back to a full wrap"
             );
         });
     }
@@ -1989,59 +1616,42 @@ Second sentence.
         .unwrap();
         let target = 1_000;
         let offset = writer.read_with(cx, |writer, _| writer.document.blocks[target].content.start);
-        // Move the caret into the middle: no rendered geometry exists for that
-        // block yet, so the window must follow the caret's estimated position.
         cx.update_window(handle.into(), |_, window, cx| {
             session.update(cx, |session, cx| {
                 session.set_writer_selection(offset, offset, window, cx);
             });
-            window.render_frame(cx);
+            for _ in 0..12 {
+                window.render_frame(cx);
+            }
         })
         .unwrap();
         writer.read_with(cx, |writer, _| {
-            assert!(
-                writer.rendered_range.contains(&target),
-                "the caret block is rendered after the jump: {:?}",
-                writer.rendered_range
+            assert!(writer.scroll.offset().y < px(-1_000.));
+            let layout = writer.layout.borrow();
+            let layout = layout.as_ref().unwrap();
+            let (block, rendered) = writer.document.caret_location(offset).unwrap();
+            let hit = Hit { block, rendered };
+            let caret = layout.caret(hit).expect("the caret row is prepared");
+            let geometry = writer.geometry.borrow();
+            let position = point(
+                geometry.origin.x + caret.origin.x,
+                geometry.origin.y + caret.origin.y,
             );
+            assert!(geometry.viewport.contains(&position));
             assert!(
-                writer.rendered_range.start > 0,
-                "a mid-document caret must not fall back to the top"
+                layout
+                    .hit_test(point(caret.origin.x, caret.origin.y))
+                    .is_some()
+            );
+            let source = writer
+                .source_at(position)
+                .expect("hit testing maps the caret row");
+            let block = writer.document.blocks[block].source.clone();
+            assert!(
+                block.start <= source && source <= block.end,
+                "hit {source} must land in the caret block {block:?}"
             );
         });
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-        })
-        .unwrap();
-        let (range, index, hit) = writer.read_with(cx, |writer, _| {
-            let range = writer.rendered_range.clone();
-            let index = range.start + range.len() / 2;
-            let bounds = writer
-                .geometry
-                .borrow()
-                .leaves
-                .get(&block_key(index))
-                .expect("a rendered block reports geometry")
-                .bounds();
-            let position = bounds.center();
-            (range.clone(), index, writer.source_at(position))
-        });
-        assert!(range.contains(&target), "the caret stays in the window");
-        let hit = hit.expect("hit testing maps a rendered leaf");
-        let source = writer.read_with(cx, |writer, _| writer.document.blocks[index].source.clone());
-        assert!(
-            source.start <= hit && hit <= source.end,
-            "hit {hit} must land in the rendered block's source range {source:?}"
-        );
-    }
-
-    #[test]
-    fn pointer_distance_prefers_the_containing_block() {
-        let bounds = Bounds::new(point(px(10.), px(10.)), size(px(100.), px(20.)));
-        assert_eq!(distance(bounds, point(px(20.), px(20.))), 0.);
-        assert!(
-            distance(bounds, point(px(0.), px(0.))) < distance(bounds, point(px(0.), px(100.)))
-        );
     }
 
     #[test]
@@ -2063,9 +1673,11 @@ Second sentence.
             window.render_frame(cx);
         })
         .unwrap();
-        let (builds, cached) = writer.read_with(cx, |writer, cx| {
+        let (builds, rows) = writer.read_with(cx, |writer, cx| {
             assert!(writer.caret.read(cx).blinks == 0);
-            (writer.prepared_builds, writer.nodes.len())
+            let layout = writer.layout.borrow();
+            let layout = layout.as_ref().unwrap();
+            (writer.layout_builds, layout.measured_rows())
         });
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(1_100));
@@ -2077,27 +1689,13 @@ Second sentence.
                 writer.caret.read(cx).blinks >= 2,
                 "the caret timer toggled the overlay"
             );
+            let layout = writer.layout.borrow();
+            let layout = layout.as_ref().unwrap();
             assert_eq!(
-                (writer.prepared_builds, writer.nodes.len()),
-                (builds, cached),
-                "blinking must not rebuild prepared style runs"
+                (writer.layout_builds, layout.measured_rows()),
+                (builds, rows),
+                "blinking must not rebuild or re-wrap the layout"
             );
         });
-    }
-
-    #[test]
-    fn rendered_marks_become_text_mark_runs() {
-        let mut text = astrolith_document::RichText {
-            text: "abc".to_owned(),
-            ..Default::default()
-        };
-        text.marks.push(astrolith_document::InlineMark {
-            range: 1..3,
-            kind: astrolith_document::InlineMarkKind::Bold,
-        });
-        let runs = mark_runs(&text);
-        assert_eq!(runs.len(), 2);
-        assert!(!runs[0].1.bold);
-        assert!(runs[1].1.bold);
     }
 }
