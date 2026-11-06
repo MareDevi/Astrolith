@@ -2,7 +2,7 @@
 
 - 日期：2026-11-06。
 - 对应方案：[编辑器性能优化实施方案](editor-performance-implementation-plan.md) M6。
-- 状态：**SourceSurface 已实现并通过帧预算；completion、diagnostics、hover、code action 与 go-to-definition 已由公开状态宿主接管，Build 产品路径仍保留 stock Editor。** 功能门槛（folding/搜索/overview ruler 等）未全部通过，M6 不关闭。
+- 状态：**SourceSurface 已实现并通过帧预算；completion、search/replace、diagnostics、hover、code action 与 go-to-definition 已由公开状态宿主接管，Build 产品路径仍保留 stock Editor。** 功能门槛（folding/overview ruler 等）未全部通过，M6 不关闭。
 - 环境：Linux 7.3.1-1-cachyos x64，Hyprland/Wayland，scale 1，gpui-pre 0.3.11，dev profile，无 profiler。
 - 入口：debug 构建设置 `ASTROLITH_SOURCE_SURFACE=1` 时 Build 使用 SourceSurface；默认仍是 stock Kit `Editor`。perf harness 使用 `--source-surface` 记录该开关。
 - 证据：`artifacts/e2e/editor-m6-surface-build-*`。
@@ -12,9 +12,9 @@
 | 位置 | 职责 |
 | --- | --- |
 | `editor/text_layout/source.rs` | 源文本行索引、纵向可见窗口、按字素边界切分的水平测量块、带上下文的有界整形窗口、caret/hit-test/selection 几何 |
-| `editor/source_surface.rs` | 可见 `EntityInputHandler`；`EditorState` 继续承担输入、composition、选区与 undo；自有绘制、行号 gutter、点击/拖选、方向选择、命令绑定与 caret 跟随 |
+| `editor/source_surface.rs` | 可见 `EntityInputHandler`；`EditorState` 继续承担输入、composition、选区与 undo；自有绘制、行号 gutter、点击/拖选、方向选择、命令绑定、caret 跟随、搜索栏与浮层宿主 |
 | `editor/input_boundaries.rs` | Writing 与 Source 共用的字素/单词边界，删除重复实现 |
-| `editor/session.rs` | 按内部开关创建 surface；Build 滚动仍走同一 driver 入口 |
+| `editor/session.rs` | 按内部开关创建 surface；源编辑器启用 searchable；Build 滚动仍走同一 driver 入口 |
 | `layout/panels.rs` | Build 内容选择 SourceSurface 或原 stock Editor |
 | `scripts/editor-perf.mjs` | `--source-surface` 开关；`build_frame.total_ms` 计入 `prepare_ms`，并单列准备阶段 |
 
@@ -49,10 +49,10 @@
 
 ## 3. 功能边界（未通过替换门槛）
 
-SourceSurface 满足几何与性能门槛。completion、hover、code action 与 diagnostic 浮层已由 SourceSurface 通过公开状态绘制（见 §3.2–§3.4）；以下 Build 行为仍由 Kit `Input` 元素承担，surface 尚未提供对应 UI/交互：
+SourceSurface 满足几何与性能门槛。completion、search/replace、hover、code action、diagnostic 与 definition 已由 SourceSurface 通过公开状态绘制（见 §3.2–§3.6）；以下 Build 行为仍由 Kit `Input` 元素承担，surface 尚未提供对应 UI/交互：
 
 - diagnostics overview ruler、折叠 gutter 与 folding 后的行映射；
-- 编辑器内搜索/替换、bracket matching、indent guides、auto-close/smart-indent 的可见反馈；
+- bracket matching、indent guides 的可见反馈；
 - 真实 fcitx5 预编辑/候选窗口、物理键盘与剪贴板原生验收仍属 editor-04。
 
 `EditorState` 仍收到文本事务并保持 undo/selection/composition，未接入的浮层与装饰不会出现。因此：
@@ -73,9 +73,10 @@ Kit 的浮层控件（`input/popovers/*`）是 `pub(crate)`，无法直接复用
 | Code action 菜单 | `code_action_menu_state()`、`present_code_actions()`、`perform_code_action()` | 已实施：宿主调用 `Lsp::code_action_providers` 后提交状态，见 §3.4 |
 | Diagnostic popover | `diagnostic_popover()`、`present_diagnostic()`、`diagnostics()`（`DiagnosticSet` 可遍历） | 可读可写，宿主自行做命中与绘制 |
 | Go to definition | `Lsp::definition_provider`、`show_document` | 已实施：宿主自行查询、绘制修饰键下划线并跳转，见 §3.5 |
-| Folding | `display_map()`（只读）、`set_folding`/`unfold_at` | 折叠后的显示映射可读；SourceSurface 尚未按 `DisplayMap` 渲染 |
+| Search/replace | `open_search()`、`search_session()`（`open`/`replace_mode`/`query`/`matcher`）、`set_search_query()`、`next/previous_search_match()`、`replace_current_search_match()`、`replace_all_search_matches()`、`close_search()`、`search_activation_revision()` | 已实施：宿主自行绘制搜索栏并驱动匹配与替换，见 §3.6 |
+| Folding | `display_map()`（只读）、`set_folding`/`unfold_at` | 折叠后的显示映射可读；SourceSurface 尚未按 `DisplayMap` 渲染。公开 API 没有 `set_folded`/`toggle_fold`，无法从自有 gutter 创建折叠 |
 
-结论：completion 可以完全由公开 API 承载；hover/code action/diagnostic/definition 的**呈现**可以自行实现，但它们的**触发时序**目前在 Kit 元素内部，宿主必须自己重建（provider 调用、去抖、范围解析）。这些能力在替换产品路径前必须逐项落地。
+结论：completion 与 search/replace 可以完全由公开 API 承载；hover/code action/diagnostic/definition 的**呈现**可以自行实现，但它们的**触发时序**目前在 Kit 元素内部，宿主必须自己重建（provider 调用、去抖、范围解析）。这些能力在替换产品路径前必须逐项落地。
 
 ### 3.2 已实施：completion 菜单宿主
 
@@ -120,6 +121,18 @@ Kit 把 hover/code action 的**触发时序**写在元素内部，SourceSurface 
 
 验证：`definition_request_moves_the_selection`（headless，假 provider 返回同文档目标，断言选区跳到 `1:0–1:4`）与 `definition_hover_underlines_the_resolved_symbol`（headless，断言只有 symbol 范围加下划线）；原生 `editor-m6-surface-build-definition-host`（`complex-markdown`，88 帧，total p95 2.47 ms）确认渲染路径未回归。真实语言服务器往返仍属 editor-09。
 
+### 3.6 已实施：search/replace 栏
+
+公开的 `SearchSession` 与匹配器不依赖 Kit 元素，SourceSurface 因此接管搜索的呈现与输入来源：
+
+- 源编辑器启用 `.searchable(true)`，应用既有的 Find/Find next/Replace 命令继续调用 `open_search()`；表面按 `search_session().open` 显示搜索栏，替代 Kit 的 `SearchPanel`。stock Editor 路径同时恢复这些命令的原有面板。
+- 搜索栏包含查询、匹配计数（`SearchMatcher::label`）、上一个/下一个与关闭；`replace_mode` 时增加替换字段与 Replace/All。`Enter`/`Shift+Enter` 走匹配前进/后退，`Escape` 关闭并把焦点还给编辑器；指针点击按钮走同一组操作。
+- 查询字段的变更调用 `set_search_query()`；`search_activation_revision()` 变化时把会话中的 query 写回字段并选中，支持选中文本后 Ctrl+F 预填以及重复 Ctrl+F。
+- 匹配高亮并入同一份整形 run：所有匹配使用去饱和的 selection 颜色，当前匹配使用 selection 颜色；只处理与整形窗口相交的范围。当前匹配变化时，表面用自有 caret 几何把匹配滚入视口；几何尚未整形时保留目标并在下一帧重试，不估算位置。
+- 替换仍由 `replace_current_search_match()` / `replace_all_search_matches()` 完成，经 `EditorState` 走 source 事务与 `SourceHistory`；搜索状态只保留在 `EditorState`，宿主不复制匹配表。
+
+验证：`search_bar_mirrors_the_session_and_replaces`（headless）覆盖打开搜索、选中文本预填、匹配计数来源、Replace All 与关闭；`search_runs_background_every_match_and_the_current_one`（headless）断言当前匹配与其他匹配的颜色区分；原生 `editor-m6-surface-build-find`（`complex-markdown`，`scenario find`：打开查询、4 次前进、Replace All、关闭，24 帧，total p95 6.63 ms，p99 10.96 ms）确认搜索渲染路径在帧预算内。
+
 ## 4. 复现
 
 ```sh
@@ -132,12 +145,18 @@ node scripts/editor-perf.mjs run \
   --fixture history-single-paragraph-102420 \
   --backend pre --scenario build --cycles 2 --settle 2000 \
   --source-surface --test-id editor-m6-surface-build-history-single-paragraph-102420
+
+node scripts/editor-perf.mjs run \
+  --fixture complex-markdown \
+  --backend pre --scenario find --cycles 4 --settle 2000 \
+  --source-surface --test-id editor-m6-surface-build-find
 ```
 
 ## 5. 未执行与限制
 
 - release profile、gpui-fast 组合未测。
-- 折叠开关动作仍调用 `EditorState::set_folding`；SourceSurface 不读取折叠后的 display map，视觉上未生效。
+- 折叠开关动作仍调用 `EditorState::set_folding`；SourceSurface 不读取折叠后的 display map，视觉上未生效。公开 API 只提供只读 `display_map()` 与 `unfold_at()`，没有 `set_folded`/`toggle_fold`，自有 gutter 无法创建折叠。
+- 搜索原生场景经公开会话 API 打开并驱动匹配（`find_query`/`find_next`/`find_replace_all`/`find_close`），未把物理键盘输入送进搜索栏；键盘、IME 与候选窗口仍属 editor-04。
 - 输入坐标验证停在 `EditorState` 适配器与 headless composition；真实 fcitx5 未执行。
 - hover、code action 与 definition 的宿主只在 headless 测试中验证状态、绘制与跳转；真实语言服务器的往返、浮层候选位置与原生输入未在本轮场景触发（属 editor-09）。
 - 长 RTL/双向文本的窗口化命中只做字素/整形上下文保护，未做原生 bidi 视觉滚动验收。
