@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
+# Opt-in GPUI Fast retained-mode backend, for A/B measurement only.
+gpui-fast = ["astrolith-gpui/gpui-fast"]
 # Opt-in embedded WebView build; Linux hosts it through X11/XWayland.
 embedded-webview = ["astrolith-gpui/embedded-webview"]
 

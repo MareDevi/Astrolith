@@ -7,8 +7,17 @@ publish.workspace = true
 
 [features]
 default = []
+# Opt-in GPUI Fast retained-mode backend for A/B measurement. It swaps the
+# whole Kit/GPUI type graph, so every Kit-dependent crate must agree on it.
+gpui-fast = ["gpui-kit/gpui-fast"]
 # Compiles the real embedded WebView surface. Linux hosts it on X11/XWayland.
-embedded-webview = ["dep:gpui-webview", "dep:wry"]
+# The WebView must use the same GPUI backend as the shell.
+embedded-webview = [
+    "dep:gpui-webview",
+    "dep:wry",
+    "gpui-fast",
+    "gpui-webview/gpui-fast",
+]
 
 [dependencies]
 tracing.workspace = true
