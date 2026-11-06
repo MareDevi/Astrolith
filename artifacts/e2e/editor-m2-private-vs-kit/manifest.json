@@ -1,0 +1,144 @@
+{
+  "schema": "astrolith.e2e.manifest/1",
+  "test_id": "editor-m2-private-vs-kit",
+  "title": "M2 private layout vs Kit TextView process CPU on the 102 KB paragraph",
+  "purpose": "Compare the application-owned viewport layout with the Kit TextView for the same source and scripted actions.",
+  "status": "passed",
+  "layer": "L2 real process",
+  "started_at": "2026-11-06T06:44:30.000Z",
+  "duration_s": null,
+  "source": "native spike runs on Hyprland/Wayland; dev profile with cosmic-text opt-level 3",
+  "environment": {
+    "os": "Linux 7.3.1-1-cachyos",
+    "arch": "x64",
+    "backend": "pre",
+    "session": "wayland",
+    "display": "wayland-1",
+    "scale": 1,
+    "profiled": false
+  },
+  "fixture": {
+    "id": "history-single-paragraph-102420",
+    "bytes": 102420,
+    "sha256": "34a6a328ba1699d8ed3f39235fd9914195409337b2a9d4d2c36e2210a936d28b"
+  },
+  "command": "see command.txt",
+  "repro": "target/debug/astrolith-desktop --spike=text-layout with ASTROLITH_TEXT_LAYOUT_MODE=private or kit",
+  "expected": "The private layout keeps process CPU and memory below the Kit TextView for the same 102 KB single paragraph and actions, without the Kit whole-paragraph Inline work.",
+  "observed": "Private layout used 0.39 s user CPU and 252,756 KB max RSS; the Kit TextView used 16.39 s user CPU and 348,104 KB max RSS for the same steps.",
+  "evidence": {
+    "logs": "artifacts/e2e/editor-m2-private-vs-kit/*.log",
+    "perf": "artifacts/e2e/editor-m2-private-vs-kit/perf.json",
+    "scenario": "artifacts/e2e/editor-m2-private-vs-kit/scenario.json"
+  },
+  "metrics": {
+    "private": {
+      "frames_sampled": 16,
+      "max_shaped_rows_per_frame": 49.0,
+      "max_wrapped_bytes_per_frame": 11355.0,
+      "max_prepare_ms": 11.182324000000001,
+      "rows_end": "121",
+      "total_height_end": "4236.0",
+      "pending_end": "false",
+      "steps": [
+        {
+          "mode": "private",
+          "block": "0",
+          "rendered": "0",
+          "rows": "89",
+          "pending": "false",
+          "pending_bytes": "20134",
+          "ime_x": "0.0",
+          "ime_y": "4.4160003662109375",
+          "ime_width": "1.0",
+          "ime_height": "23.167999267578125"
+        },
+        {
+          "mode": "private",
+          "block": "0",
+          "rendered": "0",
+          "rows": "89",
+          "pending": "false",
+          "pending_bytes": "20134",
+          "ime_x": "0.0",
+          "ime_y": "4.4160003662109375",
+          "ime_width": "1.0",
+          "ime_height": "23.167999267578125"
+        },
+        {
+          "mode": "private",
+          "block": "0",
+          "rendered": "62239",
+          "rows": "121",
+          "pending": "false",
+          "pending_bytes": "4993",
+          "ime_x": null,
+          "ime_y": null,
+          "ime_width": null,
+          "ime_height": null
+        }
+      ]
+    },
+    "kit": {
+      "frames_sampled": 0,
+      "steps": [
+        {
+          "mode": "kit",
+          "block": "0",
+          "rendered": "0",
+          "rows": "0",
+          "pending": "false",
+          "pending_bytes": "62239",
+          "ime_x": null,
+          "ime_y": null,
+          "ime_width": null,
+          "ime_height": null
+        },
+        {
+          "mode": "kit",
+          "block": "0",
+          "rendered": "0",
+          "rows": "0",
+          "pending": "false",
+          "pending_bytes": "62239",
+          "ime_x": null,
+          "ime_y": null,
+          "ime_width": null,
+          "ime_height": null
+        },
+        {
+          "mode": "kit",
+          "block": "0",
+          "rendered": "62239",
+          "rows": "0",
+          "pending": "false",
+          "pending_bytes": "62239",
+          "ime_x": null,
+          "ime_y": null,
+          "ime_width": null,
+          "ime_height": null
+        }
+      ]
+    },
+    "process": {
+      "private": {
+        "user_s": 0.39,
+        "sys_s": 0.29,
+        "wall_s": 3.91,
+        "max_rss_kb": 252756
+      },
+      "kit": {
+        "user_s": 16.39,
+        "sys_s": 0.27,
+        "wall_s": 16.82,
+        "max_rss_kb": 348104
+      }
+    }
+  },
+  "limitations": [
+    "Kit steps were delayed by main-thread layout, so wall time is not a fair comparison; process CPU and max RSS are reported.",
+    "One run per mode; this is feasibility evidence, not a statistical benchmark.",
+    "The Kit mode renders through TextView and does not include the product writer chrome."
+  ],
+  "rerun_notes": "Same fixture, build configuration, window and step sequence for both modes."
+}

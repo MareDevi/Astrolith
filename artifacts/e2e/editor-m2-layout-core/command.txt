@@ -1,0 +1,18 @@
+node scripts/editor-perf.mjs fixtures
+RUST_LOG='warn,astrolith::perf=info,astrolith_gpui=info,astrolith_desktop=info' \
+  ASTROLITH_EDITOR_PERF=1 \
+  ASTROLITH_TEXT_LAYOUT_FIXTURE=target/editor-perf/fixtures/history-single-paragraph-102420.md \
+  ASTROLITH_TEXT_LAYOUT_STEPS='[{"wait_ms":900,"log":true},{"scroll":0.5,"wait_ms":500,"log":true},{"caret":"end","wait_ms":900,"log":true},{"mode":"kit","wait_ms":600,"log":true},{"mode":"private","wait_ms":600,"log":true,"quit":true}]' \
+  ASTROLITH_TEXT_LAYOUT_EXIT_MS=14000 \
+  target/debug/astrolith-desktop --spike=text-layout
+# local edit
+ASTROLITH_TEXT_LAYOUT_STEPS='[{"wait_ms":900},{"caret":"end"},{"wait_ms":500},{"insert":true},{"wait_ms":600,"log":true,"quit":true}]'
+# resize
+ASTROLITH_TEXT_LAYOUT_STEPS='[{"wait_ms":800,"log":true},{"size":[720,520],"wait_ms":500,"log":true},{"size":[1500,940],"wait_ms":500,"log":true,"quit":true}]'
+# caret to end from the start
+ASTROLITH_TEXT_LAYOUT_STEPS='[{"wait_ms":1200},{"caret":"end"},{"wait_ms":1200,"log":true,"quit":true}]'
+# 1 MiB and 8 MiB boundary workloads
+ASTROLITH_TEXT_LAYOUT_FIXTURE=target/editor-perf/fixtures/plain-long-line-1mib.md
+ASTROLITH_TEXT_LAYOUT_FIXTURE=target/editor-perf/fixtures/boundary-8mib.md
+# private vs Kit process CPU
+ASTROLITH_TEXT_LAYOUT_MODE=private|kit ASTROLITH_TEXT_LAYOUT_STEPS='[{"wait_ms":1500,"log":true},{"scroll":0.6,"wait_ms":800,"log":true},{"caret":"end","wait_ms":1000,"log":true,"quit":true}]'
