@@ -90,15 +90,6 @@ fixture `history-single-paragraph-102420`（102,420 B，单段落，CJK/emoji/�
 
 ## 7. 复现
 
-```sh
-node scripts/editor-perf.mjs fixtures
-RUST_LOG='warn,astrolith::perf=info,astrolith_gpui=info,astrolith_desktop=info' \
-ASTROLITH_EDITOR_PERF=1 \
-ASTROLITH_TEXT_LAYOUT_FIXTURE=target/editor-perf/fixtures/history-single-paragraph-102420.md \
-ASTROLITH_TEXT_LAYOUT_STEPS='[{"wait_ms":900,"log":true},{"scroll":0.5,"wait_ms":500,"log":true},
-  {"caret":"end","wait_ms":900,"log":true},{"insert":true},{"wait_ms":600,"log":true,"quit":true}]' \
-ASTROLITH_TEXT_LAYOUT_EXIT_MS=12000 \
-target/debug/astrolith-desktop --spike=text-layout
-```
-
-`ASTROLITH_TEXT_LAYOUT_MODE=kit` 打开同一 source 的 Kit `TextView` 对照；`Tab` 在窗口内切换。
+M2 的对照入口 `--spike=text-layout`（`ASTROLITH_TEXT_LAYOUT_*`）已于 M7 收尾时删除：Writing/Preview
+已改用正式布局，保留第二份只读原型属于被替代的测试辅助代码。本节数据保留其原始环境与命令归属；
+当前产品路径的测量使用 [编辑器性能基准入口](editor-perf-harness.md) 的 `m7-input`、`cycle` 场景。

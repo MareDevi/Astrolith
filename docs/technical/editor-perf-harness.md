@@ -12,7 +12,6 @@
 | `crates/astrolith-gpui/src/editor/perf.rs` | 默认关闭的计数与分阶段计时，target 为 `astrolith::perf` |
 | `crates/astrolith-gpui/src/shell/perf.rs` | 仅开发构建：读取 `ASTROLITH_PERF_SCENARIO`，驱动模式、滚动、输入和退出 |
 | `gpui-fast` feature | `astrolith-gpui` / `astrolith-desktop` 的可选后端切换，不改变默认构建 |
-| `--spike=text-layout` | 开发专用 M2 对照窗口：应用自有视口布局与 Kit `TextView` 同一 source 的 A/B，不替换产品视图 |
 
 计数器只在 `ASTROLITH_EDITOR_PERF=1` 时输出，且只记录数字：块数、准备好的节点数、缓存复用数、交给整形的字节数、几何叶子数、以及 render/layout/prepaint/paint 各阶段毫秒。不记录正文、选择或预编辑内容。
 

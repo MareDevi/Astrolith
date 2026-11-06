@@ -1,11 +1,10 @@
 //! Application-owned viewport text layout.
 //!
-//! This is the M2 feasibility core: it wraps the rendered writer text into
-//! visual rows with GPUI's own text system, shapes only the rows that intersect
-//! the viewport plus overscan, and answers hit-test, caret, selection and IME
-//! geometry from the same row snapshot. It does not go through the Kit Inline
-//! retained-layout table or the Kit `TextView`, and it does not replace any
-//! product view.
+//! Writing and Preview render through this layer. It wraps the rendered writer
+//! text into visual rows with GPUI's own text system, shapes only the rows that
+//! intersect the viewport plus overscan, and answers hit-test, caret, selection
+//! and IME geometry from the same row snapshot. It does not go through the Kit
+//! Inline retained-layout table or the Kit `TextView`.
 //!
 //! Contracts:
 //!
@@ -37,8 +36,6 @@ use gpui_kit::{
 use unicode_segmentation::UnicodeSegmentation;
 
 pub(crate) mod source;
-#[cfg(debug_assertions)]
-pub(crate) mod spike;
 #[cfg(test)]
 mod tests;
 
@@ -971,14 +968,6 @@ impl BlockLayout {
 
 fn next_grapheme_len(text: &str, offset: usize) -> usize {
     text[offset..].graphemes(true).next().map_or(1, str::len)
-}
-
-/// Start of the grapheme before `offset`.
-fn previous_grapheme_start(text: &str, offset: usize) -> usize {
-    text[..offset]
-        .grapheme_indices(true)
-        .next_back()
-        .map_or(0, |(index, _)| index)
 }
 
 /// Shape a single grapheme for wrapping. Single-code-point graphemes use the
@@ -1993,11 +1982,6 @@ impl TextLayout {
             }
             BlockKind::Image { .. } | BlockKind::Heading(_) | BlockKind::Paragraph => {}
         }
-    }
-
-    /// Content height of the whole document for a scroll range.
-    pub(crate) fn max_scroll(&self, viewport_height: f32) -> f32 {
-        (self.total_height() - viewport_height).max(0.)
     }
 
     /// Rows discovered so far, across every block.
