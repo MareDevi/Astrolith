@@ -1,0 +1,80 @@
+{
+  "schema": "astrolith.editor-perf.metrics/1",
+  "test_id": "editor-m3-pre-plain-long-line-1mib",
+  "backend": "pre",
+  "fixture": "plain-long-line-1mib",
+  "metrics": {
+    "build_ms": 300,
+    "writer_repaints": {
+      "samples": 0,
+      "paint_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "caret_blinks_max": 0
+    },
+    "writer_frames": {
+      "samples": 85,
+      "total_ms": {
+        "p50": 0.998685,
+        "p95": 3.4377350000000004,
+        "p99": 3.8153700000000006,
+        "max": 3.8153700000000006
+      },
+      "render_ms": {
+        "p50": 0.14791300000000002,
+        "p95": 3.132334,
+        "max": 3.3083650000000002
+      },
+      "layout_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "prepaint_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "paint_ms": {
+        "p50": 0.500489,
+        "p95": 1.144907,
+        "max": 1.264051
+      },
+      "blocks_rendered_max": 1,
+      "blocks_total_max": 1,
+      "nodes_built_total": 0,
+      "nodes_reused_total": 0,
+      "geometry_leaves_max": 0,
+      "shaping_bytes_max": 8193,
+      "caret_blinks_max": 16
+    },
+    "driver_steps": {
+      "samples": 15,
+      "p50": 0.023414,
+      "p95": 0.319801,
+      "max": 0.319801
+    },
+    "mode_handlers": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "change_handlers": {
+      "samples": 4,
+      "p50": 2.5607569999999997,
+      "p95": 4.932705,
+      "max": 4.932705
+    },
+    "parse_queue_vs_install": {
+      "samples": 5,
+      "p50": 0.0013850000000000002,
+      "p95": 0.001468,
+      "max": 0.001468
+    },
+    "cpu": null,
+    "fullscreen_pairs": 0
+  }
+}
