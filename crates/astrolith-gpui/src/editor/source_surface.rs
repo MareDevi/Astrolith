@@ -3198,6 +3198,20 @@ mod tests {
                 "the session matches the query the bar shows"
             );
         });
+        cx.simulate_input(handle.into(), "foo");
+        surface.read_with(cx, |surface, cx| {
+            assert_eq!(surface.find_query.read(cx).value().as_ref(), "foo");
+            assert_eq!(
+                surface.editor.read(cx).search_session().query,
+                "foo",
+                "typing in the bar updates the retained search session"
+            );
+            assert_eq!(
+                surface.editor.read(cx).search_session().matcher.len(),
+                2,
+                "the keystrokes reach the matching engine"
+            );
+        });
         cx.update_window(handle.into(), |_, window, cx| {
             surface.update(cx, |surface, cx| {
                 surface
