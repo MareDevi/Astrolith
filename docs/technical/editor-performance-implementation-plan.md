@@ -3,7 +3,7 @@
 - 日期：2026-11-06。
 - 基线提交：`8c9d7f3`（依赖升级）、`c54783f`（新版本性能诊断）。
 - 依赖基线：GPUI Kit/base/component 0.9.0、gpui-pre 0.3.11，全部使用发布包。
-- 状态：M0–M4 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)、[M4 结果](editor-performance-m4-results.md)）；Writing 与 Preview 已切换到自有布局，Build 仍走现有实现，M5 起未开始。
+- 状态：M0–M4 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)、[M4 结果](editor-performance-m4-results.md)）；Writing 与 Preview 已切换到自有布局，Build 仍走现有实现。M5 已按触发条件评估并保留现有输入桥（见 [M5 决策](editor-performance-m5-decision.md)），M6 起未开始。
 - 目标环境：首先解决用户实际运行的 `mise run dev` 与 Hyprland/Wayland 场景；release 和其他平台单独验收。
 
 ## 1. 决策与范围
@@ -294,7 +294,8 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 | M2 自有文本布局可行性 | 已完成（可行性门槛通过；产品视图未替换） | [M2 结果](editor-performance-m2-results.md)；`artifacts/e2e/editor-m2-layout-core`、`editor-m2-private-vs-kit` |
 | M3 Writing 接入新布局 | 已完成；Writing 产品路径已切换 | [M3 结果](editor-performance-m3-results.md)；`artifacts/e2e/editor-m3-pre-*` |
 | M4 Preview 接入共享阅读布局 | 已完成；Preview 产品路径已切换 | [M4 结果](editor-performance-m4-results.md)；`artifacts/e2e/editor-m4-pre-*` |
-| M5–M7 | 未开始 | — |
+| M5 Writing 输入内核迁移 | 已评估：保留现有输入桥，未触发迁移 | [M5 决策](editor-performance-m5-decision.md)；`artifacts/e2e/editor-m5-gate-*` |
+| M6–M7 | 未开始 | — |
 | GPUI Fast 采用 | 不采用默认后端 | 长单段落 p95 277 ms，明显差于 gpui-pre 52 ms |
 
 ### M0：可重复基线与最小测量入口（必做）
@@ -367,6 +368,8 @@ Writing 输入模型迁移时，composition 是临时编辑状态：
 ### M5：Writing 输入内核迁移（条件执行，独立功能里程碑）
 
 **触发：** 渲染路径已稳定（通过 Fast + M1 达标，或完成 M3/M4），且重复 EditorState 状态、后台高亮/DisplayMap 工作或长期维护复杂度有可测成本；如果当前桥已达标，先记录保留决定，不为移除类型重写输入。
+
+**2026-11-06 评估结果：未触发，保留现有输入桥。** 1 MiB 单块下 pinned 输入更新（含 DisplayMap 簿记与内部 undo）最大 0.72 ms，低于应用 source 事务 p95 3.83 ms，未观测到后台高亮或渲染期整形；重复文本按 8 MiB 上限有界。证据与重开条件见 [M5 决策](editor-performance-m5-decision.md)。
 
 - 提取纯输入/事务模型与投影坐标索引，使用已有 DocumentBuffer/SourceHistory。
 - 实现第 6 节的 composition 状态机、方向选择、命令与平台输入协议。
