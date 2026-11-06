@@ -59,3 +59,10 @@ ropey = { opt-level = 3 }
 gpui-pre-sum-tree = { opt-level = 3 }
 tree-sitter = { opt-level = 3 }
 taffy = { opt-level = 3 }
+font-types = { opt-level = 3 }
+fontdb = { opt-level = 3 }
+harfrust = { opt-level = 3 }
+read-fonts = { opt-level = 3 }
+skrifa = { opt-level = 3 }
+swash = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
