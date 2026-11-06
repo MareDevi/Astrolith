@@ -1422,22 +1422,32 @@ fn parse_inline(
                     push_char(text, base, out, index);
                 }
             }
-            _ => push_char(text, base, out, index),
+            _ => {
+                // Syntax bytes are ASCII, so the next one is also a UTF-8
+                // boundary. Preserve a whole literal span in one source run.
+                let start = *index;
+                let end = bytes[start + 1..]
+                    .iter()
+                    .position(|byte| {
+                        matches!(byte, b'\\' | b'`' | b'*' | b'_' | b'~' | b'!' | b'[' | b'<')
+                    })
+                    .map_or(bytes.len(), |offset| start + 1 + offset);
+                push_plain(text, base, out, index, end);
+            }
         }
     }
 }
 
 fn push_plain(text: &str, base: usize, out: &mut RichText, index: &mut usize, end: usize) {
-    while *index < end {
-        push_char(text, base, out, index);
-    }
+    out.push_run(&text[*index..end], base + *index..base + end, true);
+    *index = end;
 }
 
 fn push_char(text: &str, base: usize, out: &mut RichText, index: &mut usize) {
     let character = text[*index..].chars().next().unwrap_or('\0');
     let len = character.len_utf8();
     out.push_run(
-        &character.to_string(),
+        &text[*index..*index + len],
         base + *index..base + *index + len,
         true,
     );
@@ -1767,6 +1777,39 @@ Second paragraph.
         });
         assert!(result.is_none());
         assert_eq!(checks, 3);
+    }
+
+    #[test]
+    fn plain_inline_spans_preserve_unicode_and_source_boundaries() {
+        let source = "prefix 中文 e\u{301}👩\u{200d}💻 ! ~ < tail \\* **bold** suffix";
+        let start = "prefix ".len();
+        let parsed = inline(source, start..source.len(), &Definitions::default());
+        assert_eq!(
+            parsed.text,
+            "中文 e\u{301}👩\u{200d}💻 ! ~ < tail * bold suffix"
+        );
+        let escape = source.find("\\*").unwrap();
+        assert_eq!(
+            parsed.segments[0],
+            SourceSegment {
+                rendered: 0..escape - start,
+                source: start..escape,
+                linear: true,
+            }
+        );
+        assert!(parsed.segments.iter().any(|segment| {
+            !segment.linear
+                && segment.source == (escape..escape + 2)
+                && &parsed.text[segment.rendered.clone()] == "*"
+        }));
+        let bold = parsed.text.find("bold").unwrap();
+        assert_eq!(
+            parsed.marks,
+            [InlineMark {
+                range: bold..bold + 4,
+                kind: InlineMarkKind::Bold
+            }]
+        );
     }
 
     #[test]
