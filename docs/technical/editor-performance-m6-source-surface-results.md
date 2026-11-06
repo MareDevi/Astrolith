@@ -125,7 +125,7 @@ Kit 把 hover/code action 的**触发时序**写在元素内部，SourceSurface 
 
 公开的 `SearchSession` 与匹配器不依赖 Kit 元素，SourceSurface 因此接管搜索的呈现与输入来源：
 
-- 源编辑器启用 `.searchable(true)`，应用既有的 Find/Find next/Replace 命令继续调用 `open_search()`；表面按 `search_session().open` 显示搜索栏，替代 Kit 的 `SearchPanel`。stock Editor 路径同时恢复这些命令的原有面板。
+- 源编辑器启用 `.searchable(true)`，应用既有的 Find/Find next/Replace 命令继续调用 `open_search()`；表面按 `search_session().open` 显示搜索栏，替代 Kit 的 `SearchPanel`。stock Editor 路径同时恢复这些命令的原有面板（原生 `scenario find` 在不启用 SourceSurface 时通过，帧 p95 13.35 ms）。
 - 搜索栏包含查询、匹配计数（`SearchMatcher::label`）、上一个/下一个与关闭；`replace_mode` 时增加替换字段与 Replace/All。`Enter`/`Shift+Enter` 走匹配前进/后退，`Escape` 关闭并把焦点还给编辑器；指针点击按钮走同一组操作。
 - 查询字段的变更调用 `set_search_query()`；`search_activation_revision()` 变化时把会话中的 query 写回字段并选中，支持选中文本后 Ctrl+F 预填以及重复 Ctrl+F。
 - 匹配高亮并入同一份整形 run：所有匹配使用去饱和的 selection 颜色，当前匹配使用 selection 颜色；只处理与整形窗口相交的范围。当前匹配变化时，表面用自有 caret 几何把匹配滚入视口；几何尚未整形时保留目标并在下一帧重试，不估算位置。
@@ -150,6 +150,11 @@ node scripts/editor-perf.mjs run \
   --fixture complex-markdown \
   --backend pre --scenario find --cycles 4 --settle 2000 \
   --source-surface --test-id editor-m6-surface-build-find
+
+node scripts/editor-perf.mjs run \
+  --fixture complex-markdown \
+  --backend pre --scenario find --cycles 2 --settle 2000 \
+  --test-id editor-m6-stock-build-find-smoke
 ```
 
 ## 5. 未执行与限制
