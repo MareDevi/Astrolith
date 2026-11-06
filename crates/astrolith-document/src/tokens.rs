@@ -48,6 +48,36 @@ pub struct TokenSummary {
     pub lines: usize,
 }
 
+impl TokenSummary {
+    /// Update an exact summary after replacing a UTF-8 byte range in `text`.
+    ///
+    /// Scan only the replaced bytes, replacement and one character on each
+    /// side. That context preserves word joins and splits at both edit seams.
+    /// `self` must describe `text`; `range` must be valid for `str::replace_range`.
+    pub fn edited(self, text: &str, range: Range<usize>, replacement: &str) -> Self {
+        let left = text[..range.start]
+            .chars()
+            .next_back()
+            .map_or(range.start, |character| range.start - character.len_utf8());
+        let right = text[range.end..]
+            .chars()
+            .next()
+            .map_or(range.end, |character| range.end + character.len_utf8());
+        let before = token_summary(&text[left..right]);
+        let after = summarize(
+            text[left..range.start]
+                .chars()
+                .chain(replacement.chars())
+                .chain(text[range.end..right].chars()),
+        );
+        Self {
+            words: self.words - before.words + after.words,
+            characters: self.characters - before.characters + after.characters,
+            lines: self.lines - before.lines + after.lines,
+        }
+    }
+}
+
 /// Tokenize `text` once and count words and characters from that snapshot.
 pub fn token_snapshot(text: &str) -> TokenSnapshot {
     let tokens = crate::copyedit::word_ranges(text);
@@ -65,10 +95,14 @@ pub fn token_snapshot(text: &str) -> TokenSnapshot {
 /// [`token_snapshot`] but never materialises the token ranges, so the cost is
 /// one pass over the bytes with no allocation.
 pub fn token_summary(text: &str) -> TokenSummary {
+    summarize(text.chars())
+}
+
+fn summarize(characters: impl Iterator<Item = char>) -> TokenSummary {
     let mut words = 0;
     let mut in_word = false;
     let mut counts = ScanCounts::default();
-    for character in text.chars() {
+    for character in characters {
         let word = is_word_character(character);
         if word && !in_word {
             words += 1;
@@ -197,6 +231,34 @@ mod tests {
                 token_snapshot(text).summary(),
                 "{text:?}"
             );
+        }
+    }
+    #[test]
+    fn edited_summary_matches_full_scan_at_every_unicode_boundary() {
+        for text in [
+            "",
+            "alpha beta",
+            "don't_stop",
+            "中文🦀 café",
+            "a\r\nb\n",
+            "a--b _'c",
+        ] {
+            let boundaries: Vec<_> = (0..=text.len())
+                .filter(|&offset| text.is_char_boundary(offset))
+                .collect();
+            for &start in &boundaries {
+                for &end in boundaries.iter().filter(|&&end| end >= start) {
+                    for replacement in ["", "x", "中文", "🦀", "' _", "\r\n"] {
+                        let mut edited = text.to_owned();
+                        edited.replace_range(start..end, replacement);
+                        assert_eq!(
+                            token_summary(text).edited(text, start..end, replacement),
+                            token_summary(&edited),
+                            "{text:?}, {start}..{end}, {replacement:?}",
+                        );
+                    }
+                }
+            }
         }
     }
 }

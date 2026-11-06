@@ -508,9 +508,8 @@ impl DocumentSession {
             self.programmatic_change = true;
             return;
         }
-        // The editor reports that *some* text changed, so the whole visible
-        // text is diffed at this boundary and mapped back before anything
-        // reads the buffer.
+        // Compare retained input snapshots and map the changed byte range
+        // back before anything reads the authoritative buffer.
         self.programmatic_change = std::mem::take(&mut self.writing_self);
         let intent = if self.programmatic_change {
             HistoryIntent::Atomic
@@ -1556,7 +1555,7 @@ impl DocumentSession {
         self.absorb_with_intent(cx, HistoryIntent::Atomic);
     }
 
-    /// Map the whole visible text back into the complete source and absorb it.
+    /// Map a retained input snapshot change into the authoritative source.
     fn absorb_with_intent(&mut self, cx: &App, intent: HistoryIntent) {
         let text_key = (
             self.editor.entity_id(),
@@ -1597,6 +1596,7 @@ impl DocumentSession {
             self.projection_range_to_source(self.editor.read(cx).selected_range());
         let before = self.buffer.text_snapshot();
         let mut projected = None;
+        let mut updated_counts = None;
         if let Ok(source_range) = self.projection.map_visible_range(&change.old) {
             let removed = before.slice(source_range.clone()).to_string();
             if let Err(error) = self.buffer.splice_text(source_range.clone(), &replacement) {
@@ -1614,6 +1614,13 @@ impl DocumentSession {
             // Keep the projection allocation; only move the tail of this local
             // edit. Parser/string interoperability must not copy the whole body
             // merely to renew two source-mapping segments.
+            if !self.presentation_dirty {
+                updated_counts = Some(self.counts.edited(
+                    &self.projection.visible,
+                    change.old.clone(),
+                    &replacement,
+                ));
+            }
             let mut text = std::mem::take(&mut self.projection.visible);
             text.replace_range(change.old.clone(), &replacement);
             projected = Some(text);
@@ -1650,7 +1657,12 @@ impl DocumentSession {
             Ok(projection) => {
                 self.projection = projection;
                 self.absorbed_writer_text = visible;
-                self.presentation_dirty = true;
+                if let Some(counts) = updated_counts {
+                    self.counts = counts;
+                    self.presentation_dirty = false;
+                } else {
+                    self.presentation_dirty = true;
+                }
             }
             Err(error) => self.refuse(&error.to_string()),
         }
@@ -2514,6 +2526,7 @@ mod tests {
                 source.replacen("ordinary", "日本語", 1)
             );
             assert_eq!(snapshot, source);
+            assert_eq!(session.counts, token_summary(&session.projection.visible));
         });
         cx.update_window(handle, |_, window, cx| {
             session.update(cx, |session, cx| assert!(session.undo_source(window, cx)));
