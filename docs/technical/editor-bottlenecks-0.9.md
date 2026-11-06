@@ -135,3 +135,8 @@ passes `mise run check` with 1,011 Rust tests (8 ignored), fixture loaders and t
 optional embedded-webview type check. The Windows job adapter separately passed
 an isolated Windows-target compilation and Send/Sync assertion; native Windows
 execution was not tested.
+
+## Implementation plan
+
+See the [detailed optimization implementation plan](editor-performance-implementation-plan.md)
+for milestones, layout/input contracts, acceptance targets and rollback boundaries.
