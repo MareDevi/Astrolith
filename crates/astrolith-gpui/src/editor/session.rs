@@ -14,7 +14,7 @@ use gpui_kit::component::input::{
 };
 use gpui_kit::{
     App, AppContext, Context, Entity, EventEmitter, Focusable, Pixels, Point, SharedString,
-    Subscription, Task, Window,
+    Subscription, Task, Window, point, px,
 };
 
 use crate::editor::component_builder::snippets::PreparedInsertion;
@@ -1207,10 +1207,26 @@ impl DocumentSession {
             .update(cx, |writer, cx| writer.set_visible(visible, cx));
     }
 
-    /// Scroll the visible writing surface, for the native perf driver.
-    pub(crate) fn perf_scroll(&mut self, y: f32, cx: &mut Context<Self>) {
-        self.writer
-            .update(cx, |writer, cx| writer.set_scroll_offset(y, cx));
+    /// Scroll the active surface (source editor or writing page) for the
+    /// native perf driver. Negative values scroll down/right, matching GPUI's
+    /// scroll convention.
+    pub(crate) fn perf_scroll(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        if self.source_view {
+            self.editor.update(cx, |editor, cx| {
+                editor.set_scroll_offset(point(px(-x), px(-y)), cx)
+            });
+        } else {
+            self.writer
+                .update(cx, |writer, cx| writer.set_scroll_offset(y, cx));
+        }
+    }
+
+    /// Place the active editor's caret at the end of its text, for the native
+    /// harness's end-of-document input steps.
+    pub(crate) fn perf_cursor_to_end(&mut self, cx: &mut Context<Self>) {
+        let end = self.editor.read(cx).text().len();
+        self.editor
+            .update(cx, |editor, cx| editor.set_selected_range(end..end, cx));
     }
 
     /// Select the same visible range in the editor model from the rendered

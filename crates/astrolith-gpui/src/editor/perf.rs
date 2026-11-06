@@ -11,6 +11,11 @@
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use gpui_kit::{
+    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, IntoElement, LayoutId, Pixels,
+    Window,
+};
+
 /// Whether the opt-in counters are enabled for this process.
 pub(crate) fn enabled() -> bool {
     static ENABLED: LazyLock<bool> = LazyLock::new(|| {
@@ -95,6 +100,110 @@ pub(crate) fn frame_repaint(stats: Frame, paint: Duration) {
         paint_ms = millis(paint),
         "writer repaint"
     );
+}
+
+/// Emit one Build (source editor) frame: the Kit `Editor` element's own
+/// request-layout, prepaint and paint phases.
+pub(crate) fn build_frame(layout: Duration, prepaint: Duration, paint: Duration) {
+    if !enabled() {
+        return;
+    }
+    let sequence = FRAME_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    tracing::info!(
+        target: "astrolith::perf",
+        event = "build_frame",
+        sequence,
+        layout_ms = millis(layout),
+        prepaint_ms = millis(prepaint),
+        paint_ms = millis(paint),
+        total_ms = millis(layout + prepaint + paint),
+        "source editor frame"
+    );
+}
+
+/// Wrap the Build source editor so its element phases are measured.
+///
+/// Returns the element unchanged when counters are off, so production frames
+/// keep exactly one element and no extra timing branches.
+pub(crate) fn build_frame_element(inner: AnyElement) -> AnyElement {
+    if !enabled() {
+        return inner;
+    }
+    BuildFrameElement {
+        inner,
+        layout: Duration::ZERO,
+        prepaint: Duration::ZERO,
+    }
+    .into_any_element()
+}
+
+struct BuildFrameElement {
+    inner: AnyElement,
+    layout: Duration,
+    prepaint: Duration,
+}
+
+impl Element for BuildFrameElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        self.inner.id()
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.inner.source_location()
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui_kit::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let started = Instant::now();
+        let layout_id = self.inner.request_layout(window, cx);
+        self.layout = started.elapsed();
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui_kit::InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let started = Instant::now();
+        self.inner.prepaint(window, cx);
+        self.prepaint = started.elapsed();
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui_kit::InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let started = Instant::now();
+        self.inner.paint(window, cx);
+        build_frame(self.layout, self.prepaint, started.elapsed());
+    }
+}
+
+impl IntoElement for BuildFrameElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
 }
 
 /// Emit one named application-side span (change handler, parse wait, mode

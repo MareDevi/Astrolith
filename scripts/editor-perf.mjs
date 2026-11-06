@@ -314,6 +314,31 @@ function scenarioFor(options) {
   } else if (name === 'build-idle') {
     pushMode('build');
     steps.push({ wait_ms: Number(options.duration ?? 8000) });
+  } else if (name === 'build') {
+    pushMode('build');
+    steps.push({ wait_ms: pause });
+    for (let step = 0; step < Number(options.cycles ?? 3); step += 1) {
+      steps.push({ scroll_y: -2000 * (step + 1), wait_ms: pause });
+      steps.push({ scroll_x: -600 * (step + 1), wait_ms: pause });
+      steps.push({ scroll_y: 0, scroll_x: 0, wait_ms: pause / 2 });
+    }
+    steps.push({ caret: 'end', wait_ms: pause });
+    steps.push({ input: '中🦀', wait_ms: pause });
+    steps.push({ input: '\t', wait_ms: pause });
+    steps.push({ mono_font_size: 16, wait_ms: pause });
+    steps.push({ mono_font_family: 'DejaVu Sans Mono', wait_ms: pause });
+    steps.push({ resize_width: 1000, resize_height: 640, wait_ms: pause });
+    steps.push({ resize_width: 1600, resize_height: 1000, wait_ms: pause });
+    steps.push({ set_folding: false, wait_ms: pause });
+    steps.push({ set_folding: true, wait_ms: pause });
+  } else if (name === 'build-wrap') {
+    pushMode('build');
+    steps.push({ wait_ms: pause });
+    steps.push({ set_soft_wrap: true, wait_ms: pause * 2 });
+    steps.push({ scroll_y: -2000, wait_ms: pause * 2 });
+    steps.push({ scroll_y: 0, wait_ms: pause });
+    steps.push({ caret: 'end', wait_ms: pause * 2 });
+    steps.push({ input: '中🦀', wait_ms: pause * 2 });
   } else if (name === 'scroll-input') {
     pushMode('writing');
     for (let step = 0; step < Number(options.cycles ?? 4); step += 1) {
@@ -419,6 +444,22 @@ function summarize(events) {
       max: values.at(-1) ?? null,
     };
   };
+  const buildFrames = events.filter((event) => event.event === 'build_frame');
+  const buildTotals = buildFrames
+    .map((frame) =>
+      ['layout_ms', 'prepaint_ms', 'paint_ms']
+        .map((key) => Number(frame[key] ?? 0))
+        .reduce((sum, value) => sum + value, 0),
+    )
+    .sort((a, b) => a - b);
+  const buildPhase = (key) => {
+    const values = buildFrames.map((frame) => Number(frame[key] ?? 0)).sort((a, b) => a - b);
+    return {
+      p50: percentile(values, 0.5),
+      p95: percentile(values, 0.95),
+      max: values.at(-1) ?? null,
+    };
+  };
   const steps = events.filter((event) => event.event === 'driver_step');
   const stepMs = steps.map((event) => Number(event.ms ?? 0)).sort((a, b) => a - b);
   const modes = events
@@ -462,6 +503,18 @@ function summarize(events) {
       geometry_leaves_max: Math.max(0, ...frames.map((frame) => Number(frame.geometry_leaves ?? 0))),
       shaping_bytes_max: Math.max(0, ...frames.map((frame) => Number(frame.shaping_bytes ?? 0))),
       caret_blinks_max: Math.max(0, ...frames.map((frame) => Number(frame.caret_blinks ?? 0))),
+    },
+    build_frames: {
+      samples: buildFrames.length,
+      total_ms: {
+        p50: percentile(buildTotals, 0.5),
+        p95: percentile(buildTotals, 0.95),
+        p99: percentile(buildTotals, 0.99),
+        max: buildTotals.at(-1) ?? null,
+      },
+      layout_ms: buildPhase('layout_ms'),
+      prepaint_ms: buildPhase('prepaint_ms'),
+      paint_ms: buildPhase('paint_ms'),
     },
     driver_steps: {
       samples: steps.length,
@@ -635,6 +688,7 @@ async function runOnce(options) {
     timedOut ? 'driver timed out' : null,
     documentReady ? 'document opened through a startup entry' : 'document did not open',
     `writer frames sampled: ${metrics.writer_frames.samples}`,
+    `source editor frames sampled: ${metrics.build_frames.samples}`,
   ]
     .filter(Boolean)
     .join('; ');
@@ -692,7 +746,7 @@ async function runOnce(options) {
       hyprland === 'not_run'
         ? 'No Hyprland fullscreen/resize actions were requested for this run.'
         : 'Hyprland fullscreen dispatch was attempted; check the pair count.',
-      'Preview and Build use Kit TextView/Editor internals and are measured externally in this baseline.',
+      'Preview uses Kit TextView internals and is measured externally; Build reports the Kit Editor element\'s own layout/prepaint/paint phases as build_frame events.',
     ],
     rerun_notes: 'Run the same command with an isolated preferences directory; do not compare across different fixtures or fonts.',
   };

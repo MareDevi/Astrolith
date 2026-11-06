@@ -11,7 +11,8 @@
 use super::Shell;
 use crate::editor::perf;
 use astrolith_core::preferences::WorkspaceMode;
-use gpui_kit::{Context, EntityInputHandler as _, Window};
+use gpui_kit::component::Theme;
+use gpui_kit::{Context, EntityInputHandler as _, Window, px, size};
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,29 @@ struct Step {
     /// Negative scroll translation, matching GPUI's scroll convention.
     #[serde(default)]
     scroll_y: Option<f32>,
+    /// Negative horizontal scroll translation. Absent means zero.
+    #[serde(default)]
+    scroll_x: Option<f32>,
+    /// `end` or `start`, placing the caret in the active editor.
+    #[serde(default)]
+    caret: Option<String>,
+    /// Toggle code folding on the active editor.
+    #[serde(default)]
+    set_folding: Option<bool>,
+    /// Toggle soft wrap on the active editor.
+    #[serde(default)]
+    set_soft_wrap: Option<bool>,
+    /// Change the theme's monospace size, invalidating source metrics.
+    #[serde(default)]
+    mono_font_size: Option<f32>,
+    /// Change the theme's monospace family, invalidating source metrics.
+    #[serde(default)]
+    mono_font_family: Option<String>,
+    /// Resize the native window to this content size.
+    #[serde(default)]
+    resize_width: Option<f32>,
+    #[serde(default)]
+    resize_height: Option<f32>,
     #[serde(default)]
     input: Option<String>,
     #[serde(default)]
@@ -118,8 +142,18 @@ impl Shell {
             mode.to_owned()
         } else if step.input.is_some() {
             "input".to_owned()
-        } else if step.scroll_y.is_some() {
+        } else if step.scroll_y.is_some() || step.scroll_x.is_some() {
             "scroll".to_owned()
+        } else if step.caret.is_some() {
+            "caret".to_owned()
+        } else if step.set_folding.is_some() {
+            "folding".to_owned()
+        } else if step.set_soft_wrap.is_some() {
+            "soft_wrap".to_owned()
+        } else if step.mono_font_size.is_some() || step.mono_font_family.is_some() {
+            "font".to_owned()
+        } else if step.resize_width.is_some() || step.resize_height.is_some() {
+            "resize".to_owned()
         } else if step.quit {
             "quit".to_owned()
         } else {
@@ -145,21 +179,69 @@ impl Shell {
             };
         }
         let session = self.project.read(cx).active_session(cx);
-        if let Some(y) = step.scroll_y {
+        if step.scroll_y.is_some() || step.scroll_x.is_some() {
+            let x = step.scroll_x.unwrap_or(0.);
+            let y = step.scroll_y.unwrap_or(0.);
             if self.mode == WorkspaceMode::Preview {
                 self.rendered
                     .update(cx, |rendered, cx| rendered.set_scroll_offset(y, cx));
             } else if let Some(session) = session.clone() {
-                session.update(cx, |session, cx| session.perf_scroll(y, cx));
+                session.update(cx, |session, cx| session.perf_scroll(x, y, cx));
             }
+        }
+        if let Some(caret) = step.caret.as_deref()
+            && let Some(session) = session.clone()
+        {
+            match caret {
+                "end" => session.update(cx, |session, cx| session.perf_cursor_to_end(cx)),
+                "start" => {
+                    let editor = session.read(cx).editor.clone();
+                    editor.update(cx, |editor, cx| editor.set_selected_range(0..0, cx));
+                }
+                _ => accepted = false,
+            }
+        }
+        if let Some(folding) = step.set_folding
+            && let Some(session) = session.clone()
+        {
+            let editor = session.read(cx).editor.clone();
+            editor.update(cx, |editor, cx| editor.set_folding(folding, window, cx));
+        }
+        if let Some(wrap) = step.set_soft_wrap
+            && let Some(session) = session.clone()
+        {
+            let editor = session.read(cx).editor.clone();
+            editor.update(cx, |editor, cx| editor.set_soft_wrap(wrap, window, cx));
+        }
+        if step.mono_font_size.is_some() || step.mono_font_family.is_some() {
+            let size = step.mono_font_size;
+            let family = step.mono_font_family.clone();
+            Theme::update(cx, |theme| {
+                if let Some(size) = size {
+                    theme.mono_font_size = px(size);
+                }
+                if let Some(family) = family {
+                    theme.mono_font_family = family.into();
+                }
+            });
+        }
+        if let (Some(width), Some(height)) = (step.resize_width, step.resize_height) {
+            window.resize(size(px(width), px(height)));
         }
         if let Some(text) = step.input.as_deref()
             && let Some(session) = session
         {
-            let writer = session.read(cx).writer.clone();
-            writer.update(cx, |writer, cx| {
-                writer.replace_text_in_range(None, text, window, cx);
-            });
+            if self.mode == WorkspaceMode::Build {
+                let editor = session.read(cx).editor.clone();
+                editor.update(cx, |editor, cx| {
+                    editor.replace_text_in_range(None, text, window, cx);
+                });
+            } else {
+                let writer = session.read(cx).writer.clone();
+                writer.update(cx, |writer, cx| {
+                    writer.replace_text_in_range(None, text, window, cx);
+                });
+            }
         }
         perf::span("driver_step", &label, started.elapsed());
         if step.quit {
