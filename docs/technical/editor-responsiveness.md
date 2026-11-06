@@ -62,7 +62,9 @@ presentation latency or a guarantee of 60 FPS. Frame logging threshold was 8 ms;
 | Mode handler, all six directions in the final native runs | exit could queue behind a 15.4 s Preview frame | 0.38–2.41 ms handler work |
 
 First entry into pathological long lines still has measurable cold shaping work.
-The first large Writing frame still parses its rich snapshot synchronously.
+At this measurement point, the first large Writing frame still parsed its rich
+snapshot synchronously. The subsequent [Rope snapshot repair](rope-snapshot-performance.md)
+moves that parse to background workers and updates the input measurements.
 These results do not establish constant-time first-open or a 16 ms worst-case
 bound for arbitrary document sizes. Warm transitions and resize no longer repeat
 whole-document layout or pathological quadratic work.
