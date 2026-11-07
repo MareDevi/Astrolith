@@ -18,7 +18,9 @@ mod input;
 
 use super::perf;
 use super::text_change::TextChange;
-use super::text_layout::{Caret, Decoration, Hit, LayoutStyle, Selection, TextLayout, Viewport};
+use super::text_layout::{
+    Caret, Decoration, FocusSentence, Hit, LayoutStyle, Selection, TextLayout, Viewport,
+};
 use gpui_kit::component::input::Rope;
 use std::cell::RefCell;
 use std::ops::Range;
@@ -29,7 +31,7 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use astrolith_document::{WysiwygDocument, cursor_sentence};
+use astrolith_document::{WysiwygDocument, sentences};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
     App, Bounds, Context, Element, ElementId, Focusable, GlobalElementId, Hsla, IntoElement,
@@ -99,9 +101,10 @@ pub(crate) struct WriterSurface {
     /// Keep following the caret until its row is visible; a user scroll after
     /// that leaves the viewport alone.
     follow_caret: bool,
-    /// Block indices dimmed by Focus mode in the last frame, for the tests.
+    /// Sentence boundaries for the active rendered block of this revision.
+    focus_sentences: Option<(usize, Vec<Range<usize>>)>,
     #[cfg(test)]
-    dimmed_blocks: Vec<usize>,
+    last_focus_sentence: Option<FocusSentence>,
     /// Layout rebuilds since construction, for the tests.
     #[cfg(test)]
     layout_builds: usize,
@@ -148,8 +151,9 @@ impl WriterSurface {
             document_revision: None,
             last_cursor: None,
             follow_caret: false,
+            focus_sentences: None,
             #[cfg(test)]
-            dimmed_blocks: Vec::new(),
+            last_focus_sentence: None,
             #[cfg(test)]
             layout_builds: 0,
         }
@@ -278,6 +282,7 @@ impl WriterSurface {
         self.parsed_text = Arc::new(text);
         self.pending_edit = None;
         self.document = Arc::new(document);
+        self.focus_sentences = None;
         // Unchanged blocks keep their rows and shaped lines across the edit;
         // the edited block keeps the safe row prefix.
         let reconcile = Instant::now();
@@ -654,6 +659,35 @@ fn following_rendered(
     None
 }
 
+impl WriterSurface {
+    fn focused_sentence(&mut self, hit: Hit) -> FocusSentence {
+        if self
+            .focus_sentences
+            .as_ref()
+            .is_none_or(|(block, _)| *block != hit.block)
+        {
+            self.focus_sentences = Some((
+                hit.block,
+                sentences(&self.document.blocks[hit.block].text.text),
+            ));
+        }
+        let (_, ranges) = self
+            .focus_sentences
+            .as_ref()
+            .expect("the active block is indexed");
+        let index = ranges.partition_point(|range| range.end <= hit.rendered);
+        let range = ranges
+            .get(index)
+            .or_else(|| ranges.last())
+            .cloned()
+            .unwrap_or(0..0);
+        FocusSentence {
+            block: hit.block,
+            range,
+        }
+    }
+}
+
 impl Render for WriterSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let render_started = Instant::now();
@@ -777,29 +811,14 @@ impl Render for WriterSurface {
                 );
             }
         }
-        let dimmed = if modes.focus {
-            let sentence = cursor_sentence(self.parsed_text.as_str(), cursor);
-            sentence
-                .as_ref()
-                .map(|sentence| {
-                    document
-                        .blocks
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, block)| {
-                            !(sentence.start < block.source.end
-                                && sentence.end > block.source.start)
-                        })
-                        .map(|(index, _)| index)
-                        .collect()
-                })
-                .unwrap_or_default()
+        let focus_sentence = if modes.focus {
+            caret_hit.map(|hit| self.focused_sentence(hit))
         } else {
-            Vec::new()
+            None
         };
         #[cfg(test)]
         {
-            self.dimmed_blocks = dimmed.clone();
+            self.last_focus_sentence = focus_sentence.clone();
         }
 
         let caret_target = if focused && selection.is_empty() {
@@ -827,7 +846,7 @@ impl Render for WriterSurface {
             selection: selection_hits,
             caret: caret_hit,
             decorations,
-            dimmed,
+            focus_sentence,
             input: cx.entity(),
             stats: self.frame_stats,
             render_elapsed: render_started.elapsed(),
@@ -922,7 +941,7 @@ struct LayoutCanvas {
     selection: Option<Selection>,
     caret: Option<Hit>,
     decorations: Vec<Decoration>,
-    dimmed: Vec<usize>,
+    focus_sentence: Option<FocusSentence>,
     input: gpui_kit::Entity<WriterSurface>,
     stats: perf::Frame,
     render_elapsed: std::time::Duration,
@@ -1013,7 +1032,7 @@ impl Element for LayoutCanvas {
                 self.selection,
                 self.caret,
                 &self.decorations,
-                &self.dimmed,
+                self.focus_sentence.as_ref(),
                 None,
             )
         });
@@ -1596,15 +1615,8 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn focus_mode_follows_the_visible_caret_block(cx: &mut TestAppContext) {
-        let source = "First sentence.
-
-Second sentence.
-
-```
-# code
-```
-";
+    fn focus_mode_follows_sentences_within_the_same_block(cx: &mut TestAppContext) {
+        let source = "**第一句。**第二句！\n\nThird sentence.";
         let (handle, session) = mount_writer(cx, source);
         let writer = session.read_with(cx, |session, _| session.writer.clone());
         cx.update_window(handle.into(), |_, window, cx| {
@@ -1621,8 +1633,16 @@ Second sentence.
             window.render_frame(cx);
         })
         .unwrap();
-        writer.read_with(cx, |writer, _| assert_eq!(writer.dimmed_blocks, [1, 2, 3]));
-        let second = source.find("Second").unwrap();
+        writer.read_with(cx, |writer, _| {
+            assert_eq!(
+                writer.last_focus_sentence,
+                Some(FocusSentence {
+                    block: 0,
+                    range: 0.."第一句。".len()
+                })
+            );
+        });
+        let second = source.find("第二句").unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             session.update(cx, |session, cx| {
                 session.set_writer_selection(second, second, window, cx)
@@ -1630,7 +1650,15 @@ Second sentence.
             window.render_frame(cx);
         })
         .unwrap();
-        writer.read_with(cx, |writer, _| assert_eq!(writer.dimmed_blocks, [0, 2, 3]));
+        writer.read_with(cx, |writer, _| {
+            assert_eq!(
+                writer.last_focus_sentence,
+                Some(FocusSentence {
+                    block: 0,
+                    range: "第一句。".len().."第一句。第二句！".len()
+                })
+            );
+        });
     }
 
     #[gpui_kit::test]

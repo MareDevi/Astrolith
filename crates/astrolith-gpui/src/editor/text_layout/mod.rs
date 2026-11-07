@@ -199,6 +199,13 @@ pub(crate) struct Decoration {
     pub(crate) color: Hsla,
 }
 
+/// The rendered sentence that remains undimmed in Writing mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FocusSentence {
+    pub(crate) block: usize,
+    pub(crate) range: Range<usize>,
+}
+
 /// Paints image blocks into the layout's content coordinates.
 pub(crate) trait LayoutImagePainter {
     /// Paint `url` into `bounds`; return whether the image was ready.
@@ -1693,7 +1700,7 @@ impl TextLayout {
         selection: Option<Selection>,
         caret: Option<Hit>,
         decorations: &[Decoration],
-        dimmed: &[usize],
+        focus: Option<&FocusSentence>,
         images: Option<&dyn LayoutImagePainter>,
     ) -> usize {
         let clip = window.content_mask().bounds;
@@ -1715,6 +1722,7 @@ impl TextLayout {
             size(clip.size.width, px((content_bottom - content_top).max(0.))),
         );
         let mut painted = 0usize;
+        let dim_color = self.style.background.opacity(0.65);
         for index in first..=last {
             if self.blocks.is_empty() {
                 break;
@@ -1788,11 +1796,17 @@ impl TextLayout {
             let chrome_top = self.blocks[index].chrome_top;
             let has_image = self.blocks[index].image.is_some();
             let cell_count = self.blocks[index].cells.len();
+            let active_sentence = focus.filter(|sentence| sentence.block == index);
             if has_image {
                 // Painted above; the alt text only exists for source mapping.
             } else if cell_count > 0 {
                 for cell_index in 0..cell_count {
                     let cell = &self.blocks[index].cells[cell_index];
+                    let cell_start = self.blocks[index].cell_range(cell_index).start;
+                    let cell_focus = active_sentence.map(|sentence| {
+                        sentence.range.start.saturating_sub(cell_start)
+                            ..sentence.range.end.saturating_sub(cell_start)
+                    });
                     painted += paint_block_rows(
                         cell,
                         origin,
@@ -1803,12 +1817,12 @@ impl TextLayout {
                         content_top,
                         content_bottom,
                         self.style.selection,
+                        cell_focus.as_ref().map(|range| (range, dim_color)),
                         window,
                         cx,
                     );
                 }
             } else {
-                let width = f32::from(self.width);
                 painted += paint_block_rows(
                     &self.blocks[index],
                     origin,
@@ -1819,27 +1833,19 @@ impl TextLayout {
                     content_top,
                     content_bottom,
                     self.style.selection,
+                    active_sentence.map(|sentence| (&sentence.range, dim_color)),
                     window,
                     cx,
                 );
-                let _ = width;
             }
-            if dimmed.contains(&index) {
-                let block = &self.blocks[index];
-                let rows_height = block.rows.len() as f32 * block.row_height;
+            if focus.is_some() && active_sentence.is_none() {
                 let bounds = Bounds::new(
                     point(origin.x, origin.y + px(block_top)),
-                    size(
-                        px(f32::from(self.width)),
-                        px(block.chrome_top + rows_height + block.chrome_bottom),
-                    ),
-                );
-                let bounds = bounds.intersect(&Bounds::new(
-                    origin,
-                    size(clip.size.width, px(content_bottom - content_top)),
-                ));
+                    size(self.width, px(block_height)),
+                )
+                .intersect(&clip);
                 if bounds.size.width > px(0.) && bounds.size.height > px(0.) {
-                    window.paint_quad(fill(bounds, self.style.background.opacity(0.65)));
+                    window.paint_quad(fill(bounds, dim_color));
                 }
             }
         }
@@ -2053,14 +2059,16 @@ fn paint_block_rows(
     content_top: f32,
     content_bottom: f32,
     selection_color: Hsla,
+    focus: Option<(&Range<usize>, Hsla)>,
     window: &mut Window,
     cx: &mut App,
 ) -> usize {
     let mut painted = 0usize;
-    for row in &block.rows {
+    let first_row = row_index_at(block, content_top - top - block.chrome_top);
+    for row in block.rows.iter().skip(first_row) {
         let row_y = top + block.chrome_top + row.y;
-        if row_y + row.height < content_top || row_y > content_bottom {
-            continue;
+        if row_y > content_bottom {
+            break;
         }
         let Some(shaped) = row.shaped.clone() else {
             continue;
@@ -2104,6 +2112,27 @@ fn paint_block_rows(
             window,
             cx,
         );
+        if let Some((sentence, color)) = focus {
+            let start = sentence.start.max(row.range.start);
+            let end = sentence.end.min(row.range.end);
+            let width = shaped.width();
+            let (left, right) = if start >= end {
+                (width, width)
+            } else {
+                let a = shaped.x_for_index(start - row.range.start);
+                let b = shaped.x_for_index(end - row.range.start);
+                (a.min(b).clamp(px(0.), width), a.max(b).clamp(px(0.), width))
+            };
+            for span in [px(0.)..left, right..width] {
+                if span.start < span.end {
+                    let bounds = Bounds::new(
+                        point(row_origin.x + span.start, row_origin.y),
+                        size(span.end - span.start, px(row.height)),
+                    );
+                    window.paint_quad(fill(bounds, color));
+                }
+            }
+        }
         painted += 1;
     }
     painted

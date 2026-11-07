@@ -836,7 +836,7 @@ impl Element for PreviewCanvas {
                 self.selection,
                 None,
                 &[],
-                &[],
+                None,
                 Some(&painter),
             );
         }

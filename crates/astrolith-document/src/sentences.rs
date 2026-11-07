@@ -21,34 +21,42 @@ use std::ops::Range;
 
 /// Every sentence of `text`, in order, tiling the whole input.
 pub fn sentences(text: &str) -> Vec<Range<usize>> {
-    let characters: Vec<(usize, char)> = text.char_indices().collect();
+    let mut characters = text.char_indices().peekable();
     let mut ranges = Vec::new();
     let mut start = 0;
-    let mut index = 0;
-    while index < characters.len() {
-        let (_, character) = characters[index];
-        if character == '\n'
-            && let Some(next) = blank_line_break(&characters, index)
-        {
-            let end = offset_at(&characters, next, text.len());
-            ranges.push(start..end);
-            start = end;
-            index = next;
+    while let Some((_, character)) = characters.next() {
+        if character != '\n' && !is_terminator(character) {
             continue;
         }
-        if is_terminator(character)
-            && ends_sentence(&characters, index)
-            && let Some(end) = sentence_end(&characters, index, text.len())
-        {
-            ranges.push(start..end);
-            start = end;
-            index = characters
-                .iter()
-                .position(|(offset, _)| *offset >= end)
-                .unwrap_or(characters.len());
-            continue;
+        let mut after = characters.clone();
+        if character == '\n' {
+            while after
+                .peek()
+                .is_some_and(|(_, c)| matches!(c, ' ' | '\t' | '\r'))
+            {
+                after.next();
+            }
+            if !after.peek().is_some_and(|(_, c)| *c == '\n') {
+                continue;
+            }
+            after.next();
+        } else {
+            if !is_cjk_terminator(character) {
+                while after.peek().is_some_and(|(_, c)| is_closer(*c)) {
+                    after.next();
+                }
+                if after.peek().is_some_and(|(_, c)| !c.is_whitespace()) {
+                    continue;
+                }
+            }
+            while after.peek().is_some_and(|(_, c)| c.is_whitespace()) {
+                after.next();
+            }
         }
-        index += 1;
+        let end = after.peek().map_or(text.len(), |(offset, _)| *offset);
+        ranges.push(start..end);
+        start = end;
+        characters = after;
     }
     if start < text.len() {
         ranges.push(start..text.len());
@@ -96,62 +104,6 @@ fn is_closer(character: char) -> bool {
         character,
         '"' | '\'' | ')' | ']' | '}' | '»' | '”' | '’' | '」' | '』' | '】' | '〉' | '》'
     )
-}
-
-/// Index of the character after a blank line starting at a line break.
-fn blank_line_break(characters: &[(usize, char)], index: usize) -> Option<usize> {
-    let mut next = index + 1;
-    while next < characters.len() && matches!(characters[next].1, ' ' | '\t' | '\r') {
-        next += 1;
-    }
-    (next < characters.len() && characters[next].1 == '\n').then_some(next + 1)
-}
-
-/// Byte offset of the character at `index`, or `end` past the last one.
-fn offset_at(characters: &[(usize, char)], index: usize, end: usize) -> usize {
-    characters.get(index).map_or(end, |(offset, _)| *offset)
-}
-
-/// Whether the terminator at `index` ends a sentence.
-fn ends_sentence(characters: &[(usize, char)], index: usize) -> bool {
-    let (_, terminator) = characters[index];
-    let mut next = index + 1;
-    while next < characters.len() && is_closer(characters[next].1) {
-        next += 1;
-    }
-    let following = characters.get(next).map(|(_, character)| *character);
-    match following {
-        None => true,
-        Some(character) => {
-            if is_cjk_terminator(terminator) {
-                return true;
-            }
-            if !character.is_whitespace() {
-                return false;
-            }
-            // `3.14` never ends a sentence, even before whitespace.
-            !(terminator == '.'
-                && index > 0
-                && characters[index - 1].1.is_ascii_digit()
-                && characters
-                    .get(next)
-                    .is_some_and(|(_, character)| character.is_ascii_digit()))
-        }
-    }
-}
-
-/// End offset of the sentence whose terminator is at `index`.
-fn sentence_end(characters: &[(usize, char)], index: usize, end: usize) -> Option<usize> {
-    let mut next = index + 1;
-    if !is_cjk_terminator(characters[index].1) {
-        while next < characters.len() && is_closer(characters[next].1) {
-            next += 1;
-        }
-    }
-    while next < characters.len() && characters[next].1.is_whitespace() {
-        next += 1;
-    }
-    Some(offset_at(characters, next, end))
 }
 
 #[cfg(test)]
