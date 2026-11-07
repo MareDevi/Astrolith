@@ -836,6 +836,7 @@ impl Render for WriterSurface {
         let content = div()
             .id("writer-wysiwyg-content")
             .test_support()
+            .cursor_text()
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
