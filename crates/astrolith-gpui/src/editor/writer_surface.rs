@@ -230,11 +230,11 @@ impl WriterSurface {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         self.parse_cancel = cancel.clone();
-        // The diff must map the text the accepted document was built from to
-        // this snapshot, not an older pending revision.
+        // Pending hit-test geometry already holds the diff from the accepted
+        // document to this snapshot. Obsolete results cannot change that base.
         let previous_text = self.parsed_text.clone();
         let previous_document = self.document.clone();
-        let change = TextChange::between(&self.parsed_source, &source);
+        let change = self.pending_edit.clone();
         let work = cx.background_spawn(async move {
             if cancel.load(Ordering::Relaxed) {
                 return None;

@@ -5,6 +5,7 @@ use std::ops::Range;
 
 /// One conservative replacement between the displayed and latest snapshots.
 /// Source ranges stay in UTF-8 bytes, including composition text.
+#[derive(Clone)]
 pub(super) struct TextChange {
     pub(super) old: Range<usize>,
     pub(super) new: Range<usize>,
