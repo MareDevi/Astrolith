@@ -117,9 +117,10 @@ impl RichText {
         });
     }
 
-    /// Add a mark over the already-rendered range.
+    /// Add a mark over the already-rendered range. Images retain their
+    /// destination even when they have no rendered alt text.
     fn mark(&mut self, range: Range<usize>, kind: InlineMarkKind) {
-        if range.start < range.end {
+        if range.start < range.end || matches!(kind, InlineMarkKind::Image(_)) {
             self.marks.push(InlineMark { range, kind });
         }
     }
@@ -1023,16 +1024,16 @@ fn standalone_image(mut block: RichBlock) -> RichBlock {
     let text = &block.text.text;
     let start = text.len() - text.trim_start().len();
     let end = text.trim_end().len();
-    let Some(mark) = block.text.marks.iter().find(|mark| {
-        matches!(mark.kind, InlineMarkKind::Image(_))
-            && mark.range.start <= start
-            && mark.range.end >= end
-    }) else {
+    let mut images = block.text.marks.iter().filter_map(|mark| match &mark.kind {
+        InlineMarkKind::Image(url) => Some((&mark.range, url)),
+        _ => None,
+    });
+    let Some((range, url)) = images.next() else {
         return block;
     };
-    let InlineMarkKind::Image(url) = &mark.kind else {
+    if images.next().is_some() || range.start > start || range.end < end {
         return block;
-    };
+    }
     block.kind = BlockKind::Image { url: url.clone() };
     block
 }
@@ -2054,6 +2055,40 @@ Second paragraph.
             }
         );
         assert_eq!(document.blocks[0].text.text, "cover");
+    }
+
+    #[test]
+    fn a_standalone_image_with_empty_alt_keeps_its_destination() {
+        let url = "https://example.com/cover.png";
+        let source = format!("## Heading\n\n![]({url})  \n\nFollowing text.");
+        let document = WysiwygDocument::parse(&source);
+        let image = &document.blocks[1];
+        assert_eq!(
+            image.kind,
+            BlockKind::Image {
+                url: url.to_owned()
+            }
+        );
+        assert!(image.text.text.is_empty(), "empty alt text remains empty");
+    }
+
+    #[test]
+    fn a_paragraph_with_multiple_images_does_not_discard_an_image() {
+        let document = WysiwygDocument::parse("![](./a.png) ![](./b.png)\n");
+        let paragraph = &document.blocks[0];
+        assert_eq!(paragraph.kind, BlockKind::Paragraph);
+        assert_eq!(
+            paragraph
+                .text
+                .marks
+                .iter()
+                .filter_map(|mark| match &mark.kind {
+                    InlineMarkKind::Image(url) => Some(url.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["./a.png", "./b.png"],
+        );
     }
 
     #[test]
