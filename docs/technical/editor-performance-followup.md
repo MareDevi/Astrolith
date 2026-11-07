@@ -28,6 +28,7 @@ Linux / Hyprland / Wayland，gpui-pre，dev 构建，无 profiler。数据来自
 
 - `editor-fix-input-gated-20261107`：复用 diff 后 20 次输入，事务 p95 3.99 ms、安装 p95 15.24 ms。该轮处于锁屏状态，仅保留 CPU 诊断数据；历史脚本的 `passed` 不作为原生验收。
 - `editor-fix-locked-gate-20261107`：加入锁屏检测后，场景执行正常，性能状态为 `not_run`；`--enforce-slo` 退出码 1。
+- `editor-followup-mode-smoke-20261107`：最终代码在原生进程中完成 12 次实际模式切换、26 个驱动步骤并以 0 退出。锁屏使性能状态为 `not_run`；此轮仅作为启动和模式切换验证。
 
 原生测试窗口曾确认 Writing 显示光标和 fcitx5/Rime 候选框，也观察到预编辑仍显示时 `Ctrl+S` 写入了临时文字。修复前的回归测试复现 `sync_buffer` 吸收预编辑，以及取消后选中文字未恢复。修复后的 GPUI 测试覆盖保存快照、提交、unmark、取消和一次源码撤销。修复后的原生键盘复测因 Hyprland 锁屏无法取得测试窗口焦点，尚未验收。
 
