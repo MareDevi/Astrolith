@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use gpui_kit::component::input::{EditorState, RopeExt};
+use gpui_kit::component::input::{EditorState, InputEvent, RopeExt};
 use gpui_kit::{
     Bounds, ClipboardItem, Context, ElementInputHandler, Entity, EntityInputHandler, Focusable,
     Pixels, Point, UTF16Selection, Window, point, px, size,
@@ -13,7 +13,9 @@ use super::WriterSurface;
 
 impl WriterSurface {
     pub(super) fn input_model(&self, cx: &Context<Self>) -> Option<Entity<EditorState>> {
-        Some(self.session.upgrade()?.read(cx).editor.clone())
+        let session = self.session.upgrade()?;
+        let session = session.read(cx);
+        (!session.is_source_view()).then(|| session.editor.clone())
     }
 
     pub(super) fn register_input(
@@ -65,7 +67,18 @@ impl EntityInputHandler for WriterSurface {
 
     fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = self.input_model(cx) {
-            editor.update(cx, |editor, cx| editor.unmark_text(window, cx));
+            let committing = self
+                .session
+                .upgrade()
+                .is_some_and(|session| session.read(cx).writer_preedit_active());
+            editor.update(cx, |editor, cx| {
+                editor.unmark_text(window, cx);
+                if committing {
+                    // Kit unmarks without a Change; publish this commit to the
+                    // session just as a replacement commit would.
+                    cx.emit(InputEvent::Change);
+                }
+            });
         }
     }
 
@@ -97,9 +110,25 @@ impl EntityInputHandler for WriterSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(editor) = self.input_model(cx) {
-            editor.update(cx, |editor, cx| {
-                editor.replace_and_mark_text_in_range(range, text, selected, window, cx)
+        let (Some(session), Some(editor)) = (self.session.upgrade(), self.input_model(cx)) else {
+            return;
+        };
+        if text.is_empty()
+            && session.update(cx, |session, cx| session.cancel_writer_preedit(window, cx))
+        {
+            return;
+        }
+        let initial = (!text.is_empty() && !session.read(cx).writer_preedit_active()).then(|| {
+            let editor = editor.read(cx);
+            (editor.text().clone(), editor.selected_range())
+        });
+        let marked = editor.update(cx, |editor, cx| {
+            editor.replace_and_mark_text_in_range(range, text, selected, window, cx);
+            initial.is_some() && editor.marked_text_range(window, cx).is_some()
+        });
+        if marked && let Some((before, selection)) = initial {
+            session.update(cx, |session, _| {
+                session.retain_writer_preedit(before, selection)
             });
         }
     }

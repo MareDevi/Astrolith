@@ -2060,7 +2060,7 @@ impl Shell {
         let mode_started = crate::editor::perf::start();
         self.project.update(cx, |project, cx| {
             project.set_source_view(mode == WorkspaceMode::Build, window, cx);
-            project.set_writer_visible(mode == WorkspaceMode::Writing, cx);
+            project.set_writer_visible(mode == WorkspaceMode::Writing, window, cx);
         });
         if let Some(started) = mode_started {
             crate::editor::perf::span("mode_handler", mode.label(), started.elapsed());

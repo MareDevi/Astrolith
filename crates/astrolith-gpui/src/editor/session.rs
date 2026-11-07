@@ -10,11 +10,11 @@ use astrolith_lsp::{ClientHandle, LanguageId};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::input::{
     EditorState, InputEvent, Position, RangeDecoration, RangeDecorationCollection,
-    RangeDecorationStyle, Rope,
+    RangeDecorationStyle, Rope, RopeExt,
 };
 use gpui_kit::{
-    App, AppContext, Context, Entity, EventEmitter, Focusable, Pixels, Point, SharedString,
-    Subscription, Task, Window, point, px,
+    App, AppContext, Context, Entity, EntityInputHandler, EventEmitter, Focusable, Pixels, Point,
+    SharedString, Subscription, Task, Window, point, px,
 };
 
 use crate::editor::component_builder::snippets::PreparedInsertion;
@@ -65,6 +65,8 @@ pub(crate) struct DocumentSession {
     history: SourceHistory,
     /// Selection captured before the next source transaction, in source bytes.
     last_selection: Range<usize>,
+    /// The input bridge owns live preedit; source snapshots keep its baseline.
+    writer_preedit: Option<(Rope, Range<usize>)>,
     /// Build selects the source model; Writing selects the projected model.
     source_view: bool,
     /// Syntax language the complete-source view highlights.
@@ -339,7 +341,8 @@ impl DocumentSession {
         let blur = cx.on_blur(
             &editor.read(cx).focus_handle(cx),
             window,
-            |this, _window, cx| {
+            |this, window, cx| {
+                this.cancel_writer_preedit(window, cx);
                 if this.buffer.is_dirty() {
                     cx.emit(SaveOnBlur);
                 }
@@ -464,6 +467,7 @@ impl DocumentSession {
             programmatic_change: false,
             history: SourceHistory::default(),
             last_selection: 0..0,
+            writer_preedit: None,
             source_view: false,
             language,
             next_occurrence: None,
@@ -521,7 +525,21 @@ impl DocumentSession {
         // Compare retained input snapshots and map the changed byte range
         // back before anything reads the authoritative buffer.
         self.programmatic_change = std::mem::take(&mut self.writing_self);
-        let intent = if self.programmatic_change {
+        let composition = if self.writer_preedit.is_some() && !self.source_view {
+            if self.editor.update(cx, |editor, cx| {
+                editor.marked_text_range(window, cx).is_some()
+            }) {
+                self.refresh_writer(cx);
+                return;
+            }
+            self.writer_preedit.take()
+        } else {
+            None
+        };
+        if let Some((_, selection)) = &composition {
+            self.last_selection = self.projection_range_to_source(selection.clone());
+        }
+        let intent = if self.programmatic_change || composition.is_some() {
             HistoryIntent::Atomic
         } else {
             HistoryIntent::Typing
@@ -1212,8 +1230,48 @@ impl DocumentSession {
             .update(cx, |writer, cx| writer.set_style(style, cx));
     }
 
+    pub(super) fn retain_writer_preedit(&mut self, before: Rope, selection: Range<usize>) {
+        self.writer_preedit.get_or_insert((before, selection));
+    }
+
+    pub(super) fn writer_preedit_active(&self) -> bool {
+        self.writer_preedit.is_some()
+    }
+
+    /// Restore the original text and selection without recording a source edit.
+    pub(super) fn cancel_writer_preedit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((before, selection)) = self.writer_preedit.take() else {
+            return false;
+        };
+        self.writer_editor.update(cx, |editor, cx| {
+            if let Some(change) = TextChange::between(editor.text(), &before) {
+                let current = editor.text();
+                let range = current.offset_to_offset_utf16(change.old.start)
+                    ..current.offset_to_offset_utf16(change.old.end);
+                let replacement = before.slice(change.new).to_string();
+                editor.replace_text_in_range(Some(range), &replacement, window, cx);
+            }
+            editor.unmark_text(window, cx);
+            editor.set_selected_range(selection.clone(), cx);
+        });
+        self.last_selection = self.projection_range_to_source(selection);
+        true
+    }
+
     /// Stop or resume the caret blink for this document's visible surface.
-    pub(crate) fn set_writer_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_writer_visible(
+        &mut self,
+        visible: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !visible {
+            self.cancel_writer_preedit(window, cx);
+        }
         self.writer
             .update(cx, |writer, cx| writer.set_visible(visible, cx));
     }
@@ -1421,6 +1479,9 @@ impl DocumentSession {
     /// the editor event path already absorbed the last delivered `Change`.
     /// Undo one complete-source transaction, body or hidden frontmatter.
     pub(crate) fn undo_source(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.cancel_writer_preedit(window, cx) {
+            return true;
+        }
         self.absorb(cx);
         let Some(entry) = self.history.undo_entry() else {
             return false;
@@ -1607,6 +1668,9 @@ impl DocumentSession {
 
     /// Map a retained input snapshot change into the authoritative source.
     fn absorb_with_intent(&mut self, cx: &App, intent: HistoryIntent) {
+        if !self.source_view && self.writer_preedit.is_some() {
+            return;
+        }
         let text_key = (
             self.editor.entity_id(),
             self.buffer.revision(),
@@ -1762,6 +1826,7 @@ impl DocumentSession {
         if self.source_view == source {
             return;
         }
+        self.cancel_writer_preedit(window, cx);
         self.absorb(cx);
         let source_selection = self.current_source_selection(cx);
         let revision = self.buffer.revision();
@@ -2172,6 +2237,7 @@ impl DocumentSession {
     /// A rebuild moves hidden bytes around the visible text, so the caret is
     /// mapped through the visible diff rather than through source offsets.
     fn rebuild_projection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_writer_preedit(window, cx);
         let previous_visible = self.projection.visible.clone();
         let caret = self.editor.read(cx).cursor().min(previous_visible.len());
         let source_caret = if self.source_view {

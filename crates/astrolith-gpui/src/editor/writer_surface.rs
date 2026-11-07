@@ -1412,6 +1412,14 @@ mod tests {
             input.compose_text(None, "に🦀", Some(3..3), cx);
             assert_eq!(input.marked_text_range(cx), Some(2..5));
             drop(input);
+            session.update(cx, |session, cx| {
+                session.sync_buffer(cx);
+                assert_eq!(
+                    session.buffer.current_text(),
+                    source,
+                    "save and recovery see committed bytes only"
+                );
+            });
         })
         .unwrap();
         cx.run_until_parked();
@@ -1455,6 +1463,60 @@ mod tests {
                 "one undo removes the whole composition"
             )
         });
+    }
+
+    #[gpui_kit::test]
+    fn unmarking_commits_preedit_without_a_replacement(cx: &mut TestAppContext) {
+        use gpui_kit::{ElementInputHandler, test::TestInput};
+
+        let (handle, session) = mount_writer(cx, "Hello");
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let bounds = writer.read(cx).geometry.borrow().viewport;
+            let mut input = TestInput::new(ElementInputHandler::new(bounds, writer), window);
+            input.compose_text(None, "你", Some(1..1), cx);
+            input.unmark_text(cx);
+        })
+        .unwrap();
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.buffer.current_text(), "你Hello");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn cancelling_preedit_restores_the_replaced_selection(cx: &mut TestAppContext) {
+        use gpui_kit::{ElementInputHandler, test::TestInput};
+
+        let source = "# Hello\n";
+        let (handle, session) = mount_writer(cx, source);
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session.set_writer_selection(2, 7, window, cx)
+            });
+            window.render_frame(cx);
+            let bounds = writer.read(cx).geometry.borrow().viewport;
+            let mut input =
+                TestInput::new(ElementInputHandler::new(bounds, writer.clone()), window);
+            input.compose_text(None, "に🦀", Some(3..3), cx);
+            input.compose_text(None, "", None, cx);
+            assert_eq!(input.marked_text_range(cx), None);
+            assert_eq!(input.selected_text_range(cx).unwrap().range, 2..7);
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            session.update(cx, |session, cx| {
+                session.sync_buffer(cx);
+                assert_eq!(session.buffer.current_text(), source);
+                assert_eq!(session.editor.read(cx).value().as_str(), source);
+                assert!(
+                    !session.undo_source(window, cx),
+                    "cancel does not add source history"
+                );
+            });
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
