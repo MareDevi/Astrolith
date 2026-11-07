@@ -56,6 +56,7 @@ use astrolith_core::preferences::{ModeLayouts, PreviewPresentation, WorkspaceMod
 use astrolith_document::{DocumentKind, DocumentRevision};
 use astrolith_preview::{HostEnvironment, PreviewCapability};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::{Presence, Sheet, Transition};
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
     button::{Button, ButtonVariants},
@@ -63,12 +64,13 @@ use gpui_kit::component::{
     dock::{BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
     kbd::Kbd,
     menu::{DropdownMenu, PopupMenuItem},
+    scroll::ScrollableElement as _,
 };
 use gpui_kit::{
     Animation, AnimationExt as _, App, AppContext, Bounds, Context, Entity, ExternalPaths,
     FocusHandle, Focusable, IntoElement, PathPromptOptions, Render, ScrollHandle, SharedString,
-    Subscription, Task, TestSupportExt, Window, WindowBounds, WindowOptions, div, point,
-    prelude::*, px, rems, size,
+    Subscription, Task, TestSupportExt, WeakFocusHandle, Window, WindowBounds, WindowOptions,
+    deferred, div, point, prelude::*, px, rems, size,
 };
 
 /// Latest global and project snapshots, flushed by the quit observer.
@@ -276,6 +278,8 @@ pub(crate) struct Shell {
     frontmatter_key: Option<FrontmatterKey>,
     /// Floating frontmatter inspector visibility; never persisted.
     inspector_open: bool,
+    inspector_focus: FocusHandle,
+    inspector_return_focus: Option<WeakFocusHandle>,
     preview: Entity<PreviewPanel>,
     /// Rendered Markdown/MDX reading pane shown in Preview mode.
     rendered: Entity<RenderedDocument>,
@@ -424,7 +428,7 @@ impl Shell {
             navigator.set_view(project.clone().into(), cx)
         });
         let frontmatter = cx.new(FrontmatterForm::new);
-        let header = cx.new(|cx| DocumentHeader::new(project.clone(), frontmatter.clone(), cx));
+        let header = cx.new(|cx| DocumentHeader::new(project.clone(), cx));
         document.update(cx, |document, cx| {
             document.set_header(header.clone().into(), cx)
         });
@@ -549,14 +553,13 @@ impl Shell {
                 }
             }),
         ];
-        subscriptions.push(cx.observe(&header, |this, header, cx| {
-            let open = header.read(cx).inspector_open();
-            if this.inspector_open != open {
-                this.inspector_open = open;
-                this.menus_dirty = true;
-                cx.notify();
-            }
-        }));
+        subscriptions.push(cx.subscribe_in(
+            &header,
+            window,
+            |this, _, _: &crate::editor::header::InspectorRequested, window, cx| {
+                this.toggle_panel(PanelKind::Inspector, window, cx);
+            },
+        ));
         subscriptions.push(cx.subscribe_in(
             &project,
             window,
@@ -777,6 +780,8 @@ impl Shell {
             frontmatter,
             frontmatter_key: None,
             inspector_open: false,
+            inspector_focus: cx.focus_handle(),
+            inspector_return_focus: None,
             preview,
             rendered,
             rendered_panel,
@@ -2049,7 +2054,7 @@ impl Shell {
         // Fold any pending splitter movement into the outgoing mode first.
         self.capture_layout(cx);
         let inspector_open = self.inspector_open;
-        self.set_inspector_open(false, cx);
+        self.set_inspector_open(false, window, cx);
         self.mode = mode;
         if mode == WorkspaceMode::Preview {
             // Re-install the reading pane once when the view becomes visible,
@@ -2122,7 +2127,7 @@ impl Shell {
             {
                 return;
             }
-            self.set_inspector_open(!self.inspector_open, cx);
+            self.set_inspector_open(!self.inspector_open, window, cx);
             return;
         }
         if matches!(kind, PanelKind::Preview) {
@@ -2145,18 +2150,112 @@ impl Shell {
         cx.notify();
     }
 
-    /// Open or close the floating frontmatter inspector.
-    ///
-    /// The popover owns focus capture and restoration; this only flips the
-    /// transient state both the shell and the document rail render from.
-    pub(crate) fn set_inspector_open(&mut self, open: bool, cx: &mut Context<Self>) {
+    /// Transfer focus to the floating inspector and restore it on dismissal.
+    fn set_inspector_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.inspector_open == open {
             return;
         }
+        if open {
+            if window.has_active_sheet(cx) || window.has_active_dialog(cx) {
+                return;
+            }
+            self.inspector_return_focus = window.focused(cx).map(|focus| focus.downgrade());
+            self.inspector_focus.focus(window, cx);
+        } else if let Some(focus) = self
+            .inspector_return_focus
+            .take()
+            .and_then(|focus| focus.upgrade())
+        {
+            focus.focus(window, cx);
+        }
         self.inspector_open = open;
+        self.menus_dirty = true;
         self.document_header
             .update(cx, |header, cx| header.set_inspector_open(open, cx));
         cx.notify();
+    }
+
+    fn render_inspector(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        let motion = cx.theme().motion_tokens();
+        let transition = Transition::new(motion.duration_normal).easing(motion.easing_move.clone());
+        let presence = Presence::new("frontmatter-inspector-motion", self.inspector_open)
+            .transition(transition)
+            .sample(window, cx);
+        if !self.inspector_open && presence.progress <= 0. {
+            return None;
+        }
+        let inset = window.rem_size();
+        let width = (window.viewport_size().width - inset * 2.)
+            .max(px(0.))
+            .min(px(416.));
+        let right = inset - (width + inset) * (1. - presence.progress);
+        let project = self.project.read(cx);
+        let subtitle = project
+            .open_tabs()
+            .get(project.active_tab_index())
+            .and_then(|tab| tab.collection.as_ref())
+            .map_or_else(
+                || "Entry details".to_owned(),
+                |collection| format!("Entry details · {collection}"),
+            );
+        let surface = div()
+            .id("frontmatter-inspector-surface")
+            .test_support()
+            .absolute()
+            .top(rems(4.5))
+            .right(right)
+            .bottom(inset)
+            .w(width)
+            .occlude()
+            .v_flex()
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .shadow_xl()
+            .child(
+                div()
+                    .v_flex()
+                    .flex_shrink_0()
+                    .gap_0p5()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(div().text_sm().font_semibold().child("Frontmatter"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(subtitle),
+                    ),
+            )
+            .child(
+                div()
+                    .v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(self.frontmatter.clone()),
+            );
+        let owner = cx.weak_entity();
+        let sheet = Sheet::new(cx)
+            .focus_handle(self.inspector_focus.clone())
+            .request_close(move |window, cx| {
+                let _ = owner.update(cx, |this, cx| this.set_inspector_open(false, window, cx));
+            })
+            .surface(surface);
+        let sheet = if self.inspector_open {
+            sheet.overlay(div().absolute().inset_0().occlude())
+        } else {
+            sheet
+        };
+        Some(deferred(sheet).into_any_element())
     }
 }
 
@@ -3325,13 +3424,6 @@ fn command_icon(command: CommandId) -> IconName {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The document rail owns the trigger click and the popover dismissal;
-        // mirror its state before menus and availability read it.
-        let inspector_open = self.document_header.read(cx).inspector_open();
-        if self.inspector_open != inspector_open {
-            self.inspector_open = inspector_open;
-            self.menus_dirty = true;
-        }
         // Editor focus and selection change availability without an event;
         // compare the cheap pair and rebuild menus only when it moved.
         let editor_key = self.project.read(cx).active_session(cx).map(|session| {
@@ -3382,7 +3474,14 @@ impl Render for Shell {
             }
         }
         if self.inspector_open && self.frontmatter_key.is_none() {
-            self.set_inspector_open(false, cx);
+            let owner = cx.weak_entity();
+            window.defer(cx, move |window, cx| {
+                let _ = owner.update(cx, |this, cx| {
+                    if this.project.read(cx).active_frontmatter_key().is_none() {
+                        this.set_inspector_open(false, window, cx);
+                    }
+                });
+            });
         }
         let layout = self.active_layout(self.mode);
         // The document face, size, line height and measure are explicit
@@ -3721,6 +3820,7 @@ impl Render for Shell {
                 shell.child(self.build_tab_strip(cx))
             })
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
+            .children(self.render_inspector(window, cx))
             .when(show_file_status, |shell| {
                 shell.child(
                     div()
@@ -4252,6 +4352,7 @@ mod tests {
         }));
         let before = cx
             .update_window(handle.into(), |_, window, cx| {
+                cx.set_reduce_motion(true);
                 window.render_frame(cx);
                 assert!(window.try_find("frontmatter-inspector-surface").is_none());
                 window.find("document-panel").bounds()
@@ -4264,24 +4365,37 @@ mod tests {
                 "inspector trigger must render"
             );
             window.click("toggle-inspector", cx);
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(
                 window.try_find("frontmatter-inspector-surface").is_some(),
-                "open={} trigger_open={:?}",
-                view.read(cx).inspector_open,
-                window
-                    .try_find("toggle-inspector")
-                    .map(|snapshot| snapshot.visible())
+                "the frontmatter form must be mounted in the sheet"
             );
             assert!(window.find("frontmatter-form").visible());
+            let drawer = window.find("frontmatter-inspector-surface").bounds();
+            assert!(
+                (window.viewport_size().width - drawer.right() - window.rem_size()).abs() <= px(1.)
+            );
             assert_eq!(window.find("document-panel").bounds(), before);
             assert!(view.read(cx).inspector_open);
         })
         .unwrap();
 
-        // Outside dismissal leaves the document at the same geometry.
+        // Outside dismissal keeps the drawer mounted while it slides out.
         cx.update_window(handle.into(), |_, window, cx| {
+            cx.set_reduce_motion(false);
             window.click_at("document-panel", point(px(40.), px(400.)), cx);
+            window.render_frame(cx);
+            assert!(!view.read(cx).inspector_open);
+            assert!(window.try_find("frontmatter-inspector-surface").is_some());
+            assert_eq!(window.find("document-panel").bounds(), before);
+        })
+        .unwrap();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(window.try_find("frontmatter-inspector-surface").is_none());
             assert_eq!(window.find("document-panel").bounds(), before);
@@ -4289,17 +4403,6 @@ mod tests {
         .unwrap();
         assert!(cx.update(|cx| !view.read(cx).inspector_open));
 
-        // The header close button dismisses without touching the document.
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.click("toggle-inspector", cx);
-            window.render_frame(cx);
-            window.click("inspector-close", cx);
-            window.render_frame(cx);
-            assert!(window.try_find("frontmatter-inspector-surface").is_none());
-            assert_eq!(window.find("document-panel").bounds(), before);
-        })
-        .unwrap();
-        assert!(cx.update(|cx| !view.read(cx).inspector_open));
         assert!(project.read_with(cx, |_, _| true));
     }
 
@@ -4323,6 +4426,7 @@ mod tests {
             .read_with(cx, |session, _| session.editor.clone());
 
         cx.update_window(handle.into(), |_, window, cx| {
+            cx.set_reduce_motion(true);
             window.render_frame(cx);
             window.click(("input", editor.entity_id()), cx);
             window.press("ctrl-2", cx);

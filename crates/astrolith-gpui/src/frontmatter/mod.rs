@@ -938,14 +938,11 @@ impl Render for FrontmatterForm {
         for (index, row) in self.rows.iter().enumerate() {
             rows.push(render_row(index, row, editor, &images, cx, window).into_any_element());
         }
-        // The form is the popover body: its host owns the header and close
-        // affordance, and this root is the single scrolling region.
+        // The inspector owns the scrolling region.
         div()
             .id("frontmatter-form")
             .v_flex()
-            .size_full()
-            .overflow_y_scroll()
-            .bg(cx.theme().background)
+            .w_full()
             .when_some(notice, |form, notice| {
                 form.child(
                     div()

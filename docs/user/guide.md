@@ -227,12 +227,11 @@ symbols, signature help, a diagnostics panel and cross-file code-action edits
 are not implemented; Markdown has no server.
 
 Open **Details** with the sliders button at the right of the document rail or
-`Ctrl+2` (`Cmd+2` on macOS). It is a non-modal popover: it never changes the
-document's width or position. **Escape**, a click outside, or its close button
-dismisses it and returns focus to the document. When a select or date picker
-inside the inspector is open, the first Escape closes that control and the
-next closes the inspector. The inspector is closed by default, is not part of
-a saved layout, and closes when you switch workspace mode.
+`Ctrl+2` (`Cmd+2` on macOS). It slides in from the right and floats inset from
+the window edge without changing the document's width or position. Click outside
+or press **Escape** to slide it away and restore focus. If a select or date
+picker is open, the first Escape closes that control. The inspector is closed
+by default, is not part of a saved layout, and closes when you switch mode.
 
 **New entry** creates a file in the collection you are viewing. Opening an
 entry from another collection switches the Library to that collection, so the

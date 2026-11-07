@@ -1520,7 +1520,9 @@ impl ProjectWorkspace {
     /// ordinary typing never does.
     pub fn active_frontmatter_key(&self) -> Option<FrontmatterKey> {
         let path = self.active.clone()?;
-        if !supports_frontmatter(&path) {
+        // The entry can become active before its source finishes loading.
+        // Don't cache a form key until there is a session to populate it.
+        if !supports_frontmatter(&path) || !self.sessions.contains_key(&path) {
             return None;
         }
         let collection = self.session_collections.get(&path)?;
