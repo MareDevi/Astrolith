@@ -29,9 +29,10 @@ Linux / Hyprland / Wayland，gpui-pre，dev 构建，无 profiler。数据来自
 - `editor-fix-input-gated-20261107`：复用 diff 后 20 次输入，事务 p95 3.99 ms、安装 p95 15.24 ms。该轮处于锁屏状态，仅保留 CPU 诊断数据；历史脚本的 `passed` 不作为原生验收。
 - `editor-fix-locked-gate-20261107`：加入锁屏检测后，场景执行正常，性能状态为 `not_run`；`--enforce-slo` 退出码 1。
 - `editor-followup-mode-smoke-20261107`：最终代码在原生进程中完成 12 次实际模式切换、26 个驱动步骤并以 0 退出。锁屏使性能状态为 `not_run`；此轮仅作为启动和模式切换验证。
+- `editor-followup-input-unlocked-20261107`：解锁后以最终代码再测 1 MiB 单行，20 次输入、281 帧。Writing 帧 CPU p95 2.88 ms，编辑安装 p95 23.52 ms；输入事务 p95 4.88 ms，仍超过 4 ms 门槛，因此严格性能判定为失败。安装时间不是输入到呈现延迟。
 
-原生测试窗口曾确认 Writing 显示光标和 fcitx5/Rime 候选框，也观察到预编辑仍显示时 `Ctrl+S` 写入了临时文字。修复前的回归测试复现 `sync_buffer` 吸收预编辑，以及取消后选中文字未恢复。修复后的 GPUI 测试覆盖保存快照、提交、unmark、取消和一次源码撤销。修复后的原生键盘复测因 Hyprland 锁屏无法取得测试窗口焦点，尚未验收。
+原生测试窗口曾确认 Writing 显示光标和 fcitx5/Rime 候选框，也观察到预编辑仍显示时 `Ctrl+S` 写入了临时文字。修复前的回归测试复现 `sync_buffer` 吸收预编辑，以及取消后选中文字未恢复。修复后的 GPUI 测试覆盖保存快照、提交、unmark、取消和一次源码撤销。第一次修复后复测被锁屏阻断。解锁后以 Linux uinput 测试键盘走实际 Wayland/fcitx5/Rime 路径，Writing 输入通过本轮验收（`editor-followup-ime-rime-20261107`）：截图可见光标和候选框；`ni` 预编辑时保存不改文件，确认后只插入「你」；取消 `hao` 保持文件不变；一次撤销后恢复原始字节；英文输入与保存也通过。
 
 `mise run check`：1,050 Rust 测试通过，8 忽略；5 项性能脚本测试和 Astro fixture 通过。GPUI 无窗口测试不能代替真实候选框和系统输入测试。
 
-默认 Build 仍用 stock Editor，长单行整形仍超预算。实验 SourceSurface 的折叠及功能对等尚未完成，因此保持现有默认路径。平台输入、分数缩放、release、长期内存和输入到呈现延迟仍按原计划独立验收。
+默认 Build 仍用 stock Editor，长单行整形仍超预算。实验 SourceSurface 的折叠及功能对等尚未完成，因此保持现有默认路径。其他平台输入、剪贴板、分数缩放、release、长期内存和输入到呈现延迟仍按原计划独立验收。
