@@ -1,0 +1,188 @@
+2026-11-07T12:50:40.544473Z  INFO main astrolith_observability: crates/astrolith-observability/src/lib.rs:362: logging initialized filter=info log_directory=None file_format=Json
+2026-11-07T12:50:40.544537Z  INFO main astrolith_desktop: apps/desktop/src/main.rs:44: Astrolith starting version="0.1.0" os="linux" arch="x86_64" pid=43885 log_directory=None
+2026-11-07T12:50:40.562259Z  INFO main gpui_linux::linux::platform: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-linux-0.3.11/src/linux/platform.rs:1693: Compositor GPU hint: vendor=0x8086, device=0x7d55 (from dev 226:128)
+2026-11-07T12:50:40.564639Z  WARN main gpui::text_system: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-0.3.11/src/text_system.rs:617: failed to load font Font { family: ".SystemUIFont", features: FontFeatures, fallbacks: None, weight: FontWeight(400.0), style: Normal }: requested font family contains no font matching the other parameters: no font found
+2026-11-07T12:50:40.564671Z  INFO main gpui_component::theme::system_font: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-component-0.9.0/src/theme/system_font.rs:47: UI font ".SystemUIFont" resolves to "Adwaita Sans", naming it on the theme.
+2026-11-07T12:50:40.567697Z  INFO main astrolith_gpui::shell: crates/astrolith-gpui/src/shell.rs:108: GPUI backend selected for this build gpui_fast=false
+2026-11-07T12:50:40.567914Z  INFO main astrolith_gpui::runtime: crates/astrolith-gpui/src/runtime.rs:49: application service runtime started async_workers=2 blocking_threads=4 blocking_jobs=2
+2026-11-07T12:50:40.570486Z  INFO main astrolith_gpui::shell: crates/astrolith-gpui/src/shell.rs:142: preferences loaded theme=System
+2026-11-07T12:50:40.610889Z ERROR main wgpu_hal::vulkan::instance: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-hal-30.0.1/src/vulkan/instance.rs:97: GENERAL [Loader Message (0x0)]
+	loader_create_instance_chain: Failed to find 'vkGetInstanceProcAddr' in layer "/home/maredevi/.local/share/vulkan/implicit_layer.d/../../../lib/liblsfg-vk-layer.so"
+2026-11-07T12:50:40.610945Z ERROR main wgpu_hal::vulkan::instance: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-hal-30.0.1/src/vulkan/instance.rs:149: 	objects: (type: INSTANCE, hndl: 0x5571c2c74850, name: ?)
+2026-11-07T12:50:40.649085Z  INFO main wgpu_hal::vulkan::adapter: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-hal-30.0.1/src/vulkan/adapter.rs:3546: Found 6 cooperative matrix configurations supported by wgpu
+2026-11-07T12:50:40.651195Z  INFO main gpui_wgpu::wgpu_context: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-wgpu-0.3.11/src/wgpu_context.rs:538: Found 3 GPU adapter(s):
+2026-11-07T12:50:40.651212Z  INFO main gpui_wgpu::wgpu_context: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-wgpu-0.3.11/src/wgpu_context.rs:541:   - Intel(R) Arc(tm) Graphics (MTL) (vendor=0x8086, device=0x7d55, backend=Vulkan, type=IntegratedGpu)
+2026-11-07T12:50:40.651219Z  INFO main gpui_wgpu::wgpu_context: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-wgpu-0.3.11/src/wgpu_context.rs:541:   - NVIDIA GeForce RTX 4060 Laptop GPU (vendor=0x10de, device=0x28e0, backend=Vulkan, type=DiscreteGpu)
+2026-11-07T12:50:40.651224Z  INFO main gpui_wgpu::wgpu_context: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-wgpu-0.3.11/src/wgpu_context.rs:541:   - Mesa Intel(R) Arc(tm) Graphics (MTL) (vendor=0x8086, device=0x0000, backend=Gl, type=IntegratedGpu)
+2026-11-07T12:50:40.651231Z  INFO main gpui_wgpu::wgpu_context: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-wgpu-0.3.11/src/wgpu_context.rs:564: Testing adapter: Intel(R) Arc(tm) Graphics (MTL) (Vulkan)...
+2026-11-07T12:50:40.652035Z ERROR main wgpu_hal::vulkan::instance: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-hal-30.0.1/src/vulkan/instance.rs:97: GENERAL [Loader Message (0x0)]
+	loader_create_device_chain: Failed to find 'vkGetInstanceProcAddr' in layer "/home/maredevi/.local/share/vulkan/implicit_layer.d/../../../lib/liblsfg-vk-layer.so".  Skipping layer.
+2026-11-07T12:50:40.652084Z ERROR main wgpu_hal::vulkan::instance: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-hal-30.0.1/src/vulkan/instance.rs:149: 	objects: (type: INSTANCE, hndl: 0x5571c2c74850, name: ?)
+2026-11-07T12:50:40.674219Z  INFO main gpui_wgpu::wgpu_context: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-wgpu-0.3.11/src/wgpu_context.rs:568: Selected GPU (passed configuration test): Intel(R) Arc(tm) Graphics (MTL) (Vulkan)
+2026-11-07T12:50:40.674335Z  INFO main gpui_wgpu::wgpu_context: /home/maredevi/.local/share/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-pre-wgpu-0.3.11/src/wgpu_context.rs:307: Selected GPU adapter: "Intel(R) Arc(tm) Graphics (MTL)" (Vulkan)
+2026-11-07T12:50:40.946579Z  INFO main astrolith_gpui::shell: crates/astrolith-gpui/src/shell.rs:177: main window opened
+2026-11-07T12:50:40.946760Z  INFO main astrolith::perf: crates/astrolith-gpui/src/shell/perf.rs:98: perf driver event="driver_start" steps=24 settle_ms=2000 wait_document_ms=15000 monotonic_ns=74 epoch_ms=1794055840946
+2026-11-07T12:50:40.967248Z  INFO main astrolith_gpui::project_discovery: crates/astrolith-gpui/src/project_discovery.rs:2467: opening Astro project root=/tmp/astrolith-editor-perf-BEStlq/project
+2026-11-07T12:50:40.973558Z  INFO main astrolith_gpui::project_discovery: crates/astrolith-gpui/src/project_discovery.rs:2571: Astro project opened project=workspace-1 generation=1 entries=1
+2026-11-07T12:50:40.976677Z  INFO main astrolith_gpui::terminal: crates/astrolith-gpui/src/terminal/mod.rs:379: started the project terminal root=/tmp/astrolith-editor-perf-BEStlq/project
+2026-11-07T12:50:40.976899Z  INFO main astrolith_gpui::preview: crates/astrolith-gpui/src/preview/mod.rs:459: attaching the preview panel to a project project=workspace-1 root=/tmp/astrolith-editor-perf-BEStlq/project
+2026-11-07T12:50:40.978899Z  WARN main astrolith_gpui::project_discovery::watch: crates/astrolith-gpui/src/project_discovery/watch.rs:240: collection schema generation failed error=Astro package does not declare an `astro` binary
+2026-11-07T12:50:40.978967Z  INFO main astrolith_gpui::project_discovery::load: crates/astrolith-gpui/src/project_discovery/load.rs:240: document loaded path=/tmp/astrolith-editor-perf-BEStlq/project/src/content/fixture.md bytes=1048576
+2026-11-07T12:50:40.996247Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.000736
+2026-11-07T12:50:41.003359Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:276: application text layout event="text_layout_frame" sequence=1 mode="writer" blocks=0 rows=0 wrapped_rows=0 wrapped_bytes=0 shaped_rows=0 shaped_bytes=0 reused_rows=0 pending=false pending_bytes=0 total_height=0.0 width=884.0999755859375 scroll=0.0 prepare_ms=0.003457
+2026-11-07T12:50:41.006030Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:66: writer frame event="writer_frame" sequence=2 blocks_total=0 blocks_rendered=0 nodes_built=0 nodes_reused=0 decorations=0 shaping_bytes=0 geometry_leaves=0 caret_blinks=0 render_ms=0.07022 layout_ms=0.0 prepaint_ms=0.0 paint_ms=0.013271999999999999
+2026-11-07T12:50:41.018648Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048576 reused_blocks=0 ms=4.503013
+2026-11-07T12:50:41.022902Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:41.022916Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=4.221791
+2026-11-07T12:50:41.022921Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="initial_install" ms=26.690488
+2026-11-07T12:50:42.967328Z  INFO main astrolith::perf: crates/astrolith-gpui/src/shell/perf.rs:121: perf document wait finished event="driver_document" ready=true monotonic_ns=2020557841 epoch_ms=1794055842967
+2026-11-07T12:50:43.667750Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="writing" ms=0.010815
+2026-11-07T12:50:44.368288Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="caret" ms=0.043411
+2026-11-07T12:50:45.771764Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.328714
+2026-11-07T12:50:45.774351Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.001127
+2026-11-07T12:50:45.778406Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.9865990000000004
+2026-11-07T12:50:45.780945Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048583 reused_blocks=0 ms=6.406421
+2026-11-07T12:50:45.785038Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:45.785050Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=4.065066
+2026-11-07T12:50:45.785054Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=10.706667
+2026-11-07T12:50:47.179151Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.301512
+2026-11-07T12:50:47.181592Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.001366
+2026-11-07T12:50:47.184774Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.124001
+2026-11-07T12:50:47.189952Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048590 reused_blocks=0 ms=8.036639
+2026-11-07T12:50:47.193865Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:47.193884Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=3.8931769999999997
+2026-11-07T12:50:47.193889Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=12.299245
+2026-11-07T12:50:48.585519Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.272407
+2026-11-07T12:50:48.588005Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.00116
+2026-11-07T12:50:48.591668Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.5975360000000003
+2026-11-07T12:50:48.597088Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048597 reused_blocks=0 ms=8.823253
+2026-11-07T12:50:48.603033Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:48.603046Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=5.912706999999999
+2026-11-07T12:50:48.603050Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=15.048837
+2026-11-07T12:50:49.992547Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.29821600000000004
+2026-11-07T12:50:49.995104Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.000891
+2026-11-07T12:50:49.998094Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=2.941337
+2026-11-07T12:50:50.002193Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048604 reused_blocks=0 ms=6.807307000000001
+2026-11-07T12:50:50.006120Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:50.006131Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=3.9092170000000004
+2026-11-07T12:50:50.006135Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=11.033536
+2026-11-07T12:50:51.398625Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.237822
+2026-11-07T12:50:51.400200Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.000897
+2026-11-07T12:50:51.404304Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=4.028903000000001
+2026-11-07T12:50:51.407930Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048611 reused_blocks=0 ms=7.555946
+2026-11-07T12:50:51.414982Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:51.415015Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=7.054994
+2026-11-07T12:50:51.415022Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=14.82656
+2026-11-07T12:50:52.805154Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.293169
+2026-11-07T12:50:52.807612Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.0009680000000000001
+2026-11-07T12:50:52.811083Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.4119770000000003
+2026-11-07T12:50:52.813450Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048618 reused_blocks=0 ms=5.6382639999999995
+2026-11-07T12:50:52.817756Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:52.817767Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=4.2927
+2026-11-07T12:50:52.817772Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=10.163045
+2026-11-07T12:50:54.211693Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.277854
+2026-11-07T12:50:54.213894Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.001139
+2026-11-07T12:50:54.216719Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=2.771993
+2026-11-07T12:50:54.220649Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048625 reused_blocks=0 ms=6.675285000000001
+2026-11-07T12:50:54.225035Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:54.225048Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=4.3614939999999995
+2026-11-07T12:50:54.225053Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=11.161696000000001
+2026-11-07T12:50:55.617388Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.286951
+2026-11-07T12:50:55.619776Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.000927
+2026-11-07T12:50:55.623011Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.181505
+2026-11-07T12:50:55.625756Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048632 reused_blocks=0 ms=5.897328
+2026-11-07T12:50:55.630495Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:55.630510Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=4.717562
+2026-11-07T12:50:55.630515Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=10.741043000000001
+2026-11-07T12:50:55.783224Z  INFO main astrolith_gpui::project_discovery::save: crates/astrolith-gpui/src/project_discovery/save.rs:231: document saved path=/tmp/astrolith-editor-perf-BEStlq/project/src/content/fixture.md revision=8 current=true
+2026-11-07T12:50:55.933656Z  WARN main astrolith_gpui::project_discovery::watch: crates/astrolith-gpui/src/project_discovery/watch.rs:496: project reindex failed; buffers retained error=invalid frontmatter in /tmp/astrolith-editor-perf-BEStlq/project/src/content/fixture.md: frontmatter exceeds 1048576 bytes
+2026-11-07T12:50:57.024042Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.332376
+2026-11-07T12:50:57.026564Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.001092
+2026-11-07T12:50:57.030063Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.442221
+2026-11-07T12:50:57.032921Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048639 reused_blocks=0 ms=6.174464
+2026-11-07T12:50:57.037151Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:57.037162Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=4.218987
+2026-11-07T12:50:57.037167Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=10.605316
+2026-11-07T12:50:58.430954Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.32132900000000003
+2026-11-07T12:50:58.433615Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.0011870000000000001
+2026-11-07T12:50:58.437674Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.9703389999999996
+2026-11-07T12:50:58.439953Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048646 reused_blocks=0 ms=6.106158000000001
+2026-11-07T12:50:58.446318Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:58.446329Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=6.334662
+2026-11-07T12:50:58.446334Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=12.728739
+2026-11-07T12:50:59.838528Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.270821
+2026-11-07T12:50:59.841106Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.0010780000000000002
+2026-11-07T12:50:59.844559Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.388347
+2026-11-07T12:50:59.849135Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048653 reused_blocks=0 ms=7.652679
+2026-11-07T12:50:59.853040Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:50:59.853052Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=3.890743
+2026-11-07T12:50:59.853057Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=11.954592
+2026-11-07T12:51:01.245455Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.274081
+2026-11-07T12:51:01.247985Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.001103
+2026-11-07T12:51:01.251607Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.5634360000000003
+2026-11-07T12:51:01.258799Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048660 reused_blocks=0 ms=10.568147
+2026-11-07T12:51:01.263203Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:51:01.263217Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=4.377858
+2026-11-07T12:51:01.263223Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=15.240972000000001
+2026-11-07T12:51:02.652410Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.282119
+2026-11-07T12:51:02.654812Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.000919
+2026-11-07T12:51:02.657888Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.0254190000000003
+2026-11-07T12:51:02.664539Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048667 reused_blocks=0 ms=9.518165999999999
+2026-11-07T12:51:02.670567Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:51:02.670581Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=6.0006260000000005
+2026-11-07T12:51:02.670586Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=15.776065
+2026-11-07T12:51:04.058612Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.286293
+2026-11-07T12:51:04.061052Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.0011719999999999999
+2026-11-07T12:51:04.064285Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.1743029999999997
+2026-11-07T12:51:04.070210Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048674 reused_blocks=0 ms=8.821693
+2026-11-07T12:51:04.074105Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:51:04.074116Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=3.861211
+2026-11-07T12:51:04.074120Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=13.071324
+2026-11-07T12:51:05.464971Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.290252
+2026-11-07T12:51:05.467553Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.000905
+2026-11-07T12:51:05.471013Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.4135210000000002
+2026-11-07T12:51:05.476761Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048681 reused_blocks=0 ms=8.892382000000001
+2026-11-07T12:51:05.481276Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:51:05.481287Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=4.496961
+2026-11-07T12:51:05.481292Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=13.741985999999999
+2026-11-07T12:51:06.871814Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.299541
+2026-11-07T12:51:06.874417Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.0010780000000000002
+2026-11-07T12:51:06.877845Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.36725
+2026-11-07T12:51:06.882527Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048688 reused_blocks=0 ms=7.814857999999999
+2026-11-07T12:51:06.887192Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:51:06.887204Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=4.652625
+2026-11-07T12:51:06.887210Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=12.795008
+2026-11-07T12:51:07.036243Z  INFO main astrolith_gpui::project_discovery::save: crates/astrolith-gpui/src/project_discovery/save.rs:231: document saved path=/tmp/astrolith-editor-perf-BEStlq/project/src/content/fixture.md revision=16 current=true
+2026-11-07T12:51:07.150176Z  WARN main astrolith_gpui::project_discovery::watch: crates/astrolith-gpui/src/project_discovery/watch.rs:496: project reindex failed; buffers retained error=invalid frontmatter in /tmp/astrolith-editor-perf-BEStlq/project/src/content/fixture.md: frontmatter exceeds 1048576 bytes
+2026-11-07T12:51:08.278707Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.293122
+2026-11-07T12:51:08.281304Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.001126
+2026-11-07T12:51:08.285126Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.730215
+2026-11-07T12:51:08.288343Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048695 reused_blocks=0 ms=6.804181000000001
+2026-11-07T12:51:08.296491Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:51:08.296511Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=8.121814
+2026-11-07T12:51:08.296521Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=15.224898000000001
+2026-11-07T12:51:09.685916Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.34035
+2026-11-07T12:51:09.688364Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.000959
+2026-11-07T12:51:09.691762Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.347794
+2026-11-07T12:51:09.694858Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048702 reused_blocks=0 ms=6.274018
+2026-11-07T12:51:09.700844Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:51:09.700857Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=5.958565
+2026-11-07T12:51:09.700861Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=12.499346999999998
+2026-11-07T12:51:11.092578Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.28509999999999996
+2026-11-07T12:51:11.095138Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.001215
+2026-11-07T12:51:11.098946Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.724378
+2026-11-07T12:51:11.101573Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048709 reused_blocks=0 ms=6.272266
+2026-11-07T12:51:11.105456Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:51:11.105468Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=3.8621499999999997
+2026-11-07T12:51:11.105474Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=10.345386
+2026-11-07T12:51:12.499636Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="input" ms=0.287265
+2026-11-07T12:51:12.502084Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="parse_queue" name="wait" ms=0.0010479999999999999
+2026-11-07T12:51:12.505379Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="source_transaction" name="change_handler" ms=3.243278
+2026-11-07T12:51:12.508443Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:233: writer parse event="parse_run" bytes=1048716 reused_blocks=0 ms=6.280048
+2026-11-07T12:51:12.513698Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:303: application text layout edit event="text_layout_edit" reused_blocks=0 reused_rows=0 rebuilt_blocks=1
+2026-11-07T12:51:12.513715Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="layout_reconcile" ms=5.229837
+2026-11-07T12:51:12.513720Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="document_ready" name="edit_install" ms=11.638318
+2026-11-07T12:51:12.805790Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="wait" ms=0.008135
+2026-11-07T12:51:12.805851Z  INFO main astrolith::perf: crates/astrolith-gpui/src/editor/perf.rs:215: editor span event="driver_step" name="quit" ms=0.001296
+2026-11-07T12:51:12.805881Z  INFO main astrolith::perf: crates/astrolith-gpui/src/shell/perf.rs:306: perf driver event="driver_quit" monotonic_ns=31859120038 epoch_ms=1794055872805
+2026-11-07T12:51:12.855623Z  INFO main astrolith_desktop: apps/desktop/src/main.rs:111: Astrolith exiting

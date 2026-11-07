@@ -3,7 +3,8 @@
 - 日期：2026-11-06。
 - 基线提交：`8c9d7f3`（依赖升级）、`c54783f`（新版本性能诊断）。
 - 依赖基线：GPUI Kit/base/component 0.9.0、gpui-pre 0.3.11，全部使用发布包。
-- 状态：M0–M4 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)、[M4 结果](editor-performance-m4-results.md)）；Writing 与 Preview 已切换到自有布局，Build 仍走现有实现。M5 已按触发条件评估并保留现有输入桥（见 [M5 决策](editor-performance-m5-decision.md)）。M6 已完成 stock Editor 评估并实现、验证 `SourceSurface` 的帧预算；因 LSP 浮层、折叠与搜索等能力仍未接入，Build 默认继续使用 stock Editor（见 [M6 决策](editor-performance-m6-decision.md)、[SourceSurface 结果](editor-performance-m6-source-surface-results.md)）；M7 已完成解析增量化评估与收尾，多块本地编辑改用块级增量解析，单一巨大块保留整块重解析（见 [M7 结果](editor-performance-m7-results.md)）。
+- 状态：M0–M4 已实施并产出原生证据（见 [M0/M1 结果](editor-performance-m0-m1-results.md)、[M2 结果](editor-performance-m2-results.md)、[M3 结果](editor-performance-m3-results.md)、[M4 结果](editor-performance-m4-results.md)）；Writing 与 Preview 已切换到自有布局，Build 仍走现有实现。M5 已按触发条件评估并保留现有输入桥（见 [M5 决策](editor-performance-m5-decision.md)）。M6 已完成 stock Editor 评估并实现、验证 `SourceSurface` 的帧预算；补全、诊断、hover、code action、定义跳转和搜索宿主已接入；折叠、gutter/overview、缩进和括号提示等能力及原生功能验收仍未关闭，Build 默认继续使用 stock Editor（见 [M6 决策](editor-performance-m6-decision.md)、[SourceSurface 结果](editor-performance-m6-source-surface-results.md)）；M7 已完成解析增量化评估与收尾，多块本地编辑改用块级增量解析，单一巨大块保留整块重解析（见 [M7 结果](editor-performance-m7-results.md)）。
+- 后续验收：[独立验收](editor-performance-acceptance.md)与[修复及复测](editor-performance-followup.md)。后者记录缓存、宽度刷新、预编辑快照及单块输入的修复。
 - 目标环境：首先解决用户实际运行的 `mise run dev` 与 Hyprland/Wayland 场景；release 和其他平台单独验收。
 
 ## 1. 决策与范围

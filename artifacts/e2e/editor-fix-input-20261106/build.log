@@ -1,0 +1,5 @@
+$ cargo build -p astrolith-desktop --locked
+   Compiling astrolith-document v0.1.0 (/home/maredevi/Projects/Astrolith/crates/astrolith-document)
+   Compiling astrolith-gpui v0.1.0 (/home/maredevi/Projects/Astrolith/crates/astrolith-gpui)
+   Compiling astrolith-desktop v0.1.0 (/home/maredevi/Projects/Astrolith/apps/desktop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.55s

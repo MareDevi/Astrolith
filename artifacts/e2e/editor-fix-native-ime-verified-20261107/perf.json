@@ -1,0 +1,187 @@
+{
+  "schema": "astrolith.editor-perf.metrics/1",
+  "test_id": "editor-fix-native-ime-verified-20261107",
+  "backend": "pre",
+  "fixture": "history-single-paragraph-102420",
+  "metrics": {
+    "build_ms": 267,
+    "preview_prepare": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "writer_repaints": {
+      "samples": 0,
+      "paint_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "caret_blinks_max": 0
+    },
+    "writer_frames": {
+      "samples": 1,
+      "total_ms": {
+        "p50": 0.064577,
+        "p95": 0.064577,
+        "p99": 0.064577,
+        "max": 0.064577
+      },
+      "render_ms": {
+        "p50": 0.054364,
+        "p95": 0.054364,
+        "max": 0.054364
+      },
+      "layout_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "prepaint_ms": {
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "paint_ms": {
+        "p50": 0.010213,
+        "p95": 0.010213,
+        "max": 0.010213
+      },
+      "blocks_rendered_max": 0,
+      "blocks_total_max": 0,
+      "nodes_built_total": 0,
+      "nodes_reused_total": 0,
+      "geometry_leaves_max": 0,
+      "shaping_bytes_max": 0,
+      "caret_blinks_max": 0
+    },
+    "build_frames": {
+      "samples": 0,
+      "total_ms": {
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null
+      },
+      "prepare_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "layout_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "prepaint_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "paint_ms": {
+        "p50": null,
+        "p95": null,
+        "max": null
+      }
+    },
+    "driver_steps": {
+      "samples": 3,
+      "p50": 0.008112,
+      "p95": 0.00877,
+      "max": 0.00877
+    },
+    "mode_handlers": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "change_handlers": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "parse_queue_vs_install": {
+      "samples": 1,
+      "p50": 0.000592,
+      "p95": 0.000592,
+      "max": 0.000592
+    },
+    "parse_runs": {
+      "samples": 1,
+      "bytes": {
+        "p50": 102420,
+        "max": 102420
+      },
+      "reused_blocks": {
+        "p50": 0,
+        "max": 0
+      },
+      "incremental_samples": 0,
+      "ms": {
+        "p50": 28.672183,
+        "p95": 28.672183,
+        "max": 28.672183
+      }
+    },
+    "document_convergence": {
+      "initial_install_ms": {
+        "samples": 1,
+        "p50": 35.142756,
+        "p95": 35.142756,
+        "max": 35.142756
+      },
+      "edit_install_ms": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "layout_reconcile_ms": {
+        "p50": 6.217956,
+        "p95": 6.217956,
+        "max": 6.217956
+      }
+    },
+    "document_close": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "cpu": null,
+    "fullscreen_pairs": 0,
+    "fullscreen_transitions": [],
+    "execution": {
+      "status": "passed",
+      "exit_code": 0,
+      "signal": null,
+      "error": null,
+      "timed_out": false,
+      "document_ready": true,
+      "quit_observed": true,
+      "expected_steps": 3,
+      "observed_steps": 3
+    },
+    "performance": {
+      "status": "passed",
+      "scope": "Sampled CPU spans only; first correct visible frame and compositor presentation are not measured.",
+      "checks": [
+        {
+          "name": "writing_frame_p95",
+          "value_ms": 0.064577,
+          "limit_ms": 16.7,
+          "passed": true
+        },
+        {
+          "name": "writing_frame_p99",
+          "value_ms": 0.064577,
+          "limit_ms": 33,
+          "passed": true
+        }
+      ]
+    }
+  }
+}

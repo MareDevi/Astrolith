@@ -1,0 +1,22 @@
+{
+  "launcher": [
+    "node",
+    "scripts/editor-perf.mjs",
+    "run",
+    "--fixture",
+    "history-single-paragraph-102420",
+    "--backend",
+    "pre",
+    "--scenario",
+    "idle",
+    "--duration",
+    "29000",
+    "--timeout",
+    "60",
+    "--test-id",
+    "editor-fix-native-ime-verified-20261107"
+  ],
+  "keyboard": "wtype Wayland virtual keyboard",
+  "input_method": "fcitx5/Rime",
+  "error": "isolated app window did not acquire focus"
+}
