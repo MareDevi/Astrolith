@@ -685,8 +685,10 @@ export function assessRun(run, metrics) {
   check('mode_handler_p95', metrics.mode_handlers?.p95, 4);
   check('edit_install_p95', metrics.document_convergence?.edit_install_ms?.p95, 50);
   const performance = {
-    status: !checks.length ? 'not_run' : checks.every((item) => item.passed) ? 'passed' : 'failed',
-    scope: 'Sampled CPU spans only; first correct visible frame and compositor presentation are not measured.',
+    status: run.screenLocked || !checks.length ? 'not_run' : checks.every((item) => item.passed) ? 'passed' : 'failed',
+    scope: run.screenLocked
+      ? 'Hyprland was locked; CPU counters are diagnostic and cannot pass the native performance gate.'
+      : 'Sampled CPU spans only; first correct visible frame and compositor presentation are not measured.',
     checks,
   };
   return { execution, performance };
@@ -834,6 +836,13 @@ async function runOnce(options) {
   const stderrPath = path.join(caseDir, 'stderr.log');
   const stdout = fs.createWriteStream(stdoutPath);
   const stderr = fs.createWriteStream(stderrPath);
+  const readScreenLock = () => {
+    if (!process.env.HYPRLAND_INSTANCE_SIGNATURE) return null;
+    const state = hyprctl('locked');
+    const output = state.output.trim();
+    return state.status === 0 && ['true', 'false'].includes(output) ? output === 'true' : null;
+  };
+  const lockedAtStart = readScreenLock();
   const started = Date.now();
   const child = spawn(command[0], command.slice(1), {
     cwd: ROOT,
@@ -872,7 +881,9 @@ async function runOnce(options) {
     }
     cpu = fields;
   }
-  const assessment = assessRun({ events, expectedSteps: scenario.steps.length, exit, timedOut,
+  const lockedAtEnd = readScreenLock();
+  const screenLocked = lockedAtStart === true || lockedAtEnd === true;
+  const assessment = assessRun({ events, expectedSteps: scenario.steps.length, exit, timedOut, screenLocked,
     fullscreenRequested: Number(options['fullscreen-pairs'] ?? 0), fullscreenPairs }, metrics);
   const status = assessment.execution.status === 'passed'
     && (!options['enforce-slo'] || assessment.performance.status === 'passed') ? 'passed' : 'failed';
@@ -905,6 +916,7 @@ async function runOnce(options) {
       features: backend === 'fast' ? ['gpui-fast'] : [],
       source_surface: sourceSurface,
       hyprland_version: hyprland === 'not_run' ? null : hyprctl('version', '-j').output,
+      hyprland_screen_lock: { start: lockedAtStart, end: lockedAtEnd },
       session: process.env.XDG_SESSION_TYPE ?? null,
       wayland_display: process.env.WAYLAND_DISPLAY ?? null,
       scale: null,

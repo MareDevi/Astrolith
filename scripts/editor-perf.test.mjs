@@ -37,6 +37,12 @@ test('a completed baseline records failed latency independently', () => {
   assert.equal(assessRun({ events, expectedSteps: 2, exit: { code: 0 } }, {}).performance.status, 'not_run');
 });
 
+test('a locked desktop cannot pass native performance acceptance', () => {
+  const result = assessRun({ events, expectedSteps: 2, exit: { code: 0 }, screenLocked: true }, metrics);
+  assert.equal(result.execution.status, 'passed');
+  assert.equal(result.performance.status, 'not_run');
+});
+
 test('process exit is retained even when observed after the child closes', async () => {
   const child = spawn(process.execPath, ['-e', 'process.exit(7)']);
   const finished = watchChild(child, 1000);
