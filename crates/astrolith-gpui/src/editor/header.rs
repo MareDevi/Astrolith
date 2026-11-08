@@ -8,9 +8,11 @@
 //! the writer should see the page, not an editor window. Additional open
 //! documents stay one click away in the overflow menu.
 
+use crate::commands::CommandId;
 use crate::editor::save_coordinator::SaveStatus;
 use crate::project_discovery::ProjectWorkspace;
 use crate::ui;
+use astrolith_core::preferences::WorkspaceMode;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt,
@@ -24,21 +26,31 @@ use gpui_kit::{
 
 pub(crate) struct InspectorRequested;
 pub(crate) struct LibraryRequested;
+pub(crate) struct WorkspaceCommandRequested(pub(crate) CommandId);
 
 pub(crate) struct DocumentHeader {
     project: Entity<ProjectWorkspace>,
     inspector_open: bool,
     library_open: bool,
+    preview_open: bool,
+    mode: WorkspaceMode,
     _subscription: Subscription,
 }
 
 impl DocumentHeader {
-    pub(crate) fn new(project: Entity<ProjectWorkspace>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        project: Entity<ProjectWorkspace>,
+        mode: WorkspaceMode,
+        preview_open: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscription = cx.observe(&project, |_, _, cx| cx.notify());
         Self {
             project,
             inspector_open: false,
             library_open: false,
+            preview_open,
+            mode,
             _subscription: subscription,
         }
     }
@@ -59,10 +71,25 @@ impl DocumentHeader {
         self.library_open = open;
         cx.notify();
     }
+
+    pub(crate) fn set_workspace(
+        &mut self,
+        mode: WorkspaceMode,
+        preview_open: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mode == mode && self.preview_open == preview_open {
+            return;
+        }
+        self.mode = mode;
+        self.preview_open = preview_open;
+        cx.notify();
+    }
 }
 
 impl EventEmitter<InspectorRequested> for DocumentHeader {}
 impl EventEmitter<LibraryRequested> for DocumentHeader {}
+impl EventEmitter<WorkspaceCommandRequested> for DocumentHeader {}
 
 impl Render for DocumentHeader {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -127,6 +154,12 @@ impl Render for DocumentHeader {
             .map(|tab| (tab.label.clone(), tab.path.clone()))
             .collect();
         let menu_active = active_path.clone();
+        let writing_modes = self.project.read(cx).writing_modes();
+        let library_open = self.library_open;
+        let preview_open = self.preview_open;
+        let inspector_open = self.inspector_open;
+        let mode = self.mode;
+        let workspace_owner = cx.weak_entity();
 
         div()
             .id("document-header")
@@ -199,7 +232,51 @@ impl Render for DocumentHeader {
                             .tooltip("Document actions")
                             .accessibility_label("Document actions")
                             .dropdown_menu(move |menu, _, _| {
-                                let mut menu = menu;
+                                let command_item =
+                                    |label: &'static str, command: CommandId, checked: bool| {
+                                        let owner = workspace_owner.clone();
+                                        PopupMenuItem::new(label).checked(checked).on_click(
+                                            move |_, _, cx| {
+                                                let _ = owner.update(cx, |_, cx| {
+                                                    cx.emit(WorkspaceCommandRequested(command));
+                                                });
+                                            },
+                                        )
+                                    };
+                                let mut menu = menu
+                                    .item(command_item(
+                                        "Focus mode",
+                                        CommandId::ToggleFocusMode,
+                                        writing_modes.focus,
+                                    ))
+                                    .item(command_item(
+                                        "Typewriter mode",
+                                        CommandId::ToggleTypewriterMode,
+                                        writing_modes.typewriter,
+                                    ))
+                                    .separator()
+                                    .item(command_item(
+                                        "Library",
+                                        CommandId::ToggleSidebar,
+                                        library_open,
+                                    ))
+                                    .item(command_item(
+                                        if mode == WorkspaceMode::Build {
+                                            "Terminal"
+                                        } else {
+                                            "Astro preview"
+                                        },
+                                        CommandId::TogglePreview,
+                                        preview_open,
+                                    ));
+                                if mode == WorkspaceMode::Writing {
+                                    menu = menu.item(command_item(
+                                        "Details",
+                                        CommandId::ToggleInspector,
+                                        inspector_open,
+                                    ));
+                                }
+                                menu = menu.separator();
                                 if let Some(path) = menu_active.clone() {
                                     let owner = menu_owner.clone();
                                     menu =

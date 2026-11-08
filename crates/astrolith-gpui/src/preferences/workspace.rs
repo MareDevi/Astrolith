@@ -55,48 +55,6 @@ impl PreferencesSheet {
             })
             .into_any_element();
 
-        let focus_weak = weak.clone();
-        let focus_label = if self.focus_mode { "On" } else { "Off" };
-        let focus_mode = Button::new("preferences-focus-mode")
-            .outline()
-            .label(focus_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (label, value) in [("Off", false), ("On", true)] {
-                    let weak = focus_weak.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
-                            sheet.focus_mode = value;
-                            cx.notify();
-                        });
-                    }));
-                }
-                menu
-            })
-            .into_any_element();
-
-        let typewriter_weak = weak.clone();
-        let typewriter_label = if self.typewriter_mode { "On" } else { "Off" };
-        let typewriter_mode = Button::new("preferences-typewriter-mode")
-            .outline()
-            .label(typewriter_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (label, value) in [("Off", false), ("On", true)] {
-                    let weak = typewriter_weak.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
-                            sheet.typewriter_mode = value;
-                            cx.notify();
-                        });
-                    }));
-                }
-                menu
-            })
-            .into_any_element();
-
         let autosave_weak = weak.clone();
         let autosave = Button::new("preferences-autosave")
             .outline()
@@ -211,28 +169,6 @@ impl PreferencesSheet {
 
         let writing = vec![
             self.field(
-                "preferences-field-focus-mode",
-                "Focus mode",
-                focus_mode,
-                FieldExtras {
-                    field: None,
-                    hint: Some("Dim every sentence except the one holding the cursor."),
-                    trailing: None,
-                },
-                cx,
-            ),
-            self.field(
-                "preferences-field-typewriter-mode",
-                "Typewriter mode",
-                typewriter_mode,
-                FieldExtras {
-                    field: None,
-                    hint: Some("Keep the cursor line vertically centred."),
-                    trailing: None,
-                },
-                cx,
-            ),
-            self.field(
                 "preferences-field-autosave",
                 "Idle autosave",
                 autosave,
@@ -296,8 +232,8 @@ impl PreferencesSheet {
                 cx,
             ))
             .child(self.section(
-                "Writing",
-                Some("Writing presentation, saving and new-entry defaults."),
+                "Documents",
+                Some("Saving behavior and defaults for new files."),
                 writing,
                 cx,
             ))

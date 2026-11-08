@@ -17,7 +17,7 @@ use crate::{
         component_builder::{ComponentBuilder, ComponentBuilderEvent},
         content_finder::{self, FinderEntry},
         copyedit::CopyeditConfig,
-        header::{DocumentHeader, LibraryRequested},
+        header::{DocumentHeader, LibraryRequested, WorkspaceCommandRequested},
         rendered::RenderedDocument,
         session::SessionChanged,
         writer_chrome::{ChromeVisibility, TypedCharacters},
@@ -63,7 +63,6 @@ use gpui_kit::component::{
     command::{Command, CommandGroup, CommandItem, CommandState},
     dock::{BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
     kbd::Kbd,
-    menu::{DropdownMenu, PopupMenuItem},
     scroll::ScrollableElement as _,
 };
 use gpui_kit::{
@@ -432,7 +431,8 @@ impl Shell {
             navigator.set_view(project.clone().into(), cx)
         });
         let frontmatter = cx.new(FrontmatterForm::new);
-        let header = cx.new(|cx| DocumentHeader::new(project.clone(), cx));
+        let header =
+            cx.new(|cx| DocumentHeader::new(project.clone(), mode, layout.preview_visible, cx));
         document.update(cx, |document, cx| {
             document.set_header(header.clone().into(), cx)
         });
@@ -582,6 +582,13 @@ impl Shell {
             window,
             |this, _, _: &LibraryRequested, window, cx| {
                 this.toggle_panel(PanelKind::Sidebar, window, cx);
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &header,
+            window,
+            |this, _, event: &WorkspaceCommandRequested, window, cx| {
+                this.execute(event.0, window, cx);
             },
         ));
         subscriptions.push(cx.subscribe_in(
@@ -1886,6 +1893,9 @@ impl Shell {
                 attach_preview_dock(dock, panel, height, window, cx)
             }
             false => dock.remove_dock(DockPlacement::Bottom, window, cx),
+        });
+        self.document_header.update(cx, |header, cx| {
+            header.set_workspace(self.mode, visible, cx)
         });
         // The Astro preview is a dock capability, not a reading-mode flag:
         // showing it is what arms Open-on-Enter and the embedded split.
@@ -3870,72 +3880,6 @@ impl Render for Shell {
                                                         },
                                                     )),
                                             )
-                                            .child({
-                                                let owner = cx.weak_entity();
-                                                let sidebar = layout.sidebar_visible;
-                                                let preview = layout.preview_visible;
-                                                let inspector = self.inspector_open;
-                                                let modes = self.project.read(cx).writing_modes();
-                                                let writing = self.mode == WorkspaceMode::Writing;
-                                                let build = self.mode == WorkspaceMode::Build;
-                                                Button::new("view-menu")
-                                                    .small()
-                                                    .ghost()
-                                                    .icon(IconName::PanelsTopLeft)
-                                                    .tooltip("Panels")
-                                                    .accessibility_label("Panels and writing modes")
-                                                    .dropdown_menu(move |menu, _, _| {
-                                                        let item = |label: &'static str,
-                                                            kind: CommandId,
-                                                            checked: bool| {
-                                                    let owner = owner.clone();
-                                                    PopupMenuItem::new(label)
-                                                        .checked(checked)
-                                                        .on_click(move |_, window, cx| {
-                                                            let _ = owner.update(
-                                                                cx,
-                                                                |this, cx| {
-                                                                    this.execute(kind, window, cx)
-                                                                },
-                                                            );
-                                                        })
-                                                };
-                                                        let mut menu = menu
-                                                            .item(item(
-                                                                "Focus mode",
-                                                                CommandId::ToggleFocusMode,
-                                                                modes.focus,
-                                                            ))
-                                                            .item(item(
-                                                                "Typewriter mode",
-                                                                CommandId::ToggleTypewriterMode,
-                                                                modes.typewriter,
-                                                            ))
-                                                            .separator()
-                                                            .item(item(
-                                                                "Library",
-                                                                CommandId::ToggleSidebar,
-                                                                sidebar,
-                                                            ))
-                                                            .item(item(
-                                                                if build {
-                                                                    "Terminal"
-                                                                } else {
-                                                                    "Astro preview"
-                                                                },
-                                                                CommandId::TogglePreview,
-                                                                preview,
-                                                            ));
-                                                        if writing {
-                                                            menu = menu.item(item(
-                                                                "Details",
-                                                                CommandId::ToggleInspector,
-                                                                inspector,
-                                                            ));
-                                                        }
-                                                        menu
-                                                    })
-                                            })
                                             .child(
                                                 Button::new("open-preferences")
                                                     .small()
@@ -7844,10 +7788,6 @@ mod tests {
             assert_eq!(
                 window.find("command-palette").label(),
                 Some(CommandId::OpenPalette.label())
-            );
-            assert_eq!(
-                window.find("view-menu").label(),
-                Some("Panels and writing modes")
             );
         })
         .unwrap();
