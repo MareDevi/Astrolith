@@ -3009,12 +3009,13 @@ impl Shell {
         let view = self.preferences_sheet.clone();
         let close = self.preferences_sheet.downgrade();
         let initial_focus = std::cell::Cell::new(true);
-        // The sheet scales with the window instead of staying at a small fixed
-        // size; the minimum keeps the navigation and form columns readable.
+        // Keep the sheet landscape and reserve room around it; the pane body scrolls.
         let viewport = window.viewport_size();
-        let dialog_height = px((f32::from(viewport.height) - 64.).min(920.));
+        let dialog_height = px((f32::from(viewport.height) - 64.)
+            .min(f32::from(viewport.height) * 0.74)
+            .min(680.));
         let dialog_width = px((f32::from(viewport.width) - 48.)
-            .min(f32::from(dialog_height) * 1.65)
+            .min(f32::from(dialog_height) * 1.85)
             .min(1500.));
         window.open_dialog(cx, move |dialog, window, cx| {
             let close = close.clone();
