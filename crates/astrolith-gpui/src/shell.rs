@@ -2174,13 +2174,13 @@ impl Shell {
             .items_center()
             .gap_0p5()
             .p(px(3.))
-            .rounded_full()
+            .rounded(cx.theme().radius)
             .bg(cx.theme().tab_bar_segmented)
             .children(WorkspaceMode::ALL.map(|mode| {
                 let owner = owner.clone();
                 Button::new(mode.label())
                     .ghost()
-                    .rounded_full()
+                    .rounded(cx.theme().radius)
                     .label(mode.label())
                     .selected(mode == current)
                     .tooltip(mode.label())

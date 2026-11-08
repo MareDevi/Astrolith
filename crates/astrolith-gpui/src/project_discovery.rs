@@ -647,9 +647,16 @@ impl ListDelegate for EntryList {
                 .min_h(rems(3.25))
                 .selected(selected)
                 .rounded(cx.theme().radius)
-                .when(selected, |item| item.bg(cx.theme().selection))
                 .accessibility_label(row.search.clone())
-                .child(row_content),
+                .child(
+                    div()
+                        .w_full()
+                        .h(rems(2.75))
+                        .flex_shrink_0()
+                        .rounded(cx.theme().radius)
+                        .when(selected, |surface| surface.bg(cx.theme().selection))
+                        .child(row_content),
+                ),
         )
     }
     fn set_selected_index(
@@ -8157,7 +8164,7 @@ export const collections = {blog, dataAuthors};
             let second = window.find("entry:blog:b").bounds();
             assert!(
                 second.origin.y >= first.origin.y + first.size.height,
-                "a two-line entry row must not overlap the next row: first={first:?} second={second:?}"
+                "entry rows must not overlap: first={first:?} second={second:?}"
             );
         })
         .unwrap();
