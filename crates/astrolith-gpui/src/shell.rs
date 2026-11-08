@@ -2039,6 +2039,7 @@ impl Shell {
         let owner = cx.weak_entity();
         let project = self.project.clone();
         let motion = cx.theme().motion_tokens();
+        let terminal_open = self.dock.read(cx).has_dock(DockPlacement::Bottom);
         div()
             .id("build-tabs")
             .test_support()
@@ -2141,6 +2142,18 @@ impl Shell {
                             .selected(self.git_open)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.toggle_git(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("build-terminal")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Terminal)
+                            .tooltip("Terminal")
+                            .accessibility_label("Toggle terminal")
+                            .selected(terminal_open)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx)),
                             ),
                     ),
             )
@@ -5663,6 +5676,7 @@ mod tests {
             window.render_frame(cx);
             assert!(window.find("build-tabs").visible());
             assert!(window.find("build-source-control").visible());
+            assert!(window.find("build-terminal").visible());
             assert!(window.try_find("build-tab-0").is_none());
         })
         .unwrap();
@@ -5695,6 +5709,7 @@ mod tests {
             window.render_frame(cx);
             assert!(window.find("build-tabs").visible());
             assert!(window.find("build-source-control").visible());
+            assert!(window.find("build-terminal").visible());
             assert!(window.try_find("build-tab-0").is_none());
         })
         .unwrap();
