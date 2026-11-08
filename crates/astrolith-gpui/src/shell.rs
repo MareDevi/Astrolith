@@ -47,7 +47,7 @@ use crate::{
         resolve, settings_path,
     },
     single_instance,
-    terminal::TerminalPanel,
+    terminal::{TerminalPanel, TerminalPanelEvent},
     theme::{self, ThemeMode},
     update,
     url_scheme::{self, StartupRequest, StartupTarget},
@@ -557,6 +557,19 @@ impl Shell {
                 }
             }),
         ];
+        subscriptions.push(cx.subscribe_in(
+            &terminal,
+            window,
+            |this, _, TerminalPanelEvent::ClosePanel, window, cx| {
+                this.dock.update(cx, |dock, cx| {
+                    if dock.has_dock(DockPlacement::Bottom) {
+                        dock.remove_dock(DockPlacement::Bottom, window, cx);
+                    }
+                });
+                this.sync_terminal_activity(window, cx);
+                this.focus_document_surface(window, cx);
+            },
+        ));
         subscriptions.push(cx.subscribe_in(
             &header,
             window,

@@ -14,14 +14,15 @@ use astrolith_terminal::{
     ExitInfo, TerminalCell, TerminalColor, TerminalMouseEncoding, TerminalMouseMode,
     TerminalSession, TerminalSnapshot,
 };
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, StyledExt,
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{
-    App, Bounds, Context, FocusHandle, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, Task, Window, canvas, div,
-    prelude::*, px,
+    App, Bounds, Context, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, Task, Window,
+    canvas, div, prelude::*, px,
 };
 
 use crate::theme::METRICS;
@@ -39,6 +40,10 @@ const ACTIVE_POLL: Duration = Duration::from_millis(16);
 /// Polling cadence while the terminal dock is hidden. Slow enough that a
 /// hidden terminal is not a repaint source, fast enough to notice an exit.
 const HIDDEN_POLL: Duration = Duration::from_millis(250);
+
+pub(crate) enum TerminalPanelEvent {
+    ClosePanel,
+}
 
 /// Measured geometry of one terminal cell.
 ///
@@ -225,6 +230,8 @@ pub(crate) struct TerminalPanel {
     poll_intervals: Vec<Duration>,
     _keys: gpui_kit::Subscription,
 }
+
+impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}
 
 impl TerminalPanel {
     /// Create an empty terminal panel; no process starts until a project attaches.
@@ -1021,6 +1028,16 @@ impl Render for TerminalPanel {
                             .ghost()
                             .label("Restart")
                             .on_click(restart),
+                    )
+                    .child(
+                        Button::new("terminal-close-panel")
+                            .small()
+                            .ghost()
+                            .icon(IconName::X)
+                            .tooltip("Close terminal panel")
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(TerminalPanelEvent::ClosePanel)),
+                            ),
                     ),
             )
             .child(
