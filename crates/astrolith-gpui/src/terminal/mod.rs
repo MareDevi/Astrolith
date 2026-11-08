@@ -1051,7 +1051,7 @@ impl Render for TerminalPanel {
                             .size_full()
                             .min_h_0()
                             .overflow_hidden()
-                            .rounded_md()
+                            .rounded(cx.theme().radius)
                             .border_1()
                             .border_color(if focused {
                                 cx.theme().tokens.ring.color

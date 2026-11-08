@@ -504,7 +504,7 @@ impl ListDelegate for EntryList {
                 ListItem::new(id)
                     .min_h(rems(3.25))
                     .selected(selected)
-                    .rounded_lg()
+                    .rounded(cx.theme().radius)
                     .when(selected, |item| item.bg(cx.theme().selection))
                     .accessibility_label(label)
                     .child(
@@ -646,7 +646,7 @@ impl ListDelegate for EntryList {
             ListItem::new(row.id.clone())
                 .min_h(rems(3.25))
                 .selected(selected)
-                .rounded_lg()
+                .rounded(cx.theme().radius)
                 .when(selected, |item| item.bg(cx.theme().selection))
                 .accessibility_label(row.search.clone())
                 .child(row_content),
@@ -4295,7 +4295,7 @@ impl Render for ProjectWorkspace {
                                         .w_full()
                                         .h(px(56.))
                                         .justify_start()
-                                        .rounded_lg()
+                                        .rounded(cx.theme().radius)
                                         .selected(
                                             selected_collection.as_deref() == Some(name.as_str()),
                                         )

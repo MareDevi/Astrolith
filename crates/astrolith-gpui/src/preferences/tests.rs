@@ -133,6 +133,19 @@ fn interface_font_size_stays_inside_the_readable_band() {
 }
 
 #[test]
+fn panel_radius_accepts_zero_through_twenty_four_logical_pixels() {
+    assert_eq!(panel_radius_value("0").unwrap(), 0.);
+    assert_eq!(panel_radius_value("10").unwrap(), 10.);
+    assert_eq!(panel_radius_value("24").unwrap(), 24.);
+    for invalid in ["-1", "25", "NaN", "wide", ""] {
+        assert!(
+            panel_radius_value(invalid).is_err(),
+            "{invalid} must be refused"
+        );
+    }
+}
+
+#[test]
 fn ide_argv_validates_the_executable_and_known_placeholders() {
     let command = ide_command_value("hx", "{project}\n{file}\n--line\n{line}:{column}").unwrap();
     assert_eq!(command.executable, "hx");

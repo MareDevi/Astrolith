@@ -649,6 +649,8 @@ pub struct GlobalPreferencesV2 {
     pub ui_font_family: String,
     /// Interface base font size in logical pixels; controls the rem scale.
     pub ui_font_size: f32,
+    /// Shared corner radius in logical pixels for panels and components.
+    pub panel_radius: f32,
     /// Document font family; empty uses the mock's sans face.
     pub prose_font_family: String,
     /// Document font size in logical pixels.
@@ -694,6 +696,7 @@ impl Default for GlobalPreferencesV2 {
             heading_colors: HeadingColors::default(),
             ui_font_family: String::new(),
             ui_font_size: 18.,
+            panel_radius: 10.,
             prose_font_family: String::new(),
             editor_font_size: 16.,
             build_font_family: String::new(),

@@ -88,6 +88,23 @@ impl PreferencesSheet {
                 cx,
             ),
         ];
+        let panel = vec![self.field(
+            "preferences-field-panel-radius",
+            "Panel and component corner radius",
+            self.control(FieldId::PanelRadius),
+            FieldExtras {
+                field: Some(FieldId::PanelRadius),
+                hint: Some(
+                    "0–24 logical pixels; applies to all panels and components. The default is 10.",
+                ),
+                trailing: Some(self.reset_button(
+                    FieldId::PanelRadius,
+                    "preferences-reset-panel-radius",
+                    cx,
+                )),
+            },
+            cx,
+        )];
         let document = vec![
             self.field(
                 "preferences-field-prose-font-family",
@@ -283,6 +300,12 @@ impl PreferencesSheet {
                 "Interface",
                 Some("Typography for panels, controls and menus."),
                 interface,
+                cx,
+            ))
+            .child(self.section(
+                "Panel shape",
+                Some("One corner radius for panels and components across every project."),
+                panel,
                 cx,
             ))
             .child(self.section(

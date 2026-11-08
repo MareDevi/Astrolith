@@ -239,8 +239,9 @@ pub fn apply(settings: &GlobalPreferencesV2, appearance: WindowAppearance, cx: &
         theme.font_size = ui_font_size;
         theme.mono_font_family = mono_font;
         theme.mono_font_size = gpui_kit::px(settings.build_font_size.clamp(1., 30.));
-        theme.radius = gpui_kit::px(METRICS.radius.control);
-        theme.radius_lg = gpui_kit::px(METRICS.radius.surface);
+        let panel_radius = gpui_kit::px(settings.panel_radius.clamp(0., 24.));
+        theme.radius = panel_radius;
+        theme.radius_lg = panel_radius;
         theme.shadow = true;
     });
     let configured = match mode {

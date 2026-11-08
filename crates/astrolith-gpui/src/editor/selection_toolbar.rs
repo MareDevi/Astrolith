@@ -168,7 +168,7 @@ fn toolbar_body(
         .items_center()
         .gap_1()
         .p_1p5()
-        .rounded_lg()
+        .rounded(cx.theme().radius)
         .border_1()
         .border_color(cx.theme().border)
         .bg(cx.theme().popover)

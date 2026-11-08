@@ -53,21 +53,6 @@ pub(crate) struct TypeScale {
     pub mono: f32,
 }
 
-/// Corner radii in logical pixels, from tight chrome to floating surfaces.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct RadiusScale {
-    /// 6 px: chips and very small controls.
-    pub small: f32,
-    /// 10 px: buttons, inputs and Kit's general `radius`.
-    pub control: f32,
-    /// 14 px: Inspector, dialogs and Kit's `radius_lg`.
-    pub surface: f32,
-    /// 18 px: large floating panels.
-    pub overlay: f32,
-    /// Pill radius for segmented mode switches.
-    pub pill: f32,
-}
-
 /// One shadow layer: CSS box-shadow geometry with the mock's ink alpha.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ShadowLayer {
@@ -93,7 +78,6 @@ pub(crate) struct ElevationScale {
 pub(crate) struct ThemeMetrics {
     pub space: SpaceScale,
     pub type_scale: TypeScale,
-    pub radius: RadiusScale,
     pub elevation: ElevationScale,
 }
 
@@ -119,13 +103,6 @@ pub(crate) const METRICS: ThemeMetrics = ThemeMetrics {
         title: 36.,
         display: 48.,
         mono: 13.,
-    },
-    radius: RadiusScale {
-        small: 6.,
-        control: 10.,
-        surface: 14.,
-        overlay: 18.,
-        pill: 999.,
     },
     elevation: ElevationScale {
         overlay: [
@@ -171,8 +148,6 @@ mod tests {
         assert_eq!(METRICS.type_scale.caption, 12.);
         assert_eq!(METRICS.type_scale.title, 36.);
         assert_eq!(METRICS.type_scale.display, 48.);
-        assert_eq!(METRICS.radius.control, 10.);
-        assert_eq!(METRICS.radius.surface, 14.);
         assert_eq!(METRICS.elevation.overlay[0].blur, 15.);
     }
 }

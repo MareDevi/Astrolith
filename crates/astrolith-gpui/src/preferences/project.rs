@@ -178,7 +178,7 @@ impl PreferencesSheet {
                     .w_full()
                     .gap_2()
                     .p_2()
-                    .rounded_md()
+                    .rounded(cx.theme().radius)
                     .bg(cx.theme().warning.opacity(0.12))
                     .child(
                         div()

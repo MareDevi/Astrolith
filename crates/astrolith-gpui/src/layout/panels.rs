@@ -515,7 +515,7 @@ impl Render for WorkspacePanel {
                             .bottom(px(12.))
                             .right(px(12.))
                             .p_1()
-                            .rounded_md()
+                            .rounded(cx.theme().radius)
                             .border_1()
                             .border_color(cx.theme().window_border)
                             .bg(cx.theme().background)

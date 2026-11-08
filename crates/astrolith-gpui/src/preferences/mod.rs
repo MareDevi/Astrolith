@@ -196,6 +196,7 @@ pub(crate) enum FieldId {
     HeadingDark,
     UiFontFamily,
     UiFontSize,
+    PanelRadius,
     ProseFontFamily,
     FontSize,
     BuildFontFamily,
@@ -237,6 +238,7 @@ struct Inputs {
     heading_dark: Entity<InputState>,
     ui_font_family: Entity<InputState>,
     ui_font_size: Entity<InputState>,
+    panel_radius: Entity<InputState>,
     prose_font_family: Entity<InputState>,
     font_size: Entity<InputState>,
     build_font_family: Entity<InputState>,
@@ -345,6 +347,7 @@ impl PreferencesSheet {
                 heading_dark: input!("#e6edf3"),
                 ui_font_family: input!("System UI font"),
                 ui_font_size: input!(format_number(GlobalPreferencesV2::default().ui_font_size)),
+                panel_radius: input!(format_number(GlobalPreferencesV2::default().panel_radius)),
                 prose_font_family: input!("Inter / system sans"),
                 font_size: input!("16"),
                 build_font_family: input!("System monospace font"),
@@ -428,6 +431,12 @@ impl PreferencesSheet {
         self.set_text(
             FieldId::UiFontSize,
             &format_number(global.ui_font_size),
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::PanelRadius,
+            &format_number(global.panel_radius),
             window,
             cx,
         );
@@ -579,6 +588,8 @@ impl PreferencesSheet {
             .ok()
             .filter(|size| size.is_finite() && (8.0..=28.0).contains(size))
             .unwrap_or(global.ui_font_size);
+        global.panel_radius =
+            panel_radius_value(&self.text(FieldId::PanelRadius, cx)).unwrap_or(global.panel_radius);
         global.prose_font_family = self.text(FieldId::ProseFontFamily, cx).trim().to_owned();
         global.editor_font_size = self
             .text(FieldId::FontSize, cx)
@@ -669,6 +680,12 @@ impl PreferencesSheet {
             FieldId::UiFontSize => self.set_text(
                 field,
                 &format_number(GlobalPreferencesV2::default().ui_font_size),
+                window,
+                cx,
+            ),
+            FieldId::PanelRadius => self.set_text(
+                field,
+                &format_number(GlobalPreferencesV2::default().panel_radius),
                 window,
                 cx,
             ),
@@ -955,6 +972,7 @@ impl PreferencesSheet {
             FieldId::HeadingDark => self.inputs.heading_dark.read(cx).value(),
             FieldId::UiFontFamily => self.inputs.ui_font_family.read(cx).value(),
             FieldId::UiFontSize => self.inputs.ui_font_size.read(cx).value(),
+            FieldId::PanelRadius => self.inputs.panel_radius.read(cx).value(),
             FieldId::ProseFontFamily => self.inputs.prose_font_family.read(cx).value(),
             FieldId::FontSize => self.inputs.font_size.read(cx).value(),
             FieldId::BuildFontFamily => self.inputs.build_font_family.read(cx).value(),
@@ -1014,6 +1032,10 @@ impl PreferencesSheet {
             FieldId::UiFontSize => self
                 .inputs
                 .ui_font_size
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::PanelRadius => self
+                .inputs
+                .panel_radius
                 .update(cx, |input, cx| input.set_value(value, window, cx)),
             FieldId::ProseFontFamily => self
                 .inputs
@@ -1177,6 +1199,9 @@ impl PreferencesSheet {
         if let Err(message) = ui_font_size_value(&self.text(FieldId::UiFontSize, cx)) {
             insert(FieldId::UiFontSize, message);
         }
+        if let Err(message) = panel_radius_value(&self.text(FieldId::PanelRadius, cx)) {
+            insert(FieldId::PanelRadius, message);
+        }
         let prose_font_family = self.text(FieldId::ProseFontFamily, cx);
         if !theme::font_family_available(cx, &prose_font_family) {
             insert(
@@ -1331,6 +1356,9 @@ impl PreferencesSheet {
             }
             FieldId::UiFontSize => {
                 gpui_kit::component::input::Input::new(&self.inputs.ui_font_size).into_any_element()
+            }
+            FieldId::PanelRadius => {
+                gpui_kit::component::input::Input::new(&self.inputs.panel_radius).into_any_element()
             }
             FieldId::ProseFontFamily => {
                 gpui_kit::component::input::Input::new(&self.inputs.prose_font_family)
@@ -1499,7 +1527,7 @@ impl PreferencesSheet {
             .w_full()
             .gap_4()
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius)
             .bg(cx.theme().group_box)
             .border_1()
             .border_color(cx.theme().border.opacity(0.55))
@@ -1876,6 +1904,18 @@ pub(crate) fn page_width_value(value: &str) -> Result<f32, String> {
         return Err("Page width must be between 30 and 100 percent.".into());
     }
     Ok(width)
+}
+
+/// Validate the shared panel and component corner radius.
+pub(crate) fn panel_radius_value(value: &str) -> Result<f32, String> {
+    let value = value.trim();
+    let Ok(radius) = value.parse::<f32>() else {
+        return Err("Enter a shared corner radius between 0 and 24.".into());
+    };
+    if !radius.is_finite() || !(0.0..=24.0).contains(&radius) {
+        return Err("Shared corner radius must be between 0 and 24.".into());
+    }
+    Ok(radius)
 }
 
 /// Validate the interface font size.
