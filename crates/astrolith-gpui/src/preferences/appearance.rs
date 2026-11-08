@@ -338,7 +338,7 @@ impl PreferencesSheet {
                         });
                     }));
                 }
-                menu
+                menu.scrollable(true).max_h(px(450.))
             })
             .into_any_element()
     }
