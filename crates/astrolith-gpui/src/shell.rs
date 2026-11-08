@@ -3009,14 +3009,12 @@ impl Shell {
         let view = self.preferences_sheet.clone();
         let close = self.preferences_sheet.downgrade();
         let initial_focus = std::cell::Cell::new(true);
-        // Keep the sheet landscape and reserve room around it; the pane body scrolls.
+        // Keep a fixed 16:10 sheet inside the window; the pane body scrolls.
         let viewport = window.viewport_size();
-        let dialog_height = px((f32::from(viewport.height) - 64.)
-            .min(f32::from(viewport.height) * 0.74)
-            .min(680.));
-        let dialog_width = px((f32::from(viewport.width) - 48.)
-            .min(f32::from(dialog_height) * 1.85)
-            .min(1500.));
+        let available_width = f32::from(viewport.width) - 48.;
+        let available_height = f32::from(viewport.height) - 64.;
+        let dialog_height = px(available_height.min(available_width * 10. / 16.).min(900.));
+        let dialog_width = px(f32::from(dialog_height) * 16. / 10.);
         window.open_dialog(cx, move |dialog, window, cx| {
             let close = close.clone();
             if initial_focus.replace(false) {
@@ -3025,6 +3023,7 @@ impl Shell {
             dialog
                 .title("Preferences")
                 .w(dialog_width)
+                .h(dialog_height)
                 .max_h(dialog_height)
                 .on_close(move |_, _, cx| {
                     let _ = close.update(cx, |sheet, cx| sheet.cancel(cx));
@@ -7801,10 +7800,11 @@ mod tests {
         open_preferences_sheet(cx, handle, &view);
         cx.update_window(handle.into(), |_, window, _cx| {
             let viewport = window.viewport_size();
-            let body = window.find("preferences-field-theme").bounds();
+            let sheet = window.find("surface").bounds();
+            let aspect_ratio = f32::from(sheet.size.width) / f32::from(sheet.size.height);
             assert!(
-                body.size.width > body.size.height,
-                "preferences body should use a landscape layout: {body:?}"
+                (1.5..1.9).contains(&aspect_ratio),
+                "preferences sheet should use a 16:10 landscape layout: {sheet:?}"
             );
             for id in ["preferences-apply", "preferences-cancel"] {
                 let bounds = window.find(id).bounds();
