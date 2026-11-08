@@ -766,21 +766,27 @@ impl TerminalPanel {
             let mut col = cols;
             while col > 0 {
                 col -= 1;
+                let point = GridPoint { row, col };
+                let selected = selection.is_some_and(|selection| selection.contains(point));
+                let is_cursor = snapshot.terminal.is_live()
+                    && !snapshot.terminal.cursor_hidden()
+                    && cursor == (row, col)
+                    && focused;
                 let Some(cell) = snapshot.cell(row, col) else {
+                    if selected || is_cursor {
+                        end = col + 1;
+                        break;
+                    }
                     continue;
                 };
                 if cell.wide_continuation() {
                     continue;
                 }
-                let point = GridPoint { row, col };
                 let padding = cell.contents().is_empty()
                     && matches!(cell.background(), TerminalColor::Default)
                     && !cell.inverse()
-                    && !selection.is_some_and(|selection| selection.contains(point))
-                    && !(snapshot.terminal.is_live()
-                        && !snapshot.terminal.cursor_hidden()
-                        && cursor == (row, col)
-                        && focused);
+                    && !selected
+                    && !is_cursor;
                 if !padding {
                     end = col + if cell.wide() { 2 } else { 1 };
                     break;
@@ -790,19 +796,46 @@ impl TerminalPanel {
             let mut runs = Vec::new();
             let mut col = 0;
             while col < end {
-                let Some(cell) = snapshot.cell(row, col) else {
-                    break;
-                };
-                if cell.wide_continuation() {
-                    col += 1;
-                    continue;
-                }
                 let point = GridPoint { row, col };
                 let selected = selection.is_some_and(|selection| selection.contains(point));
                 let is_cursor = snapshot.terminal.is_live()
                     && !snapshot.terminal.cursor_hidden()
                     && cursor == (row, col)
                     && focused;
+                let Some(cell) = snapshot.cell(row, col) else {
+                    let mut fg = foreground;
+                    let mut bg = background;
+                    if selected {
+                        bg = selection_color;
+                        fg = foreground;
+                    }
+                    if is_cursor {
+                        std::mem::swap(&mut fg, &mut bg);
+                        bg = cursor_color;
+                        fg = background;
+                    }
+                    RunView::push(
+                        &mut runs,
+                        " ",
+                        1,
+                        RunStyle {
+                            foreground: fg,
+                            background: bg,
+                            bold: false,
+                            italic: false,
+                            underline: false,
+                            strikethrough: false,
+                            wide: false,
+                            highlight: selected || is_cursor,
+                        },
+                    );
+                    col += 1;
+                    continue;
+                };
+                if cell.wide_continuation() {
+                    col += 1;
+                    continue;
+                }
                 let mut fg = ansi_color(cell.foreground(), foreground);
                 let mut bg = ansi_color(cell.background(), background);
                 if cell.inverse() {
@@ -1687,6 +1720,58 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn focused_terminal_renders_typed_command_echo(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let mut panel = None;
+        let (handle, _host) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let terminal = cx.new(|cx| TerminalPanel::new(window, cx));
+                panel = Some(terminal.clone());
+                cx.new(|_| TerminalHost(terminal))
+            })
+            .unwrap()
+        });
+        let handle = handle.downcast::<Root>().unwrap();
+        let panel = panel.expect("the panel is mounted");
+        cx.update_window(handle.into(), |_, window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.attach(root.path(), cx);
+                panel.focus.focus(window, cx);
+                panel.set_active(true, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.simulate_input(handle.into(), "echo CODEX_TYPED_ECHO");
+        cx.simulate_keystrokes(handle.into(), "enter");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let contents = panel.read_with(cx, |panel, _| panel.screen_contents());
+            if contents.contains("CODEX_TYPED_ECHO") {
+                assert!(contents.contains("echo CODEX_TYPED_ECHO"), "{contents:?}");
+                let rendered = cx
+                    .update_window(handle.into(), |_, window, cx| {
+                        panel.update(cx, |panel, cx| {
+                            panel
+                                .render_rows(window, cx)
+                                .into_iter()
+                                .flat_map(|row| row.runs.into_iter().map(|run| run.text))
+                                .collect::<String>()
+                        })
+                    })
+                    .unwrap();
+                assert!(rendered.contains("echo CODEX_TYPED_ECHO"), "{rendered:?}");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{contents:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panel.update(cx, |panel, cx| panel.shutdown(cx));
+    }
+
+    #[gpui_kit::test]
     async fn terminal_tabs_keep_sessions_alive_and_close_only_the_selected_shell(
         cx: &mut TestAppContext,
     ) {
@@ -1749,6 +1834,14 @@ mod tests {
     impl Render for Host {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
+        }
+    }
+
+    struct TerminalHost(gpui_kit::Entity<TerminalPanel>);
+
+    impl Render for TerminalHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
         }
     }
 }
