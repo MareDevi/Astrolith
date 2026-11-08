@@ -485,9 +485,9 @@ impl TerminalPanel {
     /// Hidden terminals keep noticing exits at a slow cadence instead of
     /// repainting every frame. Becoming visible restarts the loop so the
     /// first frame after showing does not wait out the hidden interval.
-    pub(crate) fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+    pub(crate) fn set_active(&mut self, active: bool, cx: &mut Context<Self>) -> bool {
         if self.active == active {
-            return;
+            return false;
         }
         self.active = active;
         if active
@@ -496,7 +496,7 @@ impl TerminalPanel {
                 .iter()
                 .any(|terminal| terminal.session.is_some() && terminal.exit.is_none())
         {
-            return;
+            return active;
         }
         if active && !self.terminals.is_empty() {
             // Restart immediately: the old task may be asleep on the slow
@@ -504,6 +504,7 @@ impl TerminalPanel {
             self.poll_task = None;
             self.start_polling(cx);
         }
+        active
     }
 
     /// Cadence for the next poll, chosen from visibility.
@@ -892,6 +893,11 @@ impl Render for TerminalPanel {
             .map(|(index, terminal)| (terminal.id, format!("Terminal {}", index + 1)))
             .collect::<Vec<_>>();
         let selected = self.selected_text();
+        let terminal_size = self
+            .active_session()
+            .map(TerminalSession::size)
+            .unwrap_or((0, 0));
+        let focused = self.focus.is_focused(_window);
         let clear = cx.listener(|this, _, _, cx| this.clear(cx));
         let restart = cx.listener(|this, _, _, cx| this.restart(cx));
         let create = cx.listener(|this, _, window, cx| {
@@ -907,51 +913,48 @@ impl Render for TerminalPanel {
             .v_flex()
             .size_full()
             .min_h_0()
-            .bg(cx.theme().background)
+            .bg(cx.theme().group_box)
             .text_color(cx.theme().foreground)
             .child(
                 div()
                     .h_flex()
-                    .h(px(32.))
+                    .h(px(40.))
                     .flex_shrink_0()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .px(px(METRICS.space.md as f32))
-                    .child(
-                        div()
-                            .h_flex()
-                            .gap_1()
-                            .children(tabs.into_iter().map(|(id, label)| {
-                                let select = cx.listener(move |this, _, window, cx| {
-                                    this.select_terminal(id, cx);
-                                    this.focus.focus(window, cx);
-                                });
-                                Button::new(format!("terminal-tab-{id}"))
-                                    .small()
-                                    .ghost()
-                                    .label(label)
-                                    .when(active == Some(id), |button| button.underline())
-                                    .on_click(select)
-                            })),
-                    )
+                    .bg(cx.theme().tab_bar)
+                    .px(px(METRICS.space.sm as f32))
+                    .child(div().h_flex().gap(px(2.)).children(tabs.into_iter().map(
+                        |(id, label)| {
+                            let select = cx.listener(move |this, _, window, cx| {
+                                this.select_terminal(id, cx);
+                                this.focus.focus(window, cx);
+                            });
+                            Button::new(format!("terminal-tab-{id}"))
+                                .small()
+                                .ghost()
+                                .label(label)
+                                .when(active == Some(id), |button| {
+                                    button
+                                        .bg(cx.theme().tab_active)
+                                        .text_color(cx.theme().tab_active_foreground)
+                                })
+                                .when(active != Some(id), |button| {
+                                    button.text_color(cx.theme().tab_foreground)
+                                })
+                                .on_click(select)
+                        },
+                    )))
                     .child(
                         Button::new("terminal-new")
                             .small()
                             .ghost()
-                            .label("New")
+                            .label("+ New")
                             .on_click(create),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(status),
-                    )
+                    .child(div().flex_1().min_w_0())
                     .child(
                         Button::new("terminal-close")
                             .small()
@@ -986,173 +989,229 @@ impl Render for TerminalPanel {
             )
             .child(
                 div()
-                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_hidden()
-                    .font_family(mono.clone())
-                    .text_size(px(metrics.size))
-                    .track_focus(&self.focus)
-                    .key_context("Terminal")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            this.handle_mouse_down(event, window, cx)
-                        }),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            this.handle_mouse_down(event, window, cx)
-                        }),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Middle,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            this.handle_mouse_down(event, window, cx)
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                        let mode = this.mouse_mode();
-                        let report = match mode {
-                            TerminalMouseMode::AnyMotion => Some(
-                                event
-                                    .pressed_button
-                                    .and_then(mouse_button_code)
-                                    .unwrap_or(3),
-                            ),
-                            TerminalMouseMode::ButtonMotion => {
-                                event.pressed_button.and_then(mouse_button_code)
-                            }
-                            _ => None,
-                        };
-                        if let Some(button) = report {
-                            if let Some(point) = this.point_at(event.position)
-                                && this.last_mouse_report != Some((point, button))
-                            {
-                                this.send_mouse_report(button, point, event.modifiers, false, true);
-                                this.last_mouse_report = Some((point, button));
-                            }
-                            return;
-                        }
-                        if !this.selecting {
-                            return;
-                        }
-                        if let Some(point) = this.point_at(event.position)
-                            && let Some(selection) = this.selection.as_mut()
-                            && selection.focus != point
-                        {
-                            selection.focus = point;
-                            cx.notify();
-                        }
-                    }))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, event: &MouseUpEvent, _, _| this.handle_mouse_up(event)),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Right,
-                        cx.listener(|this, event: &MouseUpEvent, _, _| this.handle_mouse_up(event)),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Middle,
-                        cx.listener(|this, event: &MouseUpEvent, _, _| this.handle_mouse_up(event)),
-                    )
-                    .on_scroll(
-                        cx.listener(move |this, event: &gpui_kit::ScrollEvent, _, cx| {
-                            let lines = match event.delta {
-                                gpui_kit::ScrollDelta::Lines(lines) => lines.y,
-                                gpui_kit::ScrollDelta::Pixels(pixels) => {
-                                    f32::from(pixels.y) / row_height
-                                }
-                            };
-                            if lines.abs() < f32::EPSILON {
-                                return;
-                            }
-                            let delta = -(lines.round() as i32) * WHEEL_ROWS;
-                            if this.mouse_mode() != TerminalMouseMode::None {
-                                if lines.abs() >= f32::EPSILON
-                                    && let Some(point) = this.point_at(event.position)
-                                {
-                                    this.send_mouse_report(
-                                        if lines < 0. { 64 } else { 65 },
-                                        point,
-                                        event.modifiers,
-                                        false,
-                                        false,
-                                    );
-                                }
-                                return;
-                            }
-                            let revision = this.active_session().and_then(|session| {
-                                session.scroll(delta).then(|| session.revision())
-                            });
-                            if let Some(revision) = revision {
-                                this.selection = None;
-                                if let Some(terminal) = this.active_instance_mut() {
-                                    terminal.last_revision = revision;
-                                }
-                                cx.notify();
-                            }
-                        }),
-                    )
+                    .p(px(METRICS.space.sm as f32))
                     .child(
-                        canvas(
-                            move |bounds, _, _| {
-                                bounds_cell.set(Some(bounds));
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .inset_0(),
+                        div()
+                            .relative()
+                            .size_full()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if focused {
+                                cx.theme().tokens.ring.color
+                            } else {
+                                cx.theme().border
+                            })
+                            .bg(cx.theme().background)
+                            .font_family(mono.clone())
+                            .text_size(px(metrics.size))
+                            .track_focus(&self.focus)
+                            .key_context("Terminal")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                    this.handle_mouse_down(event, window, cx)
+                                }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                    this.handle_mouse_down(event, window, cx)
+                                }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Middle,
+                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                    this.handle_mouse_down(event, window, cx)
+                                }),
+                            )
+                            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                                let mode = this.mouse_mode();
+                                let report = match mode {
+                                    TerminalMouseMode::AnyMotion => Some(
+                                        event
+                                            .pressed_button
+                                            .and_then(mouse_button_code)
+                                            .unwrap_or(3),
+                                    ),
+                                    TerminalMouseMode::ButtonMotion => {
+                                        event.pressed_button.and_then(mouse_button_code)
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(button) = report {
+                                    if let Some(point) = this.point_at(event.position)
+                                        && this.last_mouse_report != Some((point, button))
+                                    {
+                                        this.send_mouse_report(
+                                            button,
+                                            point,
+                                            event.modifiers,
+                                            false,
+                                            true,
+                                        );
+                                        this.last_mouse_report = Some((point, button));
+                                    }
+                                    return;
+                                }
+                                if !this.selecting {
+                                    return;
+                                }
+                                if let Some(point) = this.point_at(event.position)
+                                    && let Some(selection) = this.selection.as_mut()
+                                    && selection.focus != point
+                                {
+                                    selection.focus = point;
+                                    cx.notify();
+                                }
+                            }))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, event: &MouseUpEvent, _, _| {
+                                    this.handle_mouse_up(event)
+                                }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Right,
+                                cx.listener(|this, event: &MouseUpEvent, _, _| {
+                                    this.handle_mouse_up(event)
+                                }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Middle,
+                                cx.listener(|this, event: &MouseUpEvent, _, _| {
+                                    this.handle_mouse_up(event)
+                                }),
+                            )
+                            .on_scroll(cx.listener(
+                                move |this, event: &gpui_kit::ScrollEvent, _, cx| {
+                                    let lines = match event.delta {
+                                        gpui_kit::ScrollDelta::Lines(lines) => lines.y,
+                                        gpui_kit::ScrollDelta::Pixels(pixels) => {
+                                            f32::from(pixels.y) / row_height
+                                        }
+                                    };
+                                    if lines.abs() < f32::EPSILON {
+                                        return;
+                                    }
+                                    let delta = -(lines.round() as i32) * WHEEL_ROWS;
+                                    if this.mouse_mode() != TerminalMouseMode::None {
+                                        if lines.abs() >= f32::EPSILON
+                                            && let Some(point) = this.point_at(event.position)
+                                        {
+                                            this.send_mouse_report(
+                                                if lines < 0. { 64 } else { 65 },
+                                                point,
+                                                event.modifiers,
+                                                false,
+                                                false,
+                                            );
+                                        }
+                                        return;
+                                    }
+                                    let revision = this.active_session().and_then(|session| {
+                                        session.scroll(delta).then(|| session.revision())
+                                    });
+                                    if let Some(revision) = revision {
+                                        this.selection = None;
+                                        if let Some(terminal) = this.active_instance_mut() {
+                                            terminal.last_revision = revision;
+                                        }
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                            .child(
+                                canvas(
+                                    move |bounds, _, _| {
+                                        bounds_cell.set(Some(bounds));
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .inset_0(),
+                            )
+                            .child(div().absolute().inset_0().v_flex().children(
+                                rows.into_iter().map(|row| {
+                                    div()
+                                        .h(px(row_height))
+                                        .w_full()
+                                        .flex()
+                                        .flex_shrink_0()
+                                        .children(row.runs.into_iter().map(|run| {
+                                            div()
+                                                .h_full()
+                                                .w(px(col_width * f32::from(run.width_cells)))
+                                                .flex_shrink_0()
+                                                .flex()
+                                                .items_center()
+                                                .bg(run.style.background)
+                                                .text_color(run.style.foreground)
+                                                .when(run.style.bold, |run| {
+                                                    run.font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                                })
+                                                .when(run.style.italic, |run| run.italic())
+                                                .when(run.style.underline, |run| run.underline())
+                                                .when(run.style.strikethrough, |run| {
+                                                    run.line_through()
+                                                })
+                                                .child(SharedString::from(run.text))
+                                        }))
+                                }),
+                            ))
+                            .when(!running, |viewport| {
+                                viewport.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(
+                                            active_failure.clone().unwrap_or_else(|| {
+                                                "No project terminal".to_owned()
+                                            }),
+                                        ),
+                                )
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .h_flex()
+                    .h(px(26.))
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().status_bar)
+                    .px(px(METRICS.space.md as f32))
+                    .child(div().size(px(6.)).rounded_full().bg(if running {
+                        cx.theme().success
+                    } else {
+                        cx.theme().muted_foreground
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(status),
                     )
                     .child(
                         div()
-                            .absolute()
-                            .inset_0()
-                            .v_flex()
-                            .children(rows.into_iter().map(|row| {
-                                div()
-                                    .h(px(row_height))
-                                    .w_full()
-                                    .flex()
-                                    .flex_shrink_0()
-                                    .children(row.runs.into_iter().map(|run| {
-                                        div()
-                                            .h_full()
-                                            .w(px(col_width * f32::from(run.width_cells)))
-                                            .flex_shrink_0()
-                                            .flex()
-                                            .items_center()
-                                            .bg(run.style.background)
-                                            .text_color(run.style.foreground)
-                                            .when(run.style.bold, |run| {
-                                                run.font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                            })
-                                            .when(run.style.italic, |run| run.italic())
-                                            .when(run.style.underline, |run| run.underline())
-                                            .when(run.style.strikethrough, |run| run.line_through())
-                                            .child(SharedString::from(run.text))
-                                    }))
-                            })),
-                    )
-                    .when(!running, |viewport| {
-                        viewport.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(
-                                    active_failure
-                                        .clone()
-                                        .unwrap_or_else(|| "No project terminal".to_owned()),
-                                ),
-                        )
-                    }),
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{} × {}", terminal_size.0, terminal_size.1)),
+                    ),
             )
     }
 }

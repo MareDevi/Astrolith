@@ -982,6 +982,48 @@ mod tests {
     }
 
     #[test]
+    fn interactive_shell_echoes_typed_commands_before_their_output() {
+        let mut shell = CommandBuilder::new("sh");
+        shell.arg("-i");
+        shell.env("TERM", "xterm-256color");
+        let mut session =
+            TerminalSession::spawn_command(&std::env::temp_dir(), 40, 8, shell).unwrap();
+        session.write(b"printf 'command-output\\n'\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let contents = session.contents();
+            if contents.contains("command-output") {
+                assert!(contents.contains("printf 'command-output"), "{contents:?}");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "shell output timed out: {contents:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn configured_login_shell_echoes_typed_commands() {
+        let mut session = TerminalSession::spawn(&std::env::temp_dir(), 40, 8).unwrap();
+        session.write(b"echo CODEX_TYPED_MARKER\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let contents = session.contents();
+            if contents.contains("CODEX_TYPED_MARKER") {
+                assert!(contents.contains("echo CODEX_TYPED_MARKER"), "{contents:?}");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "shell output timed out: {contents:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
     fn killing_a_long_running_child_ends_the_read_loop() {
         let mut session =
             TerminalSession::spawn_command(&std::env::temp_dir(), 40, 8, command("sleep 60"))

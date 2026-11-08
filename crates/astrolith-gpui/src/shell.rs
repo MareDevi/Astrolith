@@ -1900,8 +1900,12 @@ impl Shell {
         let active =
             self.mode == WorkspaceMode::Build && self.dock.read(cx).has_dock(DockPlacement::Bottom);
         let terminal_focused = self.terminal.read(cx).has_focus(window);
-        self.terminal
+        let became_active = self
+            .terminal
             .update(cx, |terminal, cx| terminal.set_active(active, cx));
+        if became_active {
+            self.terminal.read(cx).focus_handle(cx).focus(window, cx);
+        }
         // gpui focus is pure handle equality: removing the dock does not move
         // it, so a hidden terminal would keep every keystroke.
         if !active && terminal_focused {
