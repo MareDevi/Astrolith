@@ -58,12 +58,13 @@ use astrolith_preview::{HostEnvironment, PreviewCapability};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Presence, Sheet, Transition};
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
+    ActiveTheme, Disableable, Icon, Sizable, StyledExt, TitleBar, WindowExt,
     button::{Button, ButtonVariants},
     command::{Command, CommandGroup, CommandItem, CommandState},
     dock::{BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
     kbd::Kbd,
     scroll::ScrollableElement as _,
+    tab::{Tab, TabBar},
 };
 use gpui_kit::{
     Animation, AnimationExt as _, App, AppContext, Bounds, Context, Entity, ExternalPaths,
@@ -1976,6 +1977,7 @@ impl Shell {
         let active = self.project.read(cx).active_path();
         let owner = cx.weak_entity();
         let project = self.project.clone();
+        let motion = cx.theme().motion_tokens();
         div()
             .id("build-tabs")
             .test_support()
@@ -2060,31 +2062,32 @@ impl Shell {
                             )
                     })),
             )
+            .with_animation(
+                "build-tabs-appear",
+                Animation::new(motion.duration_fast)
+                    .with_easing(gpui_kit::base::animation::ease_out_cubic),
+                |tabs, progress| tabs.opacity(progress),
+            )
     }
 
     /// The centered three-way mode switch.
     fn mode_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.mode;
         let owner = cx.weak_entity();
-        div()
-            .h_flex()
-            .items_center()
-            .gap_0p5()
-            .p(px(3.))
-            .rounded_full()
-            .bg(cx.theme().tab_bar_segmented)
-            .children(WorkspaceMode::ALL.map(|mode| {
-                let owner = owner.clone();
-                Button::new(mode.label())
-                    .ghost()
-                    .rounded_full()
-                    .label(mode.label())
-                    .selected(mode == current)
-                    .tooltip(mode.label())
-                    .on_click(move |_, window, cx| {
-                        let _ = owner.update(cx, |this, cx| this.set_mode(mode, window, cx));
-                    })
-            }))
+        let selected = WorkspaceMode::ALL
+            .iter()
+            .position(|mode| *mode == current)
+            .unwrap_or(0);
+        TabBar::new("workspace-mode-switch")
+            .small()
+            .segmented()
+            .selected_index(selected)
+            .children(WorkspaceMode::ALL.map(|mode| Tab::new().label(mode.label())))
+            .on_click(move |index, window, cx| {
+                if let Some(mode) = WorkspaceMode::ALL.get(*index).copied() {
+                    let _ = owner.update(cx, |this, cx| this.set_mode(mode, window, cx));
+                }
+            })
     }
 
     /// Keep the document empty state aligned with the navigation the mode shows.
@@ -2298,6 +2301,7 @@ impl Shell {
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
+            .opacity(presence.progress)
             .shadow_xl()
             .child(
                 div()
@@ -2374,6 +2378,7 @@ impl Shell {
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
+            .opacity(presence.progress)
             .shadow_xl()
             .track_focus(&self.library_focus)
             .key_context("WritingLibrary")
@@ -3752,6 +3757,30 @@ impl Render for Shell {
         // stays implicit so a healthy window keeps its original layout.
         let file_status = self.file_status.clone();
         let show_file_status = file_status != "Readonly · No file open" && !file_status.is_empty();
+        let motion = cx.theme().motion_tokens();
+        let status_presence = Presence::new("file-status-presence", show_file_status)
+            .transition(Transition::new(motion.duration_fast).easing(motion.easing_enter.clone()))
+            .sample(window, cx);
+        let file_status = status_presence.should_render().then(|| {
+            div()
+                .id("file-status")
+                .test_support()
+                .flex_shrink_0()
+                .h(px(20. * status_presence.progress))
+                .w_full()
+                .h_flex()
+                .items_center()
+                .overflow_hidden()
+                .px_3()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().tab_bar)
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .opacity(status_presence.progress)
+                .child(file_status)
+                .into_any_element()
+        });
 
         let close_owner = self.project.downgrade();
         div()
@@ -3916,25 +3945,7 @@ impl Render for Shell {
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
             .children(self.render_library(window, cx))
             .children(self.render_inspector(window, cx))
-            .when(show_file_status, |shell| {
-                shell.child(
-                    div()
-                        .id("file-status")
-                        .test_support()
-                        .flex_shrink_0()
-                        .h(px(20.))
-                        .w_full()
-                        .h_flex()
-                        .items_center()
-                        .px_3()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().tab_bar)
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(file_status),
-                )
-            })
+            .children(file_status)
     }
 }
 

@@ -25,8 +25,8 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{
-    AnyElement, App, Bounds, Entity, FocusHandle, IntoElement, Pixels, SharedString,
-    TestSupportExt, WeakEntity, anchored, div, point, prelude::*, px,
+    Animation, AnimationExt as _, AnyElement, App, Bounds, Entity, FocusHandle, IntoElement,
+    Pixels, SharedString, TestSupportExt, WeakEntity, anchored, div, point, prelude::*, px,
 };
 
 use crate::editor::session::DocumentSession;
@@ -133,6 +133,7 @@ fn toolbar_body(
     toolbar_focus: &FocusHandle,
     cx: &mut App,
 ) -> impl IntoElement {
+    let enter_duration = cx.theme().motion_tokens().duration_fast;
     let mut buttons: Vec<(&'static str, FormatCommand, IconName)> = vec![
         (
             "selection-toolbar-bold",
@@ -184,6 +185,11 @@ fn toolbar_body(
                         session.update(cx, |session, cx| session.apply_format(command, window, cx));
                 })
         }))
+        .with_animation(
+            "selection-toolbar-appear",
+            Animation::new(enter_duration).with_easing(gpui_kit::base::animation::ease_out_cubic),
+            |toolbar, progress| toolbar.opacity(progress),
+        )
 }
 
 fn format_label(command: FormatCommand) -> SharedString {

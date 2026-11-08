@@ -19,8 +19,8 @@ use gpui_kit::component::{
     menu::{DropdownMenu, PopupMenuItem},
 };
 use gpui_kit::{
-    Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, TestSupportExt,
-    Window, div, prelude::*, px,
+    Animation, AnimationExt as _, Context, Entity, EventEmitter, IntoElement, Render, SharedString,
+    Subscription, TestSupportExt, Window, div, prelude::*, px,
 };
 
 pub(crate) struct InspectorRequested;
@@ -102,6 +102,7 @@ impl Render for DocumentHeader {
         let externally_changed = active_tab
             .as_ref()
             .is_some_and(|tab| tab.externally_changed);
+        let enter_duration = cx.theme().motion_tokens().duration_fast;
 
         let save_status = self.project.read(cx).active_save_status();
         let (state, state_tone): (SharedString, _) = match save_status {
@@ -248,6 +249,12 @@ impl Render for DocumentHeader {
                                 menu
                             }),
                     ),
+            )
+            .with_animation(
+                "document-header-appear",
+                Animation::new(enter_duration)
+                    .with_easing(gpui_kit::base::animation::ease_out_cubic),
+                |header, progress| header.opacity(progress),
             )
             .into_any_element()
     }
