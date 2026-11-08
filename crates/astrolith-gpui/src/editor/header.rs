@@ -153,17 +153,18 @@ impl Render for DocumentHeader {
                             .items_center()
                             .gap_2()
                             .min_w_0()
+                            .when_some(collection.clone(), |row, _| {
+                                row.child(self.library_control(cx))
+                            })
                             .child(crate::ui::document_title(title, cx))
                             .when_some(collection.clone(), |row, collection| {
-                                row.child(crate::ui::v_divider(cx))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .truncate()
-                                            .child(collection),
-                                    )
-                                    .child(self.library_control(cx))
+                                row.child(crate::ui::v_divider(cx)).child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .truncate()
+                                        .child(collection),
+                                )
                             }),
                     )
                     .child(div().flex_1())
