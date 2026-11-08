@@ -2,8 +2,8 @@ use gpui_kit::Hsla;
 
 /// Semantic roles owned by Astrolith; Kit supplies interaction/status roles.
 ///
-/// The application uses one neutral light and one neutral dark palette. Roles
-/// are named for what they mean, not for the mock's CSS custom properties:
+/// Named colour palettes map into these shared semantic roles. Roles are named
+/// for what they mean, not for the mock's CSS custom properties:
 /// notably `muted` is secondary *text*, while [`Self::control`] and
 /// [`Self::surface`] carry the quiet *fills* the mock calls `muted` and
 /// `sidebar`. Components read roles, never raw palette values.

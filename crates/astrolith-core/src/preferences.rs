@@ -32,6 +32,39 @@ pub enum ThemePreference {
     System,
 }
 
+/// Named colour family used in the application interface.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Hash, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorScheme {
+    /// Catppuccin Latte.
+    #[default]
+    CatppuccinLatte,
+    /// Catppuccin Frappé.
+    CatppuccinFrappe,
+    /// Catppuccin Macchiato.
+    CatppuccinMacchiato,
+    /// Catppuccin Mocha.
+    CatppuccinMocha,
+    /// Nord.
+    Nord,
+    /// Nord Light.
+    NordLight,
+    /// Tokyo Night.
+    TokyoNight,
+    /// Tokyo Night Storm.
+    TokyoNightStorm,
+    /// Tokyo Night Moon.
+    TokyoNightMoon,
+    /// Tokyo Day.
+    TokyoDay,
+    /// Gruvbox Light.
+    GruvboxLight,
+    /// Gruvbox Dark.
+    GruvboxDark,
+}
+
 /// Workspace presentation mode.
 ///
 /// The mode changes layout policy and chrome only; document identity, editor
@@ -598,6 +631,8 @@ pub struct GlobalPreferencesV2 {
     pub version: u32,
     /// Light, dark or system appearance.
     pub theme: ThemePreference,
+    /// Named colour palette.
+    pub color_scheme: ColorScheme,
     /// Interface language selected by the user (`en`, `zh-CN` or `ja`).
     pub language: String,
     /// Mode restored when no project records a last mode.
@@ -653,6 +688,7 @@ impl Default for GlobalPreferencesV2 {
         Self {
             version: GLOBAL_PREFERENCES_VERSION,
             theme: ThemePreference::System,
+            color_scheme: ColorScheme::default(),
             language: "en".to_owned(),
             default_mode: WorkspaceMode::default(),
             layouts: ModeLayouts::default(),

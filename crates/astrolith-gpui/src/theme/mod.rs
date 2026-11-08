@@ -10,7 +10,7 @@ pub(crate) use typography::{
     font_family_available, installed_font_names, preferred_ui_font, prose_font, system_ui_font,
 };
 
-use astrolith_core::preferences::GlobalPreferencesV2;
+use astrolith_core::preferences::{ColorScheme, GlobalPreferencesV2};
 use gpui_kit::{
     App, Global, Hsla, WindowAppearance,
     component::{ActiveTheme, Theme},
@@ -70,13 +70,9 @@ impl ResolveTheme for ThemeMode {
     }
 }
 
-/// Return the neutral palette for a resolved appearance. Callers resolve
-/// System first.
-pub fn palette(mode: ThemeMode) -> ThemeTokens {
-    match mode {
-        ThemeMode::Dark => palettes::dark(),
-        ThemeMode::Light | ThemeMode::System => palettes::light(),
-    }
+/// Return the named palette selected in global preferences.
+pub fn palette(_mode: ThemeMode, scheme: ColorScheme) -> ThemeTokens {
+    palettes::named(scheme)
 }
 
 /// Apply colors through Kit's synchronized Component/Base theme update path.
@@ -117,7 +113,7 @@ pub fn apply(settings: &GlobalPreferencesV2, appearance: WindowAppearance, cx: &
         ThemeMode::Light | ThemeMode::System => gpui_kit::component::ThemeMode::Light,
     };
     Theme::change(kit_mode, None, cx);
-    let tokens = palette(mode);
+    let tokens = palette(mode, settings.color_scheme);
     Theme::update(cx, |theme| {
         let colors = &mut theme.colors;
         colors.background = tokens.background;

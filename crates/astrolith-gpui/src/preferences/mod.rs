@@ -23,9 +23,9 @@ use std::{
 
 use astrolith_astro::schema::{CollectionSchema, FieldKind};
 use astrolith_core::preferences::{
-    AutosaveDelay, BrowserCommand, CollectionPreferencesV1, FieldMappings, FileExtension,
-    GlobalPreferencesV2, HeadingColors, IdeCommand, ImagePathMode, PreviewPreferences,
-    PreviewPresentation, ProjectPreferencesV1, ThemePreference, WorkspaceMode,
+    AutosaveDelay, BrowserCommand, CollectionPreferencesV1, ColorScheme, FieldMappings,
+    FileExtension, GlobalPreferencesV2, HeadingColors, IdeCommand, ImagePathMode,
+    PreviewPreferences, PreviewPresentation, ProjectPreferencesV1, ThemePreference, WorkspaceMode,
 };
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt, WindowExt,
@@ -276,6 +276,7 @@ pub(crate) struct PreferencesSheet {
     context: Option<PreferencesContext>,
     pane: Pane,
     theme: ThemePreference,
+    color_scheme: ColorScheme,
     language: String,
     default_mode: WorkspaceMode,
     layout_resets: LayoutResets,
@@ -325,6 +326,7 @@ impl PreferencesSheet {
             context: None,
             pane: Pane::Appearance,
             theme: ThemePreference::default(),
+            color_scheme: ColorScheme::default(),
             language: "en".to_owned(),
             default_mode: WorkspaceMode::default(),
             layout_resets: LayoutResets::default(),
@@ -400,6 +402,7 @@ impl PreferencesSheet {
         let project = context.project.clone();
         let global = context.global.clone();
         self.theme = global.theme;
+        self.color_scheme = global.color_scheme;
         self.language = supported_language(&global.language).to_owned();
         self.default_mode = global.default_mode;
         self.layout_resets = LayoutResets::default();
@@ -586,6 +589,7 @@ impl PreferencesSheet {
         let context = self.context.as_ref()?;
         let mut global = context.global.clone();
         global.theme = self.theme;
+        global.color_scheme = self.color_scheme;
         global.language = self.language.clone();
         global.default_mode = self.default_mode;
         global.default_extension = self.global_extension;

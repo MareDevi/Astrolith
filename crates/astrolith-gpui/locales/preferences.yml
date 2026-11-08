@@ -209,9 +209,17 @@ preferences:
       zh-CN: "颜色模式"
       ja: "カラーモード"
     theme_hint:
-      en: "Astrolith uses one neutral light and dark palette; Follow system chooses between them from the desktop appearance."
-      zh-CN: "Astrolith 使用统一的中性浅色与深色调色板；“跟随系统”会根据桌面外观在两者之间选择。"
-      ja: "Astrolith は中立なライトとダークの 1 つのパレットを使用し、「システムに従う」はデスクトップの外観に応じて切り替えます。"
+      en: "Choose light, dark or follow the desktop appearance."
+      zh-CN: "选择浅色、深色，或跟随桌面外观。"
+      ja: "ライト、ダーク、またはデスクトップの外観に従う設定を選びます。"
+    color_scheme:
+      en: "Colour scheme"
+      zh-CN: "配色方案"
+      ja: "カラースキーム"
+    color_scheme_hint:
+      en: "Choose a named palette shared by every project. Light and dark variants are separate choices."
+      zh-CN: "选择所有项目共用的配色；浅色与深色变体分别列出。"
+      ja: "すべてのプロジェクトで共通する配色を選びます。ライトとダークは別々に選択します。"
     theme_section:
       en: "Theme"
       zh-CN: "主题"

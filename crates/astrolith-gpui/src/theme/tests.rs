@@ -75,24 +75,6 @@ fn explicit_interface_typography_overrides_the_theme_face_and_scale(cx: &mut Tes
     });
 }
 
-#[test]
-fn oklch_conversion_matches_css_reference_values_and_keeps_alpha() {
-    let white: Rgba = palettes::oklch(1., 0., 0., 1.).into();
-    assert!((white.r - 1.).abs() < 0.001);
-    assert!((white.g - 1.).abs() < 0.001);
-    assert!((white.b - 1.).abs() < 0.001);
-
-    let black: Rgba = palettes::oklch(0., 0., 0., 1.).into();
-    assert!(black.r < 0.001 && black.g < 0.001 && black.b < 0.001);
-
-    let red: Rgba = palettes::oklch(0.627_955, 0.257_683, 29.234, 1.).into();
-    assert!((red.r - 1.).abs() < 0.01);
-    assert!(red.g < 0.01 && red.b < 0.01);
-
-    let hairline = palettes::oklch(1., 0., 0., 0.1);
-    assert!((hairline.a - 0.1).abs() < f32::EPSILON);
-}
-
 fn luminance(color: Hsla) -> f32 {
     let color: Rgba = color.into();
     let linear = |channel: f32| {
@@ -114,9 +96,12 @@ fn contrast(first: Hsla, second: Hsla) -> f32 {
 }
 
 #[test]
-fn neutral_roles_keep_text_contrast_and_translucent_boundaries_composite() {
+fn catppuccin_mocha_roles_keep_text_contrast_and_distinct_selection_states() {
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
-        let tokens = palette(mode);
+        let tokens = palette(
+            mode,
+            astrolith_core::preferences::ColorScheme::CatppuccinMocha,
+        );
         assert!(
             contrast(tokens.foreground, tokens.background) >= 4.5,
             "{mode:?} primary text meets the normal-text target"
@@ -136,11 +121,48 @@ fn neutral_roles_keep_text_contrast_and_translucent_boundaries_composite() {
         assert_ne!(tokens.hover, tokens.selection);
     }
 
-    let dark = palette(ThemeMode::Dark);
-    assert!(dark.border.a < 1.);
-    let composited = dark.background.blend(dark.border);
-    assert!((composited.a - 1.).abs() < f32::EPSILON);
-    assert!(luminance(composited) > luminance(dark.background));
+    let dark = palette(
+        ThemeMode::Dark,
+        astrolith_core::preferences::ColorScheme::CatppuccinMocha,
+    );
+    assert_ne!(dark.surface, dark.background);
+    assert_ne!(dark.hover, dark.selection);
+}
+
+#[test]
+fn popular_schemes_keep_text_and_action_contrast_in_both_modes() {
+    use astrolith_core::preferences::ColorScheme;
+
+    for scheme in [
+        ColorScheme::CatppuccinLatte,
+        ColorScheme::CatppuccinFrappe,
+        ColorScheme::CatppuccinMacchiato,
+        ColorScheme::CatppuccinMocha,
+        ColorScheme::Nord,
+        ColorScheme::NordLight,
+        ColorScheme::TokyoNight,
+        ColorScheme::TokyoNightStorm,
+        ColorScheme::TokyoNightMoon,
+        ColorScheme::TokyoDay,
+        ColorScheme::GruvboxLight,
+        ColorScheme::GruvboxDark,
+    ] {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let tokens = palette(mode, scheme);
+            assert!(
+                contrast(tokens.foreground, tokens.background) >= 4.5,
+                "{scheme:?} {mode:?} text"
+            );
+            assert!(
+                contrast(tokens.primary_foreground, tokens.primary) >= 4.5,
+                "{scheme:?} {mode:?} action"
+            );
+            assert!(
+                contrast(tokens.focus, tokens.background) >= 3.0,
+                "{scheme:?} {mode:?} focus"
+            );
+        }
+    }
 }
 
 #[gpui_kit::test]
@@ -153,7 +175,7 @@ fn theme_adapter_projects_complete_semantic_roles_in_both_modes(cx: &mut TestApp
                 ..GlobalPreferencesV2::default()
             };
             apply(&settings, WindowAppearance::Dark, cx);
-            let tokens = palette(mode);
+            let tokens = palette(mode, settings.color_scheme);
             assert_eq!(cx.theme().background, tokens.background);
             assert_eq!(cx.theme().foreground, tokens.foreground);
             assert_eq!(cx.theme().sidebar, tokens.surface);

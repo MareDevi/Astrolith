@@ -8789,7 +8789,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn appearance_commands_apply_the_neutral_palette_and_persist(cx: &mut TestAppContext) {
+    fn appearance_commands_persist_mode_and_keep_the_selected_scheme(cx: &mut TestAppContext) {
         use crate::theme::ResolveTheme;
 
         let (handle, view) = mount(cx, GlobalPreferencesV2::default());
@@ -8802,11 +8802,15 @@ mod tests {
                 view.update(cx, |shell, cx| shell.execute(command, window, cx))
             })
             .unwrap();
-            let (settings_theme, resolved) = view.read_with(cx, |shell, cx| {
-                (shell.settings.theme, mode.resolve(cx.window_appearance()))
+            let (settings_theme, scheme, resolved) = view.read_with(cx, |shell, cx| {
+                (
+                    shell.settings.theme,
+                    shell.settings.color_scheme,
+                    mode.resolve(cx.window_appearance()),
+                )
             });
             assert_eq!(settings_theme, mode);
-            let tokens = theme::palette(resolved);
+            let tokens = theme::palette(resolved, scheme);
             cx.update(|cx| {
                 assert_eq!(cx.theme().background, tokens.background);
                 assert_eq!(cx.theme().primary, tokens.primary);
