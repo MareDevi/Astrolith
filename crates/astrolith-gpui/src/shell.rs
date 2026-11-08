@@ -58,13 +58,12 @@ use astrolith_preview::{HostEnvironment, PreviewCapability};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Presence, Sheet, Transition};
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, Sizable, StyledExt, TitleBar, WindowExt,
+    ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
     button::{Button, ButtonVariants},
     command::{Command, CommandGroup, CommandItem, CommandState},
     dock::{BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
     kbd::Kbd,
     scroll::ScrollableElement as _,
-    tab::{Tab, TabBar},
 };
 use gpui_kit::{
     Animation, AnimationExt as _, App, AppContext, Bounds, Context, Entity, ExternalPaths,
@@ -2074,20 +2073,25 @@ impl Shell {
     fn mode_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.mode;
         let owner = cx.weak_entity();
-        let selected = WorkspaceMode::ALL
-            .iter()
-            .position(|mode| *mode == current)
-            .unwrap_or(0);
-        TabBar::new("workspace-mode-switch")
-            .small()
-            .segmented()
-            .selected_index(selected)
-            .children(WorkspaceMode::ALL.map(|mode| Tab::new().label(mode.label())))
-            .on_click(move |index, window, cx| {
-                if let Some(mode) = WorkspaceMode::ALL.get(*index).copied() {
-                    let _ = owner.update(cx, |this, cx| this.set_mode(mode, window, cx));
-                }
-            })
+        div()
+            .h_flex()
+            .items_center()
+            .gap_0p5()
+            .p(px(3.))
+            .rounded_full()
+            .bg(cx.theme().tab_bar_segmented)
+            .children(WorkspaceMode::ALL.map(|mode| {
+                let owner = owner.clone();
+                Button::new(mode.label())
+                    .ghost()
+                    .rounded_full()
+                    .label(mode.label())
+                    .selected(mode == current)
+                    .tooltip(mode.label())
+                    .on_click(move |_, window, cx| {
+                        let _ = owner.update(cx, |this, cx| this.set_mode(mode, window, cx));
+                    })
+            }))
     }
 
     /// Keep the document empty state aligned with the navigation the mode shows.
