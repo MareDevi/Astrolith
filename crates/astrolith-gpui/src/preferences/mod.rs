@@ -35,8 +35,9 @@ use gpui_kit::component::{
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, SharedString, Subscription, TestSupportExt, Window, div, prelude::*, px,
+    Animation, AnimationExt as _, AnyElement, App, AppContext, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, IntoElement, SharedString, Subscription, TestSupportExt, Window, div,
+    prelude::*, px,
 };
 
 use crate::theme;
@@ -1627,6 +1628,7 @@ impl Render for PreferencesSheet {
         };
         let apply_disabled = self.has_errors();
         let pane = self.pane;
+        let motion = cx.theme().motion_tokens();
         let header = div()
             .h_flex()
             .w_full()
@@ -1724,7 +1726,14 @@ impl Render for PreferencesSheet {
                                 .px_6()
                                 .py_5()
                                 .overflow_y_scrollbar()
-                                .child(body),
+                                .child(
+                                    div().w_full().child(body).with_animation(
+                                        pane.label(),
+                                        Animation::new(motion.duration_fast)
+                                            .with_easing(gpui_kit::base::animation::ease_out_cubic),
+                                        |body, progress| body.opacity(progress),
+                                    ),
+                                ),
                         ),
                 ),
         )
