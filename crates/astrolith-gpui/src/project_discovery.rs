@@ -1235,11 +1235,6 @@ impl ProjectWorkspace {
         self.tabs.clone()
     }
 
-    /// Whether any document tab is open, without cloning the tab list.
-    pub(crate) fn has_open_tabs(&self) -> bool {
-        !self.tabs.is_empty()
-    }
-
     #[cfg(test)]
     pub(crate) fn is_loading(&self) -> bool {
         self.loading

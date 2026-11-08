@@ -2030,10 +2030,9 @@ impl Shell {
 
     /// Build's buffer tabs, backed by retained sessions.
     ///
-    /// The strip is only drawn while at least one buffer exists. Many tabs
-    /// scroll horizontally instead of being clipped, and each tab uses the
-    /// shared tab tokens so it reads as the same surface as the rest of the
-    /// application.
+    /// Many tabs scroll horizontally instead of being clipped, and each tab
+    /// uses shared tab tokens so it reads as the same surface as the rest of
+    /// the application.
     fn build_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs = self.project.read(cx).open_tabs();
         let active = self.project.read(cx).active_path();
@@ -2124,6 +2123,27 @@ impl Shell {
                             )
                     })),
             )
+            .child(
+                div()
+                    .h_full()
+                    .h_flex()
+                    .items_center()
+                    .border_l_1()
+                    .border_color(cx.theme().border)
+                    .px_2()
+                    .child(
+                        Button::new("build-source-control")
+                            .small()
+                            .ghost()
+                            .icon(IconName::GitBranch)
+                            .tooltip("Source Control")
+                            .accessibility_label("Git source control")
+                            .selected(self.git_open)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_git(window, cx)),
+                            ),
+                    ),
+            )
             .with_animation(
                 "build-tabs-appear",
                 Animation::new(motion.duration_fast)
@@ -2155,19 +2175,6 @@ impl Shell {
                         let _ = owner.update(cx, |this, cx| this.set_mode(mode, window, cx));
                     })
             }))
-            .when(current == WorkspaceMode::Build, |switch| {
-                let owner = owner.clone();
-                switch.child(
-                    Button::new("build-source-control")
-                        .ghost()
-                        .rounded_full()
-                        .label("Git")
-                        .selected(self.git_open)
-                        .on_click(move |_, window, cx| {
-                            let _ = owner.update(cx, |this, cx| this.toggle_git(window, cx));
-                        }),
-                )
-            })
     }
 
     /// Keep the document empty state aligned with the navigation the mode shows.
@@ -4283,7 +4290,6 @@ impl Render for Shell {
         );
         let chrome_hidden = self.chrome.is_hidden() && self.warning.is_none();
         let project_name = self.project.read(cx).project_name();
-        let has_buffers = self.project.read(cx).has_open_tabs();
         // Open, scan and builder failures used to be stored and never shown.
         // Surface them in a compact status line; the neutral "no file" copy
         // stays implicit so a healthy window keeps its original layout.
@@ -4471,7 +4477,7 @@ impl Render for Shell {
                     )
                     .into_any_element()
             })
-            .when(self.mode == WorkspaceMode::Build && has_buffers, |shell| {
+            .when(self.mode == WorkspaceMode::Build, |shell| {
                 shell.child(self.build_tab_strip(cx))
             })
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
@@ -5630,7 +5636,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    async fn build_buffer_tabs_appear_only_while_buffers_are_open(cx: &mut TestAppContext) {
+    async fn build_tab_strip_keeps_git_control_visible_without_buffers(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let workspace = tempfile::tempdir().unwrap();
         let global_path = workspace.path().join("preferences/global.json");
@@ -5648,14 +5654,16 @@ mod tests {
         })
         .await;
 
-        // An empty Build leaves no buffer strip behind.
+        // Empty Build keeps the Git control available without a tab.
         cx.update_window(handle.into(), |_, window, cx| {
             cx.set_reduce_motion(true);
             view.update(cx, |shell, cx| {
                 shell.set_mode(WorkspaceMode::Build, window, cx)
             });
             window.render_frame(cx);
-            assert!(window.try_find("build-tabs").is_none());
+            assert!(window.find("build-tabs").visible());
+            assert!(window.find("build-source-control").visible());
+            assert!(window.try_find("build-tab-0").is_none());
         })
         .unwrap();
 
@@ -5677,7 +5685,7 @@ mod tests {
         })
         .unwrap();
 
-        // Closing the last buffer removes the strip instead of leaving a blank row.
+        // Closing the last buffer keeps Git control available.
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |shell, cx| {
                 shell
@@ -5685,7 +5693,9 @@ mod tests {
                     .update(cx, |project, cx| project.close_active(window, cx));
             });
             window.render_frame(cx);
-            assert!(window.try_find("build-tabs").is_none());
+            assert!(window.find("build-tabs").visible());
+            assert!(window.find("build-source-control").visible());
+            assert!(window.try_find("build-tab-0").is_none());
         })
         .unwrap();
     }
