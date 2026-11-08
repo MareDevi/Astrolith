@@ -125,6 +125,9 @@ pub(crate) struct DocumentSession {
     /// Set when a failure was already reported, so the exit that follows a
     /// handshake error does not overwrite its cause.
     lsp_failure_seen: bool,
+    /// Whether the current notice came from the language server, so recovery
+    /// can replace exactly that notice without inspecting translated text.
+    lsp_notice_pending: bool,
     /// Visible complete-source surface, when the internal M6 switch selects it.
     source_surface: Option<Entity<SourceSurface>>,
     _change: Subscription,
@@ -195,6 +198,19 @@ struct BuildState {
 }
 
 impl DocumentSession {
+    /// Replace the notice with one that does not come from the language server.
+    fn set_notice(&mut self, notice: impl Into<SharedString>) {
+        self.notice = Some(notice.into());
+        self.lsp_notice_pending = false;
+    }
+
+    /// Replace the notice with a language-server message, so recovery can
+    /// replace exactly this notice later.
+    fn set_lsp_notice(&mut self, notice: impl Into<SharedString>) {
+        self.notice = Some(notice.into());
+        self.lsp_notice_pending = true;
+    }
+
     pub fn new(
         identity: DocumentIdentity,
         source: String,
@@ -492,6 +508,7 @@ impl DocumentSession {
             lsp_diagnostic_version: None,
             lsp_status: LspStatus::Inactive,
             lsp_failure_seen: false,
+            lsp_notice_pending: false,
             _change: change,
             _cursor: cursor,
             _blur: blur,
@@ -644,10 +661,10 @@ impl DocumentSession {
         cx: &mut Context<Self>,
     ) -> Result<(), SharedString> {
         if self.source_view {
-            let message = "Formatting commands are unavailable in complete-source view.";
-            self.notice = Some(SharedString::from(message));
+            let message = tr!("editor.session.formatting_unavailable");
+            self.set_notice(message.clone());
             cx.notify();
-            return Err(SharedString::from(message));
+            return Err(message.into());
         }
         self.absorb(cx);
         let selection = self.editor.read(cx).selected_range();
@@ -659,12 +676,11 @@ impl DocumentSession {
         ) {
             Ok(formatted) => formatted,
             Err(error) => {
-                let message =
-                    format!("The formatting command was refused and the source was kept: {error}");
-                self.notice = Some(SharedString::from(message.clone()));
+                let message = tr!("editor.session.formatting_refused", error = error);
+                self.set_notice(message.clone());
                 cx.emit(SessionChanged);
                 cx.notify();
-                return Err(SharedString::from(message));
+                return Err(message.into());
             }
         };
         let unchanged = formatted.outcome.is_unchanged(&self.projection.visible);
@@ -737,10 +753,9 @@ impl DocumentSession {
         match result {
             Ok(source) => Ok(source),
             Err(error) => {
-                let message =
-                    format!("The writer edit was refused and the source was kept: {error}");
-                self.notice = Some(SharedString::from(message.clone()));
-                Err(SharedString::from(message))
+                let message = tr!("editor.session.writer_edit_refused", error = error);
+                self.set_notice(message.clone());
+                Err(message.into())
             }
         }
     }
@@ -990,7 +1005,7 @@ impl DocumentSession {
         prepared
             .plan
             .revalidate(self.buffer.current_text())
-            .map_err(|error| format!("{error}. Insert again to re-plan the imports."))?;
+            .map_err(|error| tr!("editor.session.import_replan", error = error))?;
         let selection = self.editor.read(cx).selected_range();
         let caret = prepared
             .tag
@@ -1006,7 +1021,7 @@ impl DocumentSession {
             &self.projection,
             TextEdit::replace(selection.clone(), prepared.tag.text.clone()),
         )
-        .map_err(|error| format!("The tag was refused and the source was kept: {error}"))?;
+        .map_err(|error| tr!("editor.session.tag_refused", error = error))?;
         if prepared.changes_imports(self.buffer.current_text()) {
             // Import edits live in the hidden prelude; a plan that would change
             // visible text is refused rather than shifting the selection.
@@ -1014,10 +1029,7 @@ impl DocumentSession {
                 .0
                 .visible;
             if visible != self.projection.visible {
-                return Err(
-                    "The import plan would change the document body; nothing was inserted."
-                        .to_owned(),
-                );
+                return Err(tr!("editor.session.import_body_changed"));
             }
             self.buffer
                 .apply_text(prepared.plan.source().to_owned())
@@ -1803,6 +1815,7 @@ impl DocumentSession {
         self.projection = projection;
         if self.notice.is_none() {
             self.notice = notice;
+            self.lsp_notice_pending = false;
         }
         self.counts = token_summary(&self.projection.visible);
         self.presentation_dirty = false;
@@ -1987,7 +2000,7 @@ impl DocumentSession {
         self.lsp_status = LspStatus::Ready;
         if self.take_lsp_notice() {
             // Replace the failure the status line copied with recovery.
-            self.notice = Some(SharedString::from("Language server ready."));
+            self.set_lsp_notice(tr!("editor.session.lsp.ready"));
             cx.emit(SessionChanged);
         }
         self.install_lsp_providers(support, cx);
@@ -2017,19 +2030,25 @@ impl DocumentSession {
             return false;
         }
         let message = match &status {
-            LspStatus::Failed(error) => format!("Language server failed: {error}"),
-            LspStatus::Exited(Some(code)) => format!("Language server exited with status {code}"),
-            LspStatus::Exited(None) => "Language server exited unexpectedly".to_owned(),
+            LspStatus::Failed(error) if retry => {
+                tr!("editor.session.lsp.failed_retry", error = error)
+            }
+            LspStatus::Failed(error) => tr!("editor.session.lsp.failed_no_retry", error = error),
+            LspStatus::Exited(Some(code)) if retry => {
+                tr!("editor.session.lsp.exited_retry", code = code)
+            }
+            LspStatus::Exited(Some(code)) => {
+                tr!("editor.session.lsp.exited_no_retry", code = code)
+            }
+            LspStatus::Exited(None) if retry => {
+                tr!("editor.session.lsp.exited_unexpectedly_retry")
+            }
+            LspStatus::Exited(None) => tr!("editor.session.lsp.exited_unexpectedly_no_retry"),
             _ => return false,
         };
         self.lsp_failure_seen = true;
         self.lsp_status = status;
-        let suffix = if retry {
-            " Retrying once."
-        } else {
-            " Build continues without language support."
-        };
-        self.notice = Some(SharedString::from(format!("{message}.{suffix}")));
+        self.set_lsp_notice(message);
         cx.emit(SessionChanged);
         cx.notify();
         true
@@ -2037,14 +2056,12 @@ impl DocumentSession {
 
     /// Take an LSP notice, leaving notices that belong to other features.
     fn take_lsp_notice(&mut self) -> bool {
-        let was_lsp = self
-            .notice
-            .as_ref()
-            .is_some_and(|notice| notice.starts_with("Language server"));
-        if was_lsp {
-            self.notice = None;
+        if !self.lsp_notice_pending || self.notice.is_none() {
+            return false;
         }
-        was_lsp
+        self.notice = None;
+        self.lsp_notice_pending = false;
+        true
     }
 
     /// Install only the providers the server advertised in its handshake.
@@ -2227,9 +2244,7 @@ impl DocumentSession {
         self.refused = true;
         self.projection = project_or_complete(self.buffer.current_text(), self.kind).0;
         self.presentation_dirty = true;
-        self.notice = Some(SharedString::from(format!(
-            "A writer edit was refused and the source was kept: {reason}. The editor was reloaded from the document."
-        )));
+        self.set_notice(tr!("editor.session.edit_refused_reloaded", reason = reason));
     }
 
     /// Re-project the complete source, keeping the active caret on its text.
@@ -2249,7 +2264,7 @@ impl DocumentSession {
         self.projection = projection;
         self.presentation_dirty = true;
         if let Some(notice) = notice {
-            self.notice = Some(notice);
+            self.set_notice(notice);
         }
         if self.source_view {
             let source = self.buffer.current_text().to_owned();
@@ -2521,9 +2536,7 @@ fn project_or_complete(
         // so the writer shows everything instead of guessing.
         Err(error) => (
             WriterProjection::complete(source),
-            Some(SharedString::from(format!(
-                "Writer metadata stays visible: {error}"
-            ))),
+            Some(tr!("editor.session.metadata_visible", error = error).into()),
         ),
     }
 }
@@ -2747,6 +2760,7 @@ mod tests {
                 session.notice = Some(SharedString::from(
                     "Language server failed: boom. Retrying once.",
                 ));
+                session.lsp_notice_pending = true;
                 session.attach_lsp(
                     handle,
                     uri,

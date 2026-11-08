@@ -1,0 +1,412 @@
+_version: 2
+editor:
+  header:
+    no_document:
+      en: "No document open"
+      zh-CN: "未打开任何文档"
+      ja: "ドキュメントが開かれていません"
+    document_fallback:
+      en: "Document"
+      zh-CN: "文档"
+      ja: "ドキュメント"
+    word_count:
+      en: "%{words} words · %{characters} characters"
+      zh-CN: "%{words} 个词 · %{characters} 个字符"
+      ja: "%{words} 語 · %{characters} 文字"
+    save_file:
+      en: "Save file"
+      zh-CN: "保存文件"
+      ja: "ファイルを保存"
+    document_actions:
+      en: "Document actions"
+      zh-CN: "文档操作"
+      ja: "ドキュメントの操作"
+    close_document:
+      en: "Close document"
+      zh-CN: "关闭文档"
+      ja: "ドキュメントを閉じる"
+    toggle_library:
+      en: "Toggle library"
+      zh-CN: "切换资料库"
+      ja: "ライブラリの表示を切り替え"
+    edit_frontmatter:
+      en: "Edit frontmatter"
+      zh-CN: "编辑 frontmatter"
+      ja: "フロントマターを編集"
+    no_frontmatter:
+      en: "No frontmatter for the active document"
+      zh-CN: "当前文档没有 frontmatter"
+      ja: "現在のドキュメントにフロントマターはありません"
+    frontmatter_unavailable:
+      en: "Frontmatter unavailable for the active document"
+      zh-CN: "当前文档的 frontmatter 不可用"
+      ja: "現在のドキュメントではフロントマターを利用できません"
+    focus_mode:
+      en: "Focus mode"
+      zh-CN: "专注模式"
+      ja: "フォーカスモード"
+    focus_mode_on:
+      en: "Turn on Focus mode"
+      zh-CN: "开启专注模式"
+      ja: "フォーカスモードをオンにする"
+    focus_mode_off:
+      en: "Turn off Focus mode"
+      zh-CN: "关闭专注模式"
+      ja: "フォーカスモードをオフにする"
+    typewriter_mode:
+      en: "Typewriter mode"
+      zh-CN: "打字机模式"
+      ja: "タイプライターモード"
+    typewriter_mode_on:
+      en: "Turn on Typewriter mode"
+      zh-CN: "开启打字机模式"
+      ja: "タイプライターモードをオンにする"
+    typewriter_mode_off:
+      en: "Turn off Typewriter mode"
+      zh-CN: "关闭打字机模式"
+      ja: "タイプライターモードをオフにする"
+  drop:
+    failure_one:
+      en: "1 asset was not copied: %{names}"
+      zh-CN: "1 个资源未复制：%{names}"
+      ja: "1 件のアセットをコピーできませんでした：%{names}"
+    failure_many:
+      en: "%{count} assets were not copied: %{names}"
+      zh-CN: "%{count} 个资源未复制：%{names}"
+      ja: "%{count} 件のアセットをコピーできませんでした：%{names}"
+    success_one_file:
+      en: "Copied 1 file: %{names}"
+      zh-CN: "已复制 1 个文件：%{names}"
+      ja: "1 個のファイルをコピーしました：%{names}"
+    success_one_image:
+      en: "Copied 1 image: %{names}"
+      zh-CN: "已复制 1 张图片：%{names}"
+      ja: "1 枚の画像をコピーしました：%{names}"
+    success_files:
+      en: "Copied %{count} files: %{names}"
+      zh-CN: "已复制 %{count} 个文件：%{names}"
+      ja: "%{count} 個のファイルをコピーしました：%{names}"
+    success_one_image_of:
+      en: "Copied %{count} assets (1 image): %{names}"
+      zh-CN: "已复制 %{count} 个资源（1 张图片）：%{names}"
+      ja: "%{count} 件のアセットをコピーしました（画像 1 枚）：%{names}"
+    success_with_images:
+      en: "Copied %{count} assets (%{images} images): %{names}"
+      zh-CN: "已复制 %{count} 个资源（%{images} 张图片）：%{names}"
+      ja: "%{count} 件のアセットをコピーしました（画像 %{images} 枚）：%{names}"
+  save_status:
+    conflict:
+      en: "Conflict"
+      zh-CN: "冲突"
+      ja: "競合"
+    saving:
+      en: "Saving…"
+      zh-CN: "正在保存…"
+      ja: "保存中…"
+    failed:
+      en: "Save failed"
+      zh-CN: "保存失败"
+      ja: "保存に失敗しました"
+    unsaved:
+      en: "Unsaved"
+      zh-CN: "未保存"
+      ja: "未保存"
+    changed_on_disk:
+      en: "Changed on disk"
+      zh-CN: "磁盘上已更改"
+      ja: "ディスク上で変更されています"
+    saved:
+      en: "Saved"
+      zh-CN: "已保存"
+      ja: "保存済み"
+  selection_toolbar:
+    bold:
+      en: "Bold (Ctrl/Cmd+B)"
+      zh-CN: "加粗 (Ctrl/Cmd+B)"
+      ja: "太字 (Ctrl/Cmd+B)"
+    italic:
+      en: "Italic (Ctrl/Cmd+I)"
+      zh-CN: "斜体 (Ctrl/Cmd+I)"
+      ja: "斜体 (Ctrl/Cmd+I)"
+    link:
+      en: "Link (Ctrl/Cmd+K)"
+      zh-CN: "链接 (Ctrl/Cmd+K)"
+      ja: "リンク (Ctrl/Cmd+K)"
+    comment:
+      en: "Markdown comment (Ctrl/Cmd+/)"
+      zh-CN: "Markdown 注释 (Ctrl/Cmd+/)"
+      ja: "Markdown コメント (Ctrl/Cmd+/)"
+    heading:
+      en: "Heading"
+      zh-CN: "标题"
+      ja: "見出し"
+    paragraph:
+      en: "Paragraph"
+      zh-CN: "正文"
+      ja: "段落"
+  preview:
+    empty_title:
+      en: "Nothing to preview"
+      zh-CN: "没有可预览的内容"
+      ja: "プレビューする内容がありません"
+    no_document:
+      en: "Open a Markdown or MDX document to preview it."
+      zh-CN: "打开 Markdown 或 MDX 文档即可预览。"
+      ja: "Markdown または MDX ドキュメントを開くとプレビューできます。"
+    nothing_yet:
+      en: "Nothing to preview yet."
+      zh-CN: "暂无内容可预览。"
+      ja: "まだプレビューできる内容がありません。"
+    unsupported:
+      en: "Preview is available for Markdown and MDX documents."
+      zh-CN: "预览仅适用于 Markdown 和 MDX 文档。"
+      ja: "プレビューは Markdown と MDX ドキュメントでのみ利用できます。"
+  source:
+    find_placeholder:
+      en: "Find"
+      zh-CN: "查找"
+      ja: "検索"
+    replace_placeholder:
+      en: "Replace"
+      zh-CN: "替换"
+      ja: "置換"
+    find_in_document:
+      en: "Find in document"
+      zh-CN: "在文档中查找"
+      ja: "ドキュメント内を検索"
+    replace_with:
+      en: "Replace with"
+      zh-CN: "替换为"
+      ja: "置換後の文字列"
+    replace:
+      en: "Replace"
+      zh-CN: "替换"
+      ja: "置換"
+    replace_all:
+      en: "All"
+      zh-CN: "全部"
+      ja: "すべて"
+  palette:
+    project_group:
+      en: "Project components"
+      zh-CN: "项目组件"
+      ja: "プロジェクトのコンポーネント"
+    requires:
+      en: "Requires %{names}"
+      zh-CN: "需要 %{names}"
+      ja: "%{names} が必要"
+    optional_count:
+      en: "%{count} optional"
+      zh-CN: "%{count} 个可选"
+      ja: "省略可能 %{count} 件"
+    no_props:
+      en: "No props"
+      zh-CN: "无属性"
+      ja: "プロパティなし"
+  builder:
+    auto_import_warning:
+      en: "This project declares astro-auto-import. Imports are still added only when you add them here."
+      zh-CN: "此项目声明了 astro-auto-import。仅当你在此处添加时才会写入导入。"
+      ja: "このプロジェクトは astro-auto-import を宣言しています。インポートはここで追加した場合にのみ書き込まれます。"
+    indexing:
+      en: "Indexing components…"
+      zh-CN: "正在索引组件…"
+      ja: "コンポーネントを索引中…"
+    unavailable:
+      en: "Components unavailable: %{error}"
+      zh-CN: "组件不可用：%{error}"
+      ja: "コンポーネントを利用できません：%{error}"
+    no_components:
+      en: "No components were found in this project."
+      zh-CN: "此项目中未找到任何组件。"
+      ja: "このプロジェクトにはコンポーネントが見つかりませんでした。"
+    search_placeholder:
+      en: "Search components by name…"
+      zh-CN: "按名称搜索组件…"
+      ja: "名前でコンポーネントを検索…"
+    wraps_content:
+      en: "wraps content"
+      zh-CN: "包裹内容"
+      ja: "コンテンツを包みます"
+    no_matches:
+      en: "No matching components"
+      zh-CN: "没有匹配的组件"
+      ja: "一致するコンポーネントはありません"
+    back:
+      en: "Back"
+      zh-CN: "返回"
+      ja: "戻る"
+    add:
+      en: "Add"
+      zh-CN: "添加"
+      ja: "追加"
+    default_value:
+      en: "default: %{value}"
+      zh-CN: "默认值：%{value}"
+      ja: "既定値：%{value}"
+    choose:
+      en: "Choose…"
+      zh-CN: "选择…"
+      ja: "選択…"
+    clear:
+      en: "Clear"
+      zh-CN: "清除"
+      ja: "クリア"
+    choose_entry:
+      en: "Choose a %{collection} entry…"
+      zh-CN: "选择 %{collection} 条目…"
+      ja: "%{collection} のエントリを選択…"
+    no_entries:
+      en: "No entries"
+      zh-CN: "没有条目"
+      ja: "エントリがありません"
+    choose_image:
+      en: "Choose image…"
+      zh-CN: "选择图片…"
+      ja: "画像を選択…"
+    choose_image_prompt:
+      en: "Choose an image"
+      zh-CN: "选择图片"
+      ja: "画像を選択"
+    client_directive:
+      en: "client directive"
+      zh-CN: "客户端指令"
+      ja: "クライアントディレクティブ"
+    none:
+      en: "None"
+      zh-CN: "无"
+      ja: "なし"
+    child_content:
+      en: "child content"
+      zh-CN: "子内容"
+      ja: "子コンテンツ"
+    child_content_placeholder:
+      en: "Child content"
+      zh-CN: "子内容"
+      ja: "子コンテンツ"
+    directive_value_placeholder:
+      en: "Directive value"
+      zh-CN: "指令值"
+      ja: "ディレクティブの値"
+    include_optional:
+      en: "Include optional props"
+      zh-CN: "包含可选属性"
+      ja: "省略可能なプロパティを含める"
+    exclude_optional:
+      en: "Exclude optional props"
+      zh-CN: "排除可选属性"
+      ja: "省略可能なプロパティを除外する"
+    add_import:
+      en: "Add import for this insertion"
+      zh-CN: "为本次插入添加导入"
+      ja: "この挿入のインポートを追加"
+    import_untouched:
+      en: "Off leaves the import untouched."
+      zh-CN: "关闭时不会改动导入。"
+      ja: "オフの場合、インポートは変更されません。"
+    import_off:
+      en: "Import insertion is off for this project."
+      zh-CN: "此项目已关闭导入插入。"
+      ja: "このプロジェクトではインポートの挿入が無効です。"
+    preview:
+      en: "Preview"
+      zh-CN: "预览"
+      ja: "プレビュー"
+    provisional_identifiers:
+      en: "Image and entry identifiers are provisional; the import plan settles the final names when you insert."
+      zh-CN: "图片和条目标识符是临时的；插入时导入计划会确定最终名称。"
+      ja: "画像とエントリの識別子は暫定的です。挿入時にインポート計画が最終的な名前を確定します。"
+    insert:
+      en: "Insert"
+      zh-CN: "插入"
+      ja: "挿入"
+    choose_component_first:
+      en: "Choose a component before inserting it."
+      zh-CN: "请先选择组件再插入。"
+      ja: "挿入する前にコンポーネントを選択してください。"
+    no_image_context:
+      en: "This document has no project context for image picks."
+      zh-CN: "此文档没有可用于选取图片的项目上下文。"
+      ja: "このドキュメントには画像選択に使えるプロジェクトコンテキストがありません。"
+    no_preview_component:
+      en: "Choose a component before previewing a tag."
+      zh-CN: "请先选择组件再预览标签。"
+      ja: "タグをプレビューする前にコンポーネントを選択してください。"
+    field_number_placeholder:
+      en: "Number"
+      zh-CN: "数字"
+      ja: "数値"
+    field_list_placeholder:
+      en: "Comma-separated values"
+      zh-CN: "以逗号分隔的值"
+      ja: "カンマ区切りの値"
+    field_image_placeholder:
+      en: "Project image path"
+      zh-CN: "项目内图片路径"
+      ja: "プロジェクト内の画像パス"
+    field_entry_placeholder:
+      en: "Entry id"
+      zh-CN: "条目 ID"
+      ja: "エントリ ID"
+  session:
+    formatting_unavailable:
+      en: "Formatting commands are unavailable in complete-source view."
+      zh-CN: "完整源码视图中无法使用格式化命令。"
+      ja: "完全なソース表示では書式設定コマンドを使用できません。"
+    formatting_refused:
+      en: "The formatting command was refused and the source was kept: %{error}"
+      zh-CN: "格式化命令被拒绝，源码已保留：%{error}"
+      ja: "書式設定コマンドは拒否され、ソースは保持されました：%{error}"
+    writer_edit_refused:
+      en: "The writer edit was refused and the source was kept: %{error}"
+      zh-CN: "写作视图的编辑被拒绝，源码已保留：%{error}"
+      ja: "ライターの編集は拒否され、ソースは保持されました：%{error}"
+    import_replan:
+      en: "%{error}. Insert again to re-plan the imports."
+      zh-CN: "%{error}。请重新插入以重新规划导入。"
+      ja: "%{error}。挿入し直すとインポートが再計画されます。"
+    tag_refused:
+      en: "The tag was refused and the source was kept: %{error}"
+      zh-CN: "标签被拒绝，源码已保留：%{error}"
+      ja: "タグは拒否され、ソースは保持されました：%{error}"
+    import_body_changed:
+      en: "The import plan would change the document body; nothing was inserted."
+      zh-CN: "导入计划会改动文档正文，因此未插入任何内容。"
+      ja: "インポート計画が本文を変更するため、何も挿入されませんでした。"
+    edit_refused_reloaded:
+      en: "A writer edit was refused and the source was kept: %{reason}. The editor was reloaded from the document."
+      zh-CN: "写作视图的编辑被拒绝，源码已保留：%{reason}。编辑器已从文档重新加载。"
+      ja: "ライターの編集は拒否され、ソースは保持されました：%{reason}。エディタはドキュメントから再読み込みされました。"
+    metadata_visible:
+      en: "Writer metadata stays visible: %{error}"
+      zh-CN: "写作视图的元数据保持可见：%{error}"
+      ja: "ライターのメタデータは表示されたままです：%{error}"
+    lsp:
+      ready:
+        en: "Language server ready."
+        zh-CN: "语言服务器已就绪。"
+        ja: "ランゲージサーバーの準備ができました。"
+      failed_retry:
+        en: "Language server failed: %{error}. Retrying once."
+        zh-CN: "语言服务器失败：%{error}。正在重试一次。"
+        ja: "ランゲージサーバーが失敗しました：%{error}。一度だけ再試行します。"
+      failed_no_retry:
+        en: "Language server failed: %{error}. Build continues without language support."
+        zh-CN: "语言服务器失败：%{error}。构建将在没有语言支持的情况下继续。"
+        ja: "ランゲージサーバーが失敗しました：%{error}。言語サポートなしでビルドを続行します。"
+      exited_retry:
+        en: "Language server exited with status %{code}. Retrying once."
+        zh-CN: "语言服务器以状态 %{code} 退出。正在重试一次。"
+        ja: "ランゲージサーバーがステータス %{code} で終了しました。一度だけ再試行します。"
+      exited_no_retry:
+        en: "Language server exited with status %{code}. Build continues without language support."
+        zh-CN: "语言服务器以状态 %{code} 退出。构建将在没有语言支持的情况下继续。"
+        ja: "ランゲージサーバーがステータス %{code} で終了しました。言語サポートなしでビルドを続行します。"
+      exited_unexpectedly_retry:
+        en: "Language server exited unexpectedly. Retrying once."
+        zh-CN: "语言服务器意外退出。正在重试一次。"
+        ja: "ランゲージサーバーが予期せず終了しました。一度だけ再試行します。"
+      exited_unexpectedly_no_retry:
+        en: "Language server exited unexpectedly. Build continues without language support."
+        zh-CN: "语言服务器意外退出。构建将在没有语言支持的情况下继续。"
+        ja: "ランゲージサーバーが予期せず終了しました。言語サポートなしでビルドを続行します。"

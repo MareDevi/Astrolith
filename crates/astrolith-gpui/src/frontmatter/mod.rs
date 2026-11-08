@@ -16,7 +16,7 @@ pub mod fields;
 use std::{path::PathBuf, sync::Arc};
 
 use astrolith_astro::schema::{
-    CollectionSchema, FieldKind, ValidationDiagnostic, validate_frontmatter,
+    CollectionSchema, FieldKind, ValidationDiagnostic, ValidationSeverity, validate_frontmatter,
 };
 use astrolith_core::preferences::{FieldMappings, ImagePathMode};
 use astrolith_document::{
@@ -48,7 +48,7 @@ use serde_json::{Map, Value};
 
 pub use fields::{
     ControlKind, FieldControl, FieldEditError, FieldRole, FrontmatterEdit, ReferenceCatalog,
-    control_label, slugify,
+    RefusalReason, control_label, slugify,
 };
 
 /// The GUI-free form model for one document's frontmatter.
@@ -150,12 +150,14 @@ impl FrontmatterEditor {
     pub fn set_value(&mut self, path: &str, raw: &str) -> Result<String, String> {
         let control = self
             .control(path)
-            .ok_or_else(|| format!("unknown frontmatter field `{path}`"))?
+            .ok_or_else(|| tr!("frontmatter.error.unknown_field", path = path))?
             .clone();
         if !control.editable {
             return Err(control
                 .refusal
-                .unwrap_or_else(|| "this field is read-only".to_owned()));
+                .as_ref()
+                .map(RefusalReason::text)
+                .unwrap_or_else(|| tr!("frontmatter.error.read_only")));
         }
         if matches!(
             control.kind,
@@ -163,7 +165,7 @@ impl FrontmatterEditor {
         ) {
             // A list control must never be replaced by one scalar; items are
             // added and removed individually through `add_item`/`remove_item`.
-            return Err("list fields are edited item by item".to_owned());
+            return Err(tr!("frontmatter.error.list_item_by_item"));
         }
         let mut document = self.document.clone();
         match &control.kind {
@@ -184,7 +186,7 @@ impl FrontmatterEditor {
     pub fn add_item(&mut self, path: &str, raw: &str) -> Result<String, String> {
         let control = self
             .control(path)
-            .ok_or_else(|| format!("unknown frontmatter field `{path}`"))?
+            .ok_or_else(|| tr!("frontmatter.error.unknown_field", path = path))?
             .clone();
         if !control.editable
             || !matches!(
@@ -194,7 +196,9 @@ impl FrontmatterEditor {
         {
             return Err(control
                 .refusal
-                .unwrap_or_else(|| "this field does not accept list items".to_owned()));
+                .as_ref()
+                .map(RefusalReason::text)
+                .unwrap_or_else(|| tr!("frontmatter.error.not_list_items")));
         }
         let value = FrontmatterValue::String(raw.to_owned());
         let mut document = self.document.clone();
@@ -224,10 +228,10 @@ impl FrontmatterEditor {
     pub fn remove_field(&mut self, path: &str) -> Result<String, String> {
         let control = self
             .control(path)
-            .ok_or_else(|| format!("unknown frontmatter field `{path}`"))?
+            .ok_or_else(|| tr!("frontmatter.error.unknown_field", path = path))?
             .clone();
         if control.required {
-            return Err("a required field cannot be removed".to_owned());
+            return Err(tr!("frontmatter.error.required_not_removable"));
         }
         let mut document = self.document.clone();
         document
@@ -318,25 +322,25 @@ fn insert_path(root: &mut Map<String, Value>, path: &str, value: Value) {
     }
 }
 
-/// Capitalized presentation of a control family.
-fn kind_display(label: &'static str) -> &'static str {
-    match label {
-        "text" => "Text",
-        "number" => "Number",
-        "integer" => "Integer",
-        "boolean" => "Boolean",
-        "date" => "Date",
-        "image" => "Image",
-        "enum" => "Choice",
-        "reference" => "Reference",
-        "reference list" => "References",
-        "tags" => "Tags",
-        "object" => "Group",
-        "raw yaml" => "YAML",
-        "literal" => "Fixed",
-        "read-only" => "Read only",
-        other => other,
-    }
+/// Localized presentation of a control family.
+fn kind_display(kind: &ControlKind) -> SharedString {
+    let label = match kind {
+        ControlKind::Text { .. } => tr!("frontmatter.type.text"),
+        ControlKind::Number => tr!("frontmatter.type.number"),
+        ControlKind::Integer => tr!("frontmatter.type.integer"),
+        ControlKind::Boolean => tr!("frontmatter.type.boolean"),
+        ControlKind::Date => tr!("frontmatter.type.date"),
+        ControlKind::Image => tr!("frontmatter.type.image"),
+        ControlKind::Enum { .. } => tr!("frontmatter.type.choice"),
+        ControlKind::Reference { multiple: true, .. } => tr!("frontmatter.type.references"),
+        ControlKind::Reference { .. } => tr!("frontmatter.type.reference"),
+        ControlKind::Tags => tr!("frontmatter.type.tags"),
+        ControlKind::Object => tr!("frontmatter.type.group"),
+        ControlKind::RawYaml { .. } => tr!("frontmatter.type.yaml"),
+        ControlKind::Literal { .. } => tr!("frontmatter.type.fixed"),
+        ControlKind::ReadOnly => tr!("frontmatter.type.read_only"),
+    };
+    SharedString::from(label)
 }
 
 /// Short label for a schema leaf kind (used for tests and diagnostics).
@@ -366,16 +370,13 @@ struct RowEditor {
     textarea: Option<Entity<TextareaState>>,
     date: Option<Entity<DatePickerState>>,
     add_input: Option<Entity<InputState>>,
-    /// Presentation strings are built when the form loads, not per frame.
+    /// Data-derived presentation strings, built when the form loads; the
+    /// translated labels are resolved per frame so a locale change applies.
     label: SharedString,
     path: SharedString,
-    kind_label: &'static str,
     hierarchy: usize,
     is_object: bool,
-    read_only_label: Option<SharedString>,
     description: Option<SharedString>,
-    hint: Option<SharedString>,
-    aria_label: SharedString,
     /// (display, raw) pairs for enum controls.
     enum_values: Vec<(SharedString, SharedString)>,
     /// Options for reference controls, ordered by label.
@@ -624,7 +625,7 @@ impl FrontmatterForm {
         };
         let slug = slugify(&title);
         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(slug));
-        self.notice = Some(SharedString::from("Slug copied to the clipboard"));
+        self.notice = Some(SharedString::from(tr!("frontmatter.notice.slug_copied")));
         cx.notify();
     }
 
@@ -648,7 +649,6 @@ impl FrontmatterForm {
             row.control.refusal = control.refusal.clone();
             row.items = sequence_display(editor, &row.path);
             row.raw = editor.raw(&row.path).map(SharedString::from);
-            row.read_only_label = read_only_label(&row.control, row.is_object);
         }
     }
 
@@ -690,8 +690,15 @@ fn read_only_label(control: &FieldControl, is_object: bool) -> Option<SharedStri
     if control.editable || is_object {
         return None;
     }
-    let refusal = control.refusal.as_deref().unwrap_or("read-only field");
-    Some(SharedString::from(format!("Read-only · {refusal}")))
+    let refusal = control
+        .refusal
+        .as_ref()
+        .map(RefusalReason::text)
+        .unwrap_or_else(|| tr!("frontmatter.field.read_only_reason_fallback"));
+    Some(SharedString::from(tr!(
+        "frontmatter.field.read_only",
+        reason = refusal
+    )))
 }
 
 fn build_rows(
@@ -825,14 +832,10 @@ fn build_rows(
         };
         rows.push(RowEditor {
             label: SharedString::from(control.name.clone()),
-            aria_label: SharedString::from(format!("frontmatter field {}", control.path)),
             path: SharedString::from(control.path.clone()),
-            kind_label: kind_display(control_label(&control.kind)),
             hierarchy: control.path.matches('.').count(),
             is_object,
-            read_only_label: read_only_label(control, is_object),
             description: control.description.clone().map(SharedString::from),
-            hint: control.hint().map(SharedString::from),
             enum_values,
             reference_options,
             items: sequence_display(editor, &control.path),
@@ -891,14 +894,14 @@ impl Render for FrontmatterForm {
                         .gap_2()
                         .text_sm()
                         .child(Icon::new(IconName::TriangleAlert))
-                        .child("Frontmatter cannot be edited safely"),
+                        .child(tr!("frontmatter.form.load_error_title")),
                 )
                 .child(div().text_xs().text_color(cx.theme().danger).child(error))
                 .child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Edit the raw source instead; the document is never rewritten."),
+                        .child(tr!("frontmatter.form.load_error_hint")),
                 )
                 .test_support()
                 .into_any_element();
@@ -917,12 +920,12 @@ impl Render for FrontmatterForm {
                         .size_6()
                         .text_color(cx.theme().muted_foreground),
                 )
-                .child(div().text_sm().child("No frontmatter form"))
+                .child(div().text_sm().child(tr!("frontmatter.form.empty_title")))
                 .child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Choose an entry to see its details."),
+                        .child(tr!("frontmatter.form.empty_hint")),
                 )
                 .test_support()
                 .into_any_element();
@@ -971,15 +974,18 @@ fn render_row(
     let control = &row.control;
     let mut diagnostics = String::new();
     for diagnostic in editor.diagnostics_for(&row.path) {
-        use std::fmt::Write as _;
         if !diagnostics.is_empty() {
             diagnostics.push_str(" · ");
         }
-        let _ = write!(
-            diagnostics,
-            "{:?}: {}",
-            diagnostic.severity, diagnostic.message
-        );
+        let severity = match diagnostic.severity {
+            ValidationSeverity::Error => tr!("frontmatter.severity.error"),
+            ValidationSeverity::Warning => tr!("frontmatter.severity.warning"),
+        };
+        diagnostics.push_str(&tr!(
+            "frontmatter.field.diagnostic",
+            severity = severity,
+            message = diagnostic.message.as_str()
+        ));
     }
     let header = div()
         .h_flex()
@@ -1008,7 +1014,7 @@ fn render_row(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(row.kind_label),
+                        .child(kind_display(&control.kind)),
                 )
                 .when(row.control.removable, |group| {
                     let path = row.path.clone();
@@ -1017,7 +1023,7 @@ fn render_row(
                             .ghost()
                             .xsmall()
                             .icon(IconName::X)
-                            .tooltip("Remove this optional field")
+                            .tooltip(tr!("frontmatter.field.remove_action"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.apply_remove_field(&path, cx);
                             })),
@@ -1067,10 +1073,12 @@ fn render_row(
             Textarea::new(area)
                 .small()
                 .h(px(96.))
-                .aria_label(row.aria_label.clone()),
+                .aria_label(tr!("frontmatter.field.aria", path = row.path.as_ref())),
         );
     } else if let Some(input) = row.input.as_ref() {
-        let field = Input::new(input).small().aria_label(row.aria_label.clone());
+        let field = Input::new(input)
+            .small()
+            .aria_label(tr!("frontmatter.field.aria", path = row.path.as_ref()));
         let field = if row.is_title { field.large() } else { field };
         row_view = row_view.child(field);
     } else if let Some(picker) = row.date.as_ref() {
@@ -1096,7 +1104,7 @@ fn render_row(
         row_view = row_view.child(reference_list(index, row, cx));
     } else if matches!(control.kind, ControlKind::Tags) {
         row_view = row_view.child(tag_control(index, row, cx));
-    } else if let Some(label) = row.read_only_label.clone() {
+    } else if let Some(label) = read_only_label(control, row.is_object) {
         row_view = row_view.child(
             div()
                 .h_flex()
@@ -1114,8 +1122,8 @@ fn render_row(
             Button::new(("frontmatter-copy-slug", index))
                 .ghost()
                 .xsmall()
-                .label("Copy slug")
-                .tooltip("Slugify the title and copy it to the clipboard")
+                .label(tr!("frontmatter.field.copy_slug"))
+                .tooltip(tr!("frontmatter.field.copy_slug_tooltip"))
                 .on_click(cx.listener(|this, _, _window, cx| {
                     this.copy_slug(cx);
                 })),
@@ -1123,7 +1131,7 @@ fn render_row(
         row_view = row_view.child(actions);
     }
 
-    if let Some(hint) = row.hint.clone() {
+    if let Some(hint) = control.hint() {
         row_view = row_view.child(
             div()
                 .text_xs()
@@ -1153,7 +1161,7 @@ fn selected_option_label(options: &[(SharedString, SharedString)], current: &str
         .map(|(label, _)| label.clone())
         .unwrap_or_else(|| {
             if current.is_empty() {
-                SharedString::from("Select…")
+                SharedString::from(tr!("frontmatter.list.select"))
             } else {
                 SharedString::from(current.to_owned())
             }
@@ -1219,7 +1227,7 @@ fn reference_dropdown(
         .dropdown_menu(move |menu, _window, _cx| {
             let mut menu = menu;
             if options.is_empty() {
-                return menu.item(PopupMenuItem::label("No entries"));
+                return menu.item(PopupMenuItem::label(tr!("frontmatter.list.no_entries")));
             }
             for (display, value) in &options {
                 let path = path.clone();
@@ -1268,7 +1276,7 @@ fn reference_list(
                             .ghost()
                             .xsmall()
                             .icon(IconName::X)
-                            .tooltip("Remove item")
+                            .tooltip(tr!("frontmatter.list.remove_item"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.apply_remove_item(&path, item_index, cx);
                             })),
@@ -1281,11 +1289,11 @@ fn reference_list(
         Button::new(("frontmatter-reference-add", index))
             .xsmall()
             .outline()
-            .label("Add reference")
+            .label(tr!("frontmatter.list.add_reference"))
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _window, _cx| {
                 if options.is_empty() {
-                    return menu.item(PopupMenuItem::label("No entries"));
+                    return menu.item(PopupMenuItem::label(tr!("frontmatter.list.no_entries")));
                 }
                 let mut menu = menu;
                 for (display, value) in &options {
@@ -1335,7 +1343,7 @@ fn tag_control(
                             .ghost()
                             .xsmall()
                             .icon(IconName::X)
-                            .tooltip("Remove tag")
+                            .tooltip(tr!("frontmatter.list.remove_tag"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.apply_remove_item(&path, item_index, cx);
                             })),
@@ -1345,11 +1353,10 @@ fn tag_control(
         view = view.child(div().h_flex().flex_wrap().gap_1().children(chips));
     }
     if let Some(input) = row.add_input.as_ref() {
-        view = view.child(
-            Input::new(input)
-                .small()
-                .aria_label(SharedString::from(format!("add tag to {}", row.path))),
-        );
+        view = view.child(Input::new(input).small().aria_label(tr!(
+            "frontmatter.field.add_tag_aria",
+            path = row.path.as_ref()
+        )));
     }
     view
 }
@@ -1367,8 +1374,8 @@ pub(crate) fn resolve_image_pick(
     path_mode: ImagePathMode,
     selected: PathBuf,
 ) -> Result<String, String> {
-    let root = root.ok_or_else(|| "The project root is unavailable.".to_owned())?;
-    let source = source.ok_or_else(|| "This document has no project source.".to_owned())?;
+    let root = root.ok_or_else(|| tr!("frontmatter.error.root_unavailable"))?;
+    let source = source.ok_or_else(|| tr!("frontmatter.error.no_source"))?;
     let canonical_root = std::fs::canonicalize(&root).map_err(|error| error.to_string())?;
     let canonical = std::fs::canonicalize(&selected).map_err(|error| error.to_string())?;
     if canonical.starts_with(&canonical_root) {
@@ -1376,8 +1383,7 @@ pub(crate) fn resolve_image_pick(
             .map_err(|error| error.to_string())?;
         return Ok(asset_path(path_mode, &source, &relative));
     }
-    let location =
-        assets.ok_or_else(|| "External images need a resolved assets directory.".to_owned())?;
+    let location = assets.ok_or_else(|| tr!("frontmatter.error.assets_unavailable"))?;
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let asset = copy_asset(
         &location,
@@ -1439,13 +1445,19 @@ fn image_control(
         ),
     };
     if let Some(input) = row.input.as_ref() {
-        preview = div().h_flex().items_center().gap_2().child(preview).child(
-            div().flex_1().child(
-                Input::new(input)
-                    .small()
-                    .aria_label(SharedString::from(format!("image path for {}", row.path))),
-            ),
-        );
+        preview = div()
+            .h_flex()
+            .items_center()
+            .gap_2()
+            .child(preview)
+            .child(
+                div()
+                    .flex_1()
+                    .child(Input::new(input).small().aria_label(tr!(
+                        "frontmatter.field.image_path_aria",
+                        path = row.path.as_ref()
+                    ))),
+            );
     }
     let mut actions = div().h_flex().gap_2();
     let pick_path = path.clone();
@@ -1456,7 +1468,7 @@ fn image_control(
         Button::new(("frontmatter-image-pick", index))
             .xsmall()
             .outline()
-            .label("Choose…")
+            .label(tr!("frontmatter.image.choose"))
             .on_click(cx.listener(move |this, _, window, cx| {
                 let _ = this;
                 let path = pick_path.clone();
@@ -1468,7 +1480,7 @@ fn image_control(
                     files: true,
                     directories: false,
                     multiple: false,
-                    prompt: Some("Choose an image".into()),
+                    prompt: Some(tr!("frontmatter.image.choose_prompt").into()),
                 });
                 cx.spawn_in(window, async move |this, cx| {
                     let Ok(Ok(Some(paths))) = paths.await else {
@@ -1494,11 +1506,13 @@ fn image_control(
                         match result {
                             Ok(value) => {
                                 form.set_image_path(&path, value, cx);
-                                form.notice = Some(SharedString::from("Image path updated"));
+                                form.notice =
+                                    Some(SharedString::from(tr!("frontmatter.image.updated")));
                             }
                             Err(error) => {
-                                form.notice = Some(SharedString::from(format!(
-                                    "Could not copy the image: {error}"
+                                form.notice = Some(SharedString::from(tr!(
+                                    "frontmatter.image.copy_failed",
+                                    error = error
                                 )));
                             }
                         }
@@ -1514,7 +1528,7 @@ fn image_control(
             Button::new(("frontmatter-image-clear", index))
                 .xsmall()
                 .ghost()
-                .label("Clear")
+                .label(tr!("frontmatter.image.clear"))
                 .on_click(cx.listener(move |this, _, _window, cx| {
                     this.apply_remove_field(&path, cx);
                 })),

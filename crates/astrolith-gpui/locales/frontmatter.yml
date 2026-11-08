@@ -1,0 +1,332 @@
+_version: 2
+frontmatter:
+  form:
+    load_error_title:
+      en: Frontmatter cannot be edited safely
+      zh-CN: 无法安全地编辑 Frontmatter
+      ja: フロントマターを安全に編集できません
+    load_error_hint:
+      en: Edit the raw source instead; the document is never rewritten.
+      zh-CN: 请改为编辑原始源文件；文档不会被重写。
+      ja: 代わりに生のソースを編集してください。ドキュメントは書き換えられません。
+    empty_title:
+      en: No frontmatter form
+      zh-CN: 没有可用的 Frontmatter 表单
+      ja: フロントマターのフォームがありません
+    empty_hint:
+      en: Choose an entry to see its details.
+      zh-CN: 选择一个条目以查看其详细信息。
+      ja: エントリーを選択すると詳細が表示されます。
+  type:
+    text:
+      en: Text
+      zh-CN: 文本
+      ja: テキスト
+    number:
+      en: Number
+      zh-CN: 数字
+      ja: 数値
+    integer:
+      en: Integer
+      zh-CN: 整数
+      ja: 整数
+    boolean:
+      en: Boolean
+      zh-CN: 布尔值
+      ja: 真偽値
+    date:
+      en: Date
+      zh-CN: 日期
+      ja: 日付
+    image:
+      en: Image
+      zh-CN: 图片
+      ja: 画像
+    choice:
+      en: Choice
+      zh-CN: 选项
+      ja: 選択肢
+    reference:
+      en: Reference
+      zh-CN: 引用
+      ja: 参照
+    references:
+      en: References
+      zh-CN: 引用列表
+      ja: 参照一覧
+    tags:
+      en: Tags
+      zh-CN: 标签
+      ja: タグ
+    group:
+      en: Group
+      zh-CN: 分组
+      ja: グループ
+    yaml:
+      en: YAML
+      zh-CN: YAML
+      ja: YAML
+    fixed:
+      en: Fixed
+      zh-CN: 固定值
+      ja: 固定値
+    read_only:
+      en: Read only
+      zh-CN: 只读
+      ja: 読み取り専用
+  field:
+    remove_action:
+      en: Remove this optional field
+      zh-CN: 移除此可选字段
+      ja: この任意フィールドを削除
+    read_only:
+      en: Read-only · %{reason}
+      zh-CN: 只读 · %{reason}
+      ja: 読み取り専用 · %{reason}
+    read_only_reason_fallback:
+      en: read-only field
+      zh-CN: 只读字段
+      ja: 読み取り専用フィールド
+    aria:
+      en: frontmatter field %{path}
+      zh-CN: Frontmatter 字段 %{path}
+      ja: フロントマターフィールド %{path}
+    add_tag_aria:
+      en: add tag to %{path}
+      zh-CN: 向 %{path} 添加标签
+      ja: '%{path} にタグを追加'
+    image_path_aria:
+      en: image path for %{path}
+      zh-CN: '%{path} 的图片路径'
+      ja: '%{path} の画像パス'
+    copy_slug:
+      en: Copy slug
+      zh-CN: 复制 slug
+      ja: スラッグをコピー
+    copy_slug_tooltip:
+      en: Slugify the title and copy it to the clipboard
+      zh-CN: 将标题转换为 slug 并复制到剪贴板
+      ja: タイトルをスラッグ化してクリップボードにコピー
+    diagnostic:
+      en: '%{severity}: %{message}'
+      zh-CN: '%{severity}：%{message}'
+      ja: '%{severity}: %{message}'
+  severity:
+    error:
+      en: Error
+      zh-CN: 错误
+      ja: エラー
+    warning:
+      en: Warning
+      zh-CN: 警告
+      ja: 警告
+  hint:
+    default:
+      en: 'Default: %{value}'
+      zh-CN: '默认值：%{value}'
+      ja: 'デフォルト: %{value}'
+    min:
+      en: 'Min: %{value}'
+      zh-CN: '最小值：%{value}'
+      ja: '最小: %{value}'
+    max:
+      en: 'Max: %{value}'
+      zh-CN: '最大值：%{value}'
+      ja: '最大: %{value}'
+    length:
+      en: 'Length: %{min}–%{max}'
+      zh-CN: '长度：%{min}–%{max}'
+      ja: '長さ: %{min}–%{max}'
+    min_length:
+      en: 'Min length: %{min}'
+      zh-CN: '最小长度：%{min}'
+      ja: '最小長: %{min}'
+    max_length:
+      en: 'Max length: %{max}'
+      zh-CN: '最大长度：%{max}'
+      ja: '最大長: %{max}'
+    pattern:
+      en: 'Pattern: %{pattern}'
+      zh-CN: '模式：%{pattern}'
+      ja: 'パターン: %{pattern}'
+  list:
+    select:
+      en: Select…
+      zh-CN: 请选择…
+      ja: 選択してください…
+    no_entries:
+      en: No entries
+      zh-CN: 没有条目
+      ja: エントリーがありません
+    add_reference:
+      en: Add reference
+      zh-CN: 添加引用
+      ja: 参照を追加
+    remove_item:
+      en: Remove item
+      zh-CN: 移除项目
+      ja: 項目を削除
+    remove_tag:
+      en: Remove tag
+      zh-CN: 移除标签
+      ja: タグを削除
+  image:
+    choose:
+      en: Choose…
+      zh-CN: 选择…
+      ja: 選択…
+    choose_prompt:
+      en: Choose an image
+      zh-CN: 选择图片
+      ja: 画像を選択
+    clear:
+      en: Clear
+      zh-CN: 清除
+      ja: クリア
+    updated:
+      en: Image path updated
+      zh-CN: 图片路径已更新
+      ja: 画像パスを更新しました
+    copy_failed:
+      en: 'Could not copy the image: %{error}'
+      zh-CN: '无法复制图片：%{error}'
+      ja: '画像をコピーできませんでした: %{error}'
+  notice:
+    slug_copied:
+      en: Slug copied to the clipboard
+      zh-CN: Slug 已复制到剪贴板
+      ja: スラッグをクリップボードにコピーしました
+  error:
+    unknown_field:
+      en: unknown frontmatter field `%{path}`
+      zh-CN: 未知的 Frontmatter 字段 `%{path}`
+      ja: 不明なフロントマターフィールド `%{path}`
+    read_only:
+      en: this field is read-only
+      zh-CN: 此字段为只读
+      ja: このフィールドは読み取り専用です
+    list_item_by_item:
+      en: list fields are edited item by item
+      zh-CN: 列表字段需逐项编辑
+      ja: リストフィールドは項目ごとに編集します
+    not_list_items:
+      en: this field does not accept list items
+      zh-CN: 此字段不接受列表项目
+      ja: このフィールドはリスト項目を受け付けません
+    required_not_removable:
+      en: a required field cannot be removed
+      zh-CN: 必填字段无法移除
+      ja: 必須フィールドは削除できません
+    invalid_number:
+      en: '`%{value}` is not a valid number'
+      zh-CN: '`%{value}` 不是有效的数字'
+      ja: '`%{value}` は有効な数値ではありません'
+    invalid_integer:
+      en: '`%{value}` is not a valid integer'
+      zh-CN: '`%{value}` 不是有效的整数'
+      ja: '`%{value}` は有効な整数ではありません'
+    invalid_boolean:
+      en: '`%{value}` is not a valid boolean'
+      zh-CN: '`%{value}` 不是有效的布尔值'
+      ja: '`%{value}` は有効な真偽値ではありません'
+    not_scalar:
+      en: '`%{value}` cannot be represented as a scalar'
+      zh-CN: '`%{value}` 无法表示为标量'
+      ja: '`%{value}` をスカラーとして表現できません'
+    not_allowed:
+      en: '`%{value}` is not one of the allowed values'
+      zh-CN: '`%{value}` 不在允许的取值范围内'
+      ja: '`%{value}` は許可された値ではありません'
+    root_unavailable:
+      en: The project root is unavailable.
+      zh-CN: 项目根目录不可用。
+      ja: プロジェクトルートを利用できません。
+    no_source:
+      en: This document has no project source.
+      zh-CN: 此文档没有项目源路径。
+      ja: このドキュメントにはプロジェクトのソースがありません。
+    assets_unavailable:
+      en: External images need a resolved assets directory.
+      zh-CN: 外部图片需要已解析的资源目录。
+      ja: 外部画像には解決済みのアセットディレクトリが必要です。
+  refusal:
+    block_scalar:
+      en: block scalar values are preserved but not editable
+      zh-CN: 块标量值会被保留，但无法编辑
+      ja: ブロックスカラー値は保持されますが、編集できません
+    sequence_non_scalar:
+      en: sequence items are not all scalars; preserved verbatim
+      zh-CN: 序列项目并非全部为标量；将原样保留
+      ja: シーケンス項目がすべてスカラーではないため、そのまま保持されます
+    array_items:
+      en: array items are not editable in the form
+      zh-CN: 数组中的项目无法在表单中编辑
+      ja: 配列の項目はフォームで編集できません
+    record_preserved:
+      en: record values are preserved verbatim
+      zh-CN: 记录值将原样保留
+      ja: レコード値はそのまま保持されます
+    literal_fixed:
+      en: literal value is fixed by the schema
+      zh-CN: 字面量值由架构固定
+      ja: リテラル値はスキーマで固定されています
+    record_raw:
+      en: record edited as raw YAML
+      zh-CN: 记录以原始 YAML 编辑
+      ja: レコードは生の YAML として編集します
+    mapping_non_object:
+      en: mapping value in a non-object field
+      zh-CN: 非对象字段中出现映射值
+      ja: オブジェクト以外のフィールドにマッピング値があります
+    sequence_raw:
+      en: sequence of non-scalar items edited as raw YAML
+      zh-CN: 非标量项目的序列以原始 YAML 编辑
+      ja: 非スカラー項目のシーケンスは生の YAML として編集します
+    flow_raw:
+      en: flow value edited as raw YAML
+      zh-CN: 流式值以原始 YAML 编辑
+      ja: フロー値は生の YAML として編集します
+    array_non_string:
+      en: array contains non-string values
+      zh-CN: 数组包含非字符串值
+      ja: 配列に文字列以外の値が含まれています
+    array_non_string_references:
+      en: array contains non-string references
+      zh-CN: 数组包含非字符串引用
+      ja: 配列に文字列以外の参照が含まれています
+    array_non_string_images:
+      en: array contains non-string image paths
+      zh-CN: 数组包含非字符串图片路径
+      ja: 配列に文字列以外の画像パスが含まれています
+    sequence_non_string:
+      en: sequence contains non-string values
+      zh-CN: 序列包含非字符串值
+      ja: シーケンスに文字列以外の値が含まれています
+    raw_object:
+      en: object items are edited as raw YAML
+      zh-CN: 对象项目以原始 YAML 编辑
+      ja: オブジェクト項目は生の YAML として編集します
+    raw_array:
+      en: array items are edited as raw YAML
+      zh-CN: 数组项目以原始 YAML 编辑
+      ja: 配列項目は生の YAML として編集します
+    raw_record:
+      en: record items are edited as raw YAML
+      zh-CN: 记录项目以原始 YAML 编辑
+      ja: レコード項目は生の YAML として編集します
+    raw_reference:
+      en: reference items are edited as raw YAML
+      zh-CN: 引用项目以原始 YAML 编辑
+      ja: 参照項目は生の YAML として編集します
+    raw_image:
+      en: image items are edited as raw YAML
+      zh-CN: 图片项目以原始 YAML 编辑
+      ja: 画像項目は生の YAML として編集します
+    raw_literal:
+      en: literal items are edited as raw YAML
+      zh-CN: 字面量项目以原始 YAML 编辑
+      ja: リテラル項目は生の YAML として編集します
+    raw_value:
+      en: value items are edited as raw YAML
+      zh-CN: 值项目以原始 YAML 编辑
+      ja: 値項目は生の YAML として編集します

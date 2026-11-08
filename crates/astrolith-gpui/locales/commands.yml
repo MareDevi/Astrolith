@@ -1,0 +1,447 @@
+_version: 2
+commands:
+  menu:
+    file:
+      en: "File"
+      zh-CN: "文件"
+      ja: "ファイル"
+    edit:
+      en: "Edit"
+      zh-CN: "编辑"
+      ja: "編集"
+    view:
+      en: "View"
+      zh-CN: "视图"
+      ja: "表示"
+    writer:
+      en: "Writer"
+      zh-CN: "写作"
+      ja: "執筆"
+    preview:
+      en: "Preview"
+      zh-CN: "预览"
+      ja: "プレビュー"
+    help:
+      en: "Help"
+      zh-CN: "帮助"
+      ja: "ヘルプ"
+    application:
+      en: "Astrolith"
+      zh-CN: "Astrolith"
+      ja: "Astrolith"
+    open_recent:
+      en: "Open Recent"
+      zh-CN: "打开最近项目"
+      ja: "最近のプロジェクトを開く"
+    no_recent_projects:
+      en: "No recent projects"
+      zh-CN: "没有最近项目"
+      ja: "最近のプロジェクトはありません"
+  group:
+    file:
+      en: "File"
+      zh-CN: "文件"
+      ja: "ファイル"
+    view:
+      en: "View"
+      zh-CN: "视图"
+      ja: "表示"
+    format:
+      en: "Format"
+      zh-CN: "格式"
+      ja: "書式"
+    writer:
+      en: "Writer"
+      zh-CN: "写作"
+      ja: "執筆"
+    preview:
+      en: "Preview"
+      zh-CN: "预览"
+      ja: "プレビュー"
+    help:
+      en: "Help"
+      zh-CN: "帮助"
+      ja: "ヘルプ"
+    application:
+      en: "Application"
+      zh-CN: "应用程序"
+      ja: "アプリケーション"
+  label:
+    open_file:
+      en: "Open file…"
+      zh-CN: "打开文件…"
+      ja: "ファイルを開く…"
+    open_project_source:
+      en: "Open project source…"
+      zh-CN: "打开项目源文件…"
+      ja: "プロジェクトのソースを開く…"
+    open_project:
+      en: "Open project…"
+      zh-CN: "打开项目…"
+      ja: "プロジェクトを開く…"
+    manage_recent_projects:
+      en: "Manage Recent Projects…"
+      zh-CN: "管理最近项目…"
+      ja: "最近のプロジェクトを管理…"
+    reload_collections:
+      en: "Reload collections"
+      zh-CN: "重新加载集合"
+      ja: "コレクションを再読み込み"
+    open_project_in_ide:
+      en: "Open project in IDE"
+      zh-CN: "在 IDE 中打开项目"
+      ja: "プロジェクトを IDE で開く"
+    open_collection_in_ide:
+      en: "Open collection in IDE"
+      zh-CN: "在 IDE 中打开集合"
+      ja: "コレクションを IDE で開く"
+    open_file_in_ide:
+      en: "Open file in IDE"
+      zh-CN: "在 IDE 中打开文件"
+      ja: "ファイルを IDE で開く"
+    new_file:
+      en: "New file"
+      zh-CN: "新建文件"
+      ja: "新規ファイル"
+    duplicate_file:
+      en: "Duplicate file"
+      zh-CN: "创建文件副本"
+      ja: "ファイルを複製"
+    rename_or_move_file:
+      en: "Rename or move file…"
+      zh-CN: "重命名或移动文件…"
+      ja: "ファイル名の変更または移動…"
+    move_file_to_trash:
+      en: "Move file to Trash…"
+      zh-CN: "将文件移至回收站…"
+      ja: "ファイルをゴミ箱に移動…"
+    reveal_in_file_manager:
+      en: "Reveal in file manager"
+      zh-CN: "在文件管理器中显示"
+      ja: "ファイルマネージャーで表示"
+    copy_absolute_path:
+      en: "Copy absolute path"
+      zh-CN: "复制绝对路径"
+      ja: "絶対パスをコピー"
+    copy_project_relative_path:
+      en: "Copy project-relative path"
+      zh-CN: "复制项目相对路径"
+      ja: "プロジェクトからの相対パスをコピー"
+    save:
+      en: "Save"
+      zh-CN: "保存"
+      ja: "保存"
+    reload_from_disk:
+      en: "Reload from Disk (discard my edits)"
+      zh-CN: "从磁盘重新加载（放弃我的编辑）"
+      ja: "ディスクから再読み込み（編集内容を破棄）"
+    overwrite_disk_with_edits:
+      en: "Overwrite Disk with My Edits"
+      zh-CN: "用我的编辑覆盖磁盘"
+      ja: "編集内容でディスクを上書き"
+    save_edits_as_copy:
+      en: "Save My Edits as a Copy"
+      zh-CN: "将我的编辑另存为副本"
+      ja: "編集内容をコピーとして保存"
+    close_file:
+      en: "Close file"
+      zh-CN: "关闭文件"
+      ja: "ファイルを閉じる"
+    recover_unsaved_changes:
+      en: "Recover unsaved changes…"
+      zh-CN: "恢复未保存的更改…"
+      ja: "未保存の変更を復元…"
+    find:
+      en: "Find…"
+      zh-CN: "查找…"
+      ja: "検索…"
+    find_and_replace:
+      en: "Find and replace…"
+      zh-CN: "查找和替换…"
+      ja: "検索と置換…"
+    find_next:
+      en: "Find next"
+      zh-CN: "查找下一个"
+      ja: "次を検索"
+    find_previous:
+      en: "Find previous"
+      zh-CN: "查找上一个"
+      ja: "前を検索"
+    close_find:
+      en: "Close find"
+      zh-CN: "关闭查找"
+      ja: "検索を閉じる"
+    go_to_line:
+      en: "Go to line…"
+      zh-CN: "转到行…"
+      ja: "行へ移動…"
+    content_finder:
+      en: "Content Finder…"
+      zh-CN: "内容查找器…"
+      ja: "コンテンツファインダー…"
+    select_next_occurrence:
+      en: "Select next occurrence"
+      zh-CN: "选择下一个匹配项"
+      ja: "次の一致を選択"
+    add_cursors_at_line_ends:
+      en: "Add cursors at line ends"
+      zh-CN: "在行尾添加光标"
+      ja: "行末にカーソルを追加"
+    bold:
+      en: "Bold"
+      zh-CN: "加粗"
+      ja: "太字"
+    italic:
+      en: "Italic"
+      zh-CN: "斜体"
+      ja: "斜体"
+    insert_link:
+      en: "Link…"
+      zh-CN: "链接…"
+      ja: "リンク…"
+    heading_1:
+      en: "Heading 1"
+      zh-CN: "一级标题"
+      ja: "見出し 1"
+    heading_2:
+      en: "Heading 2"
+      zh-CN: "二级标题"
+      ja: "見出し 2"
+    heading_3:
+      en: "Heading 3"
+      zh-CN: "三级标题"
+      ja: "見出し 3"
+    heading_4:
+      en: "Heading 4"
+      zh-CN: "四级标题"
+      ja: "見出し 4"
+    paragraph:
+      en: "Paragraph"
+      zh-CN: "段落"
+      ja: "段落"
+    toggle_markdown_comment:
+      en: "Toggle Markdown comment"
+      zh-CN: "切换 Markdown 注释"
+      ja: "Markdown コメントを切り替え"
+    insert_mdx_component:
+      en: "Insert MDX component…"
+      zh-CN: "插入 MDX 组件…"
+      ja: "MDX コンポーネントを挿入…"
+    focus_mode:
+      en: "Focus mode"
+      zh-CN: "专注模式"
+      ja: "集中モード"
+    typewriter_mode:
+      en: "Typewriter mode"
+      zh-CN: "打字机模式"
+      ja: "タイプライターモード"
+    writing_workspace:
+      en: "Writing workspace"
+      zh-CN: "写作工作区"
+      ja: "執筆ワークスペース"
+    build_workspace:
+      en: "Build workspace"
+      zh-CN: "构建工作区"
+      ja: "ビルドワークスペース"
+    preview_workspace:
+      en: "Preview workspace"
+      zh-CN: "预览工作区"
+      ja: "プレビューワークスペース"
+    cycle_workspace_mode:
+      en: "Cycle workspace mode"
+      zh-CN: "切换工作区模式"
+      ja: "ワークスペースモードを切り替え"
+    commands:
+      en: "Commands…"
+      zh-CN: "命令…"
+      ja: "コマンド…"
+    preferences:
+      en: "Preferences…"
+      zh-CN: "偏好设置…"
+      ja: "設定…"
+    toggle_files:
+      en: "Toggle files"
+      zh-CN: "切换文件栏"
+      ja: "ファイル一覧を切り替え"
+    toggle_inspector:
+      en: "Toggle inspector"
+      zh-CN: "切换检查器"
+      ja: "インスペクターを切り替え"
+    toggle_preview:
+      en: "Toggle preview"
+      zh-CN: "切换预览"
+      ja: "プレビューを切り替え"
+    toggle_terminal:
+      en: "Toggle terminal"
+      zh-CN: "切换终端"
+      ja: "ターミナルを切り替え"
+    start_preview_server:
+      en: "Start preview server"
+      zh-CN: "启动预览服务器"
+      ja: "プレビューサーバーを開始"
+    stop_preview_server:
+      en: "Stop preview server"
+      zh-CN: "停止预览服务器"
+      ja: "プレビューサーバーを停止"
+    open_preview_in_browser:
+      en: "Open preview in browser"
+      zh-CN: "在浏览器中打开预览"
+      ja: "ブラウザーでプレビューを開く"
+    restart_preview_server:
+      en: "Restart preview server"
+      zh-CN: "重启预览服务器"
+      ja: "プレビューサーバーを再起動"
+    copy_preview_url:
+      en: "Copy preview URL"
+      zh-CN: "复制预览 URL"
+      ja: "プレビュー URL をコピー"
+    focus_document:
+      en: "Focus document"
+      zh-CN: "聚焦文档"
+      ja: "ドキュメントにフォーカス"
+    focus_selection_toolbar:
+      en: "Focus selection toolbar"
+      zh-CN: "聚焦选区工具栏"
+      ja: "選択範囲ツールバーにフォーカス"
+    light_theme:
+      en: "Light theme"
+      zh-CN: "浅色主题"
+      ja: "ライトテーマ"
+    dark_theme:
+      en: "Dark theme"
+      zh-CN: "深色主题"
+      ja: "ダークテーマ"
+    system_theme:
+      en: "System theme"
+      zh-CN: "跟随系统主题"
+      ja: "システムテーマ"
+    reset_layout:
+      en: "Reset layout"
+      zh-CN: "重置布局"
+      ja: "レイアウトをリセット"
+    enter_full_screen:
+      en: "Enter full screen"
+      zh-CN: "进入全屏"
+      ja: "全画面表示"
+    user_guide:
+      en: "User guide"
+      zh-CN: "用户指南"
+      ja: "ユーザーガイド"
+    keyboard_shortcuts:
+      en: "Keyboard shortcuts"
+      zh-CN: "键盘快捷键"
+      ja: "キーボードショートカット"
+    privacy_and_local_data:
+      en: "Privacy and local data"
+      zh-CN: "隐私与本地数据"
+      ja: "プライバシーとローカルデータ"
+    about:
+      en: "About Astrolith"
+      zh-CN: "关于 Astrolith"
+      ja: "Astrolith について"
+    check_for_updates:
+      en: "Check for updates…"
+      zh-CN: "检查更新…"
+      ja: "アップデートを確認…"
+    quit:
+      en: "Quit Astrolith"
+      zh-CN: "退出 Astrolith"
+      ja: "Astrolith を終了"
+  copyedit:
+    show_nouns:
+      en: "Show nouns"
+      zh-CN: "显示名词"
+      ja: "名詞を表示"
+    hide_nouns:
+      en: "Hide nouns"
+      zh-CN: "隐藏名词"
+      ja: "名詞を非表示"
+    show_verbs:
+      en: "Show verbs"
+      zh-CN: "显示动词"
+      ja: "動詞を表示"
+    hide_verbs:
+      en: "Hide verbs"
+      zh-CN: "隐藏动词"
+      ja: "動詞を非表示"
+    show_adjectives:
+      en: "Show adjectives"
+      zh-CN: "显示形容词"
+      ja: "形容詞を表示"
+    hide_adjectives:
+      en: "Hide adjectives"
+      zh-CN: "隐藏形容词"
+      ja: "形容詞を非表示"
+    show_adverbs:
+      en: "Show adverbs"
+      zh-CN: "显示副词"
+      ja: "副詞を表示"
+    hide_adverbs:
+      en: "Hide adverbs"
+      zh-CN: "隐藏副词"
+      ja: "副詞を非表示"
+    show_conjunctions:
+      en: "Show conjunctions"
+      zh-CN: "显示连词"
+      ja: "接続詞を表示"
+    hide_conjunctions:
+      en: "Hide conjunctions"
+      zh-CN: "隐藏连词"
+      ja: "接続詞を非表示"
+    show_all:
+      en: "Show all copyedit"
+      zh-CN: "显示全部校对标注"
+      ja: "校正表示をすべて表示"
+    hide_all:
+      en: "Hide all copyedit"
+      zh-CN: "隐藏全部校对标注"
+      ja: "校正表示をすべて非表示"
+  collection:
+    open:
+      en: "Open Collection: %{name}"
+      zh-CN: "打开集合：%{name}"
+      ja: "コレクションを開く: %{name}"
+  build:
+    development:
+      en: "development build"
+      zh-CN: "开发构建"
+      ja: "開発ビルド"
+  about:
+    text:
+      en: "Astrolith %{version}\nBuild: %{build}\n%{os} · %{arch}"
+      zh-CN: "Astrolith %{version}\n构建：%{build}\n%{os} · %{arch}"
+      ja: "Astrolith %{version}\nビルド：%{build}\n%{os} · %{arch}"
+  help:
+    local_data:
+      preferences:
+        en: "Preferences and project registry"
+        zh-CN: "偏好设置与项目注册表"
+        ja: "設定とプロジェクトレジストリ"
+      recovery:
+        en: "Unsaved-edit recovery"
+        zh-CN: "未保存编辑的恢复数据"
+        ja: "未保存編集の復元データ"
+      save_failures:
+        en: "Save-failure artifacts"
+        zh-CN: "保存失败时生成的诊断文件"
+        ja: "保存失敗時の成果物"
+      logs:
+        en: "Logs"
+        zh-CN: "日志"
+        ja: "ログ"
+      unavailable:
+        en: "Unavailable: %{reason}"
+        zh-CN: "不可用：%{reason}"
+        ja: "利用できません: %{reason}"
+      no_preferences_dir:
+        en: "Unavailable: no preferences directory"
+        zh-CN: "不可用：没有偏好设置目录"
+        ja: "利用できません: 設定ディレクトリがありません"
+      privacy_notice:
+        en: "Astrolith has no telemetry and no analytics endpoint. The only Astrolith network request is the signed update manifest, and only when this build was compiled with a manifest URL and public key. These paths hold local data; this dialog lists them without opening or reading any file."
+        zh-CN: "Astrolith 没有遥测，也没有分析端点。Astrolith 唯一的网络请求是签名的更新清单，并且仅当此构建在编译时带有清单 URL 和公钥时才会发出。这些路径存放本地数据；此对话框只列出它们，不会打开或读取任何文件。"
+        ja: "Astrolith にはテレメトリーも分析エンドポイントもありません。Astrolith が行うネットワークリクエストは署名付きの更新マニフェストのみで、しかもこのビルドがマニフェスト URL と公開鍵付きでコンパイルされている場合に限られます。これらのパスにはローカルデータが保存されていますが、このダイアログはファイルを開いたり読んだりせずに一覧表示するだけです。"
+      delete_warning:
+        en: "Quit Astrolith before deleting these directories. The user privacy page documents what each one contains and how to remove it; Preferences → Advanced → Reset All removes only preferences and the registry."
+        zh-CN: "删除这些目录之前请先退出 Astrolith。用户隐私页面说明了每个目录包含的内容以及如何删除；偏好设置 → 高级 → 全部重置只会删除偏好设置和注册表。"
+        ja: "これらのディレクトリを削除する前に Astrolith を終了してください。各ディレクトリの内容と削除方法はユーザープライバシーページに記載されています。設定 → 詳細設定 → すべてリセットでは、設定とレジストリのみが削除されます。"

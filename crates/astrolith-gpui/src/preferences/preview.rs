@@ -12,12 +12,12 @@ impl PreferencesSheet {
         let embedded_available = embedded_reason.is_none();
         let presentation_label = if self.preview_presentation == PreviewPresentation::Embedded {
             if embedded_available {
-                "Embedded WebView"
+                tr!("preferences.option.embedded")
             } else {
-                "Embedded WebView (unavailable)"
+                tr!("preferences.option.embedded_unavailable")
             }
         } else {
-            "External browser"
+            tr!("preferences.option.external_browser")
         };
 
         let presentation_weak = weak.clone();
@@ -27,35 +27,41 @@ impl PreferencesSheet {
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let weak = presentation_weak.clone();
-                let menu = menu.item(PopupMenuItem::new("External browser").on_click(
-                    move |_, _, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
-                            sheet.preview_presentation = PreviewPresentation::External;
-                            cx.notify();
-                        });
-                    },
-                ));
+                let menu = menu.item(
+                    PopupMenuItem::new(tr!("preferences.option.external_browser")).on_click(
+                        move |_, _, cx| {
+                            let _ = weak.update(cx, |sheet, cx| {
+                                sheet.preview_presentation = PreviewPresentation::External;
+                                cx.notify();
+                            });
+                        },
+                    ),
+                );
                 if embedded_available {
                     let weak = presentation_weak.clone();
                     menu.item(
-                        PopupMenuItem::new("Embedded WebView").on_click(move |_, _, cx| {
-                            let _ = weak.update(cx, |sheet, cx| {
-                                sheet.preview_presentation = PreviewPresentation::Embedded;
-                                cx.notify();
-                            });
-                        }),
+                        PopupMenuItem::new(tr!("preferences.option.embedded")).on_click(
+                            move |_, _, cx| {
+                                let _ = weak.update(cx, |sheet, cx| {
+                                    sheet.preview_presentation = PreviewPresentation::Embedded;
+                                    cx.notify();
+                                });
+                            },
+                        ),
                     )
                 } else {
-                    menu.item(PopupMenuItem::new("Embedded WebView (unavailable)"))
+                    menu.item(PopupMenuItem::new(tr!(
+                        "preferences.option.embedded_unavailable"
+                    )))
                 }
             })
             .into_any_element();
 
         let enter_weak = weak.clone();
         let enter_label = if self.preview_open_on_enter {
-            "On"
+            tr!("preferences.option.on")
         } else {
-            "Off"
+            tr!("preferences.option.off")
         };
         let open_on_enter = Button::new("preferences-preview-open-on-enter")
             .outline()
@@ -63,7 +69,10 @@ impl PreferencesSheet {
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu;
-                for (label, value) in [("Off", false), ("On", true)] {
+                for (label, value) in [
+                    (tr!("preferences.option.off"), false),
+                    (tr!("preferences.option.on"), true),
+                ] {
                     let weak = enter_weak.clone();
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
                         let _ = weak.update(cx, |sheet, cx| {
@@ -79,26 +88,22 @@ impl PreferencesSheet {
         let mut children = vec![
             self.field(
                 "preferences-field-preview-presentation",
-                "Presentation",
+                tr!("preferences.preview.presentation"),
                 presentation,
                 FieldExtras {
                     field: None,
-                    hint: Some(
-                        "Embedded WebView is available only on supported hosts; Wayland windows use the external browser.",
-                    ),
+                    hint: Some(tr!("preferences.preview.presentation_hint").into()),
                     trailing: None,
                 },
                 cx,
             ),
             self.field(
                 "preferences-field-preview-browser-executable",
-                "Preferred browser executable",
+                tr!("preferences.preview.browser_executable"),
                 self.control(FieldId::PreviewBrowserExecutable),
                 FieldExtras {
                     field: Some(FieldId::PreviewBrowserExecutable),
-                    hint: Some(
-                        "Empty uses the system default browser. The executable is started directly, without a shell.",
-                    ),
+                    hint: Some(tr!("preferences.preview.browser_executable_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::PreviewBrowserExecutable,
                         "preferences-reset-preview-browser-executable",
@@ -109,13 +114,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-preview-browser-arguments",
-                "Browser arguments",
+                tr!("preferences.preview.browser_arguments"),
                 self.control(FieldId::PreviewBrowserArguments),
                 FieldExtras {
                     field: Some(FieldId::PreviewBrowserArguments),
-                    hint: Some(
-                        "One argument per line. {url} is replaced with the preview URL; without it the URL is appended.",
-                    ),
+                    hint: Some(tr!("preferences.preview.browser_arguments_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::PreviewBrowserArguments,
                         "preferences-reset-preview-browser-arguments",
@@ -126,13 +129,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-preview-open-on-enter",
-                "Open on Enter",
+                tr!("preferences.preview.open_on_enter"),
                 open_on_enter,
                 FieldExtras {
                     field: None,
-                    hint: Some(
-                        "Open the active entry once when you explicitly enter Preview. A failed launch offers the system browser.",
-                    ),
+                    hint: Some(tr!("preferences.preview.open_on_enter_hint").into()),
                     trailing: None,
                 },
                 cx,
@@ -145,10 +146,18 @@ impl PreferencesSheet {
                     .test_support()
                     .text_xs()
                     .text_color(cx.theme().warning)
-                    .child(format!("Embedded WebView unavailable: {reason}"))
+                    .child(tr!(
+                        "preferences.preview.embedded_unavailable_notice",
+                        reason = reason
+                    ))
                     .into_any_element(),
             );
         }
-        self.section("Browser", None, children, cx)
+        self.section(
+            tr!("preferences.preview.browser_section"),
+            None,
+            children,
+            cx,
+        )
     }
 }

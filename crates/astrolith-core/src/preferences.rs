@@ -420,7 +420,7 @@ impl CopyeditColors {
 }
 
 /// Copyedit toggles and colors. All categories start disabled, matching the
-/// persisted upstream default; the display layer owns one label source.
+/// persisted upstream default; the display layer owns the translated labels.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CopyeditPreferences {
@@ -474,35 +474,6 @@ impl CopyeditPreferences {
             self.set_enabled(category, enabled);
         }
     }
-
-    /// The command and settings label for one category.
-    ///
-    /// This is the single label source: the command registry, menus and the
-    /// future preferences pane all read it instead of keeping their own copy
-    /// of the enabled state.
-    pub fn toggle_label(&self, category: CopyeditCategory) -> &'static str {
-        match (category, self.enabled(category)) {
-            (CopyeditCategory::Noun, false) => "Show nouns",
-            (CopyeditCategory::Noun, true) => "Hide nouns",
-            (CopyeditCategory::Verb, false) => "Show verbs",
-            (CopyeditCategory::Verb, true) => "Hide verbs",
-            (CopyeditCategory::Adjective, false) => "Show adjectives",
-            (CopyeditCategory::Adjective, true) => "Hide adjectives",
-            (CopyeditCategory::Adverb, false) => "Show adverbs",
-            (CopyeditCategory::Adverb, true) => "Hide adverbs",
-            (CopyeditCategory::Conjunction, false) => "Show conjunctions",
-            (CopyeditCategory::Conjunction, true) => "Hide conjunctions",
-        }
-    }
-
-    /// The command and settings label for the all-categories toggle.
-    pub fn all_toggle_label(&self) -> &'static str {
-        if self.all_enabled() {
-            "Hide all copyedit"
-        } else {
-            "Show all copyedit"
-        }
-    }
 }
 
 /// IDE launch command as argv; arguments are never interpreted by a shell.
@@ -533,16 +504,6 @@ pub enum PreviewPresentation {
     External,
     /// A WebView embedded in the workspace split.
     Embedded,
-}
-
-impl PreviewPresentation {
-    /// Short label used by settings and status text.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::External => "External browser",
-            Self::Embedded => "Embedded WebView",
-        }
-    }
 }
 
 /// Preferred browser as argv; the executable is started without a shell.
@@ -1241,35 +1202,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copyedit_has_one_disabled_default_and_labels_follow_it() {
+    fn copyedit_defaults_to_disabled_and_tracks_each_category() {
         let mut copyedit = CopyeditPreferences::default();
         assert!(!copyedit.all_enabled());
         for category in CopyeditCategory::ALL {
             assert!(!copyedit.enabled(category));
         }
-        assert_eq!(copyedit.toggle_label(CopyeditCategory::Noun), "Show nouns");
-        assert_eq!(copyedit.all_toggle_label(), "Show all copyedit");
 
         copyedit.set_enabled(CopyeditCategory::Verb, true);
-        assert_eq!(copyedit.toggle_label(CopyeditCategory::Verb), "Hide verbs");
-        assert_eq!(copyedit.toggle_label(CopyeditCategory::Noun), "Show nouns");
-        assert_eq!(copyedit.all_toggle_label(), "Show all copyedit");
+        assert!(copyedit.enabled(CopyeditCategory::Verb));
+        assert!(!copyedit.enabled(CopyeditCategory::Noun));
+        assert!(!copyedit.all_enabled());
 
         copyedit.set_all(true);
         assert!(copyedit.all_enabled());
         for category in CopyeditCategory::ALL {
-            assert_eq!(
-                copyedit.toggle_label(category),
-                match category {
-                    CopyeditCategory::Noun => "Hide nouns",
-                    CopyeditCategory::Verb => "Hide verbs",
-                    CopyeditCategory::Adjective => "Hide adjectives",
-                    CopyeditCategory::Adverb => "Hide adverbs",
-                    CopyeditCategory::Conjunction => "Hide conjunctions",
-                }
-            );
+            assert!(copyedit.enabled(category));
         }
-        assert_eq!(copyedit.all_toggle_label(), "Hide all copyedit");
+
+        copyedit.set_all(false);
+        assert!(!copyedit.all_enabled());
     }
 
     #[test]

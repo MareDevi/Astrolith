@@ -66,9 +66,9 @@ pub(crate) fn parse_startup(arguments: impl IntoIterator<Item = OsString>) -> St
     let mut request = StartupRequest::default();
     for argument in arguments {
         let Some(text) = argument.to_str() else {
-            request.problem.get_or_insert_with(|| {
-                "A launch argument is not valid UTF-8 and was ignored.".to_owned()
-            });
+            request
+                .problem
+                .get_or_insert_with(|| tr!("services.link.non_utf8_argument"));
             continue;
         };
         if text.starts_with('-') {
@@ -109,28 +109,29 @@ pub(crate) fn parse_startup(arguments: impl IntoIterator<Item = OsString>) -> St
 
 /// Parse `astrolith://open?path=<absolute path>`.
 pub(crate) fn parse_deep_link(raw: &str) -> Result<StartupTarget, String> {
-    let url = Url::parse(raw).map_err(|error| format!("Invalid Astrolith link: {error}"))?;
+    let url = Url::parse(raw).map_err(|error| tr!("services.link.invalid_link", error = error))?;
     if url.scheme() != SCHEME {
-        return Err(format!(
-            "Only {SCHEME}:// links are supported, not {}://.",
-            url.scheme()
+        return Err(tr!(
+            "services.link.unsupported_scheme",
+            expected = SCHEME,
+            scheme = url.scheme()
         ));
     }
     if !url
         .host_str()
         .is_some_and(|host| host.eq_ignore_ascii_case("open"))
     {
-        return Err("An Astrolith link must use the `open` host.".to_owned());
+        return Err(tr!("services.link.missing_open_host"));
     }
     let path = url
         .query_pairs()
         .find(|(name, _)| name == "path")
         .map(|(_, value)| value.into_owned())
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "The Astrolith link has no `path` parameter.".to_owned())?;
+        .ok_or_else(|| tr!("services.link.missing_path"))?;
     let path = PathBuf::from(path);
     if !path.is_absolute() {
-        return Err("The Astrolith link path must be absolute.".to_owned());
+        return Err(tr!("services.link.relative_path"));
     }
     target_from_path(&path)
 }
@@ -143,12 +144,12 @@ fn target_from_path(path: &Path) -> Result<StartupTarget, String> {
         if is_content_entry(path) {
             return Ok(StartupTarget::Entry(path.to_path_buf()));
         }
-        return Err(format!(
-            "{} is not a Markdown or MDX entry.",
-            path.display()
+        return Err(tr!(
+            "services.link.not_content_entry",
+            path = path.display()
         ));
     }
-    Err(format!("{} does not exist.", path.display()))
+    Err(tr!("services.link.missing_target", path = path.display()))
 }
 
 /// Whether a path names a Markdown or MDX entry.
@@ -172,15 +173,15 @@ pub(crate) fn route(
     match target {
         StartupTarget::Project(path) => {
             if let Some(blocked) = blocked_root(path, home) {
-                return Route::Invalid(blocked.message().to_owned());
+                return Route::Invalid(crate::project_discovery::blocked_root_message(blocked));
             }
             Route::Project(path.clone())
         }
         StartupTarget::Entry(path) => {
             if !is_content_entry(path) {
-                return Route::Invalid(format!(
-                    "{} is not a Markdown or MDX entry.",
-                    path.display()
+                return Route::Invalid(tr!(
+                    "services.link.not_content_entry",
+                    path = path.display()
                 ));
             }
             // Registry roots are canonical; canonicalize the spelling the
@@ -194,13 +195,13 @@ pub(crate) fn route(
                 })
                 .max_by_key(|record| record.path.len())
             else {
-                return Route::Invalid(format!(
-                    "{} is not inside a project Astrolith has opened. Open the project once, then try again.",
-                    path.display()
+                return Route::Invalid(tr!(
+                    "services.link.unregistered_project",
+                    path = path.display()
                 ));
             };
             if let Some(blocked) = blocked_root(Path::new(&record.path), home) {
-                return Route::Invalid(blocked.message().to_owned());
+                return Route::Invalid(crate::project_discovery::blocked_root_message(blocked));
             }
             Route::Entry {
                 root: PathBuf::from(&record.path),

@@ -14,20 +14,18 @@ pub(crate) fn read_document(path: PathBuf) -> io::Result<DocumentSource> {
     let file = File::open(&path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
-        return Err(io::Error::other("Choose a regular file."));
+        return Err(io::Error::other(tr!("services.file.regular_file_only")));
     }
     let mut bytes = Vec::new();
     file.take((astrolith_document::MAX_DOCUMENT_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
     if bytes.len() > astrolith_document::MAX_DOCUMENT_BYTES {
-        return Err(io::Error::other("Readonly files are limited to 8 MiB."));
+        return Err(io::Error::other(tr!("services.file.too_large")));
     }
     let source =
-        String::from_utf8(bytes).map_err(|_| io::Error::other("Choose a UTF-8 text file."))?;
+        String::from_utf8(bytes).map_err(|_| io::Error::other(tr!("services.file.not_utf8")))?;
     if source.lines().count() > 50000 {
-        return Err(io::Error::other(
-            "Readonly files are limited to 50,000 lines.",
-        ));
+        return Err(io::Error::other(tr!("services.file.too_many_lines")));
     }
     Ok(DocumentSource { path, source })
 }

@@ -27,26 +27,22 @@ pub(crate) fn classify(
 ) -> Result<DropTarget, String> {
     let [path] = paths else {
         return Err(if paths.is_empty() {
-            "Nothing was dropped.".to_owned()
+            tr!("services.drop.nothing")
         } else {
-            "Drop exactly one project folder or one Markdown/MDX file.".to_owned()
+            tr!("services.drop.exactly_one")
         });
     };
     if path.is_dir() {
         return Ok(DropTarget::Project(path.clone()));
     }
     if !is_content_entry(path) {
-        return Err(
-            "Only Markdown (.md) and MDX (.mdx) files can be opened by dropping.".to_owned(),
-        );
+        return Err(tr!("services.drop.unsupported_entry"));
     }
     let Some(root) = project_root else {
-        return Err(
-            "Open the project first, then drop one of its Markdown or MDX files.".to_owned(),
-        );
+        return Err(tr!("services.drop.project_required"));
     };
     if !path.starts_with(root) {
-        return Err(format!("{} is outside the open project.", path.display()));
+        return Err(tr!("services.drop.outside_project", path = path.display()));
     }
     Ok(DropTarget::Entry(path.clone()))
 }

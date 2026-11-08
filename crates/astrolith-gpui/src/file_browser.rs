@@ -484,14 +484,14 @@ impl Render for FileBrowser {
                     .text_xs()
                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .text_color(cx.theme().muted_foreground)
-                    .child("Explorer"),
+                    .child(tr!("browser.explorer.title")),
             )
             .when(self.loading, |header| header.child(Spinner::new().xsmall()))
             .child(
                 crate::ui::icon_button(
                     "file-browser-refresh",
                     IconName::RefreshCw,
-                    "Refresh files",
+                    tr!("browser.explorer.refresh"),
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
             );
@@ -512,7 +512,7 @@ impl Render for FileBrowser {
                         .size_5()
                         .text_color(cx.theme().danger),
                 )
-                .child(div().text_sm().child("Could not read project files"))
+                .child(div().text_sm().child(tr!("browser.explorer.error_title")))
                 .child(
                     div()
                         .text_xs()
@@ -536,12 +536,12 @@ impl Render for FileBrowser {
                         .size_5()
                         .text_color(cx.theme().muted_foreground),
                 )
-                .child(div().text_sm().child("No project files"))
+                .child(div().text_sm().child(tr!("browser.explorer.empty_title")))
                 .child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("This project contains no readable files."),
+                        .child(tr!("browser.explorer.empty_body")),
                 )
                 .into_any_element()
         } else {
@@ -572,7 +572,7 @@ impl Render for FileBrowser {
                         .py_1()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Some project files are hidden by the scan limit."),
+                        .child(tr!("browser.explorer.truncated")),
                 )
             })
     }

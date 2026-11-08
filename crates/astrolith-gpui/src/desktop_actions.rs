@@ -26,22 +26,22 @@ pub(crate) struct IdeTarget {
 pub(crate) fn ide_argv(ide: &IdeCommand, target: &IdeTarget) -> Result<Vec<String>, String> {
     let executable = ide.executable.trim();
     if executable.is_empty() {
-        return Err("No IDE is configured in Preferences.".to_owned());
+        return Err(tr!("services.ide.not_configured"));
     }
     if executable.chars().any(|character| character.is_control()) {
-        return Err("The configured IDE command contains control characters.".to_owned());
+        return Err(tr!("services.ide.control_executable"));
     }
     validate_path(&target.project)?;
     if let Some(file) = &target.file {
         validate_path(file)?;
         if !file.starts_with(&target.project) {
-            return Err("The file is outside the project and was not sent to the IDE.".to_owned());
+            return Err(tr!("services.ide.file_outside_project"));
         }
         if !matches!(
             file.extension().and_then(|extension| extension.to_str()),
             Some("md" | "mdx")
         ) {
-            return Err("Only Markdown and MDX entries can be opened in the IDE.".to_owned());
+            return Err(tr!("services.ide.markdown_only"));
         }
     }
     let project = target.project.to_string_lossy();
@@ -52,14 +52,15 @@ pub(crate) fn ide_argv(ide: &IdeCommand, target: &IdeTarget) -> Result<Vec<Strin
     argv.push(executable.to_owned());
     for argument in &ide.arguments {
         if argument.contains('\0') || argument.chars().any(|character| character.is_control()) {
-            return Err("The configured IDE argument contains control characters.".to_owned());
+            return Err(tr!("services.ide.control_argument"));
         }
         let mut expanded = argument.replace("{project}", &project);
         if expanded.contains("{file}") {
             let Some(file) = file.as_ref() else {
-                return Err(
-                    "The IDE command uses {file}, but this action has no file selected.".to_owned(),
-                );
+                return Err(tr!(
+                    "services.ide.file_placeholder_missing",
+                    placeholder = "{file}"
+                ));
             };
             expanded = expanded.replace("{file}", file.as_ref());
         }
@@ -72,16 +73,16 @@ pub(crate) fn ide_argv(ide: &IdeCommand, target: &IdeTarget) -> Result<Vec<Strin
 
 fn validate_path(path: &Path) -> Result<(), String> {
     if !path.is_absolute() {
-        return Err("Only absolute project paths can be sent to the IDE.".to_owned());
+        return Err(tr!("services.ide.absolute_only"));
     }
     if path
         .components()
         .any(|component| matches!(component, std::path::Component::ParentDir))
     {
-        return Err("The IDE path contains a parent-directory segment.".to_owned());
+        return Err(tr!("services.ide.parent_directory"));
     }
     if path.to_string_lossy().chars().any(char::is_control) {
-        return Err("The IDE path contains control characters.".to_owned());
+        return Err(tr!("services.ide.control_path"));
     }
     Ok(())
 }
@@ -89,7 +90,7 @@ fn validate_path(path: &Path) -> Result<(), String> {
 /// Spawn the configured IDE without a shell.
 pub(crate) async fn spawn_ide(mut argv: Vec<String>) -> Result<(), String> {
     if argv.is_empty() {
-        return Err("No IDE is configured in Preferences.".to_owned());
+        return Err(tr!("services.ide.not_configured"));
     }
     let executable = argv.remove(0);
     let child = tokio::process::Command::new(&executable)
@@ -98,7 +99,13 @@ pub(crate) async fn spawn_ide(mut argv: Vec<String>) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| format!("Could not start the IDE (`{executable}`): {error}"))?;
+        .map_err(|error| {
+            tr!(
+                "services.ide.spawn_failed",
+                executable = executable,
+                error = error
+            )
+        })?;
     // The IDE is long-lived; reap it in the background so it is never a zombie.
     tokio::spawn(async move {
         let mut child = child;

@@ -25,7 +25,10 @@ impl ProjectWorkspace {
             ..availability
         };
         if !command.is_available(availability) {
-            self.status = format!("{} is unavailable right now.", command.label());
+            self.status = tr!(
+                "browser.entry.command_unavailable",
+                command = command.label()
+            );
             cx.notify();
             return;
         }
@@ -104,7 +107,7 @@ impl ProjectWorkspace {
         cx: &mut Context<Self>,
     ) {
         if self.is_busy() {
-            self.status = "Wait for the project index to finish before creating an entry.".into();
+            self.status = tr!("browser.entry.wait_for_index");
             cx.notify();
             return;
         }
@@ -148,8 +151,7 @@ impl ProjectWorkspace {
                     .map(|descriptor| (descriptor.id().clone(), descriptor))
             })
         else {
-            self.status =
-                "Open an Astro project with a content collection to create an entry.".into();
+            self.status = tr!("browser.entry.no_collection_for_create");
             cx.notify();
             return;
         };
@@ -181,10 +183,10 @@ impl ProjectWorkspace {
         let extension = resolved.default_extension;
         let probe = Path::new("entry").with_extension(extension.as_str());
         if descriptor.pattern().entry_kind(&probe).is_none() {
-            self.status = format!(
-                "The {} collection does not include .{} entries; change the default extension.",
-                collection.as_str(),
-                extension.as_str()
+            self.status = tr!(
+                "browser.entry.collection_extension_mismatch",
+                collection = collection.as_str(),
+                extension = extension.as_str()
             );
             cx.notify();
             return;
@@ -197,10 +199,10 @@ impl ProjectWorkspace {
             &today,
         );
         if !plan.unsupported.is_empty() {
-            self.status = format!(
-                "Cannot create a {} entry: required field(s) {} are containers the create form cannot represent. Nothing was written.",
-                collection.as_str(),
-                plan.unsupported.join(", ")
+            self.status = tr!(
+                "browser.entry.create_unsupported",
+                collection = collection.as_str(),
+                fields = plan.unsupported.join(", ")
             );
             cx.notify();
             return;
@@ -224,17 +226,15 @@ impl ProjectWorkspace {
     pub(super) fn creation_hint(&self, input: &CreationInput) -> Option<SharedString> {
         match &input.kind {
             CreationInputKind::Date => Some(SharedString::from("YYYY-MM-DD")),
-            CreationInputKind::Image => Some(SharedString::from(
-                "Project-relative image path; external copy arrives with the asset service",
-            )),
-            CreationInputKind::ImageList => Some(SharedString::from(
-                "Comma-separated project-relative image paths",
-            )),
-            CreationInputKind::Tags => Some(SharedString::from("Comma-separated values")),
+            CreationInputKind::Image => Some(SharedString::from(tr!("browser.entry.image_hint"))),
+            CreationInputKind::ImageList => {
+                Some(SharedString::from(tr!("browser.entry.image_list_hint")))
+            }
+            CreationInputKind::Tags => Some(SharedString::from(tr!("browser.entry.tags_hint"))),
             CreationInputKind::Reference { collections } => Some(self.reference_hint(collections)),
-            CreationInputKind::ReferenceList { collections } => Some(SharedString::from(format!(
-                "Comma-separated ids · {}",
-                self.reference_hint(collections)
+            CreationInputKind::ReferenceList { collections } => Some(SharedString::from(tr!(
+                "browser.entry.reference_list_hint",
+                hint = self.reference_hint(collections)
             ))),
             CreationInputKind::Enum(_) => None,
             CreationInputKind::Text
@@ -249,7 +249,10 @@ impl ProjectWorkspace {
         let mut parts = Vec::new();
         for collection in collections {
             let Some(options) = self.references.get(collection) else {
-                parts.push(format!("{collection}: no entries"));
+                parts.push(tr!(
+                    "browser.entry.no_reference_entries",
+                    collection = collection
+                ));
                 continue;
             };
             let labels = options
@@ -261,7 +264,7 @@ impl ProjectWorkspace {
             parts.push(format!("{collection}: {labels}"));
         }
         if parts.is_empty() {
-            SharedString::from("Reference id")
+            SharedString::from(tr!("browser.entry.reference_id"))
         } else {
             SharedString::from(parts.join(" · "))
         }
@@ -281,7 +284,7 @@ impl ProjectWorkspace {
             .directory
             .as_ref()
             .map(|directory| directory.as_str().to_owned())
-            .unwrap_or_else(|| "(project root)".to_owned());
+            .unwrap_or_else(|| tr!("browser.entry.project_root"));
         let extension = pending.extension.suffix().to_owned();
         let default_name = pending.today.clone();
         let owner = cx.weak_entity();
@@ -316,7 +319,7 @@ impl ProjectWorkspace {
                     div()
                         .v_flex()
                         .gap_1()
-                        .child(div().text_sm().child("File name"))
+                        .child(div().text_sm().child(tr!("browser.dialog.file_name")))
                         .child(Input::new(&name_input)),
                 );
             for (input, state, hint) in &rows {
@@ -335,48 +338,51 @@ impl ProjectWorkspace {
                 }
                 body = body.child(row);
             }
-            dialog.title("New entry").child(body).footer(
-                div()
-                    .h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("create-cancel")
-                            .label("Cancel")
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(
-                        Button::new("create-confirm")
-                            .primary()
-                            .label("Create")
-                            .on_click(move |_, window, cx| {
-                                let typed_name = name_input.read(cx).value().to_string();
-                                let mut values = Vec::with_capacity(rows.len());
-                                for (input, state, _) in &rows {
-                                    let raw = state.read(cx).value().to_string();
-                                    match operations::parse_input(input, &raw) {
-                                        Ok(value) => values.push((input.name.clone(), value)),
-                                        Err(error) => {
-                                            let _ = owner.update(cx, |project, cx| {
-                                                project.pending_create = None;
-                                                project.report_entry_error(error, cx)
-                                            });
-                                            window.close_dialog(cx);
-                                            return;
+            dialog
+                .title(tr!("browser.dialog.new_entry_title"))
+                .child(body)
+                .footer(
+                    div()
+                        .h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("create-cancel")
+                                .label(tr!("browser.dialog.cancel"))
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("create-confirm")
+                                .primary()
+                                .label(tr!("browser.dialog.create"))
+                                .on_click(move |_, window, cx| {
+                                    let typed_name = name_input.read(cx).value().to_string();
+                                    let mut values = Vec::with_capacity(rows.len());
+                                    for (input, state, _) in &rows {
+                                        let raw = state.read(cx).value().to_string();
+                                        match operations::parse_input(input, &raw) {
+                                            Ok(value) => values.push((input.name.clone(), value)),
+                                            Err(error) => {
+                                                let _ = owner.update(cx, |project, cx| {
+                                                    project.pending_create = None;
+                                                    project.report_entry_error(error, cx)
+                                                });
+                                                window.close_dialog(cx);
+                                                return;
+                                            }
                                         }
                                     }
-                                }
-                                let name = if typed_name.trim() == default_name {
-                                    None
-                                } else {
-                                    Some(typed_name.trim().to_owned())
-                                };
-                                let _ = owner.update(cx, |project, cx| {
-                                    project.submit_create(name, values, window, cx)
-                                });
-                                window.close_dialog(cx);
-                            }),
-                    ),
-            )
+                                    let name = if typed_name.trim() == default_name {
+                                        None
+                                    } else {
+                                        Some(typed_name.trim().to_owned())
+                                    };
+                                    let _ = owner.update(cx, |project, cx| {
+                                        project.submit_create(name, values, window, cx)
+                                    });
+                                    window.close_dialog(cx);
+                                }),
+                        ),
+                )
         });
     }
 
@@ -413,7 +419,7 @@ impl ProjectWorkspace {
             return;
         };
         let generation = self.generation;
-        self.status = "Creating entry…".into();
+        self.status = tr!("browser.entry.creating");
         cx.notify();
         let work = runtime::blocking(cx, move || operations::create(&scope, &request));
         self.retain_command_task(cx.spawn_in(window, async move |this, cx| {
@@ -427,11 +433,12 @@ impl ProjectWorkspace {
                 match result {
                     Ok(created) => {
                         tracing::info!(source = %created.source().as_str(), "entry created");
-                        this.status = format!("Created {}.", created.source().as_str());
+                        this.status =
+                            tr!("browser.entry.created", source = created.source().as_str());
                         this.rescan(Some(created.source().clone()), window, cx);
                     }
                     Err(error) => {
-                        this.status = format!("Could not create the entry: {error}");
+                        this.status = tr!("browser.entry.create_failed", error = error);
                         cx.notify();
                     }
                 }
@@ -456,7 +463,7 @@ impl ProjectWorkspace {
             let input = input.clone();
             let path = path.clone();
             dialog
-                .title("Rename or move entry")
+                .title(tr!("browser.dialog.rename_title"))
                 .child(
                     div()
                         .v_flex()
@@ -465,7 +472,7 @@ impl ProjectWorkspace {
                             div()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Project-relative path"),
+                                .child(tr!("browser.dialog.project_relative_path")),
                         )
                         .child(Input::new(&input)),
                 )
@@ -475,13 +482,13 @@ impl ProjectWorkspace {
                         .gap_2()
                         .child(
                             Button::new("rename-cancel")
-                                .label("Cancel")
+                                .label(tr!("browser.dialog.cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("rename-confirm")
                                 .primary()
-                                .label("Rename")
+                                .label(tr!("browser.dialog.rename"))
                                 .on_click(move |_, window, cx| {
                                     let destination = input.read(cx).value().to_string();
                                     window.close_dialog(cx);
@@ -506,7 +513,10 @@ impl ProjectWorkspace {
             Ok(destination) => destination,
             Err(_) => {
                 self.report_entry_error(
-                    format!("“{destination}” is not a valid project-relative path."),
+                    tr!(
+                        "browser.entry.invalid_destination",
+                        destination = destination
+                    ),
                     cx,
                 );
                 return;
@@ -516,7 +526,7 @@ impl ProjectWorkspace {
             return;
         };
         if current == destination {
-            self.status = "The entry path is unchanged.".into();
+            self.status = tr!("browser.entry.path_unchanged");
             cx.notify();
             return;
         }
@@ -543,9 +553,7 @@ impl ProjectWorkspace {
                 });
             if !accepts {
                 self.report_entry_error(
-                    format!(
-                        "This collection does not include .{extension} entries; the file would not be indexed."
-                    ),
+                    tr!("browser.entry.extension_not_indexed", extension = extension),
                     cx,
                 );
                 return;
@@ -584,7 +592,7 @@ impl ProjectWorkspace {
             source,
             destination,
         };
-        self.status = "Renaming entry…".into();
+        self.status = tr!("browser.entry.renaming");
         cx.notify();
         let work = runtime::blocking(cx, move || operations::rename(&scope, &request));
         self.retain_command_task(cx.spawn_in(window, async move |this, cx| {
@@ -611,17 +619,14 @@ impl ProjectWorkspace {
                                 .is_some_and(|session| session.read(cx).buffer.is_dirty());
                         }
                         this.status = if dirty {
-                            format!(
-                                "Renamed to {}. Newer edits remain unsaved; they are recorded for recovery.",
-                                moved.to().as_str()
-                            )
+                            tr!("browser.entry.renamed_dirty", source = moved.to().as_str())
                         } else {
-                            format!("Renamed to {}.", moved.to().as_str())
+                            tr!("browser.entry.renamed", source = moved.to().as_str())
                         };
                         this.rescan(None, window, cx);
                     }
                     Err(error) => {
-                        this.status = format!("Could not rename the entry: {error}");
+                        this.status = tr!("browser.entry.rename_failed", error = error);
                         cx.notify();
                     }
                 }
@@ -724,7 +729,7 @@ impl ProjectWorkspace {
         };
         let generation = self.generation;
         let request = DuplicateRequest { generation, source };
-        self.status = "Duplicating entry…".into();
+        self.status = tr!("browser.entry.duplicating");
         cx.notify();
         let work = runtime::blocking(cx, move || operations::duplicate(&scope, &request));
         self.retain_command_task(cx.spawn_in(window, async move |this, cx| {
@@ -737,11 +742,14 @@ impl ProjectWorkspace {
                 }
                 match result {
                     Ok(duplicated) => {
-                        this.status = format!("Duplicated as {}.", duplicated.source().as_str());
+                        this.status = tr!(
+                            "browser.entry.duplicated",
+                            source = duplicated.source().as_str()
+                        );
                         this.rescan(Some(duplicated.source().clone()), window, cx);
                     }
                     Err(error) => {
-                        this.status = format!("Could not duplicate the entry: {error}");
+                        this.status = tr!("browser.entry.duplicate_failed", error = error);
                         cx.notify();
                     }
                 }
@@ -768,21 +776,21 @@ impl ProjectWorkspace {
                 let save_owner = owner.clone();
                 let save_path = path.clone();
                 dialog
-                    .title(format!("Move “{title}” to the Trash?"))
-                    .child("The document has unsaved changes. Save them first, or discard them and move the file to the Trash.")
+                    .title(tr!("browser.dialog.trash_title", title = title))
+                    .child(tr!("browser.dialog.trash_dirty_body"))
                     .footer(
                         div()
                             .h_flex()
                             .gap_2()
                             .child(
                                 Button::new("trash-cancel")
-                                    .label("Cancel")
+                                    .label(tr!("browser.dialog.cancel"))
                                     .on_click(|_, window, cx| window.close_dialog(cx)),
                             )
                             .child(
                                 Button::new("trash-discard")
                                     .danger()
-                                    .label("Discard changes and trash")
+                                    .label(tr!("browser.dialog.discard_and_trash"))
                                     .on_click(move |_, window, cx| {
                                         window.close_dialog(cx);
                                         let _ = discard_owner.update(cx, |project, cx| {
@@ -797,15 +805,11 @@ impl ProjectWorkspace {
                             .child(
                                 Button::new("trash-save")
                                     .primary()
-                                    .label("Save and trash")
+                                    .label(tr!("browser.dialog.save_and_trash"))
                                     .on_click(move |_, window, cx| {
                                         window.close_dialog(cx);
                                         let _ = save_owner.update(cx, |project, cx| {
-                                            project.save_and_trash(
-                                                save_path.clone(),
-                                                window,
-                                                cx,
-                                            )
+                                            project.save_and_trash(save_path.clone(), window, cx)
                                         });
                                     }),
                             ),
@@ -814,21 +818,21 @@ impl ProjectWorkspace {
                 let owner = owner.clone();
                 let path = path.clone();
                 dialog
-                    .title(format!("Move “{title}” to the Trash?"))
-                    .child("The file moves to the desktop Trash; it is never permanently deleted here.")
+                    .title(tr!("browser.dialog.trash_title", title = title))
+                    .child(tr!("browser.dialog.trash_body"))
                     .footer(
                         div()
                             .h_flex()
                             .gap_2()
                             .child(
                                 Button::new("trash-cancel")
-                                    .label("Cancel")
+                                    .label(tr!("browser.dialog.cancel"))
                                     .on_click(|_, window, cx| window.close_dialog(cx)),
                             )
                             .child(
                                 Button::new("trash-confirm")
                                     .danger()
-                                    .label("Move to Trash")
+                                    .label(tr!("browser.dialog.move_to_trash"))
                                     .on_click(move |_, window, cx| {
                                         window.close_dialog(cx);
                                         let _ = owner.update(cx, |project, cx| {
@@ -881,7 +885,7 @@ impl ProjectWorkspace {
         let generation = self.generation;
         let backend = self.trash_backend.clone();
         let request = TrashRequest { generation, source };
-        self.status = "Moving entry to the Trash…".into();
+        self.status = tr!("browser.entry.moving_to_trash");
         cx.notify();
         let work = runtime::blocking(cx, move || {
             operations::trash(&scope, &request, backend.as_ref())
@@ -897,13 +901,14 @@ impl ProjectWorkspace {
                 match result {
                     Ok(trashed) => {
                         this.remove_session(&path, cx);
-                        this.status = format!("Moved {} to the Trash.", trashed.source().as_str());
+                        this.status = tr!(
+                            "browser.entry.moved_to_trash",
+                            source = trashed.source().as_str()
+                        );
                         this.rescan(None, window, cx);
                     }
                     Err(error) => {
-                        this.status = format!(
-                            "Could not move the entry to the Trash: {error}. The file is unchanged."
-                        );
+                        this.status = tr!("browser.entry.trash_failed", error = error);
                         cx.notify();
                     }
                 }
@@ -937,7 +942,10 @@ impl ProjectWorkspace {
                 match result {
                     Ok(target) => {
                         let directory = target.directory().to_path_buf();
-                        this.status = format!("Opening {}…", directory.display());
+                        this.status = tr!(
+                            "browser.entry.opening_directory",
+                            directory = directory.display()
+                        );
                         cx.notify();
                         let opened =
                             runtime::spawn(cx, async move { open_directory(&directory).await });
@@ -945,9 +953,9 @@ impl ProjectWorkspace {
                             let result = opened.await.and_then(|result| result);
                             let _ = this.update(cx, |this, cx| {
                                 this.status = match result {
-                                    Ok(()) => "Opened the containing folder.".into(),
+                                    Ok(()) => tr!("browser.entry.opened_folder"),
                                     Err(error) => {
-                                        format!("Could not open the file manager: {error}")
+                                        tr!("browser.entry.file_manager_failed", error = error)
                                     }
                                 };
                                 cx.notify();
@@ -956,7 +964,7 @@ impl ProjectWorkspace {
                         .detach();
                     }
                     Err(error) => {
-                        this.status = format!("Could not reveal the entry: {error}");
+                        this.status = tr!("browser.entry.reveal_failed", error = error);
                         cx.notify();
                     }
                 }
@@ -997,10 +1005,10 @@ impl ProjectWorkspace {
                         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
                             copied.text().to_owned(),
                         ));
-                        this.status = format!("Copied {}.", copied.text());
+                        this.status = tr!("browser.entry.copied_path", path = copied.text());
                     }
                     Err(error) => {
-                        this.status = format!("Could not copy the path: {error}");
+                        this.status = tr!("browser.entry.copy_path_failed", error = error);
                     }
                 }
                 cx.notify();

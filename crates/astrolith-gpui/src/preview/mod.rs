@@ -14,16 +14,17 @@ use astrolith_core::{
     preferences::{PreviewPreferences, PreviewPresentation},
 };
 use astrolith_preview::{
-    DevServer, DevServerConfig, ExternalBrowser, PreviewLifecycle, PreviewSession, PreviewSurface,
-    PreviewTarget, RouteMapping, ServerStatus, StartupFailure, TargetChange, target_change,
+    DevServer, DevServerConfig, EmbeddedUnavailable, ExternalBrowser, PreviewLifecycle,
+    PreviewSession, PreviewSurface, PreviewTarget, RouteMapping, ServerStatus, StartupFailure,
+    TargetChange, target_change,
 };
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, StyledExt,
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{
-    App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString, Task,
-    Window, div, prelude::*,
+    App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Task, Window, div,
+    prelude::*,
 };
 use url::Url;
 
@@ -142,7 +143,7 @@ pub(crate) struct PreviewPanel {
     fallback_url: Option<Url>,
     /// Generation-checked dev-server state.
     lifecycle: PreviewLifecycle,
-    message: Option<String>,
+    message: Option<PreviewMessage>,
     /// Entry the "Open in browser" button resolves, updated by the shell.
     pending_entry: Option<EntryId>,
     task: Option<Task<()>>,
@@ -183,14 +184,132 @@ impl PreviewPhase {
         }
     }
 
-    /// Stable lowercase label shared with the service status.
-    pub(crate) fn label(self) -> &'static str {
+    /// Localized phase name shown next to the status dot.
+    pub(crate) fn text(self) -> String {
         match self {
-            Self::Stopped => "stopped",
-            Self::Starting => "starting",
-            Self::Ready => "ready",
-            Self::Stopping => "stopping",
-            Self::Failed => "failed",
+            Self::Stopped => tr!("preview.phase.stopped"),
+            Self::Starting => tr!("preview.phase.starting"),
+            Self::Ready => tr!("preview.phase.ready"),
+            Self::Stopping => tr!("preview.phase.stopping"),
+            Self::Failed => tr!("preview.phase.failed"),
+        }
+    }
+}
+
+/// A message shown under the panel controls.
+///
+/// The message keeps its parameters instead of a rendered string, so changing
+/// the interface language retranslates it on the next frame.
+#[derive(Clone, Debug)]
+pub(crate) enum PreviewMessage {
+    OpenProjectToStart,
+    OpenProjectToRestart,
+    AlreadyRunning,
+    Starting,
+    Stopping,
+    Restarting,
+    Ready { url: String },
+    Stopped,
+    StoppedUnexpectedly { error: String },
+    StoppedOnItsOwn,
+    ObserveFailed { error: String },
+    StartFailed { error: String },
+    StartFailedWithOutput { error: String, output: String },
+    StopFailed { error: String },
+    UrlUnresolved { error: String },
+    OpenedInBrowser { url: String },
+    PreferredBrowserFailed { error: String },
+    OpenedInSystemBrowser { url: String },
+    SystemBrowserFailed { error: String },
+    EmbeddedUnavailable { reason: String },
+    OpenDocumentToPreview,
+    OpenDocumentToCopyUrl,
+    CopiedUrl { url: String },
+}
+
+impl PreviewMessage {
+    /// The message rendered in the current interface language.
+    pub(crate) fn text(&self) -> String {
+        match self {
+            Self::OpenProjectToStart => tr!("preview.message.open_project_to_start"),
+            Self::OpenProjectToRestart => tr!("preview.message.open_project_to_restart"),
+            Self::AlreadyRunning => tr!("preview.message.already_running"),
+            Self::Starting => tr!("preview.message.starting"),
+            Self::Stopping => tr!("preview.message.stopping"),
+            Self::Restarting => tr!("preview.message.restarting"),
+            Self::Ready { url } => tr!("preview.message.ready", url = url.as_str()),
+            Self::Stopped => tr!("preview.message.stopped"),
+            Self::StoppedUnexpectedly { error } => {
+                tr!(
+                    "preview.message.stopped_unexpectedly",
+                    error = error.as_str()
+                )
+            }
+            Self::StoppedOnItsOwn => tr!("preview.message.stopped_on_its_own"),
+            Self::ObserveFailed { error } => {
+                tr!("preview.message.observe_failed", error = error.as_str())
+            }
+            Self::StartFailed { error } => {
+                tr!("preview.message.start_failed", error = error.as_str())
+            }
+            Self::StartFailedWithOutput { error, output } => tr!(
+                "preview.message.start_failed_with_output",
+                error = error.as_str(),
+                output = output.as_str()
+            ),
+            Self::StopFailed { error } => {
+                tr!("preview.message.stop_failed", error = error.as_str())
+            }
+            Self::UrlUnresolved { error } => {
+                tr!("preview.message.url_unresolved", error = error.as_str())
+            }
+            Self::OpenedInBrowser { url } => {
+                tr!("preview.message.opened_in_browser", url = url.as_str())
+            }
+            Self::PreferredBrowserFailed { error } => tr!(
+                "preview.message.preferred_browser_failed",
+                error = error.as_str()
+            ),
+            Self::OpenedInSystemBrowser { url } => tr!(
+                "preview.message.opened_in_system_browser",
+                url = url.as_str()
+            ),
+            Self::SystemBrowserFailed { error } => tr!(
+                "preview.message.system_browser_failed",
+                error = error.as_str()
+            ),
+            Self::EmbeddedUnavailable { reason } => tr!(
+                "preview.message.embedded_unavailable",
+                reason = reason.as_str()
+            ),
+            Self::OpenDocumentToPreview => tr!("preview.message.open_document_to_preview"),
+            Self::OpenDocumentToCopyUrl => tr!("preview.message.open_document_to_copy_url"),
+            Self::CopiedUrl { url } => tr!("preview.message.copied_url", url = url.as_str()),
+        }
+    }
+}
+
+/// The message for a failed start, keeping any captured Astro output.
+fn start_failure_message(failure: &StartupFailure) -> PreviewMessage {
+    match failure.stderr_excerpt() {
+        Some(output) => PreviewMessage::StartFailedWithOutput {
+            error: failure.message().to_owned(),
+            output: output.to_owned(),
+        },
+        None => PreviewMessage::StartFailed {
+            error: failure.message().to_owned(),
+        },
+    }
+}
+
+/// Translate a host reason for unavailable embedded preview.
+pub(crate) fn embedded_unavailable_text(reason: EmbeddedUnavailable) -> String {
+    match reason {
+        EmbeddedUnavailable::NotCompiled => tr!("preview.embedded.capability.not_compiled"),
+        EmbeddedUnavailable::Wayland => tr!("preview.embedded.capability.wayland"),
+        EmbeddedUnavailable::Headless => tr!("preview.embedded.capability.headless"),
+        EmbeddedUnavailable::UnsupportedPlatform => {
+            tr!("preview.embedded.capability.unsupported_platform")
         }
     }
 }
@@ -233,8 +352,8 @@ impl PreviewPanel {
 
     /// Last user-facing message (errors, opened URL, start hint).
     #[cfg(test)]
-    pub(crate) fn message(&self) -> Option<&str> {
-        self.message.as_deref()
+    pub(crate) fn message(&self) -> Option<String> {
+        self.message.as_ref().map(PreviewMessage::text)
     }
 
     /// URL waiting for the system-browser fallback, in tests.
@@ -341,7 +460,7 @@ impl PreviewPanel {
             // Keep an Open-on-Enter launch armed: the explicit visit may have
             // begun before the project finished attaching.
             if self.pending_open {
-                self.message = Some("Open an Astro project to start a preview.".to_owned());
+                self.message = Some(PreviewMessage::OpenProjectToStart);
                 cx.notify();
             }
             return;
@@ -539,10 +658,12 @@ impl PreviewPanel {
                                     return false;
                                 }
                                 this.message = Some(match &status {
-                                    ServerStatus::Failed(error) => format!(
-                                        "The preview server stopped unexpectedly: {error}"
-                                    ),
-                                    _ => "The preview server stopped.".to_owned(),
+                                    ServerStatus::Failed(error) => {
+                                        PreviewMessage::StoppedUnexpectedly {
+                                            error: error.clone(),
+                                        }
+                                    }
+                                    _ => PreviewMessage::StoppedOnItsOwn,
                                 });
                                 cx.emit(PreviewStateChanged);
                                 cx.notify();
@@ -552,7 +673,7 @@ impl PreviewPanel {
                             Ok(Err(error)) => {
                                 tracing::warn!(%error, "could not observe the Astro preview server");
                                 this.message =
-                                    Some(format!("Could not observe the preview server: {error}"));
+                                    Some(PreviewMessage::ObserveFailed { error });
                                 cx.notify();
                                 false
                             }
@@ -573,7 +694,7 @@ impl PreviewPanel {
     /// Start the dev server (no-op while a start/stop task is in flight).
     pub(crate) fn start(&mut self, cx: &mut Context<Self>) {
         let Some(backend) = self.backend.clone() else {
-            self.message = Some("Open an Astro project to start a preview.".to_owned());
+            self.message = Some(PreviewMessage::OpenProjectToStart);
             cx.notify();
             return;
         };
@@ -581,13 +702,13 @@ impl PreviewPanel {
             return;
         }
         if self.is_ready() {
-            self.message = Some("The preview server is already running.".to_owned());
+            self.message = Some(PreviewMessage::AlreadyRunning);
             cx.notify();
             return;
         }
         self.exit_task = None;
         let generation = self.lifecycle.begin_start();
-        self.message = Some("Starting the Astro dev server…".to_owned());
+        self.message = Some(PreviewMessage::Starting);
         let started = runtime::spawn(cx, backend.start());
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = started.await;
@@ -599,7 +720,9 @@ impl PreviewPanel {
                 match result {
                     Ok(Ok(url)) => {
                         tracing::info!(url = %url, "Astro preview ready");
-                        this.message = Some(format!("Preview ready at {url}"));
+                        this.message = Some(PreviewMessage::Ready {
+                            url: url.to_string(),
+                        });
                         this.lifecycle.ready(generation, url);
                         this.maybe_open_pending(cx);
                         this.watch_exit(backend.clone(), cx);
@@ -607,8 +730,7 @@ impl PreviewPanel {
                     Ok(Err(failure)) => {
                         tracing::error!(%failure, "could not start the Astro preview");
                         this.pending_open = false;
-                        this.message =
-                            Some(format!("Could not start the preview: {}", failure.report()));
+                        this.message = Some(start_failure_message(&failure));
                         this.lifecycle
                             .failed(generation, failure.message().to_owned());
                     }
@@ -616,8 +738,7 @@ impl PreviewPanel {
                         tracing::error!(%error, "could not start the Astro preview");
                         this.pending_open = false;
                         let failure = StartupFailure::new(error, None);
-                        this.message =
-                            Some(format!("Could not start the preview: {}", failure.report()));
+                        this.message = Some(start_failure_message(&failure));
                         this.lifecycle
                             .failed(generation, failure.message().to_owned());
                     }
@@ -641,7 +762,7 @@ impl PreviewPanel {
         }
         self.exit_task = None;
         let generation = self.lifecycle.begin_stop();
-        self.message = Some("Stopping the Astro dev server…".to_owned());
+        self.message = Some(PreviewMessage::Stopping);
         let stopped = runtime::spawn(cx, backend.stop());
         self.task = Some(cx.spawn(async move |this, cx| {
             let result = stopped.await;
@@ -654,12 +775,12 @@ impl PreviewPanel {
                     Ok(Ok(())) => {
                         tracing::info!("Astro preview stopped");
                         this.lifecycle.stopped(generation);
-                        this.message = Some("Preview stopped.".to_owned());
+                        this.message = Some(PreviewMessage::Stopped);
                     }
                     Ok(Err(error)) | Err(error) => {
                         tracing::error!(%error, "could not stop the Astro preview");
                         this.lifecycle.failed(generation, error.clone());
-                        this.message = Some(format!("Could not stop the preview: {error}"));
+                        this.message = Some(PreviewMessage::StopFailed { error });
                     }
                 }
                 this.task = None;
@@ -674,7 +795,7 @@ impl PreviewPanel {
     /// Stop and start the server so configuration or dependency changes apply.
     pub(crate) fn restart(&mut self, cx: &mut Context<Self>) {
         let Some(backend) = self.backend.clone() else {
-            self.message = Some("Open an Astro project to restart a preview.".to_owned());
+            self.message = Some(PreviewMessage::OpenProjectToRestart);
             cx.notify();
             return;
         };
@@ -683,7 +804,7 @@ impl PreviewPanel {
         }
         self.exit_task = None;
         let generation = self.lifecycle.begin_restart();
-        self.message = Some("Restarting the Astro dev server…".to_owned());
+        self.message = Some(PreviewMessage::Restarting);
         let restarting = backend.clone();
         let restarted = runtime::spawn(cx, async move {
             restarting
@@ -702,15 +823,16 @@ impl PreviewPanel {
                 match result {
                     Ok(Ok(url)) => {
                         tracing::info!(url = %url, "Astro preview restarted");
-                        this.message = Some(format!("Preview ready at {url}"));
+                        this.message = Some(PreviewMessage::Ready {
+                            url: url.to_string(),
+                        });
                         this.lifecycle.ready(generation, url);
                         this.maybe_open_pending(cx);
                         this.watch_exit(backend.clone(), cx);
                     }
                     Ok(Err(failure)) => {
                         tracing::error!(%failure, "could not restart the Astro preview");
-                        this.message =
-                            Some(format!("Could not start the preview: {}", failure.report()));
+                        this.message = Some(start_failure_message(&failure));
                         this.lifecycle
                             .failed(generation, failure.message().to_owned());
                     }
@@ -718,8 +840,7 @@ impl PreviewPanel {
                         tracing::error!(%error, "could not restart the Astro preview");
                         this.pending_open = false;
                         let failure = StartupFailure::new(error, None);
-                        this.message =
-                            Some(format!("Could not start the preview: {}", failure.report()));
+                        this.message = Some(start_failure_message(&failure));
                         this.lifecycle
                             .failed(generation, failure.message().to_owned());
                     }
@@ -745,7 +866,9 @@ impl PreviewPanel {
                 tracing::warn!(%error, "could not open a preview route");
                 self.pending_open = false;
                 self.fallback_url = None;
-                self.message = Some(error.to_string());
+                self.message = Some(PreviewMessage::UrlUnresolved {
+                    error: error.to_string(),
+                });
                 cx.notify();
                 return;
             }
@@ -758,14 +881,16 @@ impl PreviewPanel {
             Ok(()) => {
                 tracing::info!(url = %url, entry = %entry.id(), "opened a preview in the browser");
                 self.fallback_url = None;
-                self.message = Some(format!("Opened {url} in the browser."));
+                self.message = Some(PreviewMessage::OpenedInBrowser {
+                    url: url.to_string(),
+                });
             }
             Err(error) => {
                 tracing::warn!(%error, url = %url, "could not launch the preview browser");
                 self.fallback_url = Some(url);
-                self.message = Some(format!(
-                    "Could not open the preferred browser: {error}. The system default browser is available."
-                ));
+                self.message = Some(PreviewMessage::PreferredBrowserFailed {
+                    error: error.to_string(),
+                });
             }
         }
         cx.notify();
@@ -780,10 +905,14 @@ impl PreviewPanel {
             Ok(()) => {
                 tracing::info!(url = %url, "opened the preview in the system browser");
                 self.fallback_url = None;
-                self.message = Some(format!("Opened {url} in the system browser."));
+                self.message = Some(PreviewMessage::OpenedInSystemBrowser {
+                    url: url.to_string(),
+                });
             }
             Err(error) => {
-                self.message = Some(format!("Could not open the system browser: {error}"));
+                self.message = Some(PreviewMessage::SystemBrowserFailed {
+                    error: error.to_string(),
+                });
             }
         }
         cx.notify();
@@ -791,9 +920,9 @@ impl PreviewPanel {
 
     /// Report a host or adapter reason for unavailable embedded preview.
     pub(crate) fn note_embedded_unavailable(&mut self, reason: &str, cx: &mut Context<Self>) {
-        self.message = Some(format!(
-            "Embedded preview unavailable: {reason}. External preview remains available."
-        ));
+        self.message = Some(PreviewMessage::EmbeddedUnavailable {
+            reason: reason.to_owned(),
+        });
         self.fallback_url = self.lifecycle.status().url().cloned();
         cx.notify();
     }
@@ -805,7 +934,7 @@ impl PreviewPanel {
         match self.pending_entry.clone() {
             Some(entry) => self.open_entry(&entry, cx),
             None => {
-                self.message = Some("Open a document to preview its entry.".to_owned());
+                self.message = Some(PreviewMessage::OpenDocumentToPreview);
                 cx.notify();
             }
         }
@@ -814,7 +943,7 @@ impl PreviewPanel {
     /// Copy the active entry's preview URL, once the server is ready.
     pub(crate) fn copy_url(&mut self, cx: &mut Context<Self>) {
         let Some(entry) = self.pending_entry.clone() else {
-            self.message = Some("Open a document to copy its preview URL.".to_owned());
+            self.message = Some(PreviewMessage::OpenDocumentToCopyUrl);
             cx.notify();
             return;
         };
@@ -823,11 +952,15 @@ impl PreviewPanel {
             Ok(url) => {
                 cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(url.to_string()));
                 tracing::info!(url = %url, entry = %entry.id(), "copied the preview URL");
-                self.message = Some(format!("Copied preview URL: {url}"));
+                self.message = Some(PreviewMessage::CopiedUrl {
+                    url: url.to_string(),
+                });
             }
             Err(error) => {
                 tracing::warn!(%error, "could not resolve the preview URL");
-                self.message = Some(error.to_string());
+                self.message = Some(PreviewMessage::UrlUnresolved {
+                    error: error.to_string(),
+                });
             }
         }
         cx.notify();
@@ -835,8 +968,8 @@ impl PreviewPanel {
 
     fn status_line(&self) -> String {
         match self.lifecycle.status().url() {
-            Some(url) => format!("Preview at {url}"),
-            None => format!("Preview {}", self.phase().label()),
+            Some(url) => tr!("preview.status.at", url = url.as_str()),
+            None => tr!("preview.status.phase", phase = self.phase().text()),
         }
     }
 }
@@ -845,7 +978,7 @@ impl Render for PreviewPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let owner = cx.weak_entity();
         let status_line = self.status_line();
-        let message = self.message.clone();
+        let message = self.message.as_ref().map(PreviewMessage::text);
         let start_owner = owner.clone();
         let stop_owner = owner.clone();
         let restart_owner = owner.clone();
@@ -890,7 +1023,7 @@ impl Render for PreviewPanel {
                             .font_family(crate::theme::display_font(cx))
                             .text_base()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child("Preview"),
+                            .child(tr!("preview.title")),
                     )
                     .child(div().flex_1())
                     .child(
@@ -915,7 +1048,11 @@ impl Render for PreviewPanel {
                             .child(
                                 Button::new("preview-start")
                                     .small()
-                                    .label(if failed { "Retry" } else { "Start server" })
+                                    .label(if failed {
+                                        tr!("preview.actions.retry")
+                                    } else {
+                                        tr!("preview.actions.start")
+                                    })
                                     .disabled(running || busy)
                                     .on_click(move |_, _, cx| {
                                         let _ = start_owner.update(cx, |this, cx| this.start(cx));
@@ -925,7 +1062,7 @@ impl Render for PreviewPanel {
                                 Button::new("preview-stop")
                                     .small()
                                     .ghost()
-                                    .label("Stop")
+                                    .label(tr!("preview.actions.stop"))
                                     .disabled(!running || busy)
                                     .on_click(move |_, _, cx| {
                                         let _ = stop_owner.update(cx, |this, cx| this.stop(cx));
@@ -935,7 +1072,7 @@ impl Render for PreviewPanel {
                                 Button::new("preview-restart")
                                     .small()
                                     .ghost()
-                                    .label("Restart")
+                                    .label(tr!("preview.actions.restart"))
                                     .disabled(!attached || busy)
                                     .on_click(move |_, _, cx| {
                                         let _ =
@@ -946,7 +1083,7 @@ impl Render for PreviewPanel {
                                 Button::new("preview-open")
                                     .small()
                                     .outline()
-                                    .label("Open in browser")
+                                    .label(tr!("preview.actions.open"))
                                     .disabled(!ready)
                                     .on_click(move |_, _, cx| {
                                         let _ =
@@ -957,7 +1094,7 @@ impl Render for PreviewPanel {
                                 Button::new("preview-copy-url")
                                     .small()
                                     .ghost()
-                                    .label("Copy URL")
+                                    .label(tr!("preview.actions.copy_url"))
                                     .disabled(!ready)
                                     .on_click(move |_, _, cx| {
                                         let _ = copy_owner.update(cx, |this, cx| this.copy_url(cx));
@@ -968,7 +1105,7 @@ impl Render for PreviewPanel {
                                     Button::new("preview-open-system")
                                         .small()
                                         .outline()
-                                        .label("Open with system browser")
+                                        .label(tr!("preview.actions.open_system"))
                                         .on_click(move |_, _, cx| {
                                             let _ = fallback_owner
                                                 .update(cx, |this, cx| this.open_fallback(cx));
@@ -989,7 +1126,7 @@ impl Render for PreviewPanel {
                             div()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(SharedString::from(format!("Serving {url}"))),
+                                .child(tr!("preview.status.serving", url = url.as_str())),
                         )
                     }),
             )

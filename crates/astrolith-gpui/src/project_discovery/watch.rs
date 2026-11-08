@@ -493,7 +493,7 @@ impl ProjectWorkspace {
                         // A watcher batch reconciles the same state an operation
                         // does: no stale tab or selection survives.
                         self.apply_discovered_index(manifest, entries, cx);
-                        self.status = "Index refreshed; open buffers retained. Close and reopen an unchanged document to reload it.".into();
+                        self.status = tr!("browser.status.index_refreshed");
                     }
                     Err(error) => {
                         tracing::warn!(%error, "project reindex failed; buffers retained");
@@ -644,7 +644,10 @@ impl ProjectWorkspace {
         self.rebuild_references();
         self.load_components(cx);
         if !diagnostics.is_empty() {
-            self.status = format!("Project diagnostics: {}", diagnostics.join("; "));
+            self.status = tr!(
+                "browser.status.project_diagnostics",
+                diagnostics = diagnostics.join("; ")
+            );
         }
     }
 
@@ -652,7 +655,7 @@ impl ProjectWorkspace {
     pub(super) fn apply_index_failure(&mut self, error: String, cx: &mut Context<Self>) {
         self.index_error = Some(error);
         self.publish_entries(Vec::new(), cx);
-        self.status = "Project index unavailable. Open buffers retained.".into();
+        self.status = tr!("browser.status.index_unavailable_buffers");
     }
 
     /// Start one index request with the currently applied overrides.
@@ -722,7 +725,7 @@ impl ProjectWorkspace {
             Err(error) => {
                 tracing::warn!(%error, "post-operation rescan failed; buffers retained");
                 self.index_error = Some(error);
-                self.status = "Project index unavailable. Open buffers retained.".into();
+                self.status = tr!("browser.status.index_unavailable_buffers");
             }
         }
         self.finish_index_request(token);

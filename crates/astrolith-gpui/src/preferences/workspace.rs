@@ -2,31 +2,44 @@
 
 use super::*;
 
+/// Localized label for a workspace mode; the core label stays English.
+fn mode_label(mode: WorkspaceMode) -> String {
+    match mode {
+        WorkspaceMode::Writing => tr!("preferences.workspace.mode_writing"),
+        WorkspaceMode::Build => tr!("preferences.workspace.mode_build"),
+        WorkspaceMode::Preview => tr!("preferences.workspace.mode_preview"),
+    }
+}
+
 impl PreferencesSheet {
     pub(super) fn workspace_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.weak_entity();
         let extension_label = match self.global_extension {
-            FileExtension::Md => "Markdown (.md)",
-            FileExtension::Mdx => "MDX (.mdx)",
+            FileExtension::Md => tr!("preferences.option.markdown"),
+            FileExtension::Mdx => tr!("preferences.option.mdx"),
         };
-        let autosave_label = format!("{} seconds", self.autosave.seconds());
+        let autosave_label = tr!(
+            "preferences.workspace.seconds",
+            seconds = self.autosave.seconds()
+        );
 
         let mode_weak = weak.clone();
-        let mode_label = self.default_mode.label();
         let default_mode = Button::new("preferences-default-mode")
             .outline()
-            .label(mode_label)
+            .label(mode_label(self.default_mode))
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu;
                 for mode in WorkspaceMode::ALL {
                     let weak = mode_weak.clone();
-                    menu = menu.item(PopupMenuItem::new(mode.label()).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
-                            sheet.default_mode = mode;
-                            cx.notify();
-                        });
-                    }));
+                    menu = menu.item(PopupMenuItem::new(mode_label(mode)).on_click(
+                        move |_, _, cx| {
+                            let _ = weak.update(cx, |sheet, cx| {
+                                sheet.default_mode = mode;
+                                cx.notify();
+                            });
+                        },
+                    ));
                 }
                 menu
             })
@@ -40,8 +53,8 @@ impl PreferencesSheet {
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu;
                 for (label, extension) in [
-                    ("Markdown (.md)", FileExtension::Md),
-                    ("MDX (.mdx)", FileExtension::Mdx),
+                    (tr!("preferences.option.markdown"), FileExtension::Md),
+                    (tr!("preferences.option.mdx"), FileExtension::Mdx),
                 ] {
                     let weak = extension_weak.clone();
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
@@ -67,14 +80,15 @@ impl PreferencesSheet {
                         continue;
                     };
                     let weak = autosave_weak.clone();
-                    menu = menu.item(PopupMenuItem::new(format!("{seconds} seconds")).on_click(
-                        move |_, _, cx| {
-                            let _ = weak.update(cx, |sheet, cx| {
-                                sheet.autosave = delay;
-                                cx.notify();
-                            });
-                        },
-                    ));
+                    menu = menu.item(
+                        PopupMenuItem::new(tr!("preferences.workspace.seconds", seconds = seconds))
+                            .on_click(move |_, _, cx| {
+                                let _ = weak.update(cx, |sheet, cx| {
+                                    sheet.autosave = delay;
+                                    cx.notify();
+                                });
+                            }),
+                    );
                 }
                 menu
             })
@@ -82,13 +96,11 @@ impl PreferencesSheet {
 
         let startup = vec![self.field(
             "preferences-field-default-mode",
-            "Default mode",
+            tr!("preferences.workspace.default_mode"),
             default_mode,
             FieldExtras {
                 field: None,
-                hint: Some(
-                    "Used at launch when the open project has not recorded its own last mode.",
-                ),
+                hint: Some(tr!("preferences.workspace.default_mode_hint").into()),
                 trailing: None,
             },
             cx,
@@ -106,17 +118,17 @@ impl PreferencesSheet {
                         WorkspaceMode::Preview => "preferences-field-layout-preview",
                     },
                     match mode {
-                        WorkspaceMode::Writing => "Writing layout",
-                        WorkspaceMode::Build => "Build layout",
-                        WorkspaceMode::Preview => "Preview layout",
+                        WorkspaceMode::Writing => tr!("preferences.workspace.layout_writing"),
+                        WorkspaceMode::Build => tr!("preferences.workspace.layout_build"),
+                        WorkspaceMode::Preview => tr!("preferences.workspace.layout_preview"),
                     },
                     div().into_any_element(),
                     FieldExtras {
                         field: None,
                         hint: Some(if pending {
-                            "Reset to the design default on Apply; Cancel keeps the current layout."
+                            tr!("preferences.workspace.layout_pending_hint").into()
                         } else {
-                            layout_hint(layout)
+                            layout_hint(layout).into()
                         }),
                         trailing: Some(self.reset_layout_button(mode, pending, cx)),
                     },
@@ -131,29 +143,31 @@ impl PreferencesSheet {
                 layouts.push(
                     self.field(
                         "preferences-field-project-layout-overrides",
-                        "Project layout overrides",
+                        tr!("preferences.workspace.project_overrides"),
                         div().into_any_element(),
                         FieldExtras {
                             field: None,
                             hint: Some(if pending {
-                                "The project falls back to the global layouts on Apply."
+                                tr!("preferences.workspace.project_overrides_pending").into()
                             } else if overridden {
-                                "This project records its own dock sizes and visibility."
+                                tr!("preferences.workspace.project_overrides_set").into()
                             } else {
-                                "This project inherits every global layout."
+                                tr!("preferences.workspace.project_overrides_none").into()
                             }),
                             trailing: Some(
                                 Button::new("preferences-reset-project-layouts")
                                     .xsmall()
                                     .ghost()
                                     .label(if pending {
-                                        "Reset pending"
+                                        tr!("preferences.workspace.reset_pending")
                                     } else {
-                                        "Reset overrides"
+                                        tr!("preferences.workspace.reset_overrides")
                                     })
                                     .selected(pending)
                                     .disabled(!overridden && !pending)
-                                    .accessibility_label("Reset the project's layout overrides")
+                                    .accessibility_label(tr!(
+                                        "preferences.workspace.reset_project_overrides_accessibility"
+                                    ))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.layout_resets.project = !this.layout_resets.project;
                                         cx.notify();
@@ -170,22 +184,22 @@ impl PreferencesSheet {
         let writing = vec![
             self.field(
                 "preferences-field-autosave",
-                "Idle autosave",
+                tr!("preferences.workspace.autosave"),
                 autosave,
                 FieldExtras {
                     field: None,
-                    hint: Some("Dirty documents save after this much idle time."),
+                    hint: Some(tr!("preferences.workspace.autosave_hint").into()),
                     trailing: None,
                 },
                 cx,
             ),
             self.field(
                 "preferences-field-default-extension",
-                "New files",
+                tr!("preferences.workspace.new_files"),
                 extension,
                 FieldExtras {
                     field: None,
-                    hint: Some("Extension used for new entries unless a project or collection overrides it."),
+                    hint: Some(tr!("preferences.workspace.new_files_hint").into()),
                     trailing: None,
                 },
                 cx,
@@ -194,22 +208,22 @@ impl PreferencesSheet {
         let external = vec![
             self.field(
                 "preferences-field-ide-executable",
-                "IDE command",
+                tr!("preferences.workspace.ide_command"),
                 self.control(FieldId::IdeExecutable),
                 FieldExtras {
                     field: Some(FieldId::IdeExecutable),
-                    hint: Some("Launched directly as argv; no shell interprets it."),
+                    hint: Some(tr!("preferences.workspace.ide_command_hint").into()),
                     trailing: None,
                 },
                 cx,
             ),
             self.field(
                 "preferences-field-ide-arguments",
-                "IDE arguments",
+                tr!("preferences.workspace.ide_arguments"),
                 self.control(FieldId::IdeArguments),
                 FieldExtras {
                     field: Some(FieldId::IdeArguments),
-                    hint: Some("One argument per line. {project}, {file}, {line} and {column} are substituted."),
+                    hint: Some(tr!("preferences.workspace.ide_arguments_hint").into()),
                     trailing: None,
                 },
                 cx,
@@ -220,26 +234,26 @@ impl PreferencesSheet {
             .w_full()
             .gap_4()
             .child(self.section(
-                "Startup",
-                Some("Which workspace mode opens when there is no recorded project mode."),
+                tr!("preferences.workspace.startup"),
+                Some(tr!("preferences.workspace.startup_hint").into()),
                 startup,
                 cx,
             ))
             .child(self.section(
-                "Layouts",
-                Some("Drag a dock to size it; Reset restores the design default for that mode."),
+                tr!("preferences.workspace.layouts"),
+                Some(tr!("preferences.workspace.layouts_hint").into()),
                 layouts,
                 cx,
             ))
             .child(self.section(
-                "Documents",
-                Some("Saving behavior and defaults for new files."),
+                tr!("preferences.workspace.documents"),
+                Some(tr!("preferences.workspace.documents_hint").into()),
                 writing,
                 cx,
             ))
             .child(self.section(
-                "External editor",
-                Some("How Astrolith opens files in another program."),
+                tr!("preferences.workspace.external_editor"),
+                Some(tr!("preferences.workspace.external_editor_hint").into()),
                 external,
                 cx,
             ))
@@ -260,9 +274,16 @@ impl PreferencesSheet {
         Button::new(id)
             .xsmall()
             .ghost()
-            .label(if pending { "Reset pending" } else { "Reset" })
+            .label(if pending {
+                tr!("preferences.workspace.reset_pending")
+            } else {
+                tr!("preferences.sheet.reset")
+            })
             .selected(pending)
-            .accessibility_label(format!("Reset the {} layout", mode.label()))
+            .accessibility_label(tr!(
+                "preferences.workspace.reset_layout_accessibility",
+                layout = mode_label(mode)
+            ))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if pending {
                     this.layout_resets.global.remove(&mode);
@@ -275,11 +296,11 @@ impl PreferencesSheet {
     }
 }
 
-fn layout_hint(layout: &astrolith_core::preferences::PanelLayout) -> &'static str {
+fn layout_hint(layout: &astrolith_core::preferences::PanelLayout) -> String {
     match (layout.sidebar_visible, layout.preview_visible) {
-        (true, true) => "Library and bottom tool open.",
-        (true, false) => "Library open, bottom tool closed.",
-        (false, true) => "Library closed, bottom tool open.",
-        (false, false) => "Library and bottom tool closed.",
+        (true, true) => tr!("preferences.workspace.layout_both_open"),
+        (true, false) => tr!("preferences.workspace.layout_library_open"),
+        (false, true) => tr!("preferences.workspace.layout_tool_open"),
+        (false, false) => tr!("preferences.workspace.layout_both_closed"),
     }
 }

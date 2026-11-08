@@ -133,7 +133,8 @@ and destinations escape brackets, parentheses and backslashes.
 Open **Preferences…** with `Ctrl+,` or **View → Preferences…**. The sheet has
 six panes:
 
-- **Appearance** — follow system, light or dark with one neutral palette,
+- **Appearance** — interface language (English, Simplified Chinese or
+  Japanese), follow system, light or dark with one neutral palette,
   interface font family and size (8–28, default 18), heading colours,
   document font family, document font size (1–30, default 16), line height
   (1.2–3.0 × the font size, default 2.0) and page width (30–100% of the editor

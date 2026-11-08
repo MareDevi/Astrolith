@@ -63,30 +63,42 @@ pub(crate) fn drop_failure_status(failures: &[String]) -> Option<String> {
     if failures.is_empty() {
         return None;
     }
-    let subject = if failures.len() == 1 {
-        "1 asset was".to_owned()
+    let names = failures.join("; ");
+    Some(if failures.len() == 1 {
+        tr!("editor.drop.failure_one", names = names)
     } else {
-        format!("{} assets were", failures.len())
-    };
-    Some(format!("{subject} not copied: {}", failures.join("; ")))
+        tr!(
+            "editor.drop.failure_many",
+            count = failures.len(),
+            names = names
+        )
+    })
 }
 
 /// Status text for a fully copied drop, naming the copied files.
 pub(crate) fn drop_success_status(assets: &[CopiedAsset]) -> String {
     let images = assets.iter().filter(|asset| asset.is_image()).count();
-    let label = match (assets.len(), images) {
-        (1, 0) => "1 file".to_owned(),
-        (1, _) => "1 image".to_owned(),
-        (count, 0) => format!("{count} files"),
-        (count, 1) => format!("{count} assets (1 image)"),
-        (count, images) => format!("{count} assets ({images} images)"),
-    };
     let names = assets
         .iter()
         .map(|asset| asset.source())
         .collect::<Vec<_>>()
         .join(", ");
-    format!("Copied {label}: {names}")
+    match (assets.len(), images) {
+        (1, 0) => tr!("editor.drop.success_one_file", names = names),
+        (1, _) => tr!("editor.drop.success_one_image", names = names),
+        (count, 0) => tr!("editor.drop.success_files", count = count, names = names),
+        (count, 1) => tr!(
+            "editor.drop.success_one_image_of",
+            count = count,
+            names = names
+        ),
+        (count, images) => tr!(
+            "editor.drop.success_with_images",
+            count = count,
+            images = images,
+            names = names
+        ),
+    }
 }
 
 #[cfg(test)]

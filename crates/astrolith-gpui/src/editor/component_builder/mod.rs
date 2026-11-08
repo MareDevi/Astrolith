@@ -223,7 +223,7 @@ impl ComponentBuilder {
     }
 
     /// The auto-import reminder, when the project declares the package.
-    pub(crate) fn auto_import_warning(&self) -> Option<&'static str> {
+    pub(crate) fn auto_import_warning(&self) -> Option<SharedString> {
         auto_import_warning(self.context.as_ref())
     }
 
@@ -324,7 +324,7 @@ impl ComponentBuilder {
             let input = cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .default_value(content)
-                    .placeholder("Child content")
+                    .placeholder(tr!("editor.builder.child_content_placeholder"))
             });
             self._subscriptions.push(cx.subscribe(
                 &input,
@@ -375,9 +375,7 @@ impl ComponentBuilder {
     /// Validate the form and ask the shell to insert it.
     fn confirm(&mut self, cx: &mut Context<Self>) {
         let (Some(context), Some(form)) = (self.context.as_ref(), self.form.as_ref()) else {
-            self.error = Some(SharedString::from(
-                "Choose a component before inserting it.",
-            ));
+            self.error = Some(tr!("editor.builder.choose_component_first").into());
             return;
         };
         let imports = self.add_import && context.imports_enabled;
@@ -471,7 +469,7 @@ impl ComponentBuilder {
             let input = cx.new(|cx| {
                 InputState::new(window, cx)
                     .default_value(form.directive_value().to_owned())
-                    .placeholder("Directive value")
+                    .placeholder(tr!("editor.builder.directive_value_placeholder"))
             });
             self._subscriptions.push(cx.subscribe(
                 &input,
@@ -499,9 +497,7 @@ impl ComponentBuilder {
             .as_ref()
             .and_then(|context| context.images.clone())
         else {
-            self.error = Some(SharedString::from(
-                "This document has no project context for image picks.",
-            ));
+            self.error = Some(tr!("editor.builder.no_image_context").into());
             cx.notify();
             return;
         };
@@ -509,7 +505,7 @@ impl ComponentBuilder {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Choose an image".into()),
+            prompt: Some(tr!("editor.builder.choose_image_prompt").into()),
         });
         let weak = cx.weak_entity();
         cx.spawn_in(window, async move |_, cx| {
@@ -556,7 +552,7 @@ impl ComponentBuilder {
                 .preview(self.imports_for_insertion())
                 .map(|snippet| snippet.text)
                 .map_err(|error| error.to_string()),
-            None => Err("Choose a component before previewing a tag.".to_owned()),
+            None => Err(tr!("editor.builder.no_preview_component")),
         }
     }
 }
@@ -578,7 +574,7 @@ impl ComponentBuilder {
                 (
                     entry.component.name.clone(),
                     package,
-                    entry.requirement.clone(),
+                    entry.requirement.label().to_string(),
                 )
             })
             .collect()
@@ -598,32 +594,31 @@ impl ComponentBuilder {
     }
 }
 
-fn auto_import_warning(context: Option<&BuilderContext>) -> Option<&'static str> {
+fn auto_import_warning(context: Option<&BuilderContext>) -> Option<SharedString> {
     let context = context?;
-    context.index.auto_import().then_some(
-        "This project declares astro-auto-import. Imports are still added only when you add them here.",
-    )
+    context
+        .index
+        .auto_import()
+        .then(|| tr!("editor.builder.auto_import_warning").into())
 }
 
 /// The one line above the palette that explains an empty or pending index.
 fn palette_notice(context: &BuilderContext) -> Option<SharedString> {
     if context.loading {
-        Some(SharedString::from("Indexing components…"))
+        Some(tr!("editor.builder.indexing").into())
     } else if let Some(error) = &context.error {
-        Some(SharedString::from(format!(
-            "Components unavailable: {error}"
-        )))
+        Some(tr!("editor.builder.unavailable", error = error).into())
     } else {
-        auto_import_warning(Some(context)).map(SharedString::from)
+        auto_import_warning(Some(context))
     }
 }
 
 fn field_placeholder(field: &form::PropField) -> SharedString {
     match &field.control {
-        PropControl::Number => "Number".into(),
-        PropControl::List => "Comma-separated values".into(),
-        PropControl::Image => "Project image path".into(),
-        PropControl::Entry { .. } => "Entry id".into(),
+        PropControl::Number => tr!("editor.builder.field_number_placeholder").into(),
+        PropControl::List => tr!("editor.builder.field_list_placeholder").into(),
+        PropControl::Image => tr!("editor.builder.field_image_placeholder").into(),
+        PropControl::Entry { .. } => tr!("editor.builder.field_entry_placeholder").into(),
         PropControl::Date => "YYYY-MM-DD".into(),
         _ => field.prop.name.clone().into(),
     }
@@ -702,10 +697,10 @@ impl ComponentBuilder {
             .filter_map(|(position, header)| {
                 let entry = self.palette.get(*position)?;
                 Some(PaletteRow {
-                    header: header.map(str::to_owned),
+                    header,
                     name: entry.component.name.clone(),
                     badge: entry.badge,
-                    requirement: entry.requirement.clone(),
+                    requirement: entry.requirement.label(),
                     description: entry.description().map(str::to_owned),
                     wraps: entry.wraps,
                 })
@@ -722,9 +717,9 @@ impl ComponentBuilder {
                     .text_color(cx.theme().muted_foreground)
                     .child(
                         if self.context.as_ref().is_some_and(|context| context.loading) {
-                            "Indexing components…"
+                            tr!("editor.builder.indexing")
                         } else {
-                            "No components were found in this project."
+                            tr!("editor.builder.no_components")
                         },
                     ),
             );
@@ -732,7 +727,7 @@ impl ComponentBuilder {
         view.child(
             Command::new(&self.search)
                 .bordered(false)
-                .placeholder("Search components by name…")
+                .placeholder(tr!("editor.builder.search_placeholder"))
                 .filterable(false)
                 .on_query(move |query, _, cx| {
                     let query = query.to_owned();
@@ -770,7 +765,7 @@ impl ComponentBuilder {
                                                 div()
                                                     .text_xs()
                                                     .text_color(cx.theme().muted_foreground)
-                                                    .child("wraps content"),
+                                                    .child(tr!("editor.builder.wraps_content")),
                                             )
                                         }),
                                 )
@@ -795,7 +790,7 @@ impl ComponentBuilder {
                         .p_4()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("No matching components")
+                        .child(tr!("editor.builder.no_matches"))
                 })
                 .on_confirm(move |index: IndexPath, window, cx| {
                     let position = index.row;
@@ -830,7 +825,7 @@ impl ComponentBuilder {
                         Button::new("component-builder-back")
                             .ghost()
                             .xsmall()
-                            .label("Back")
+                            .label(tr!("editor.builder.back"))
                             .on_click(move |_, window, cx| {
                                 let _ = back.update(cx, |builder, cx| builder.back(window, cx));
                             })
@@ -844,7 +839,7 @@ impl ComponentBuilder {
                             div()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("wraps content"),
+                                .child(tr!("editor.builder.wraps_content")),
                         )
                     }),
             )
@@ -893,7 +888,7 @@ impl ComponentBuilder {
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!("default: {default}")),
+                        .child(tr!("editor.builder.default_value", value = default)),
                 );
             }
             if !required {
@@ -902,7 +897,7 @@ impl ComponentBuilder {
                 label = label.child(div().flex_1()).child(
                     Checkbox::new(("component-field-include", index))
                         .checked(included)
-                        .label("Add")
+                        .label(tr!("editor.builder.add"))
                         .on_click(move |checked: &bool, window, cx| {
                             let _ = toggle.update(cx, |builder, cx| {
                                 builder.set_field_included(index, *checked, window, cx)
@@ -948,7 +943,7 @@ impl ComponentBuilder {
                 }
                 PropControl::Enum { options } => {
                     let selected = if field.text().is_empty() {
-                        "Choose…".to_owned()
+                        tr!("editor.builder.choose")
                     } else {
                         field.text().to_owned()
                     };
@@ -963,8 +958,8 @@ impl ComponentBuilder {
                             let mut menu = menu;
                             if !required {
                                 let clear = pick.clone();
-                                menu = menu.item(PopupMenuItem::new("Clear").on_click(
-                                    move |_, window, cx| {
+                                let clear_item = PopupMenuItem::new(tr!("editor.builder.clear"))
+                                    .on_click(move |_, window, cx| {
                                         let _ = clear.update(cx, |builder, cx| {
                                             if let Some(form) = &mut builder.form {
                                                 form.set_text(index, "");
@@ -976,8 +971,8 @@ impl ComponentBuilder {
                                             }
                                             cx.notify();
                                         });
-                                    },
-                                ));
+                                    });
+                                menu = menu.item(clear_item);
                             }
                             for option in &options {
                                 let pick = pick.clone();
@@ -996,7 +991,7 @@ impl ComponentBuilder {
                 }
                 PropControl::Entry { collection } => {
                     let label = if field.text().is_empty() {
-                        format!("Choose a {collection} entry…")
+                        tr!("editor.builder.choose_entry", collection = collection)
                     } else {
                         field.text().to_owned()
                     };
@@ -1018,7 +1013,9 @@ impl ComponentBuilder {
                                 .dropdown_menu(move |menu, _, _| {
                                     let mut menu = menu;
                                     if options.is_empty() {
-                                        return menu.item(PopupMenuItem::label("No entries"));
+                                        return menu.item(PopupMenuItem::label(tr!(
+                                            "editor.builder.no_entries"
+                                        )));
                                     }
                                     for (label, value) in &options {
                                         let pick = pick.clone();
@@ -1055,7 +1052,7 @@ impl ComponentBuilder {
                             Button::new(("component-field-image", index))
                                 .xsmall()
                                 .outline()
-                                .label("Choose image…")
+                                .label(tr!("editor.builder.choose_image"))
                                 .on_click(move |_, window, cx| {
                                     let _ = pick.update(cx, |builder, cx| {
                                         builder.pick_image(index, window, cx)
@@ -1080,23 +1077,33 @@ impl ComponentBuilder {
                 div()
                     .v_flex()
                     .gap_1()
-                    .child(div().text_xs().child("client directive"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .child(tr!("editor.builder.client_directive")),
+                    )
                     .child(
                         Button::new("component-field-directive")
                             .xsmall()
                             .outline()
-                            .label(selected.clone().unwrap_or_else(|| "None".into()))
+                            .label(
+                                selected
+                                    .clone()
+                                    .unwrap_or_else(|| tr!("editor.builder.none")),
+                            )
                             .dropdown_caret(true)
                             .dropdown_menu(move |menu, _, _| {
                                 let mut menu = menu;
                                 let clear = pick.clone();
-                                menu = menu.item(PopupMenuItem::new("None").on_click(
-                                    move |_, window, cx| {
-                                        let _ = clear.update(cx, |builder, cx| {
-                                            builder.set_directive(None, window, cx)
-                                        });
-                                    },
-                                ));
+                                menu = menu.item(
+                                    PopupMenuItem::new(tr!("editor.builder.none")).on_click(
+                                        move |_, window, cx| {
+                                            let _ = clear.update(cx, |builder, cx| {
+                                                builder.set_directive(None, window, cx)
+                                            });
+                                        },
+                                    ),
+                                );
                                 for directive in &directives {
                                     let pick = pick.clone();
                                     let name = directive.name.to_owned();
@@ -1125,7 +1132,7 @@ impl ComponentBuilder {
                 div()
                     .v_flex()
                     .gap_1()
-                    .child(div().text_xs().child("child content"))
+                    .child(div().text_xs().child(tr!("editor.builder.child_content")))
                     .child(Textarea::new(&content).small().h(px(96.))),
             );
         }
@@ -1141,9 +1148,9 @@ impl ComponentBuilder {
                         .ghost()
                         .xsmall()
                         .label(if form.all_optional_included() {
-                            "Exclude optional props"
+                            tr!("editor.builder.exclude_optional")
                         } else {
-                            "Include optional props"
+                            tr!("editor.builder.include_optional")
                         })
                         .on_click(move |_, _, cx| {
                             let _ =
@@ -1163,7 +1170,7 @@ impl ComponentBuilder {
                     .child(
                         Checkbox::new("component-field-import")
                             .checked(checked)
-                            .label("Add import for this insertion")
+                            .label(tr!("editor.builder.add_import"))
                             .on_click(move |checked: &bool, _, cx| {
                                 let _ = toggle.update(cx, |builder, cx| {
                                     builder.add_import = *checked;
@@ -1175,14 +1182,14 @@ impl ComponentBuilder {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Off leaves the import untouched."),
+                            .child(tr!("editor.builder.import_untouched")),
                     )
                     .into_any_element()
             } else {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Import insertion is off for this project.")
+                    .child(tr!("editor.builder.import_off"))
                     .into_any_element()
             });
         }
@@ -1200,7 +1207,7 @@ impl ComponentBuilder {
             div()
                 .v_flex()
                 .gap_1()
-                .child(div().text_xs().child("Preview"))
+                .child(div().text_xs().child(tr!("editor.builder.preview")))
                 .child(match preview {
                     Ok(text) => div()
                         .p_2()
@@ -1223,9 +1230,7 @@ impl ComponentBuilder {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(
-                                "Image and entry identifiers are provisional; the import plan settles the final names when you insert.",
-                            ),
+                            .child(tr!("editor.builder.provisional_identifiers")),
                     )
                 }),
         );
@@ -1242,7 +1247,7 @@ impl ComponentBuilder {
                     Button::new("component-field-insert")
                         .primary()
                         .small()
-                        .label("Insert")
+                        .label(tr!("editor.builder.insert"))
                         .disabled(preview_failed)
                         .on_click(move |_, _, cx| {
                             let _ = insert.update(cx, |builder, cx| builder.confirm(cx));
@@ -1256,10 +1261,10 @@ impl ComponentBuilder {
 
 struct PaletteRow {
     /// Group header, shown only on the first row of each group.
-    header: Option<String>,
+    header: Option<SharedString>,
     name: String,
     badge: &'static str,
-    requirement: String,
+    requirement: SharedString,
     description: Option<String>,
     wraps: bool,
 }

@@ -198,8 +198,12 @@ impl SourceSurface {
                 cx.notify();
             }
         });
-        let find_query = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
-        let find_replace = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
+        let find_query = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr!("editor.source.find_placeholder"))
+        });
+        let find_replace = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr!("editor.source.replace_placeholder"))
+        });
         let find_query_events = cx.subscribe(&find_query, |this, _, event: &InputEvent, cx| {
             if !matches!(event, InputEvent::Change) {
                 return;
@@ -1522,7 +1526,7 @@ impl SourceSurface {
         let query = Input::new(&self.find_query)
             .small()
             .w(px(220.))
-            .aria_label("Find in document");
+            .aria_label(tr!("editor.source.find_in_document"));
         let row = div()
             .h_flex()
             .items_center()
@@ -1544,13 +1548,13 @@ impl SourceSurface {
                     Input::new(&self.find_replace)
                         .small()
                         .w(px(220.))
-                        .aria_label("Replace with"),
+                        .aria_label(tr!("editor.source.replace_with")),
                 )
                 .child(
                     Button::new("find-replace")
                         .small()
                         .ghost()
-                        .label("Replace")
+                        .label(tr!("editor.source.replace"))
                         .on_click(move |_, window, cx| {
                             let view = replace_one.clone();
                             view.update(cx, |this, cx| this.replace_matches(false, window, cx));
@@ -1560,7 +1564,7 @@ impl SourceSurface {
                     Button::new("find-replace-all")
                         .small()
                         .ghost()
-                        .label("All")
+                        .label(tr!("editor.source.replace_all"))
                         .on_click(move |_, window, cx| {
                             let view = replace_all.clone();
                             view.update(cx, |this, cx| this.replace_matches(true, window, cx));

@@ -11,7 +11,7 @@ use astrolith_core::preferences::CopyeditPreferences;
 use gpui_kit::component::{ActiveTheme, StyledExt, kbd::Kbd, scroll::ScrollableElement};
 use gpui_kit::{AnyElement, App, IntoElement, SharedString, div, prelude::*, px};
 
-use crate::commands::{COMMANDS, CommandId, command_group};
+use crate::commands::{COMMANDS, CommandId, command_group, command_group_names};
 use crate::settings::{recovery_dir, save_failure_dir, settings_path};
 
 /// The user guide bundled into the application.
@@ -30,11 +30,14 @@ pub(crate) enum HelpSurface {
 
 impl HelpSurface {
     /// Dialog title for this surface.
-    pub(crate) fn title(self) -> &'static str {
+    ///
+    /// The title matches the command that opens the surface, so the menu and
+    /// the dialog never name the same thing differently.
+    pub(crate) fn title(self) -> String {
         match self {
-            Self::UserGuide => "User guide",
-            Self::KeyboardShortcuts => "Keyboard shortcuts",
-            Self::LocalData => "Privacy and local data",
+            Self::UserGuide => tr!("commands.label.user_guide"),
+            Self::KeyboardShortcuts => tr!("commands.label.keyboard_shortcuts"),
+            Self::LocalData => tr!("commands.label.privacy_and_local_data"),
         }
     }
 }
@@ -117,20 +120,11 @@ pub(crate) fn formatted_shortcut(command: CommandId) -> Option<String> {
 }
 
 /// Shortcut rows grouped like the menus, in menu order.
-pub(crate) fn shortcut_groups(
-    copyedit: &CopyeditPreferences,
-) -> Vec<(&'static str, Vec<ShortcutRow>)> {
-    const ORDER: [&str; 7] = [
-        "File",
-        "View",
-        "Format",
-        "Writer",
-        "Preview",
-        "Application",
-        "Help",
-    ];
-    let mut groups: Vec<(&'static str, Vec<ShortcutRow>)> =
-        ORDER.iter().map(|title| (*title, Vec::new())).collect();
+pub(crate) fn shortcut_groups(copyedit: &CopyeditPreferences) -> Vec<(String, Vec<ShortcutRow>)> {
+    let mut groups: Vec<(String, Vec<ShortcutRow>)> = command_group_names()
+        .into_iter()
+        .map(|title| (title, Vec::new()))
+        .collect();
     for command in COMMANDS {
         let Some(keys) = formatted_shortcut(*command) else {
             continue;
@@ -138,7 +132,7 @@ pub(crate) fn shortcut_groups(
         let group = command_group(*command);
         if let Some((_, rows)) = groups.iter_mut().find(|(title, _)| *title == group) {
             rows.push(ShortcutRow {
-                label: command.label_with(copyedit).to_owned(),
+                label: command.label_with(copyedit),
                 keys,
             });
         }
@@ -150,8 +144,8 @@ pub(crate) fn shortcut_groups(
 /// One resolved local directory shown by the privacy surface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalPathRow {
-    /// What is stored there.
-    pub label: &'static str,
+    /// Translation key describing what is stored there.
+    pub label_key: &'static str,
     /// Resolved path, or the reason it is unavailable.
     pub path: String,
 }
@@ -159,7 +153,7 @@ pub(crate) struct LocalPathRow {
 fn display_path(path: Result<std::path::PathBuf, std::io::Error>) -> String {
     match path {
         Ok(path) => path.display().to_string(),
-        Err(error) => format!("Unavailable: {error}"),
+        Err(error) => tr!("commands.help.local_data.unavailable", reason = error),
     }
 }
 
@@ -169,24 +163,24 @@ pub(crate) fn local_paths() -> Vec<LocalPathRow> {
         .ok()
         .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
         .map_or_else(
-            || "Unavailable: no preferences directory".to_owned(),
+            || tr!("commands.help.local_data.no_preferences_dir"),
             |path| path.display().to_string(),
         );
     vec![
         LocalPathRow {
-            label: "Preferences and project registry",
+            label_key: "commands.help.local_data.preferences",
             path: preferences,
         },
         LocalPathRow {
-            label: "Unsaved-edit recovery",
+            label_key: "commands.help.local_data.recovery",
             path: display_path(recovery_dir()),
         },
         LocalPathRow {
-            label: "Save-failure artifacts",
+            label_key: "commands.help.local_data.save_failures",
             path: display_path(save_failure_dir()),
         },
         LocalPathRow {
-            label: "Logs",
+            label_key: "commands.help.local_data.logs",
             path: display_path(astrolith_observability::default_log_dir()),
         },
     ]
@@ -234,7 +228,7 @@ pub(crate) fn guide_body(cx: &App) -> AnyElement {
 }
 
 /// Render the generated shortcut reference.
-pub(crate) fn shortcuts_body(groups: &[(&'static str, Vec<ShortcutRow>)], cx: &App) -> AnyElement {
+pub(crate) fn shortcuts_body(groups: &[(String, Vec<ShortcutRow>)], cx: &App) -> AnyElement {
     div()
         .id("help-keyboard-shortcuts")
         .v_flex()
@@ -249,7 +243,7 @@ pub(crate) fn shortcuts_body(groups: &[(&'static str, Vec<ShortcutRow>)], cx: &A
                     .text_sm()
                     .font_semibold()
                     .pt_2()
-                    .child(SharedString::from(*title))
+                    .child(SharedString::from(title.clone()))
                     .into_any_element(),
             ];
             elements.extend(rows.iter().map(|row| {
@@ -281,13 +275,12 @@ pub(crate) fn local_data_body(rows: &[LocalPathRow], cx: &App) -> AnyElement {
         .gap_2()
         .max_h(px(520.))
         .overflow_y_scrollbar()
-        .child(div().text_xs().w_full().child(
-            "Astrolith has no telemetry and no analytics endpoint. The only \
-                        Astrolith network request is the signed update manifest, and only \
-                        when this build was compiled with a manifest URL and public key. \
-                        These paths hold local data; this dialog lists them without \
-                        opening or reading any file.",
-        ))
+        .child(
+            div()
+                .text_xs()
+                .w_full()
+                .child(tr!("commands.help.local_data.privacy_notice")),
+        )
         .children(rows.iter().map(|row| {
             div()
                 .v_flex()
@@ -297,17 +290,18 @@ pub(crate) fn local_data_body(rows: &[LocalPathRow], cx: &App) -> AnyElement {
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(SharedString::from(row.label)),
+                        .child(SharedString::from(tr!(row.label_key))),
                 )
                 .child(div().text_sm().child(SharedString::from(row.path.clone())))
                 .into_any_element()
         }))
-        .child(div().text_xs().w_full().pt_2().child(
-            "Quit Astrolith before deleting these directories. The user privacy \
-                        page documents what each one contains and how to remove it; \
-                        Preferences → Advanced → Reset All removes only preferences and \
-                        the registry.",
-        ))
+        .child(
+            div()
+                .text_xs()
+                .w_full()
+                .pt_2()
+                .child(tr!("commands.help.local_data.delete_warning")),
+        )
         .into_any_element()
 }
 
@@ -356,7 +350,7 @@ mod tests {
     #[test]
     fn shortcut_groups_follow_the_menu_order_and_skip_unbound_commands() {
         let groups = shortcut_groups(&CopyeditPreferences::default());
-        let titles: Vec<_> = groups.iter().map(|(title, _)| *title).collect();
+        let titles: Vec<_> = groups.iter().map(|(title, _)| title.as_str()).collect();
         assert_eq!(
             titles,
             ["File", "View", "Format", "Writer", "Preview", "Application"]
@@ -394,7 +388,7 @@ mod tests {
                 assert!(
                     row.path.ends_with(&format!("astrolith/{leaf}")),
                     "{} should end with astrolith/{leaf}, got {}",
-                    row.label,
+                    row.label_key,
                     row.path
                 );
             }

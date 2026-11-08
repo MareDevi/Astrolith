@@ -41,17 +41,22 @@ fn project_and_collection_panes_follow_the_open_project() {
     };
     assert_eq!(
         panes(false),
-        ["Appearance", "Workspace", "Preview", "Advanced"]
+        vec![
+            tr!("preferences.pane.appearance.label"),
+            tr!("preferences.pane.workspace.label"),
+            tr!("preferences.pane.preview.label"),
+            tr!("preferences.pane.advanced.label"),
+        ]
     );
     assert_eq!(
         panes(true),
-        [
-            "Appearance",
-            "Workspace",
-            "Preview",
-            "Project Settings",
-            "Collections",
-            "Advanced",
+        vec![
+            tr!("preferences.pane.appearance.label"),
+            tr!("preferences.pane.workspace.label"),
+            tr!("preferences.pane.preview.label"),
+            tr!("preferences.pane.project.label"),
+            tr!("preferences.pane.collections.label"),
+            tr!("preferences.pane.advanced.label"),
         ]
     );
 }
@@ -294,22 +299,22 @@ fn versions_report_the_application_and_every_envelope() {
     assert_eq!(
         lines[1],
         (
-            "Global preferences".into(),
-            format!("version {}", versions.global)
+            tr!("preferences.advanced.global_preferences"),
+            tr!("preferences.advanced.version", version = versions.global)
         )
     );
     assert_eq!(
         lines[2],
         (
-            "Project preferences".into(),
-            format!("version {}", versions.project)
+            tr!("preferences.advanced.project_preferences"),
+            tr!("preferences.advanced.version", version = versions.project)
         )
     );
     assert_eq!(
         lines[3],
         (
-            "Project registry".into(),
-            format!("version {}", versions.registry)
+            tr!("preferences.advanced.project_registry"),
+            tr!("preferences.advanced.version", version = versions.registry)
         )
     );
 }

@@ -1,0 +1,94 @@
+_version: 2
+settings_store:
+  read_failed:
+    en: "Could not read preferences at %{path}: %{error}. The file is preserved; fix it and restart to enable persistence."
+    zh-CN: "无法读取 %{path} 处的偏好设置：%{error}。文件已保留；请修复后重启以启用持久化。"
+    ja: "%{path} の設定を読み込めませんでした: %{error}。ファイルは保持されています。修正して再起動すると保存が有効になります。"
+  unsupported_version:
+    en: "Unsupported preference version in %{path}. The file is preserved and will not be overwritten."
+    zh-CN: "%{path} 中的偏好设置版本不受支持。文件已保留，不会被覆盖。"
+    ja: "%{path} の設定バージョンはサポートされていません。ファイルは保持され、上書きされることはありません。"
+  quarantine_failed:
+    en: "Could not load preferences at %{path}: %{error}. The file is preserved; fix it and restart to enable persistence (%{rename_error})."
+    zh-CN: "无法加载 %{path} 处的偏好设置：%{error}。文件已保留；请修复后重启以启用持久化（%{rename_error}）。"
+    ja: "%{path} の設定を読み込めませんでした: %{error}。ファイルは保持されています。修正して再起動すると保存が有効になります (%{rename_error})。"
+  quarantined:
+    en: "Could not load preferences at %{path}: %{error}. The invalid file was moved to %{destination}; defaults are active."
+    zh-CN: "无法加载 %{path} 处的偏好设置：%{error}。无效文件已移至 %{destination}；当前使用默认设置。"
+    ja: "%{path} の設定を読み込めませんでした: %{error}。無効なファイルは %{destination} に移動されました。現在は既定値が有効です。"
+  read_only:
+    en: "Preferences are read-only after a load error; fix the file and restart."
+    zh-CN: "加载出错后偏好设置为只读；请修复文件并重启。"
+    ja: "読み込みエラー後、設定は読み取り専用です。ファイルを修正して再起動してください。"
+  changed_externally:
+    en: "Preferences changed outside Astrolith; restart before saving settings."
+    zh-CN: "偏好设置在 Astrolith 之外被修改；请重启后再保存设置。"
+    ja: "設定が Astrolith の外部で変更されました。再起動してから設定を保存してください。"
+  value_not_object:
+    en: "Preference value must be an object."
+    zh-CN: "偏好设置的值必须是对象。"
+    ja: "設定値はオブジェクトである必要があります。"
+  revision_exhausted:
+    en: "Preference revision exhausted."
+    zh-CN: "偏好设置修订号已用尽。"
+    ja: "設定のリビジョンが上限に達しました。"
+  registry_unavailable:
+    en: "Project registry unavailable."
+    zh-CN: "项目注册表不可用。"
+    ja: "プロジェクトレジストリを利用できません。"
+  project_store_unavailable:
+    en: "Project preference store unavailable."
+    zh-CN: "项目偏好设置存储不可用。"
+    ja: "プロジェクト設定ストアを利用できません。"
+  choose_project_directory:
+    en: "Choose a project directory."
+    zh-CN: "请选择一个项目目录。"
+    ja: "プロジェクトディレクトリを選択してください。"
+  path_not_utf8:
+    en: "Project path is not valid UTF-8."
+    zh-CN: "项目路径不是有效的 UTF-8。"
+    ja: "プロジェクトのパスが有効な UTF-8 ではありません。"
+  invalid_project_identity:
+    en: "Invalid project identity."
+    zh-CN: "无效的项目标识。"
+    ja: "プロジェクト識別子が無効です。"
+  store_unavailable:
+    en: "Preference store unavailable."
+    zh-CN: "偏好设置存储不可用。"
+    ja: "設定ストアを利用できません。"
+  exceeds_limit:
+    en: "Preferences exceed %{limit} KiB."
+    zh-CN: "偏好设置超过 %{limit} KiB。"
+    ja: "設定が %{limit} KiB を超えています。"
+  missing_parent:
+    en: "Preferences need a parent directory."
+    zh-CN: "偏好设置需要一个父目录。"
+    ja: "設定には親ディレクトリが必要です。"
+  file_missing:
+    en: "preference file is missing"
+    zh-CN: "偏好设置文件不存在"
+    ja: "設定ファイルが見つかりません"
+  not_object:
+    en: "preferences must be a JSON object"
+    zh-CN: "偏好设置必须是 JSON 对象"
+    ja: "設定は JSON オブジェクトである必要があります"
+  invalid_envelope:
+    en: "preference envelope must carry a non-negative integer version"
+    zh-CN: "偏好设置外层必须包含非负整数版本号"
+    ja: "設定エンベロープには非負の整数バージョンが必要です"
+  config_dir_unavailable:
+    en: "Application configuration directory unavailable."
+    zh-CN: "应用程序配置目录不可用。"
+    ja: "アプリケーションの設定ディレクトリを利用できません。"
+  settings_path_absolute:
+    en: "ASTROLITH_SETTINGS_PATH must be absolute."
+    zh-CN: "ASTROLITH_SETTINGS_PATH 必须是绝对路径。"
+    ja: "ASTROLITH_SETTINGS_PATH は絶対パスである必要があります。"
+  save_failure_dir_absolute:
+    en: "ASTROLITH_SAVE_FAILURE_DIR must be absolute."
+    zh-CN: "ASTROLITH_SAVE_FAILURE_DIR 必须是绝对路径。"
+    ja: "ASTROLITH_SAVE_FAILURE_DIR は絶対パスである必要があります。"
+  recovery_dir_absolute:
+    en: "ASTROLITH_RECOVERY_DIR must be absolute."
+    zh-CN: "ASTROLITH_RECOVERY_DIR 必须是绝对路径。"
+    ja: "ASTROLITH_RECOVERY_DIR は絶対パスである必要があります。"

@@ -1,0 +1,1022 @@
+_version: 2
+preferences:
+  group:
+    general:
+      en: "GENERAL"
+      zh-CN: "通用"
+      ja: "一般"
+    project:
+      en: "PROJECT"
+      zh-CN: "项目"
+      ja: "プロジェクト"
+    advanced:
+      en: "ADVANCED"
+      zh-CN: "高级"
+      ja: "詳細"
+  sheet:
+    reset:
+      en: "Reset"
+      zh-CN: "重置"
+      ja: "リセット"
+    user_guide:
+      en: "User guide"
+      zh-CN: "用户指南"
+      ja: "ユーザーガイド"
+    keyboard_shortcuts:
+      en: "Keyboard shortcuts"
+      zh-CN: "键盘快捷键"
+      ja: "キーボードショートカット"
+    cancel:
+      en: "Cancel"
+      zh-CN: "取消"
+      ja: "キャンセル"
+    apply:
+      en: "Apply"
+      zh-CN: "应用"
+      ja: "適用"
+    fix_errors:
+      en: "Fix the highlighted values before applying."
+      zh-CN: "请先修正高亮显示的值再应用。"
+      ja: "適用する前にハイライトされた値を修正してください。"
+    apply_note:
+      en: "Changes apply immediately and persist atomically."
+      zh-CN: "更改会立即生效并以原子方式保存。"
+      ja: "変更はすぐに反映され、アトミックに保存されます。"
+  pane:
+    appearance:
+      label:
+        en: "Appearance"
+        zh-CN: "外观"
+        ja: "外観"
+      description:
+        en: "Theme, interface type and document typography."
+        zh-CN: "主题、界面字体与文档排版。"
+        ja: "テーマ、インターフェースの書体、ドキュメントのタイポグラフィ。"
+    workspace:
+      label:
+        en: "Workspace"
+        zh-CN: "工作区"
+        ja: "ワークスペース"
+      description:
+        en: "Startup behavior, panel layouts, saving and file defaults."
+        zh-CN: "启动行为、面板布局、保存与新文件默认值。"
+        ja: "起動時の動作、パネルレイアウト、保存とファイルの既定値。"
+    preview:
+      label:
+        en: "Preview"
+        zh-CN: "预览"
+        ja: "プレビュー"
+      description:
+        en: "How the live site opens and which browser to use."
+        zh-CN: "实时站点如何打开以及使用哪个浏览器。"
+        ja: "ライブサイトの開き方と使用するブラウザー。"
+    project:
+      label:
+        en: "Project Settings"
+        zh-CN: "项目设置"
+        ja: "プロジェクト設定"
+      description:
+        en: "Defaults for this project's content workflow."
+        zh-CN: "此项目内容工作流的默认值。"
+        ja: "このプロジェクトのコンテンツワークフローの既定値。"
+    collections:
+      label:
+        en: "Collections"
+        zh-CN: "集合"
+        ja: "コレクション"
+      description:
+        en: "Directories, field mappings and style per collection."
+        zh-CN: "每个集合的目录、字段映射和样式。"
+        ja: "コレクションごとのディレクトリ、フィールドマッピング、スタイル。"
+    advanced:
+      label:
+        en: "Advanced"
+        zh-CN: "高级"
+        ja: "詳細設定"
+      description:
+        en: "Paths, integrations and reset actions."
+        zh-CN: "路径、集成和重置操作。"
+        ja: "パス、連携、リセット操作。"
+  option:
+    follow_system:
+      en: "Follow system"
+      zh-CN: "跟随系统"
+      ja: "システムに従う"
+    light:
+      en: "Light"
+      zh-CN: "浅色"
+      ja: "ライト"
+    dark:
+      en: "Dark"
+      zh-CN: "深色"
+      ja: "ダーク"
+    inherit:
+      en: "Inherit"
+      zh-CN: "继承"
+      ja: "継承"
+    inherit_global:
+      en: "Inherit global"
+      zh-CN: "继承全局"
+      ja: "グローバルを継承"
+    inherit_project:
+      en: "Inherit project"
+      zh-CN: "继承项目"
+      ja: "プロジェクトを継承"
+    inherit_relative:
+      en: "Inherit (relative)"
+      zh-CN: "继承（相对）"
+      ja: "継承（相対）"
+    relative:
+      en: "Relative"
+      zh-CN: "相对"
+      ja: "相対"
+    absolute:
+      en: "Absolute"
+      zh-CN: "绝对"
+      ja: "絶対"
+    "on":
+      en: "On"
+      zh-CN: "开启"
+      ja: "オン"
+    "off":
+      en: "Off"
+      zh-CN: "关闭"
+      ja: "オフ"
+    markdown:
+      en: "Markdown (.md)"
+      zh-CN: "Markdown（.md）"
+      ja: "Markdown（.md）"
+    mdx:
+      en: "MDX (.mdx)"
+      zh-CN: "MDX（.mdx）"
+      ja: "MDX（.mdx）"
+    external_browser:
+      en: "External browser"
+      zh-CN: "外部浏览器"
+      ja: "外部ブラウザー"
+    embedded:
+      en: "Embedded WebView"
+      zh-CN: "内嵌 WebView"
+      ja: "埋め込み WebView"
+    embedded_unavailable:
+      en: "Embedded WebView (unavailable)"
+      zh-CN: "内嵌 WebView（不可用）"
+      ja: "埋め込み WebView（利用不可）"
+    system_default:
+      en: "System default"
+      zh-CN: "系统默认"
+      ja: "システム既定"
+  placeholder:
+    browser_executable:
+      en: "Empty uses the system browser"
+      zh-CN: "留空则使用系统浏览器"
+      ja: "空欄の場合はシステムのブラウザーを使用します"
+    ui_font_family:
+      en: "System UI font"
+      zh-CN: "系统界面字体"
+      ja: "システム UI フォント"
+    build_font_family:
+      en: "System monospace font"
+      zh-CN: "系统等宽字体"
+      ja: "システム等幅フォント"
+    project_content:
+      en: "Inherit the Astro content directory"
+      zh-CN: "继承 Astro 内容目录"
+      ja: "Astro コンテンツディレクトリを継承"
+    project_assets:
+      en: "Inherit the configured assets directory"
+      zh-CN: "继承已配置的资源目录"
+      ja: "設定済みのアセットディレクトリを継承"
+    project_mdx:
+      en: "Inherit the MDX component directory"
+      zh-CN: "继承 MDX 组件目录"
+      ja: "MDX コンポーネントディレクトリを継承"
+    collection_content:
+      en: "Inherit the project content directory"
+      zh-CN: "继承项目内容目录"
+      ja: "プロジェクトのコンテンツディレクトリを継承"
+    collection_assets:
+      en: "Inherit the project assets directory"
+      zh-CN: "继承项目资源目录"
+      ja: "プロジェクトのアセットディレクトリを継承"
+    collection_mapping:
+      en: "Inherit the project mapping"
+      zh-CN: "继承项目映射"
+      ja: "プロジェクトのマッピングを継承"
+  appearance:
+    theme:
+      en: "Colour mode"
+      zh-CN: "颜色模式"
+      ja: "カラーモード"
+    theme_hint:
+      en: "Astrolith uses one neutral light and dark palette; Follow system chooses between them from the desktop appearance."
+      zh-CN: "Astrolith 使用统一的中性浅色与深色调色板；“跟随系统”会根据桌面外观在两者之间选择。"
+      ja: "Astrolith は中立なライトとダークの 1 つのパレットを使用し、「システムに従う」はデスクトップの外観に応じて切り替えます。"
+    theme_section:
+      en: "Theme"
+      zh-CN: "主题"
+      ja: "テーマ"
+    theme_section_hint:
+      en: "Colour schemes shared by every project."
+      zh-CN: "所有项目共用的配色方案。"
+      ja: "すべてのプロジェクトで共有される配色。"
+    interface_section:
+      en: "Interface"
+      zh-CN: "界面"
+      ja: "インターフェース"
+    interface_section_hint:
+      en: "Typography for panels, controls and menus."
+      zh-CN: "面板、控件和菜单的排版。"
+      ja: "パネル、コントロール、メニューのタイポグラフィ。"
+    interface_font:
+      en: "Interface font"
+      zh-CN: "界面字体"
+      ja: "インターフェースフォント"
+    interface_font_hint:
+      en: "An installed font family. Empty uses the system UI font."
+      zh-CN: "已安装的字体族。留空则使用系统界面字体。"
+      ja: "インストール済みのフォントファミリー。空欄の場合はシステム UI フォントを使用します。"
+    interface_size:
+      en: "Interface size"
+      zh-CN: "界面字号"
+      ja: "インターフェースサイズ"
+    interface_size_hint:
+      en: "8–28 logical pixels; the default is 18."
+      zh-CN: "8–28 逻辑像素；默认 18。"
+      ja: "8〜28 論理ピクセル。既定値は 18。"
+    panel_section:
+      en: "Panel shape"
+      zh-CN: "面板形状"
+      ja: "パネルの形状"
+    panel_section_hint:
+      en: "One corner radius for panels and components across every project."
+      zh-CN: "所有项目的面板和组件使用同一圆角半径。"
+      ja: "すべてのプロジェクトでパネルとコンポーネントに共通の角丸半径を使用します。"
+    panel_radius:
+      en: "Panel and component corner radius"
+      zh-CN: "面板和组件圆角半径"
+      ja: "パネルとコンポーネントの角丸半径"
+    panel_radius_hint:
+      en: "0–24 logical pixels; applies to all panels and components. The default is 10."
+      zh-CN: "0–24 逻辑像素；应用于所有面板和组件。默认 10。"
+      ja: "0〜24 論理ピクセル。すべてのパネルとコンポーネントに適用されます。既定値は 10。"
+    document_section:
+      en: "Document"
+      zh-CN: "文档"
+      ja: "ドキュメント"
+    document_section_hint:
+      en: "Body typography, page measure and heading colours."
+      zh-CN: "正文排版、页面宽度和标题颜色。"
+      ja: "本文のタイポグラフィ、ページ幅、見出しの色。"
+    document_font:
+      en: "Document font"
+      zh-CN: "文档字体"
+      ja: "ドキュメントフォント"
+    document_font_hint:
+      en: "An installed font family. Empty uses the mock's sans face (Inter or the platform UI font)."
+      zh-CN: "已安装的字体族。留空则使用预览的无衬线字体（Inter 或平台界面字体）。"
+      ja: "インストール済みのフォントファミリー。空欄の場合はモックのサンセリフ書体（Inter またはプラットフォームの UI フォント）を使用します。"
+    document_font_size:
+      en: "Document font size"
+      zh-CN: "文档字号"
+      ja: "ドキュメントのフォントサイズ"
+    document_font_size_hint:
+      en: "1–30 logical pixels; the default is 16."
+      zh-CN: "1–30 逻辑像素；默认 16。"
+      ja: "1〜30 論理ピクセル。既定値は 16。"
+    line_height:
+      en: "Line height"
+      zh-CN: "行高"
+      ja: "行の高さ"
+    line_height_hint:
+      en: "1.2–3.0 × the font size; the default is 2.0 (16/32)."
+      zh-CN: "字号的 1.2–3.0 倍；默认 2.0（16/32）。"
+      ja: "フォントサイズの 1.2〜3.0 倍。既定値は 2.0（16/32）。"
+    page_width:
+      en: "Page width"
+      zh-CN: "页面宽度"
+      ja: "ページ幅"
+    page_width_hint:
+      en: "30–100% of the editor pane; the default is 64%."
+      zh-CN: "编辑区的 30–100%；默认 64%。"
+      ja: "エディターペインの 30〜100%。既定値は 64%。"
+    heading_light:
+      en: "Light heading colour"
+      zh-CN: "浅色标题颜色"
+      ja: "ライトの見出し色"
+    heading_dark:
+      en: "Dark heading colour"
+      zh-CN: "深色标题颜色"
+      ja: "ダークの見出し色"
+    heading_hint:
+      en: "Optional #rrggbb or #rrggbbaa. Empty keeps the palette heading colour."
+      zh-CN: "可选 #rrggbb 或 #rrggbbaa。留空则使用调色板的标题颜色。"
+      ja: "任意で #rrggbb または #rrggbbaa。空欄の場合はパレットの見出し色を使用します。"
+    build_section:
+      en: "Build"
+      zh-CN: "构建"
+      ja: "ビルド"
+    build_section_hint:
+      en: "Source editor typography."
+      zh-CN: "源代码编辑器排版。"
+      ja: "ソースエディターのタイポグラフィ。"
+    build_font:
+      en: "Build font"
+      zh-CN: "构建字体"
+      ja: "ビルドフォント"
+    build_font_hint:
+      en: "Installed family for source code. Empty uses the system monospace font."
+      zh-CN: "源代码使用的已安装字体族。留空则使用系统等宽字体。"
+      ja: "ソースコード用のインストール済みファミリー。空欄の場合はシステムの等幅フォントを使用します。"
+    build_font_size:
+      en: "Build font size"
+      zh-CN: "构建字号"
+      ja: "ビルドのフォントサイズ"
+    build_font_size_hint:
+      en: "1–30 logical pixels; default 14."
+      zh-CN: "1–30 逻辑像素；默认 14。"
+      ja: "1〜30 論理ピクセル。既定値は 14。"
+    preview_section:
+      en: "Preview"
+      zh-CN: "预览"
+      ja: "プレビュー"
+    preview_section_hint:
+      en: "Rendered document typography."
+      zh-CN: "渲染后的文档排版。"
+      ja: "レンダリングされたドキュメントのタイポグラフィ。"
+    preview_font:
+      en: "Preview font"
+      zh-CN: "预览字体"
+      ja: "プレビューフォント"
+    preview_font_hint:
+      en: "Installed family for rendered documents. Empty uses the preferred sans font."
+      zh-CN: "渲染文档使用的已安装字体族。留空则使用首选无衬线字体。"
+      ja: "レンダリングされたドキュメント用のインストール済みファミリー。空欄の場合は優先サンセリフフォントを使用します。"
+    preview_font_size:
+      en: "Preview font size"
+      zh-CN: "预览字号"
+      ja: "プレビューのフォントサイズ"
+    preview_font_size_hint:
+      en: "1–30 logical pixels; default 16."
+      zh-CN: "1–30 逻辑像素；默认 16。"
+      ja: "1〜30 論理ピクセル。既定値は 16。"
+    browse:
+      en: "Browse"
+      zh-CN: "浏览"
+      ja: "参照"
+  workspace:
+    mode_writing:
+      en: "Writing"
+      zh-CN: "写作"
+      ja: "執筆"
+    mode_build:
+      en: "Build"
+      zh-CN: "构建"
+      ja: "ビルド"
+    mode_preview:
+      en: "Preview"
+      zh-CN: "预览"
+      ja: "プレビュー"
+    startup:
+      en: "Startup"
+      zh-CN: "启动"
+      ja: "起動"
+    startup_hint:
+      en: "Which workspace mode opens when there is no recorded project mode."
+      zh-CN: "没有记录项目模式时打开的工作区模式。"
+      ja: "プロジェクトのモードが記録されていない場合に開くワークスペースモード。"
+    default_mode:
+      en: "Default mode"
+      zh-CN: "默认模式"
+      ja: "既定のモード"
+    default_mode_hint:
+      en: "Used at launch when the open project has not recorded its own last mode."
+      zh-CN: "打开的项目尚未记录上次模式时，在启动时使用。"
+      ja: "開いているプロジェクトが最後のモードを記録していない場合、起動時に使用します。"
+    layouts:
+      en: "Layouts"
+      zh-CN: "布局"
+      ja: "レイアウト"
+    layouts_hint:
+      en: "Drag a dock to size it; Reset restores the design default for that mode."
+      zh-CN: "拖动停靠栏可调整大小；重置会将该模式恢复为设计默认布局。"
+      ja: "ドックをドラッグしてサイズを変更します。リセットするとそのモードのデザイン既定に戻ります。"
+    layout_writing:
+      en: "Writing layout"
+      zh-CN: "写作布局"
+      ja: "執筆レイアウト"
+    layout_build:
+      en: "Build layout"
+      zh-CN: "构建布局"
+      ja: "ビルドレイアウト"
+    layout_preview:
+      en: "Preview layout"
+      zh-CN: "预览布局"
+      ja: "プレビューレイアウト"
+    layout_pending_hint:
+      en: "Reset to the design default on Apply; Cancel keeps the current layout."
+      zh-CN: "应用时恢复为设计默认布局；取消则保留当前布局。"
+      ja: "適用時にデザイン既定に戻します。キャンセルすると現在のレイアウトを保持します。"
+    layout_both_open:
+      en: "Library and bottom tool open."
+      zh-CN: "资料库和底部工具已打开。"
+      ja: "ライブラリと下部ツールが開いています。"
+    layout_library_open:
+      en: "Library open, bottom tool closed."
+      zh-CN: "资料库已打开，底部工具已关闭。"
+      ja: "ライブラリが開き、下部ツールは閉じています。"
+    layout_tool_open:
+      en: "Library closed, bottom tool open."
+      zh-CN: "资料库已关闭，底部工具已打开。"
+      ja: "ライブラリは閉じ、下部ツールが開いています。"
+    layout_both_closed:
+      en: "Library and bottom tool closed."
+      zh-CN: "资料库和底部工具已关闭。"
+      ja: "ライブラリと下部ツールが閉じています。"
+    project_overrides:
+      en: "Project layout overrides"
+      zh-CN: "项目布局覆盖"
+      ja: "プロジェクトのレイアウト上書き"
+    project_overrides_pending:
+      en: "The project falls back to the global layouts on Apply."
+      zh-CN: "应用后项目将回退到全局布局。"
+      ja: "適用するとプロジェクトはグローバルレイアウトに戻ります。"
+    project_overrides_set:
+      en: "This project records its own dock sizes and visibility."
+      zh-CN: "此项目记录了自己的停靠栏尺寸和可见性。"
+      ja: "このプロジェクトは独自のドックサイズと表示状態を記録しています。"
+    project_overrides_none:
+      en: "This project inherits every global layout."
+      zh-CN: "此项目继承了所有全局布局。"
+      ja: "このプロジェクトはすべてのグローバルレイアウトを継承しています。"
+    reset_pending:
+      en: "Reset pending"
+      zh-CN: "待重置"
+      ja: "リセット待ち"
+    reset_overrides:
+      en: "Reset overrides"
+      zh-CN: "重置覆盖"
+      ja: "上書きをリセット"
+    reset_project_overrides_accessibility:
+      en: "Reset the project's layout overrides"
+      zh-CN: "重置项目的布局覆盖"
+      ja: "プロジェクトのレイアウト上書きをリセット"
+    reset_layout_accessibility:
+      en: "Reset the %{layout} layout"
+      zh-CN: "重置%{layout}布局"
+      ja: "%{layout}レイアウトをリセット"
+    documents:
+      en: "Documents"
+      zh-CN: "文档"
+      ja: "ドキュメント"
+    documents_hint:
+      en: "Saving behavior and defaults for new files."
+      zh-CN: "保存行为和新文件默认值。"
+      ja: "新しいファイルの保存動作と既定値。"
+    autosave:
+      en: "Idle autosave"
+      zh-CN: "空闲自动保存"
+      ja: "アイドル時の自動保存"
+    autosave_hint:
+      en: "Dirty documents save after this much idle time."
+      zh-CN: "未保存的文档在此空闲时间后保存。"
+      ja: "未保存のドキュメントはこのアイドル時間後に保存されます。"
+    seconds:
+      en: "%{seconds} seconds"
+      zh-CN: "%{seconds} 秒"
+      ja: "%{seconds} 秒"
+    new_files:
+      en: "New files"
+      zh-CN: "新文件"
+      ja: "新しいファイル"
+    new_files_hint:
+      en: "Extension used for new entries unless a project or collection overrides it."
+      zh-CN: "新建条目使用的扩展名，除非项目或集合覆盖。"
+      ja: "プロジェクトまたはコレクションが上書きしない限り、新規エントリーに使用する拡張子。"
+    external_editor:
+      en: "External editor"
+      zh-CN: "外部编辑器"
+      ja: "外部エディター"
+    external_editor_hint:
+      en: "How Astrolith opens files in another program."
+      zh-CN: "Astrolith 如何在其他程序中打开文件。"
+      ja: "Astrolith が別のプログラムでファイルを開く方法。"
+    ide_command:
+      en: "IDE command"
+      zh-CN: "IDE 命令"
+      ja: "IDE コマンド"
+    ide_command_hint:
+      en: "Launched directly as argv; no shell interprets it."
+      zh-CN: "直接以 argv 启动；不经过 shell 解释。"
+      ja: "argv として直接起動され、シェルは介在しません。"
+    ide_arguments:
+      en: "IDE arguments"
+      zh-CN: "IDE 参数"
+      ja: "IDE 引数"
+    ide_arguments_hint:
+      en: "One argument per line. {project}, {file}, {line} and {column} are substituted."
+      zh-CN: "每行一个参数。会替换 {project}、{file}、{line} 和 {column}。"
+      ja: "1 行に 1 つの引数。{project}、{file}、{line}、{column} が置換されます。"
+  preview:
+    presentation:
+      en: "Presentation"
+      zh-CN: "呈现方式"
+      ja: "表示方法"
+    presentation_hint:
+      en: "Embedded WebView is available only on supported hosts; Wayland windows use the external browser."
+      zh-CN: "内嵌 WebView 仅在受支持的主机上可用；Wayland 窗口使用外部浏览器。"
+      ja: "埋め込み WebView は対応ホストでのみ利用できます。Wayland ウィンドウは外部ブラウザーを使用します。"
+    browser_section:
+      en: "Browser"
+      zh-CN: "浏览器"
+      ja: "ブラウザー"
+    browser_executable:
+      en: "Preferred browser executable"
+      zh-CN: "首选浏览器可执行文件"
+      ja: "優先ブラウザーの実行ファイル"
+    browser_executable_hint:
+      en: "Empty uses the system default browser. The executable is started directly, without a shell."
+      zh-CN: "留空则使用系统默认浏览器。可执行文件直接启动，不经过 shell。"
+      ja: "空欄の場合はシステム既定のブラウザーを使用します。実行ファイルはシェルを介さず直接起動されます。"
+    browser_arguments:
+      en: "Browser arguments"
+      zh-CN: "浏览器参数"
+      ja: "ブラウザーの引数"
+    browser_arguments_hint:
+      en: "One argument per line. {url} is replaced with the preview URL; without it the URL is appended."
+      zh-CN: "每行一个参数。{url} 会替换为预览 URL；若没有 {url}，URL 将追加到末尾。"
+      ja: "1 行に 1 つの引数。{url} はプレビュー URL に置換されます。ない場合 URL は末尾に追加されます。"
+    open_on_enter:
+      en: "Open on Enter"
+      zh-CN: "按 Enter 时打开"
+      ja: "Enter で開く"
+    open_on_enter_hint:
+      en: "Open the active entry once when you explicitly enter Preview. A failed launch offers the system browser."
+      zh-CN: "当你主动进入预览时打开当前条目一次。启动失败时提供系统浏览器。"
+      ja: "明示的にプレビューに入ったときにアクティブなエントリーを 1 回開きます。起動に失敗するとシステムブラウザーを提案します。"
+    embedded_unavailable_notice:
+      en: "Embedded WebView unavailable: %{reason}"
+      zh-CN: "内嵌 WebView 不可用：%{reason}"
+      ja: "埋め込み WebView を利用できません: %{reason}"
+  project:
+    directories:
+      en: "Directories and paths"
+      zh-CN: "目录与路径"
+      ja: "ディレクトリとパス"
+    directories_hint:
+      en: "Empty fields inherit the Astro configuration or the global default."
+      zh-CN: "留空的字段继承 Astro 配置或全局默认值。"
+      ja: "空欄のフィールドは Astro 設定またはグローバル既定を継承します。"
+    content_directory:
+      en: "Content directory"
+      zh-CN: "内容目录"
+      ja: "コンテンツディレクトリ"
+    content_directory_hint:
+      en: "Project-relative root that contains the collection directories."
+      zh-CN: "包含集合目录的项目相对根目录。"
+      ja: "コレクションディレクトリを含むプロジェクト相対のルート。"
+    assets_directory:
+      en: "Assets directory"
+      zh-CN: "资源目录"
+      ja: "アセットディレクトリ"
+    assets_directory_hint:
+      en: "Project-relative directory for dropped and picked images."
+      zh-CN: "用于拖放和选取图片的项目相对目录。"
+      ja: "ドロップおよび選択した画像用のプロジェクト相対ディレクトリ。"
+    mdx_directory:
+      en: "MDX component directory"
+      zh-CN: "MDX 组件目录"
+      ja: "MDX コンポーネントディレクトリ"
+    mdx_directory_hint:
+      en: "Only projects have an MDX component directory."
+      zh-CN: "只有项目才有 MDX 组件目录。"
+      ja: "MDX コンポーネントディレクトリはプロジェクトにのみ存在します。"
+    image_paths:
+      en: "Image paths"
+      zh-CN: "图片路径"
+      ja: "画像パス"
+    image_paths_hint:
+      en: "Absolute paths start at the project root; relative paths start at the document."
+      zh-CN: "绝对路径从项目根目录开始；相对路径从文档开始。"
+      ja: "絶対パスはプロジェクトルートから、相対パスはドキュメントから開始します。"
+    new_files:
+      en: "New files"
+      zh-CN: "新文件"
+      ja: "新しいファイル"
+    new_files_hint:
+      en: "Overrides the General new-file type for this project."
+      zh-CN: "覆盖此项目在通用设置中的新文件类型。"
+      ja: "このプロジェクトの一般設定の新規ファイル種別を上書きします。"
+    mdx_imports:
+      en: "MDX imports"
+      zh-CN: "MDX 导入"
+      ja: "MDX インポート"
+    auto_import_notice:
+      en: "This project declares astro-auto-import. Components may already be available without imports; Astrolith never enables import insertion for you."
+      zh-CN: "此项目声明了 astro-auto-import。组件可能无需导入即可使用；Astrolith 绝不会为你启用导入插入。"
+      ja: "このプロジェクトは astro-auto-import を宣言しています。コンポーネントはインポートなしで利用できる場合があります。Astrolith がインポート挿入を有効にすることはありません。"
+    insert_imports:
+      en: "Insert MDX imports"
+      zh-CN: "插入 MDX 导入"
+      ja: "MDX インポートを挿入"
+    insert_imports_hint:
+      en: "Experimental. Inherit leaves the choice to publisher defaults (off)."
+      zh-CN: "实验性功能。选择继承时由发布器默认值决定（关闭）。"
+      ja: "試験的機能。「継承」では公開側の既定（オフ）に委ねられます。"
+    frontmatter_fields:
+      en: "Frontmatter fields"
+      zh-CN: "Frontmatter 字段"
+      ja: "フロントマターのフィールド"
+    frontmatter_fields_hint:
+      en: "Mappings are checked against the generated collection schemas."
+      zh-CN: "映射会根据生成的集合 schema 校验。"
+      ja: "マッピングは生成されたコレクションスキーマに対して検証されます。"
+    title_field:
+      en: "Title field"
+      zh-CN: "标题字段"
+      ja: "タイトルフィールド"
+    title_field_hint:
+      en: "Schema field mapped to the entry title; empty uses “title”."
+      zh-CN: "映射到条目标题的 schema 字段；留空则使用“title”。"
+      ja: "エントリータイトルにマップされるスキーマフィールド。空欄の場合は「title」を使用します。"
+    date_field:
+      en: "Date field"
+      zh-CN: "日期字段"
+      ja: "日付フィールド"
+    date_field_hint:
+      en: "Schema field mapped to the publication date; empty uses “date”."
+      zh-CN: "映射到发布日期的 schema 字段；留空则使用“date”。"
+      ja: "公開日付にマップされるスキーマフィールド。空欄の場合は「date」を使用します。"
+    description_field:
+      en: "Description field"
+      zh-CN: "描述字段"
+      ja: "説明フィールド"
+    description_field_hint:
+      en: "Schema field mapped to the description; empty uses “description”."
+      zh-CN: "映射到描述的 schema 字段；留空则使用“description”。"
+      ja: "説明にマップされるスキーマフィールド。空欄の場合は「description」を使用します。"
+    draft_field:
+      en: "Draft field"
+      zh-CN: "草稿字段"
+      ja: "下書きフィールド"
+    draft_field_hint:
+      en: "Boolean schema field mapped to the draft flag; empty uses “draft”."
+      zh-CN: "映射到草稿标记的布尔 schema 字段；留空则使用“draft”。"
+      ja: "下書きフラグにマップされる真偽値スキーマフィールド。空欄の場合は「draft」を使用します。"
+  collection:
+    no_collections:
+      en: "No collections were discovered"
+      zh-CN: "未发现集合"
+      ja: "コレクションが見つかりませんでした"
+    no_collections_hint:
+      en: "Open a project whose content configuration declares collections."
+      zh-CN: "请打开一个内容配置声明了集合的项目。"
+      ja: "コンテンツ設定でコレクションを宣言しているプロジェクトを開いてください。"
+    collection:
+      en: "Collection"
+      zh-CN: "集合"
+      ja: "コレクション"
+    directories:
+      en: "Directories"
+      zh-CN: "目录"
+      ja: "ディレクトリ"
+    directories_hint:
+      en: "Empty fields inherit the project setting."
+      zh-CN: "留空的字段继承项目设置。"
+      ja: "空欄のフィールドはプロジェクト設定を継承します。"
+    content_directory:
+      en: "Content directory"
+      zh-CN: "内容目录"
+      ja: "コンテンツディレクトリ"
+    content_directory_hint:
+      en: "Project-relative directory that replaces this collection's base."
+      zh-CN: "替换此集合基础目录的项目相对目录。"
+      ja: "このコレクションのベースを置き換えるプロジェクト相対ディレクトリ。"
+    assets_directory:
+      en: "Assets directory"
+      zh-CN: "资源目录"
+      ja: "アセットディレクトリ"
+    assets_directory_hint:
+      en: "Project-relative directory for this collection's images."
+      zh-CN: "此集合图片使用的项目相对目录。"
+      ja: "このコレクションの画像用のプロジェクト相対ディレクトリ。"
+    image_paths:
+      en: "Image paths"
+      zh-CN: "图片路径"
+      ja: "画像パス"
+    image_paths_hint:
+      en: "Overrides the project image path mode."
+      zh-CN: "覆盖项目的图片路径模式。"
+      ja: "プロジェクトの画像パスモードを上書きします。"
+    new_files:
+      en: "New files"
+      zh-CN: "新文件"
+      ja: "新しいファイル"
+    new_files_hint:
+      en: "Overrides the project new-file type."
+      zh-CN: "覆盖项目的新文件类型。"
+      ja: "プロジェクトの新規ファイル種別を上書きします。"
+    frontmatter_fields:
+      en: "Frontmatter fields"
+      zh-CN: "Frontmatter 字段"
+      ja: "フロントマターのフィールド"
+    frontmatter_fields_hint:
+      en: "Collection mappings win over project mappings."
+      zh-CN: "集合映射优先于项目映射。"
+      ja: "コレクションのマッピングはプロジェクトのマッピングより優先されます。"
+    title_field:
+      en: "Title field"
+      zh-CN: "标题字段"
+      ja: "タイトルフィールド"
+    date_field:
+      en: "Date field"
+      zh-CN: "日期字段"
+      ja: "日付フィールド"
+    description_field:
+      en: "Description field"
+      zh-CN: "描述字段"
+      ja: "説明フィールド"
+    draft_field:
+      en: "Draft field"
+      zh-CN: "草稿字段"
+      ja: "下書きフィールド"
+    mapping_hint:
+      en: "Checked against this collection's schema kinds."
+      zh-CN: "根据此集合的 schema 类型进行校验。"
+      ja: "このコレクションのスキーマ種別に対して検証されます。"
+    draft_hint:
+      en: "Must be a boolean field in this collection's schema."
+      zh-CN: "必须是此集合 schema 中的布尔字段。"
+      ja: "このコレクションのスキーマ内の真偽値フィールドである必要があります。"
+    links:
+      en: "Links"
+      zh-CN: "链接"
+      ja: "リンク"
+    links_hint:
+      en: "Used when inserting a Content Finder entry as a Markdown link."
+      zh-CN: "将 Content Finder 条目作为 Markdown 链接插入时使用。"
+      ja: "Content Finder のエントリーを Markdown リンクとして挿入するときに使用します。"
+    url_pattern:
+      en: "Content Finder URL pattern"
+      zh-CN: "Content Finder URL 模式"
+      ja: "Content Finder の URL パターン"
+    url_pattern_hint:
+      en: "Empty links to the entry file. {slug} is URL-encoded."
+      zh-CN: "留空则链接到条目文件。{slug} 会进行 URL 编码。"
+      ja: "空欄の場合はエントリーファイルにリンクします。{slug} は URL エンコードされます。"
+  advanced:
+    versions:
+      en: "Versions"
+      zh-CN: "版本"
+      ja: "バージョン"
+    global_preferences:
+      en: "Global preferences"
+      zh-CN: "全局偏好设置"
+      ja: "グローバル設定"
+    project_preferences:
+      en: "Project preferences"
+      zh-CN: "项目偏好设置"
+      ja: "プロジェクト設定"
+    project_registry:
+      en: "Project registry"
+      zh-CN: "项目注册表"
+      ja: "プロジェクトレジストリ"
+    version:
+      en: "version %{version}"
+      zh-CN: "版本 %{version}"
+      ja: "バージョン %{version}"
+    preferences_folder:
+      en: "Preferences folder"
+      zh-CN: "偏好设置文件夹"
+      ja: "設定フォルダー"
+    preferences_folder_hint:
+      en: "Open the folder that holds the preference files."
+      zh-CN: "打开包含偏好设置文件的文件夹。"
+      ja: "設定ファイルが入っているフォルダーを開きます。"
+    open_folder:
+      en: "Open preferences folder"
+      zh-CN: "打开偏好设置文件夹"
+      ja: "設定フォルダーを開く"
+    folder_unavailable:
+      en: "Preferences folder unavailable"
+      zh-CN: "偏好设置文件夹不可用"
+      ja: "設定フォルダーを利用できません"
+    folder_opened:
+      en: "Opened the preferences folder."
+      zh-CN: "已打开偏好设置文件夹。"
+      ja: "設定フォルダーを開きました。"
+    folder_open_failed:
+      en: "Could not open the preferences folder: %{error}"
+      zh-CN: "无法打开偏好设置文件夹：%{error}"
+      ja: "設定フォルダーを開けませんでした: %{error}"
+    folder_unavailable_notice:
+      en: "The preferences folder is unavailable, so Reset All cannot run."
+      zh-CN: "偏好设置文件夹不可用，无法执行全部重置。"
+      ja: "設定フォルダーを利用できないため、すべてリセットを実行できません。"
+    file_manager_unsupported:
+      en: "opening a file manager is unsupported on this platform"
+      zh-CN: "此平台不支持打开文件管理器"
+      ja: "このプラットフォームではファイルマネージャーを開けません"
+    file_manager_failed:
+      en: "the file manager exited with %{status}"
+      zh-CN: "文件管理器退出状态为 %{status}"
+      ja: "ファイルマネージャーが %{status} で終了しました"
+    reset_section:
+      en: "Reset"
+      zh-CN: "重置"
+      ja: "リセット"
+    reset_section_hint:
+      en: "Deletes only preferences and the project registry. Recovery snapshots, save failures and logs are kept. Astrolith restarts immediately."
+      zh-CN: "仅删除偏好设置和项目注册表。恢复快照、保存失败记录和日志会保留。Astrolith 会立即重启。"
+      ja: "設定とプロジェクトレジストリのみを削除します。復元スナップショット、保存失敗、ログは保持されます。Astrolith はすぐに再起動します。"
+    reset_all:
+      en: "Reset all preferences…"
+      zh-CN: "重置所有偏好设置…"
+      ja: "すべての設定をリセット…"
+    reset_title:
+      en: "Reset all preferences?"
+      zh-CN: "重置所有偏好设置？"
+      ja: "すべての設定をリセットしますか？"
+    reset_body:
+      en: "This deletes global and project preferences and the project registry in %{folder}. Recovery snapshots, save-failure records and logs are kept. Astrolith restarts immediately and reopens with defaults."
+      zh-CN: "这会删除 %{folder} 中的全局偏好设置、项目偏好设置和项目注册表。恢复快照、保存失败记录和日志会保留。Astrolith 会立即重启并以默认值重新打开。"
+      ja: "これにより %{folder} 内のグローバル設定、プロジェクト設定、プロジェクトレジストリが削除されます。復元スナップショット、保存失敗の記録、ログは保持されます。Astrolith はすぐに再起動し、既定値で開き直します。"
+    reset_confirm:
+      en: "Reset and restart"
+      zh-CN: "重置并重启"
+      ja: "リセットして再起動"
+    reset_cancel:
+      en: "Keep preferences"
+      zh-CN: "保留偏好设置"
+      ja: "設定を保持"
+  surface:
+    build:
+      en: "Build"
+      zh-CN: "构建"
+      ja: "ビルド"
+    preview:
+      en: "Preview"
+      zh-CN: "预览"
+      ja: "プレビュー"
+  error:
+    font_family:
+      en: "“%{name}” is not an installed font family."
+      zh-CN: "“%{name}”不是已安装的字体族。"
+      ja: "“%{name}”はインストールされていないフォントファミリーです。"
+    font_family_for:
+      en: "“%{name}” is not an installed font family for %{surface}."
+      zh-CN: "“%{name}”并非%{surface}所用的已安装字体族。"
+      ja: "“%{name}”は%{surface}で使用するインストール済みフォントファミリーではありません。"
+  validation:
+    directory_control_chars:
+      en: "Directories cannot contain control characters."
+      zh-CN: "目录不能包含控制字符。"
+      ja: "ディレクトリに制御文字は使用できません。"
+    directory_home:
+      en: "Use a project-relative directory, not a home-directory path."
+      zh-CN: "请使用项目相对目录，而不是主目录路径。"
+      ja: "ホームディレクトリのパスではなく、プロジェクト相対のディレクトリを使用してください。"
+    directory_absolute:
+      en: "Use a project-relative directory, not an absolute path."
+      zh-CN: "请使用项目相对目录，而不是绝对路径。"
+      ja: "絶対パスではなく、プロジェクト相対のディレクトリを使用してください。"
+    directory_escape:
+      en: "Directories must stay inside the project root."
+      zh-CN: "目录必须位于项目根目录内。"
+      ja: "ディレクトリはプロジェクトルート内に収める必要があります。"
+    directory_empty:
+      en: "Enter a directory name or leave the field empty to inherit."
+      zh-CN: "请输入目录名，或留空以继承。"
+      ja: "ディレクトリ名を入力するか、継承する場合は空欄にしてください。"
+    font_size_parse:
+      en: "Enter a font size between 1 and 30."
+      zh-CN: "请输入 1 到 30 之间的字号。"
+      ja: "1〜30 のフォントサイズを入力してください。"
+    font_size_range:
+      en: "Font size must be between 1 and 30."
+      zh-CN: "字号必须在 1 到 30 之间。"
+      ja: "フォントサイズは 1〜30 の範囲で指定してください。"
+    line_height_parse:
+      en: "Enter a line height between 1.2 and 3.0."
+      zh-CN: "请输入 1.2 到 3.0 之间的行高。"
+      ja: "1.2〜3.0 の行の高さを入力してください。"
+    line_height_range:
+      en: "Line height must be between 1.2 and 3.0."
+      zh-CN: "行高必须在 1.2 到 3.0 之间。"
+      ja: "行の高さは 1.2〜3.0 の範囲で指定してください。"
+    page_width_parse:
+      en: "Enter a page width between 30 and 100 percent."
+      zh-CN: "请输入 30 到 100 之间的页面宽度百分比。"
+      ja: "30〜100 パーセントのページ幅を入力してください。"
+    page_width_range:
+      en: "Page width must be between 30 and 100 percent."
+      zh-CN: "页面宽度必须在 30 到 100 百分比之间。"
+      ja: "ページ幅は 30〜100 パーセントの範囲で指定してください。"
+    panel_radius_parse:
+      en: "Enter a shared corner radius between 0 and 24."
+      zh-CN: "请输入 0 到 24 之间的共享圆角半径。"
+      ja: "0〜24 の共通角丸半径を入力してください。"
+    panel_radius_range:
+      en: "Shared corner radius must be between 0 and 24."
+      zh-CN: "共享圆角半径必须在 0 到 24 之间。"
+      ja: "共通角丸半径は 0〜24 の範囲で指定してください。"
+    ui_font_size_parse:
+      en: "Enter an interface size between 8 and 28."
+      zh-CN: "请输入 8 到 28 之间的界面字号。"
+      ja: "8〜28 のインターフェースサイズを入力してください。"
+    ui_font_size_range:
+      en: "Interface size must be between 8 and 28."
+      zh-CN: "界面字号必须在 8 到 28 之间。"
+      ja: "インターフェースサイズは 8〜28 の範囲で指定してください。"
+    heading_color:
+      en: "Enter a colour as #rrggbb or #rrggbbaa."
+      zh-CN: "请以 #rrggbb 或 #rrggbbaa 格式输入颜色。"
+      ja: "色は #rrggbb または #rrggbbaa の形式で入力してください。"
+    ide_executable_control_chars:
+      en: "The IDE executable cannot contain control characters."
+      zh-CN: "IDE 可执行文件不能包含控制字符。"
+      ja: "IDE の実行ファイルに制御文字は使用できません。"
+    ide_missing_executable:
+      en: "Enter the IDE executable before its arguments."
+      zh-CN: "请先填写 IDE 可执行文件，再填写参数。"
+      ja: "引数の前に IDE の実行ファイルを入力してください。"
+    ide_argument_control_chars:
+      en: "IDE arguments cannot contain control characters."
+      zh-CN: "IDE 参数不能包含控制字符。"
+      ja: "IDE の引数に制御文字は使用できません。"
+    ide_unclosed_placeholder:
+      en: "IDE arguments have an unclosed placeholder."
+      zh-CN: "IDE 参数中存在未闭合的占位符。"
+      ja: "IDE の引数に閉じられていないプレースホルダーがあります。"
+    ide_unknown_placeholder:
+      en: "Unknown IDE placeholder {%{name}}; use {project}, {file}, {line} or {column}."
+      zh-CN: "未知的 IDE 占位符 {%{name}}；请使用 {project}、{file}、{line} 或 {column}。"
+      ja: "不明な IDE プレースホルダー {%{name}} です。{project}、{file}、{line}、{column} のいずれかを使用してください。"
+    ide_stray_brace:
+      en: "IDE arguments have an unmatched closing brace."
+      zh-CN: "IDE 参数中存在未匹配的右花括号。"
+      ja: "IDE の引数に対応しない閉じ括弧があります。"
+    url_whitespace:
+      en: "The URL pattern cannot contain spaces or control characters."
+      zh-CN: "URL 模式不能包含空格或控制字符。"
+      ja: "URL パターンに空白や制御文字は使用できません。"
+    url_slug_required:
+      en: "The URL pattern must contain {slug}."
+      zh-CN: "URL 模式必须包含 {slug}。"
+      ja: "URL パターンには {slug} を含める必要があります。"
+    url_slug_only:
+      en: "Only the {slug} placeholder is supported."
+      zh-CN: "仅支持 {slug} 占位符。"
+      ja: "サポートされるプレースホルダーは {slug} のみです。"
+    url_absolute:
+      en: "Start the pattern with / or with http:// or https://."
+      zh-CN: "模式需以 /、http:// 或 https:// 开头。"
+      ja: "パターンは /、http://、https:// のいずれかで始めてください。"
+    mapping_control_chars:
+      en: "Field names cannot contain spaces or control characters."
+      zh-CN: "字段名不能包含空格或控制字符。"
+      ja: "フィールド名に空白や制御文字は使用できません。"
+    mapping_title:
+      en: "“%{value}” is not a string field for the title."
+      zh-CN: "“%{value}”不是用于标题的字符串字段。"
+      ja: "“%{value}”はタイトル用の文字列フィールドではありません。"
+    mapping_date:
+      en: "“%{value}” is not a date field for the publication date."
+      zh-CN: "“%{value}”不是用于发布日期的日期字段。"
+      ja: "“%{value}”は公開日付用の日付フィールドではありません。"
+    mapping_description:
+      en: "“%{value}” is not a string field for the description."
+      zh-CN: "“%{value}”不是用于描述的字符串字段。"
+      ja: "“%{value}”は説明用の文字列フィールドではありません。"
+    mapping_draft:
+      en: "“%{value}” is not a boolean field for the draft flag."
+      zh-CN: "“%{value}”不是用于草稿标记的布尔字段。"
+      ja: "“%{value}”は下書きフラグ用の真偽値フィールドではありません。"
+    mapping_missing_field:
+      en: "No collection schema declares a field named “%{value}”."
+      zh-CN: "没有集合 schema 声明名为“%{value}”的字段。"
+      ja: "“%{value}”という名前のフィールドを宣言しているコレクションスキーマはありません。"
+    browser_executable_control_chars:
+      en: "The browser executable cannot contain control characters."
+      zh-CN: "浏览器可执行文件不能包含控制字符。"
+      ja: "ブラウザーの実行ファイルに制御文字は使用できません。"
+    browser_missing_executable:
+      en: "Enter the browser executable before its arguments."
+      zh-CN: "请先填写浏览器可执行文件，再填写参数。"
+      ja: "引数の前にブラウザーの実行ファイルを入力してください。"
+    browser_argument_control_chars:
+      en: "Browser arguments cannot contain control characters."
+      zh-CN: "浏览器参数不能包含控制字符。"
+      ja: "ブラウザーの引数に制御文字は使用できません。"
+    browser_unclosed_placeholder:
+      en: "Browser arguments have an unclosed placeholder."
+      zh-CN: "浏览器参数中存在未闭合的占位符。"
+      ja: "ブラウザーの引数に閉じられていないプレースホルダーがあります。"
+    browser_unknown_placeholder:
+      en: "Unknown browser placeholder {%{name}}; use {url}."
+      zh-CN: "未知的浏览器占位符 {%{name}}；请使用 {url}。"
+      ja: "不明なブラウザーのプレースホルダー {%{name}} です。{url} を使用してください。"
+    browser_stray_brace:
+      en: "Browser arguments have an unmatched closing brace."
+      zh-CN: "浏览器参数中存在未匹配的右花括号。"
+      ja: "ブラウザーの引数に対応しない閉じ括弧があります。"

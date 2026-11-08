@@ -91,10 +91,27 @@ pub enum ControlKind {
         value: Value,
     },
     /// A value preserved verbatim and not editable without risking data loss.
-    ReadOnly {
-        /// Why editing is refused.
-        reason: String,
-    },
+    ReadOnly,
+}
+
+/// Why a field is shown read-only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefusalReason {
+    /// A form-owned message stored as a translation key, so it resolves in the
+    /// current locale every time it is shown.
+    Message(&'static str),
+    /// A reason reported verbatim by the collection schema.
+    Schema(String),
+}
+
+impl RefusalReason {
+    /// Resolve the refusal into the current locale.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Message(key) => tr!(*key),
+            Self::Schema(reason) => reason.clone(),
+        }
+    }
 }
 
 /// One field rendered by the form, with its resolved control and metadata.
@@ -114,8 +131,8 @@ pub struct FieldControl {
     pub present: bool,
     /// Whether the field may be removed without breaking a required field.
     pub removable: bool,
-    /// Explicit refusal reason when the field is shown read-only.
-    pub refusal: Option<String>,
+    /// Why the field is shown read-only, if it is.
+    pub refusal: Option<RefusalReason>,
     /// Whether the field also accepts `null`.
     pub nullable: bool,
     /// Schema-authored description.
@@ -140,22 +157,33 @@ impl FieldControl {
     pub fn hint(&self) -> Option<String> {
         let mut parts = Vec::new();
         if let Some(default) = &self.default {
-            parts.push(format!("Default: {}", display_json(default)));
+            parts.push(tr!(
+                "frontmatter.hint.default",
+                value = display_json(default)
+            ));
         }
         if let Some(minimum) = self.constraints.minimum {
-            parts.push(format!("Min: {minimum}"));
+            parts.push(tr!("frontmatter.hint.min", value = minimum.to_string()));
         }
         if let Some(maximum) = self.constraints.maximum {
-            parts.push(format!("Max: {maximum}"));
+            parts.push(tr!("frontmatter.hint.max", value = maximum.to_string()));
         }
         match (self.constraints.min_length, self.constraints.max_length) {
-            (Some(min), Some(max)) => parts.push(format!("Length: {min}–{max}")),
-            (Some(min), None) => parts.push(format!("Min length: {min}")),
-            (None, Some(max)) => parts.push(format!("Max length: {max}")),
+            (Some(min), Some(max)) => parts.push(tr!(
+                "frontmatter.hint.length",
+                min = min.to_string(),
+                max = max.to_string()
+            )),
+            (Some(min), None) => {
+                parts.push(tr!("frontmatter.hint.min_length", min = min.to_string()));
+            }
+            (None, Some(max)) => {
+                parts.push(tr!("frontmatter.hint.max_length", max = max.to_string()));
+            }
             (None, None) => {}
         }
         if let Some(pattern) = &self.constraints.pattern {
-            parts.push(format!("Pattern: {pattern}"));
+            parts.push(tr!("frontmatter.hint.pattern", pattern = pattern.as_str()));
         }
         (!parts.is_empty()).then(|| parts.join(" · "))
     }
@@ -177,7 +205,7 @@ pub fn control_label(kind: &ControlKind) -> &'static str {
         ControlKind::Object => "object",
         ControlKind::RawYaml { .. } => "raw yaml",
         ControlKind::Literal { .. } => "literal",
-        ControlKind::ReadOnly { .. } => "read-only",
+        ControlKind::ReadOnly => "read-only",
     }
 }
 
@@ -362,7 +390,7 @@ fn build_unknown(
 struct Mapped {
     kind: ControlKind,
     editable: bool,
-    refusal: Option<String>,
+    refusal: Option<RefusalReason>,
     nullable: bool,
 }
 
@@ -376,12 +404,9 @@ impl Mapped {
         }
     }
 
-    fn read_only(reason: impl Into<String>) -> Self {
-        let reason = reason.into();
+    fn read_only(reason: RefusalReason) -> Self {
         Self {
-            kind: ControlKind::ReadOnly {
-                reason: reason.clone(),
-            },
+            kind: ControlKind::ReadOnly,
             editable: false,
             refusal: Some(reason),
             nullable: false,
@@ -406,23 +431,25 @@ fn map_kind(kind: &FieldKind, info: Option<&FrontmatterField>) -> Mapped {
     if let Some(info) = info {
         match info.shape {
             FieldShape::BlockScalar => {
-                return Mapped::read_only("block scalar values are preserved but not editable");
+                return Mapped::read_only(RefusalReason::Message(
+                    "frontmatter.refusal.block_scalar",
+                ));
             }
             FieldShape::Mapping if !is_object_kind(kind) => {
-                return Mapped::raw("mapping value in a non-object field");
+                return Mapped::raw(tr!("frontmatter.refusal.mapping_non_object"));
             }
             FieldShape::Sequence => {
                 if info.items.is_none() {
                     return match info.raw.as_ref() {
-                        Some(_) => Mapped::raw("sequence of non-scalar items edited as raw YAML"),
-                        None => Mapped::read_only(
-                            "sequence items are not all scalars; preserved verbatim",
-                        ),
+                        Some(_) => Mapped::raw(tr!("frontmatter.refusal.sequence_raw")),
+                        None => Mapped::read_only(RefusalReason::Message(
+                            "frontmatter.refusal.sequence_non_scalar",
+                        )),
                     };
                 }
             }
             FieldShape::Flow if !is_object_kind(kind) => {
-                return Mapped::raw("flow value edited as raw YAML");
+                return Mapped::raw(tr!("frontmatter.refusal.flow_raw"));
             }
             _ => {}
         }
@@ -448,7 +475,7 @@ fn map_kind(kind: &FieldKind, info: Option<&FrontmatterField>) -> Mapped {
                 value: value.clone(),
             },
             editable: false,
-            refusal: Some("literal value is fixed by the schema".to_owned()),
+            refusal: Some(RefusalReason::Message("frontmatter.refusal.literal_fixed")),
             nullable: false,
         },
         FieldKind::Object { .. } => Mapped {
@@ -467,7 +494,7 @@ fn map_kind(kind: &FieldKind, info: Option<&FrontmatterField>) -> Mapped {
                 if all_strings {
                     Mapped::editable(ControlKind::Tags)
                 } else {
-                    Mapped::raw("array contains non-string values")
+                    Mapped::raw(tr!("frontmatter.refusal.array_non_string"))
                 }
             }
             FieldKind::Reference { collections } => {
@@ -482,7 +509,7 @@ fn map_kind(kind: &FieldKind, info: Option<&FrontmatterField>) -> Mapped {
                         multiple: true,
                     })
                 } else {
-                    Mapped::raw("array contains non-string references")
+                    Mapped::raw(tr!("frontmatter.refusal.array_non_string_references"))
                 }
             }
             FieldKind::Image => {
@@ -494,38 +521,41 @@ fn map_kind(kind: &FieldKind, info: Option<&FrontmatterField>) -> Mapped {
                 if all_strings {
                     Mapped::editable(ControlKind::Tags)
                 } else {
-                    Mapped::raw("array contains non-string image paths")
+                    Mapped::raw(tr!("frontmatter.refusal.array_non_string_images"))
                 }
             }
             other => match info {
                 Some(info) if info.raw.is_some() => Mapped::raw(raw_reason(other)),
-                _ => Mapped::read_only("array items are not editable in the form"),
+                _ => Mapped::read_only(RefusalReason::Message("frontmatter.refusal.array_items")),
             },
         },
         FieldKind::Record { .. } => match info {
-            Some(info) if info.raw.is_some() => Mapped::raw("record edited as raw YAML"),
-            _ => Mapped::read_only("record values are preserved verbatim"),
+            Some(info) if info.raw.is_some() => Mapped::raw(tr!("frontmatter.refusal.record_raw")),
+            _ => Mapped::read_only(RefusalReason::Message(
+                "frontmatter.refusal.record_preserved",
+            )),
         },
         FieldKind::Nullable { inner } => {
             let mut mapped = map_kind(inner, info);
             mapped.nullable = true;
             mapped
         }
-        FieldKind::Unsupported { reason } => Mapped::read_only(reason.clone()),
+        FieldKind::Unsupported { reason } => {
+            Mapped::read_only(RefusalReason::Schema(reason.clone()))
+        }
     }
 }
 
 fn raw_reason(kind: &FieldKind) -> String {
-    let name = match kind {
-        FieldKind::Object { .. } => "object",
-        FieldKind::Array { .. } => "array",
-        FieldKind::Record { .. } => "record",
-        FieldKind::Reference { .. } => "reference",
-        FieldKind::Image => "image",
-        FieldKind::Literal { .. } => "literal",
-        _ => "value",
-    };
-    format!("{name} items are edited as raw YAML")
+    match kind {
+        FieldKind::Object { .. } => tr!("frontmatter.refusal.raw_object"),
+        FieldKind::Array { .. } => tr!("frontmatter.refusal.raw_array"),
+        FieldKind::Record { .. } => tr!("frontmatter.refusal.raw_record"),
+        FieldKind::Reference { .. } => tr!("frontmatter.refusal.raw_reference"),
+        FieldKind::Image => tr!("frontmatter.refusal.raw_image"),
+        FieldKind::Literal { .. } => tr!("frontmatter.refusal.raw_literal"),
+        _ => tr!("frontmatter.refusal.raw_value"),
+    }
 }
 
 fn map_unknown(info: &FrontmatterField) -> Mapped {
@@ -545,15 +575,17 @@ fn map_unknown(info: &FrontmatterField) -> Mapped {
         },
         FieldShape::Sequence => match &info.items {
             Some(items) if items.iter().all(is_string_value) => Mapped::editable(ControlKind::Tags),
-            Some(_) => Mapped::raw("sequence contains non-string values"),
+            Some(_) => Mapped::raw(tr!("frontmatter.refusal.sequence_non_string")),
             None => match info.raw.as_ref() {
-                Some(_) => Mapped::raw("sequence of non-scalar items edited as raw YAML"),
-                None => Mapped::read_only("sequence items are not all scalars; preserved verbatim"),
+                Some(_) => Mapped::raw(tr!("frontmatter.refusal.sequence_raw")),
+                None => Mapped::read_only(RefusalReason::Message(
+                    "frontmatter.refusal.sequence_non_scalar",
+                )),
             },
         },
-        FieldShape::Flow => Mapped::raw("flow value edited as raw YAML"),
+        FieldShape::Flow => Mapped::raw(tr!("frontmatter.refusal.flow_raw")),
         FieldShape::BlockScalar => {
-            Mapped::read_only("block scalar values are preserved but not editable")
+            Mapped::read_only(RefusalReason::Message("frontmatter.refusal.block_scalar"))
         }
     }
 }
@@ -599,7 +631,7 @@ pub enum FieldEditError {
 impl std::fmt::Display for FieldEditError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotEditable => formatter.write_str("this field is read-only"),
+            Self::NotEditable => formatter.write_str(&tr!("frontmatter.error.read_only")),
             Self::InvalidValue(message) => formatter.write_str(message),
             Self::Document(error) => write!(formatter, "{error}"),
         }
@@ -617,20 +649,21 @@ pub fn parse_value(kind: &ControlKind, raw: &str) -> Result<FrontmatterValue, Fi
         | ControlKind::Reference { .. } => FrontmatterValue::String(raw.to_owned()),
         ControlKind::Number => {
             FrontmatterValue::Float(raw.trim().parse::<f64>().map_err(|_| {
-                FieldEditError::InvalidValue(format!("`{raw}` is not a valid number"))
+                FieldEditError::InvalidValue(tr!("frontmatter.error.invalid_number", value = raw))
             })?)
         }
         ControlKind::Integer => {
             FrontmatterValue::Integer(raw.trim().parse::<i64>().map_err(|_| {
-                FieldEditError::InvalidValue(format!("`{raw}` is not a valid integer"))
+                FieldEditError::InvalidValue(tr!("frontmatter.error.invalid_integer", value = raw))
             })?)
         }
         ControlKind::Boolean => match raw.trim() {
             "true" | "1" => FrontmatterValue::Boolean(true),
             "false" | "0" => FrontmatterValue::Boolean(false),
             other => {
-                return Err(FieldEditError::InvalidValue(format!(
-                    "`{other}` is not a valid boolean"
+                return Err(FieldEditError::InvalidValue(tr!(
+                    "frontmatter.error.invalid_boolean",
+                    value = other
                 )));
             }
         },
@@ -639,7 +672,7 @@ pub fn parse_value(kind: &ControlKind, raw: &str) -> Result<FrontmatterValue, Fi
         ControlKind::Literal { .. }
         | ControlKind::Object
         | ControlKind::RawYaml { .. }
-        | ControlKind::ReadOnly { .. } => return Err(FieldEditError::NotEditable),
+        | ControlKind::ReadOnly => return Err(FieldEditError::NotEditable),
     })
 }
 
@@ -682,12 +715,13 @@ fn enum_value(values: &[Value], raw: &str) -> Result<FrontmatterValue, FieldEdit
     for value in values {
         if display_json(value) == raw {
             return json_to_frontmatter(value).ok_or_else(|| {
-                FieldEditError::InvalidValue(format!("`{raw}` cannot be represented as a scalar"))
+                FieldEditError::InvalidValue(tr!("frontmatter.error.not_scalar", value = raw))
             });
         }
     }
-    Err(FieldEditError::InvalidValue(format!(
-        "`{raw}` is not one of the allowed values"
+    Err(FieldEditError::InvalidValue(tr!(
+        "frontmatter.error.not_allowed",
+        value = raw
     )))
 }
 

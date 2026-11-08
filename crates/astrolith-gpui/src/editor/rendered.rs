@@ -34,6 +34,28 @@ use crate::editor::writing_modes::ProseStyle;
 /// the writer surface for the same accepted revision.
 pub(crate) type SharedDocument = Option<(Arc<String>, Arc<WysiwygDocument>)>;
 
+/// Why the reading pane has no body to show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PreviewEmpty {
+    /// No document is active.
+    NoDocument,
+    /// The active document has no body yet.
+    NothingYet,
+    /// The active document is not Markdown or MDX.
+    Unsupported,
+}
+
+impl PreviewEmpty {
+    /// The explanation under the empty-state title.
+    fn message(self) -> SharedString {
+        match self {
+            Self::NoDocument => tr!("editor.preview.no_document").into(),
+            Self::NothingYet => tr!("editor.preview.nothing_yet").into(),
+            Self::Unsupported => tr!("editor.preview.unsupported").into(),
+        }
+    }
+}
+
 pub(crate) struct RenderedDocument {
     focus: FocusHandle,
     /// Accepted semantic document, shared with the writer when possible.
@@ -54,7 +76,7 @@ pub(crate) struct RenderedDocument {
     text: SharedString,
     mdx: bool,
     unsupported: bool,
-    empty_copy: &'static str,
+    empty_copy: PreviewEmpty,
     style: Option<ProseStyle>,
     /// Project root and document path used to resolve relative images.
     root: Option<PathBuf>,
@@ -106,7 +128,7 @@ impl RenderedDocument {
             text: SharedString::default(),
             mdx: false,
             unsupported: false,
-            empty_copy: "Open a Markdown or MDX document to preview it.",
+            empty_copy: PreviewEmpty::NoDocument,
             style: None,
             root: None,
             document_path: None,
@@ -140,20 +162,10 @@ impl RenderedDocument {
         cx: &mut Context<Self>,
     ) {
         let (unsupported, mdx, text, empty_copy) = match body {
-            None => (
-                false,
-                false,
-                "",
-                "Open a Markdown or MDX document to preview it.",
-            ),
-            Some((DocumentKind::Markdown, text)) => (false, false, text, "Nothing to preview yet."),
-            Some((DocumentKind::Mdx, text)) => (false, true, text, "Nothing to preview yet."),
-            Some((DocumentKind::Plain, _)) => (
-                true,
-                false,
-                "",
-                "Preview is available for Markdown and MDX documents.",
-            ),
+            None => (false, false, "", PreviewEmpty::NoDocument),
+            Some((DocumentKind::Markdown, text)) => (false, false, text, PreviewEmpty::NothingYet),
+            Some((DocumentKind::Mdx, text)) => (false, true, text, PreviewEmpty::NothingYet),
+            Some((DocumentKind::Plain, _)) => (true, false, "", PreviewEmpty::Unsupported),
         };
         let root_changed = self.root.as_deref() != root;
         let document_changed = self.document_path.as_deref() != document;
@@ -594,8 +606,8 @@ impl Render for RenderedDocument {
                 .child(crate::ui::empty_state(
                     "preview-empty",
                     gpui_kit::assets::IconName::Eye,
-                    "Nothing to preview",
-                    self.empty_copy,
+                    tr!("editor.preview.empty_title"),
+                    self.empty_copy.message(),
                     None,
                     cx,
                 ))

@@ -30,16 +30,24 @@ impl ProjectWorkspace {
     ) -> Result<(), String> {
         let root = self
             .project_root()
-            .ok_or_else(|| "Open the project before opening a source file.".to_owned())?;
-        let canonical = path
-            .canonicalize()
-            .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
-        let source = relative_source(&root, &canonical)
-            .ok_or_else(|| format!("{} is outside the open project.", canonical.display()))?;
+            .ok_or_else(|| tr!("browser.load.open_project_before_source"))?;
+        let canonical = path.canonicalize().map_err(|error| {
+            tr!(
+                "browser.status.read_failed",
+                path = path.display(),
+                error = error
+            )
+        })?;
+        let source = relative_source(&root, &canonical).ok_or_else(|| {
+            tr!(
+                "browser.status.path_outside_project",
+                path = canonical.display()
+            )
+        })?;
         if !self.is_editable_project_source(&canonical) {
-            return Err(format!(
-                "{} is not an editable project source file.",
-                canonical.display()
+            return Err(tr!(
+                "browser.load.not_editable_source",
+                path = canonical.display()
             ));
         }
         if self.sessions.contains_key(&canonical) {
@@ -53,17 +61,17 @@ impl ProjectWorkspace {
             return Ok(());
         }
         if self.loads.len() >= 2 {
-            return Err("Two documents are loading; try again when one finishes.".into());
+            return Err(tr!("browser.load.two_documents_loading"));
         }
         if self.sessions.len() + self.loads.len() >= 32 {
-            return Err("Close an open document before opening more than 32 documents.".into());
+            return Err(tr!("browser.load.document_limit"));
         }
         let retained_bytes = self.retained_source_bytes(cx);
         if retained_bytes + (self.loads.len() + 1) * MAX_DOCUMENT_BYTES > 32 * 1024 * 1024 {
-            return Err("Close documents before exceeding the 32 MiB loaded-source budget.".into());
+            return Err(tr!("browser.load.source_budget"));
         }
         let Some(project) = self.project_id.clone() else {
-            return Err("The project is not ready; try again after it opens.".into());
+            return Err(tr!("browser.load.project_not_ready"));
         };
         let generation = self.generation;
         let source_string = source.as_str().to_owned();
@@ -81,12 +89,12 @@ impl ProjectWorkspace {
             let actual = contained_path(&root, std::path::Path::new(&source_string))
                 .map_err(|error| error.to_string())?;
             if actual != expected {
-                return Err("Source mapping changed; reopen the project.".into());
+                return Err(tr!("browser.load.source_mapping_changed_reopen"));
             }
             let source =
                 read_bounded(&actual, MAX_DOCUMENT_BYTES).map_err(|error| error.to_string())?;
             if source.lines().count() > 50_000 {
-                return Err("Documents are limited to 50,000 lines.".into());
+                return Err(tr!("browser.load.line_limit"));
             }
             cancellation.check().map_err(|error| error.to_string())?;
             Ok(source)
@@ -101,7 +109,7 @@ impl ProjectWorkspace {
             }),
         );
         self.active = Some(canonical);
-        self.status = "Loading document…".into();
+        self.status = tr!("browser.load.loading_document");
         cx.notify();
         Ok(())
     }
@@ -151,26 +159,23 @@ impl ProjectWorkspace {
             return;
         }
         if self.refreshing && !forced {
-            self.status =
-                "Refreshing the project index; select this entry again when it finishes.".into();
+            self.status = tr!("browser.load.refreshing_index");
             cx.notify();
             return;
         }
         if self.loads.len() >= 2 {
-            self.status =
-                "Two documents are loading; select this entry again when one finishes.".into();
+            self.status = tr!("browser.load.two_documents_loading_entry");
             cx.notify();
             return;
         }
         if self.sessions.len() + self.loads.len() >= 32 {
-            self.status = "Close an open document before opening more than 32 documents.".into();
+            self.status = tr!("browser.load.document_limit");
             cx.notify();
             return;
         }
         let retained_bytes = self.retained_source_bytes(cx);
         if retained_bytes + (self.loads.len() + 1) * MAX_DOCUMENT_BYTES > 32 * 1024 * 1024 {
-            self.status =
-                "Close documents before exceeding the 32 MiB loaded-source budget.".into();
+            self.status = tr!("browser.load.source_budget");
             cx.notify();
             return;
         }
@@ -192,12 +197,12 @@ impl ProjectWorkspace {
             let actual = contained_path(&root, std::path::Path::new(source.as_str()))
                 .map_err(|error| error.to_string())?;
             if actual != expected {
-                return Err("Source mapping changed; rescan the project.".into());
+                return Err(tr!("browser.load.source_mapping_changed_rescan"));
             }
             let source =
                 read_bounded(&actual, MAX_DOCUMENT_BYTES).map_err(|error| error.to_string())?;
             if source.lines().count() > 50_000 {
-                return Err("Documents are limited to 50,000 lines.".into());
+                return Err(tr!("browser.load.line_limit"));
             }
             cancellation.check().map_err(|error| error.to_string())?;
             Ok(source)
@@ -212,7 +217,7 @@ impl ProjectWorkspace {
                 });
             }),
         );
-        self.status = "Loading document…".into();
+        self.status = tr!("browser.load.loading_document");
         cx.notify();
     }
 
@@ -279,7 +284,7 @@ impl ProjectWorkspace {
                 if self.active.as_ref() == Some(&key) {
                     self.active = None;
                 }
-                self.status = format!("Could not open entry: {error}");
+                self.status = tr!("browser.load.entry_open_failed", error = error);
             }
         }
         cx.notify();
@@ -314,11 +319,10 @@ impl ProjectWorkspace {
             browser.set_active(Some(path.to_path_buf()), cx)
         });
         self.status = if session.read(cx).externally_changed {
-            "Document changed on disk. This buffer is retained; resolve it with Reload from Disk, Overwrite Disk with My Edits, or Save My Edits as a Copy."
+            tr!("browser.load.external_change")
         } else {
-            ""
-        }
-        .into();
+            String::new()
+        };
         cx.notify();
     }
 }

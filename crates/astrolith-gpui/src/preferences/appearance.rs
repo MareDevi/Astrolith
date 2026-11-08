@@ -6,9 +6,9 @@ impl PreferencesSheet {
     pub(super) fn appearance_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.weak_entity();
         let theme_label = match self.theme {
-            ThemePreference::Light => "Light",
-            ThemePreference::Dark => "Dark",
-            ThemePreference::System => "Follow system",
+            ThemePreference::Light => tr!("preferences.option.light"),
+            ThemePreference::Dark => tr!("preferences.option.dark"),
+            ThemePreference::System => tr!("preferences.option.follow_system"),
         };
 
         let theme_weak = weak.clone();
@@ -19,9 +19,12 @@ impl PreferencesSheet {
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu;
                 for (label, preference) in [
-                    ("Follow system", ThemePreference::System),
-                    ("Light", ThemePreference::Light),
-                    ("Dark", ThemePreference::Dark),
+                    (
+                        tr!("preferences.option.follow_system"),
+                        ThemePreference::System,
+                    ),
+                    (tr!("preferences.option.light"), ThemePreference::Light),
+                    (tr!("preferences.option.dark"), ThemePreference::Dark),
                 ] {
                     let weak = theme_weak.clone();
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
@@ -37,13 +40,11 @@ impl PreferencesSheet {
 
         let appearance = vec![self.field(
             "preferences-field-theme",
-            "Colour mode",
+            tr!("preferences.appearance.theme"),
             theme,
             FieldExtras {
                 field: None,
-                hint: Some(
-                    "Astrolith uses one neutral light and dark palette; Follow system chooses between them from the desktop appearance.",
-                ),
+                hint: Some(tr!("preferences.appearance.theme_hint").into()),
                 trailing: None,
             },
             cx,
@@ -81,11 +82,11 @@ impl PreferencesSheet {
             .into_any_element();
         let mut interface = vec![self.field(
             "preferences-field-language",
-            rust_i18n::t!("app.language").to_string(),
+            tr!("app.language"),
             language_picker,
             FieldExtras {
                 field: None,
-                hint: Some("Choose the interface language."),
+                hint: Some(tr!("app.choose_language").into()),
                 trailing: None,
             },
             cx,
@@ -93,11 +94,11 @@ impl PreferencesSheet {
         interface.extend([
             self.field(
                 "preferences-field-ui-font-family",
-                "Interface font",
+                tr!("preferences.appearance.interface_font"),
                 self.control(FieldId::UiFontFamily),
                 FieldExtras {
                     field: Some(FieldId::UiFontFamily),
-                    hint: Some("An installed font family. Empty uses the system UI font."),
+                    hint: Some(tr!("preferences.appearance.interface_font_hint").into()),
                     trailing: Some(
                         div()
                             .h_flex()
@@ -116,11 +117,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-ui-font-size",
-                "Interface size",
+                tr!("preferences.appearance.interface_size"),
                 self.control(FieldId::UiFontSize),
                 FieldExtras {
                     field: Some(FieldId::UiFontSize),
-                    hint: Some("8–28 logical pixels; the default is 18."),
+                    hint: Some(tr!("preferences.appearance.interface_size_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::UiFontSize,
                         "preferences-reset-ui-font-size",
@@ -132,13 +133,11 @@ impl PreferencesSheet {
         ]);
         let panel = vec![self.field(
             "preferences-field-panel-radius",
-            "Panel and component corner radius",
+            tr!("preferences.appearance.panel_radius"),
             self.control(FieldId::PanelRadius),
             FieldExtras {
                 field: Some(FieldId::PanelRadius),
-                hint: Some(
-                    "0–24 logical pixels; applies to all panels and components. The default is 10.",
-                ),
+                hint: Some(tr!("preferences.appearance.panel_radius_hint").into()),
                 trailing: Some(self.reset_button(
                     FieldId::PanelRadius,
                     "preferences-reset-panel-radius",
@@ -150,17 +149,21 @@ impl PreferencesSheet {
         let document = vec![
             self.field(
                 "preferences-field-prose-font-family",
-                "Document font",
+                tr!("preferences.appearance.document_font"),
                 self.control(FieldId::ProseFontFamily),
                 FieldExtras {
                     field: Some(FieldId::ProseFontFamily),
-                    hint: Some("An installed font family. Empty uses the mock's sans face (Inter or the platform UI font)."),
+                    hint: Some(tr!("preferences.appearance.document_font_hint").into()),
                     trailing: Some(
                         div()
                             .h_flex()
                             .items_center()
                             .gap_1()
-                            .child(self.font_picker(FieldId::ProseFontFamily, "prose-font-picker", cx))
+                            .child(self.font_picker(
+                                FieldId::ProseFontFamily,
+                                "prose-font-picker",
+                                cx,
+                            ))
                             .child(self.reset_button(
                                 FieldId::ProseFontFamily,
                                 "preferences-reset-prose-font-family",
@@ -173,11 +176,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-font-size",
-                "Document font size",
+                tr!("preferences.appearance.document_font_size"),
                 self.control(FieldId::FontSize),
                 FieldExtras {
                     field: Some(FieldId::FontSize),
-                    hint: Some("1–30 logical pixels; the default is 16."),
+                    hint: Some(tr!("preferences.appearance.document_font_size_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::FontSize,
                         "preferences-reset-font-size",
@@ -188,11 +191,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-line-height",
-                "Line height",
+                tr!("preferences.appearance.line_height"),
                 self.control(FieldId::LineHeight),
                 FieldExtras {
                     field: Some(FieldId::LineHeight),
-                    hint: Some("1.2–3.0 × the font size; the default is 2.0 (16/32)."),
+                    hint: Some(tr!("preferences.appearance.line_height_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::LineHeight,
                         "preferences-reset-line-height",
@@ -203,11 +206,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-editor-width",
-                "Page width",
+                tr!("preferences.appearance.page_width"),
                 self.control(FieldId::PageWidth),
                 FieldExtras {
                     field: Some(FieldId::PageWidth),
-                    hint: Some("30–100% of the editor pane; the default is 64%."),
+                    hint: Some(tr!("preferences.appearance.page_width_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::PageWidth,
                         "preferences-reset-editor-width",
@@ -220,13 +223,11 @@ impl PreferencesSheet {
         let build = vec![
             self.field(
                 "preferences-field-build-font-family",
-                "Build font",
+                tr!("preferences.appearance.build_font"),
                 self.control(FieldId::BuildFontFamily),
                 FieldExtras {
                     field: Some(FieldId::BuildFontFamily),
-                    hint: Some(
-                        "Installed family for source code. Empty uses the system monospace font.",
-                    ),
+                    hint: Some(tr!("preferences.appearance.build_font_hint").into()),
                     trailing: Some(
                         div()
                             .h_flex()
@@ -249,11 +250,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-build-font-size",
-                "Build font size",
+                tr!("preferences.appearance.build_font_size"),
                 self.control(FieldId::BuildFontSize),
                 FieldExtras {
                     field: Some(FieldId::BuildFontSize),
-                    hint: Some("1–30 logical pixels; default 14."),
+                    hint: Some(tr!("preferences.appearance.build_font_size_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::BuildFontSize,
                         "preferences-reset-build-font-size",
@@ -266,15 +267,26 @@ impl PreferencesSheet {
         let preview = vec![
             self.field(
                 "preferences-field-preview-font-family",
-                "Preview font",
+                tr!("preferences.appearance.preview_font"),
                 self.control(FieldId::PreviewFontFamily),
                 FieldExtras {
                     field: Some(FieldId::PreviewFontFamily),
-                    hint: Some("Installed family for rendered documents. Empty uses the preferred sans font."),
+                    hint: Some(tr!("preferences.appearance.preview_font_hint").into()),
                     trailing: Some(
-                        div().h_flex().items_center().gap_1()
-                            .child(self.font_picker(FieldId::PreviewFontFamily, "preview-font-picker", cx))
-                            .child(self.reset_button(FieldId::PreviewFontFamily, "preferences-reset-preview-font-family", cx))
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.font_picker(
+                                FieldId::PreviewFontFamily,
+                                "preview-font-picker",
+                                cx,
+                            ))
+                            .child(self.reset_button(
+                                FieldId::PreviewFontFamily,
+                                "preferences-reset-preview-font-family",
+                                cx,
+                            ))
                             .into_any_element(),
                     ),
                 },
@@ -282,12 +294,16 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-preview-font-size",
-                "Preview font size",
+                tr!("preferences.appearance.preview_font_size"),
                 self.control(FieldId::PreviewFontSize),
                 FieldExtras {
                     field: Some(FieldId::PreviewFontSize),
-                    hint: Some("1–30 logical pixels; default 16."),
-                    trailing: Some(self.reset_button(FieldId::PreviewFontSize, "preferences-reset-preview-font-size", cx)),
+                    hint: Some(tr!("preferences.appearance.preview_font_size_hint").into()),
+                    trailing: Some(self.reset_button(
+                        FieldId::PreviewFontSize,
+                        "preferences-reset-preview-font-size",
+                        cx,
+                    )),
                 },
                 cx,
             ),
@@ -295,13 +311,11 @@ impl PreferencesSheet {
         let headings = vec![
             self.field(
                 "preferences-field-heading-light",
-                "Light heading colour",
+                tr!("preferences.appearance.heading_light"),
                 self.control(FieldId::HeadingLight),
                 FieldExtras {
                     field: Some(FieldId::HeadingLight),
-                    hint: Some(
-                        "Optional #rrggbb or #rrggbbaa. Empty keeps the palette heading colour.",
-                    ),
+                    hint: Some(tr!("preferences.appearance.heading_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::HeadingLight,
                         "preferences-reset-heading-light",
@@ -312,13 +326,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-heading-dark",
-                "Dark heading colour",
+                tr!("preferences.appearance.heading_dark"),
                 self.control(FieldId::HeadingDark),
                 FieldExtras {
                     field: Some(FieldId::HeadingDark),
-                    hint: Some(
-                        "Optional #rrggbb or #rrggbbaa. Empty keeps the palette heading colour.",
-                    ),
+                    hint: Some(tr!("preferences.appearance.heading_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::HeadingDark,
                         "preferences-reset-heading-dark",
@@ -333,26 +345,26 @@ impl PreferencesSheet {
             .w_full()
             .gap_4()
             .child(self.section(
-                "Theme",
-                Some("Colour schemes shared by every project."),
+                tr!("preferences.appearance.theme_section"),
+                Some(tr!("preferences.appearance.theme_section_hint").into()),
                 appearance,
                 cx,
             ))
             .child(self.section(
-                "Interface",
-                Some("Typography for panels, controls and menus."),
+                tr!("preferences.appearance.interface_section"),
+                Some(tr!("preferences.appearance.interface_section_hint").into()),
                 interface,
                 cx,
             ))
             .child(self.section(
-                "Panel shape",
-                Some("One corner radius for panels and components across every project."),
+                tr!("preferences.appearance.panel_section"),
+                Some(tr!("preferences.appearance.panel_section_hint").into()),
                 panel,
                 cx,
             ))
             .child(self.section(
-                "Document",
-                Some("Body typography, page measure and heading colours."),
+                tr!("preferences.appearance.document_section"),
+                Some(tr!("preferences.appearance.document_section_hint").into()),
                 {
                     let mut fields = document;
                     fields.extend(headings);
@@ -360,10 +372,15 @@ impl PreferencesSheet {
                 },
                 cx,
             ))
-            .child(self.section("Build", Some("Source editor typography."), build, cx))
             .child(self.section(
-                "Preview",
-                Some("Rendered document typography."),
+                tr!("preferences.appearance.build_section"),
+                Some(tr!("preferences.appearance.build_section_hint").into()),
+                build,
+                cx,
+            ))
+            .child(self.section(
+                tr!("preferences.appearance.preview_section"),
+                Some(tr!("preferences.appearance.preview_section_hint").into()),
                 preview,
                 cx,
             ))
@@ -381,17 +398,19 @@ impl PreferencesSheet {
         Button::new(id)
             .small()
             .outline()
-            .label("Browse")
+            .label(tr!("preferences.appearance.browse"))
             .dropdown_menu(move |menu, _, _| {
                 let default_owner = owner.clone();
-                let mut menu = menu.item(PopupMenuItem::new("System default").on_click(
-                    move |_, window, cx| {
-                        let _ = default_owner.update(cx, |sheet, cx| {
-                            sheet.set_text(field, "", window, cx);
-                            sheet.refresh_errors(cx);
-                        });
-                    },
-                ));
+                let mut menu = menu.item(
+                    PopupMenuItem::new(tr!("preferences.option.system_default")).on_click(
+                        move |_, window, cx| {
+                            let _ = default_owner.update(cx, |sheet, cx| {
+                                sheet.set_text(field, "", window, cx);
+                                sheet.refresh_errors(cx);
+                            });
+                        },
+                    ),
+                );
                 for family in families {
                     let owner = owner.clone();
                     let family: &'static str = family;

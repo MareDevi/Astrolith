@@ -427,7 +427,7 @@ async fn start_failure_reports_the_captured_stderr_excerpt(cx: &mut gpui_kit::Te
         let message = panel.message().unwrap_or_default();
         assert!(message.contains("Astro output"), "{message:?}");
         assert!(message.contains("Cannot find module"), "{message:?}");
-        assert_eq!(panel.phase().label(), "failed");
+        assert_eq!(panel.phase(), PreviewPhase::Failed);
     });
 
     // Retry reuses the same backend after the project problem is fixed.
@@ -435,7 +435,7 @@ async fn start_failure_reports_the_captured_stderr_excerpt(cx: &mut gpui_kit::Te
     panel.update(cx, |panel, cx| panel.start(cx));
     wait_for(cx, &panel, |panel| panel.status().is_ready()).await;
     panel.read_with(cx, |panel, _| {
-        assert_eq!(panel.phase().label(), "ready");
+        assert_eq!(panel.phase(), PreviewPhase::Ready);
     });
 }
 

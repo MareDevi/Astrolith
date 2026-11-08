@@ -200,14 +200,46 @@ impl Selection {
     }
 }
 
+/// Why the terminal cannot show a live shell.
+#[derive(Clone, Debug)]
+enum TerminalFailure {
+    /// The shell process could not be spawned.
+    Shell(String),
+    /// The service rejected the grid size.
+    Resize,
+}
+
+impl TerminalFailure {
+    /// The failure rendered in the current interface language.
+    fn text(&self) -> String {
+        match self {
+            Self::Shell(error) => tr!("terminal.failure.shell", error = error.as_str()),
+            Self::Resize => tr!("terminal.failure.resize"),
+        }
+    }
+}
+
+/// Status line for a shell that exited.
+fn exit_status(exit: &ExitInfo) -> String {
+    match (&exit.code, &exit.detail) {
+        (Some(code), Some(signal)) => tr!(
+            "terminal.status.exited_with_signal",
+            code = code,
+            signal = signal.as_str()
+        ),
+        (Some(code), None) => tr!("terminal.status.exited_with_code", code = code),
+        (None, Some(signal)) => tr!("terminal.status.terminated_by", signal = signal.as_str()),
+        (None, None) => tr!("terminal.status.exited"),
+    }
+}
+
 /// The terminal panel entity.
 struct TerminalInstance {
     id: u64,
     session: Option<TerminalSession>,
     last_revision: u64,
     exit: Option<ExitInfo>,
-    status: Option<String>,
-    failure: Option<String>,
+    failure: Option<TerminalFailure>,
 }
 
 pub(crate) struct TerminalPanel {
@@ -360,7 +392,6 @@ impl TerminalPanel {
             session.kill();
         }
         terminal.exit = None;
-        terminal.status = None;
         terminal.failure = None;
         match TerminalSession::spawn(&root, 80, 24) {
             Ok(session) => {
@@ -368,7 +399,7 @@ impl TerminalPanel {
                 terminal.session = Some(session);
                 self.start_polling(cx);
             }
-            Err(error) => terminal.failure = Some(format!("Could not start the shell: {error}")),
+            Err(error) => terminal.failure = Some(TerminalFailure::Shell(error.to_string())),
         }
         cx.notify();
     }
@@ -434,7 +465,7 @@ impl TerminalPanel {
             }
             Err(error) => {
                 tracing::warn!(%error, root = %root.display(), "could not start the project terminal");
-                (None, Some(format!("Could not start the shell: {error}")))
+                (None, Some(TerminalFailure::Shell(error.to_string())))
             }
         };
         let last_revision = session.as_ref().map_or(0, TerminalSession::revision);
@@ -443,7 +474,6 @@ impl TerminalPanel {
             session,
             last_revision,
             exit: None,
-            status: None,
             failure,
         });
         self.active_terminal = Some(id);
@@ -562,11 +592,10 @@ impl TerminalPanel {
                 && session.size() != (cols, rows)
                 && session.resize(cols, rows).is_err()
             {
-                terminal.failure = Some("Could not resize the terminal.".into());
+                terminal.failure = Some(TerminalFailure::Resize);
                 changed = true;
             }
             if let Some(exit) = session.poll_exit() {
-                terminal.status = Some(exit.message());
                 terminal.exit = Some(exit);
                 changed = true;
             }
@@ -911,29 +940,28 @@ impl Render for TerminalPanel {
         let active = self.active_terminal;
         let active_failure = self
             .active_instance()
-            .and_then(|terminal| terminal.failure.clone());
+            .and_then(|terminal| terminal.failure.as_ref().map(TerminalFailure::text));
         let status = self
             .active_instance()
             .and_then(|terminal| {
-                terminal.failure.clone().or_else(|| {
-                    terminal
-                        .exit
-                        .as_ref()
-                        .map(|exit| format!("Terminal {}", exit.message()))
-                })
+                terminal
+                    .failure
+                    .as_ref()
+                    .map(TerminalFailure::text)
+                    .or_else(|| terminal.exit.as_ref().map(exit_status))
             })
             .unwrap_or_else(|| {
                 if running {
-                    "Shell running".to_owned()
+                    tr!("terminal.status.running")
                 } else {
-                    "No shell".to_owned()
+                    tr!("terminal.status.none")
                 }
             });
         let tabs = self
             .terminals
             .iter()
             .enumerate()
-            .map(|(index, terminal)| (terminal.id, format!("Terminal {}", index + 1)))
+            .map(|(index, terminal)| (terminal.id, tr!("terminal.tab.label", number = index + 1)))
             .collect::<Vec<_>>();
         let selected = self.selected_text();
         let terminal_size = self
@@ -994,7 +1022,7 @@ impl Render for TerminalPanel {
                         Button::new("terminal-new")
                             .small()
                             .ghost()
-                            .label("+ New")
+                            .label(tr!("terminal.actions.new"))
                             .on_click(create),
                     )
                     .child(div().flex_1().min_w_0())
@@ -1002,7 +1030,7 @@ impl Render for TerminalPanel {
                         Button::new("terminal-close")
                             .small()
                             .ghost()
-                            .label("Close")
+                            .label(tr!("terminal.actions.close"))
                             .disabled(active.is_none())
                             .on_click(close),
                     )
@@ -1010,7 +1038,7 @@ impl Render for TerminalPanel {
                         Button::new("terminal-copy")
                             .small()
                             .ghost()
-                            .label("Copy")
+                            .label(tr!("terminal.actions.copy"))
                             .disabled(selected.is_none())
                             .on_click(copy),
                     )
@@ -1018,7 +1046,7 @@ impl Render for TerminalPanel {
                         Button::new("terminal-clear")
                             .small()
                             .ghost()
-                            .label("Clear")
+                            .label(tr!("terminal.actions.clear"))
                             .disabled(!running)
                             .on_click(clear),
                     )
@@ -1026,7 +1054,7 @@ impl Render for TerminalPanel {
                         Button::new("terminal-restart")
                             .small()
                             .ghost()
-                            .label("Restart")
+                            .label(tr!("terminal.actions.restart"))
                             .on_click(restart),
                     )
                     .child(
@@ -1034,7 +1062,7 @@ impl Render for TerminalPanel {
                             .small()
                             .ghost()
                             .icon(IconName::X)
-                            .tooltip("Close terminal panel")
+                            .tooltip(tr!("terminal.actions.close_panel"))
                             .on_click(
                                 cx.listener(|_, _, _, cx| cx.emit(TerminalPanelEvent::ClosePanel)),
                             ),
@@ -1228,7 +1256,7 @@ impl Render for TerminalPanel {
                                         .text_color(cx.theme().muted_foreground)
                                         .child(
                                             active_failure.clone().unwrap_or_else(|| {
-                                                "No project terminal".to_owned()
+                                                tr!("terminal.empty.no_project")
                                             }),
                                         ),
                                 )

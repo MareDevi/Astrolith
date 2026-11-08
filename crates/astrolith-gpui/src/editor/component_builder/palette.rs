@@ -6,6 +6,7 @@
 //! builder renders.
 
 use astrolith_astro::components::{Component, ComponentLocation};
+use gpui_kit::SharedString;
 
 /// Where a palette row sits in the grouped list.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -18,10 +19,32 @@ pub(crate) enum ComponentGroup {
 
 impl ComponentGroup {
     /// The header the palette shows before a group's rows.
-    pub(crate) fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> SharedString {
         match self {
-            Self::Project => "Project components",
-            Self::Package(specifier) => specifier,
+            Self::Project => tr!("editor.palette.project_group").into(),
+            Self::Package(specifier) => specifier.clone().into(),
+        }
+    }
+}
+
+/// The requirement summary a palette row shows under its name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Requirement {
+    /// Required prop names, rendered as a comma-separated list.
+    Props(Vec<String>),
+    /// The number of optional props when nothing is required.
+    Optional(usize),
+    /// The component takes no props at all.
+    None,
+}
+
+impl Requirement {
+    /// The translated line under the row's name.
+    pub(crate) fn label(&self) -> SharedString {
+        match self {
+            Self::Props(names) => tr!("editor.palette.requires", names = names.join(", ")).into(),
+            Self::Optional(count) => tr!("editor.palette.optional_count", count = count).into(),
+            Self::None => tr!("editor.palette.no_props").into(),
         }
     }
 }
@@ -35,8 +58,8 @@ pub(crate) struct PaletteEntry {
     pub group_rank: u16,
     /// Framework badge label.
     pub badge: &'static str,
-    /// Required props, optional count or "No props".
-    pub requirement: String,
+    /// Required props, optional count or no props.
+    pub requirement: Requirement,
     /// Whether the component accepts wrapped content.
     pub wraps: bool,
 }
@@ -105,7 +128,7 @@ impl Palette {
                 group,
                 group_rank: 0,
                 badge: component.framework.label(),
-                requirement: requirement_summary(component),
+                requirement: requirement(component),
                 wraps: component.has_default_slot(),
                 component: component.clone(),
             })
@@ -178,7 +201,7 @@ impl Palette {
     /// The first hit of each group carries that group's label and the rest
     /// carry none, so the palette can print one header per group without
     /// inventing non-selectable rows.
-    pub(crate) fn headers(&self, hits: &[usize]) -> Vec<Option<&str>> {
+    pub(crate) fn headers(&self, hits: &[usize]) -> Vec<Option<SharedString>> {
         let mut previous = None;
         hits.iter()
             .map(|position| {
@@ -192,21 +215,21 @@ impl Palette {
 }
 
 /// The required-prop summary shown under a palette row's name.
-pub(crate) fn requirement_summary(component: &Component) -> String {
-    let required: Vec<&str> = component
+pub(crate) fn requirement(component: &Component) -> Requirement {
+    let required: Vec<String> = component
         .props
         .iter()
         .filter(|prop| prop.required)
-        .map(|prop| prop.name.as_str())
+        .map(|prop| prop.name.clone())
         .collect();
     if !required.is_empty() {
-        return format!("Requires {}", required.join(", "));
+        return Requirement::Props(required);
     }
     let optional = component.props.len();
     if optional > 0 {
-        return format!("{optional} optional");
+        return Requirement::Optional(optional);
     }
-    "No props".to_owned()
+    Requirement::None
 }
 
 /// Rank `query` against `name`; lower scores match more closely.
@@ -340,21 +363,21 @@ mod tests {
         assert_eq!(
             headers,
             vec![
-                Some("Project components"),
+                Some("Project components".into()),
                 None,
-                Some("@astrojs/starlight/components"),
+                Some("@astrojs/starlight/components".into()),
                 None,
-                Some("@example/ui"),
+                Some("@example/ui".into()),
             ]
         );
         // A search that drops the project group labels the first hit's group.
         assert_eq!(
             palette.headers(&palette.search("bet")),
-            [Some("Project components")]
+            [Some("Project components".into())]
         );
         assert_eq!(
             palette.headers(&palette.search("card")),
-            [Some("@astrojs/starlight/components")]
+            [Some("@astrojs/starlight/components".into())]
         );
     }
 
@@ -392,20 +415,23 @@ mod tests {
                 prop("rating", false),
             ],
         );
-        assert_eq!(requirement_summary(&required), "Requires title, author");
+        assert_eq!(
+            requirement(&required),
+            Requirement::Props(vec!["title".into(), "author".into()])
+        );
         let optional =
             project_component("Optional", vec![prop("tone", false), prop("count", false)]);
-        assert_eq!(requirement_summary(&optional), "2 optional");
+        assert_eq!(requirement(&optional), Requirement::Optional(2));
         assert_eq!(
-            requirement_summary(&project_component("Bare", Vec::new())),
-            "No props"
+            requirement(&project_component("Bare", Vec::new())),
+            Requirement::None
         );
 
         let mut defaulted = project_component("Defaulted", vec![prop("tone", false)]);
         defaulted.props[0].default = Some(PropDefault::String("tip".into()));
         let entry = &Palette::new(&[defaulted]).entries[0];
         assert_eq!(entry.badge, "Astro");
-        assert_eq!(entry.requirement, "1 optional");
+        assert_eq!(entry.requirement, Requirement::Optional(1));
         assert_eq!(entry.description(), Some("Defaulted description"));
     }
 }

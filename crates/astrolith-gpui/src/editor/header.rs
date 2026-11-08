@@ -27,6 +27,16 @@ pub(crate) struct InspectorRequested;
 pub(crate) struct LibraryRequested;
 pub(crate) struct WorkspaceCommandRequested(pub(crate) CommandId);
 
+/// One writing-mode toggle rendered on the document rail.
+struct WritingModeControl {
+    id: &'static str,
+    label: String,
+    tooltip: String,
+    icon: IconName,
+    command: CommandId,
+    active: bool,
+}
+
 pub(crate) struct DocumentHeader {
     project: Entity<ProjectWorkspace>,
     inspector_open: bool,
@@ -88,7 +98,7 @@ impl Render for DocumentHeader {
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("No document open"),
+                        .child(tr!("editor.header.no_document")),
                 )
                 .into_any_element();
         }
@@ -96,7 +106,7 @@ impl Render for DocumentHeader {
         let title = active_tab
             .as_ref()
             .map(|tab| tab.label.clone())
-            .unwrap_or_else(|| "Document".into());
+            .unwrap_or_else(|| tr!("editor.header.document_fallback").into());
         let collection = active_tab.as_ref().and_then(|tab| tab.collection.clone());
         let dirty = active_tab.as_ref().is_some_and(|tab| tab.dirty);
         let externally_changed = active_tab
@@ -106,23 +116,37 @@ impl Render for DocumentHeader {
 
         let save_status = self.project.read(cx).active_save_status();
         let (state, state_tone): (SharedString, _) = match save_status {
-            Some(SaveStatus::Conflict) => ("Conflict".into(), cx.theme().danger),
-            Some(SaveStatus::Saving) => ("Saving…".into(), cx.theme().warning),
-            Some(SaveStatus::Failed(_)) => ("Save failed".into(), cx.theme().danger),
-            Some(SaveStatus::Unsaved) => ("Unsaved".into(), cx.theme().warning),
-            Some(SaveStatus::Saved) if externally_changed => {
-                ("Changed on disk".into(), cx.theme().warning)
+            Some(SaveStatus::Conflict) => {
+                (tr!("editor.save_status.conflict").into(), cx.theme().danger)
             }
-            Some(SaveStatus::Saved) => ("Saved".into(), cx.theme().success),
-            None if externally_changed => ("Changed on disk".into(), cx.theme().warning),
-            None if dirty => ("Unsaved".into(), cx.theme().warning),
-            None => ("Saved".into(), cx.theme().success),
+            Some(SaveStatus::Saving) => {
+                (tr!("editor.save_status.saving").into(), cx.theme().warning)
+            }
+            Some(SaveStatus::Failed(_)) => {
+                (tr!("editor.save_status.failed").into(), cx.theme().danger)
+            }
+            Some(SaveStatus::Unsaved) => {
+                (tr!("editor.save_status.unsaved").into(), cx.theme().warning)
+            }
+            Some(SaveStatus::Saved) if externally_changed => (
+                tr!("editor.save_status.changed_on_disk").into(),
+                cx.theme().warning,
+            ),
+            Some(SaveStatus::Saved) => (tr!("editor.save_status.saved").into(), cx.theme().success),
+            None if externally_changed => (
+                tr!("editor.save_status.changed_on_disk").into(),
+                cx.theme().warning,
+            ),
+            None if dirty => (tr!("editor.save_status.unsaved").into(), cx.theme().warning),
+            None => (tr!("editor.save_status.saved").into(), cx.theme().success),
         };
-        let counts = self
-            .project
-            .read(cx)
-            .active_counts(cx)
-            .map(|counts| format!("{} words · {} characters", counts.words, counts.characters));
+        let counts = self.project.read(cx).active_counts(cx).map(|counts| {
+            tr!(
+                "editor.header.word_count",
+                words = counts.words,
+                characters = counts.characters
+            )
+        });
 
         let active_path = self.project.read(cx).active_path();
         let menu_owner = self.project.downgrade();
@@ -188,27 +212,44 @@ impl Render for DocumentHeader {
                             .child(state),
                     )
                     .child(
-                        ui::icon_button("save-document", IconName::Save, "Save file").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.project
-                                    .update(cx, |project, cx| project.save_active(window, cx));
-                            }),
-                        ),
+                        ui::icon_button(
+                            "save-document",
+                            IconName::Save,
+                            tr!("editor.header.save_file"),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.project
+                                .update(cx, |project, cx| project.save_active(window, cx));
+                        })),
                     )
                     .child(self.writing_mode_control(
-                        "toggle-focus-mode",
-                        "Focus mode",
-                        IconName::Eye,
-                        CommandId::ToggleFocusMode,
-                        writing_modes.focus,
+                        WritingModeControl {
+                            id: "toggle-focus-mode",
+                            label: tr!("editor.header.focus_mode"),
+                            tooltip: if writing_modes.focus {
+                                tr!("editor.header.focus_mode_off")
+                            } else {
+                                tr!("editor.header.focus_mode_on")
+                            },
+                            icon: IconName::Eye,
+                            command: CommandId::ToggleFocusMode,
+                            active: writing_modes.focus,
+                        },
                         cx,
                     ))
                     .child(self.writing_mode_control(
-                        "toggle-typewriter-mode",
-                        "Typewriter mode",
-                        IconName::Type,
-                        CommandId::ToggleTypewriterMode,
-                        writing_modes.typewriter,
+                        WritingModeControl {
+                            id: "toggle-typewriter-mode",
+                            label: tr!("editor.header.typewriter_mode"),
+                            tooltip: if writing_modes.typewriter {
+                                tr!("editor.header.typewriter_mode_off")
+                            } else {
+                                tr!("editor.header.typewriter_mode_on")
+                            },
+                            icon: IconName::Type,
+                            command: CommandId::ToggleTypewriterMode,
+                            active: writing_modes.typewriter,
+                        },
                         cx,
                     ))
                     .child(self.inspector_control(cx))
@@ -217,20 +258,20 @@ impl Render for DocumentHeader {
                             .small()
                             .ghost()
                             .icon(IconName::Ellipsis)
-                            .tooltip("Document actions")
-                            .accessibility_label("Document actions")
+                            .tooltip(tr!("editor.header.document_actions"))
+                            .accessibility_label(tr!("editor.header.document_actions"))
                             .dropdown_menu(move |menu, _, _| {
                                 let mut menu = menu;
                                 if let Some(path) = menu_active.clone() {
                                     let owner = menu_owner.clone();
-                                    menu =
-                                        menu.item(PopupMenuItem::new("Close document").on_click(
-                                            move |_, window, cx| {
+                                    menu = menu.item(
+                                        PopupMenuItem::new(tr!("editor.header.close_document"))
+                                            .on_click(move |_, window, cx| {
                                                 let _ = owner.update(cx, |project, cx| {
                                                     project.close_path(path.clone(), window, cx)
                                                 });
-                                            },
-                                        ));
+                                            }),
+                                    );
                                 }
                                 if menu_tabs.len() > 1 {
                                     menu = menu.separator();
@@ -262,25 +303,21 @@ impl Render for DocumentHeader {
 }
 
 impl DocumentHeader {
-    fn writing_mode_control(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        icon: IconName,
-        command: CommandId,
-        active: bool,
-        cx: &mut Context<Self>,
-    ) -> Button {
+    fn writing_mode_control(&self, control: WritingModeControl, cx: &mut Context<Self>) -> Button {
+        let WritingModeControl {
+            id,
+            label,
+            tooltip,
+            icon,
+            command,
+            active,
+        } = control;
         Button::new(id)
             .small()
             .ghost()
             .icon(icon)
             .selected(active)
-            .tooltip(if active {
-                format!("Turn off {label}")
-            } else {
-                format!("Turn on {label}")
-            })
+            .tooltip(tooltip)
             .accessibility_label(label)
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(WorkspaceCommandRequested(command));
@@ -292,8 +329,8 @@ impl DocumentHeader {
             .small()
             .ghost()
             .icon(IconName::PanelLeft)
-            .tooltip("Toggle library")
-            .accessibility_label("Toggle library")
+            .tooltip(tr!("editor.header.toggle_library"))
+            .accessibility_label(tr!("editor.header.toggle_library"))
             .selected(self.library_open)
             .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryRequested)))
     }
@@ -305,14 +342,14 @@ impl DocumentHeader {
             .ghost()
             .icon(IconName::SlidersHorizontal)
             .tooltip(if available {
-                "Edit frontmatter"
+                tr!("editor.header.edit_frontmatter")
             } else {
-                "No frontmatter for the active document"
+                tr!("editor.header.no_frontmatter")
             })
             .accessibility_label(if available {
-                "Edit frontmatter"
+                tr!("editor.header.edit_frontmatter")
             } else {
-                "Frontmatter unavailable for the active document"
+                tr!("editor.header.frontmatter_unavailable")
             })
             .selected(self.inspector_open)
             .disabled(!available)

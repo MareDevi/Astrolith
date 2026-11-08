@@ -1,0 +1,278 @@
+_version: 2
+preview:
+  title:
+    en: "Preview"
+    zh-CN: "预览"
+    ja: "プレビュー"
+  phase:
+    stopped:
+      en: "stopped"
+      zh-CN: "已停止"
+      ja: "停止"
+    starting:
+      en: "starting"
+      zh-CN: "正在启动"
+      ja: "起動中"
+    ready:
+      en: "ready"
+      zh-CN: "就绪"
+      ja: "準備完了"
+    stopping:
+      en: "stopping"
+      zh-CN: "正在停止"
+      ja: "停止中"
+    failed:
+      en: "failed"
+      zh-CN: "失败"
+      ja: "失敗"
+  status:
+    at:
+      en: "Preview at %{url}"
+      zh-CN: "预览地址：%{url}"
+      ja: "プレビュー: %{url}"
+    phase:
+      en: "Preview %{phase}"
+      zh-CN: "预览：%{phase}"
+      ja: "プレビュー: %{phase}"
+    serving:
+      en: "Serving %{url}"
+      zh-CN: "正在提供 %{url}"
+      ja: "%{url} を配信中"
+  actions:
+    start:
+      en: "Start server"
+      zh-CN: "启动服务器"
+      ja: "サーバーを起動"
+    retry:
+      en: "Retry"
+      zh-CN: "重试"
+      ja: "再試行"
+    stop:
+      en: "Stop"
+      zh-CN: "停止"
+      ja: "停止"
+    restart:
+      en: "Restart"
+      zh-CN: "重新启动"
+      ja: "再起動"
+    open:
+      en: "Open in browser"
+      zh-CN: "在浏览器中打开"
+      ja: "ブラウザで開く"
+    copy_url:
+      en: "Copy URL"
+      zh-CN: "复制 URL"
+      ja: "URL をコピー"
+    open_system:
+      en: "Open with system browser"
+      zh-CN: "使用系统浏览器打开"
+      ja: "システムブラウザで開く"
+    reload:
+      en: "Reload"
+      zh-CN: "重新加载"
+      ja: "再読み込み"
+  message:
+    open_project_to_start:
+      en: "Open an Astro project to start a preview."
+      zh-CN: "打开 Astro 项目即可启动预览。"
+      ja: "プレビューを開始するには Astro プロジェクトを開いてください。"
+    open_project_to_restart:
+      en: "Open an Astro project to restart a preview."
+      zh-CN: "打开 Astro 项目即可重新启动预览。"
+      ja: "プレビューを再起動するには Astro プロジェクトを開いてください。"
+    already_running:
+      en: "The preview server is already running."
+      zh-CN: "预览服务器已在运行。"
+      ja: "プレビューサーバーはすでに実行中です。"
+    starting:
+      en: "Starting the Astro dev server…"
+      zh-CN: "正在启动 Astro 开发服务器…"
+      ja: "Astro 開発サーバーを起動しています…"
+    stopping:
+      en: "Stopping the Astro dev server…"
+      zh-CN: "正在停止 Astro 开发服务器…"
+      ja: "Astro 開発サーバーを停止しています…"
+    restarting:
+      en: "Restarting the Astro dev server…"
+      zh-CN: "正在重新启动 Astro 开发服务器…"
+      ja: "Astro 開発サーバーを再起動しています…"
+    ready:
+      en: "Preview ready at %{url}"
+      zh-CN: "预览已就绪：%{url}"
+      ja: "プレビューの準備ができました: %{url}"
+    stopped:
+      en: "Preview stopped."
+      zh-CN: "预览已停止。"
+      ja: "プレビューを停止しました。"
+    stopped_unexpectedly:
+      en: "The preview server stopped unexpectedly: %{error}"
+      zh-CN: "预览服务器意外停止：%{error}"
+      ja: "プレビューサーバーが予期せず停止しました: %{error}"
+    stopped_on_its_own:
+      en: "The preview server stopped."
+      zh-CN: "预览服务器已停止。"
+      ja: "プレビューサーバーが停止しました。"
+    observe_failed:
+      en: "Could not observe the preview server: %{error}"
+      zh-CN: "无法监测预览服务器：%{error}"
+      ja: "プレビューサーバーを監視できませんでした: %{error}"
+    start_failed:
+      en: "Could not start the preview: %{error}"
+      zh-CN: "无法启动预览：%{error}"
+      ja: "プレビューを起動できませんでした: %{error}"
+    start_failed_with_output:
+      en: "Could not start the preview: %{error}\n\nAstro output:\n%{output}"
+      zh-CN: "无法启动预览：%{error}\n\nAstro 输出：\n%{output}"
+      ja: "プレビューを起動できませんでした: %{error}\n\nAstro の出力:\n%{output}"
+    stop_failed:
+      en: "Could not stop the preview: %{error}"
+      zh-CN: "无法停止预览：%{error}"
+      ja: "プレビューを停止できませんでした: %{error}"
+    url_unresolved:
+      en: "Could not resolve the preview URL: %{error}"
+      zh-CN: "无法解析预览 URL：%{error}"
+      ja: "プレビュー URL を解決できませんでした: %{error}"
+    opened_in_browser:
+      en: "Opened %{url} in the browser."
+      zh-CN: "已在浏览器中打开 %{url}。"
+      ja: "ブラウザで %{url} を開きました。"
+    preferred_browser_failed:
+      en: "Could not open the preferred browser: %{error}. The system default browser is available."
+      zh-CN: "无法打开首选浏览器：%{error}。可以使用系统默认浏览器。"
+      ja: "優先ブラウザを開けませんでした: %{error}。システムの既定のブラウザを利用できます。"
+    opened_in_system_browser:
+      en: "Opened %{url} in the system browser."
+      zh-CN: "已在系统浏览器中打开 %{url}。"
+      ja: "システムブラウザで %{url} を開きました。"
+    system_browser_failed:
+      en: "Could not open the system browser: %{error}"
+      zh-CN: "无法打开系统浏览器：%{error}"
+      ja: "システムブラウザを開けませんでした: %{error}"
+    embedded_unavailable:
+      en: "Embedded preview unavailable: %{reason}. External preview remains available."
+      zh-CN: "内嵌预览不可用：%{reason}。仍可使用外部预览。"
+      ja: "埋め込みプレビューを利用できません: %{reason}。外部プレビューは引き続き利用できます。"
+    open_document_to_preview:
+      en: "Open a document to preview its entry."
+      zh-CN: "打开文档以预览其条目。"
+      ja: "エントリをプレビューするにはドキュメントを開いてください。"
+    open_document_to_copy_url:
+      en: "Open a document to copy its preview URL."
+      zh-CN: "打开文档以复制其预览 URL。"
+      ja: "プレビュー URL をコピーするにはドキュメントを開いてください。"
+    copied_url:
+      en: "Copied preview URL: %{url}"
+      zh-CN: "已复制预览 URL：%{url}"
+      ja: "プレビュー URL をコピーしました: %{url}"
+  embedded:
+    title:
+      en: "Embedded preview"
+      zh-CN: "内嵌预览"
+      ja: "埋め込みプレビュー"
+    no_page:
+      en: "no page loaded"
+      zh-CN: "未加载页面"
+      ja: "ページが読み込まれていません"
+    start_prompt:
+      en: "Start the preview server to load the page."
+      zh-CN: "启动预览服务器以加载页面。"
+      ja: "ページを読み込むにはプレビューサーバーを起動してください。"
+    not_ready:
+      en: "The preview server is not ready yet."
+      zh-CN: "预览服务器尚未就绪。"
+      ja: "プレビューサーバーの準備がまだできていません。"
+    create_failed:
+      en: "could not create the embedded WebView: %{error}"
+      zh-CN: "无法创建内嵌 WebView：%{error}"
+      ja: "埋め込み WebView を作成できませんでした: %{error}"
+    feature_disabled:
+      en: "this build was compiled without the embedded-webview feature"
+      zh-CN: "此构建未编译 embedded-webview 功能"
+      ja: "このビルドは embedded-webview 機能なしでコンパイルされています"
+    capability:
+      not_compiled:
+        en: "this build was compiled without the embedded WebView feature"
+        zh-CN: "此构建未编译内嵌 WebView 功能"
+        ja: "このビルドは埋め込み WebView 機能なしでコンパイルされています"
+      wayland:
+        en: "embedded WebView needs an X11 or XWayland window; this Wayland window is external-only"
+        zh-CN: "内嵌 WebView 需要 X11 或 XWayland 窗口；此 Wayland 窗口仅支持外部预览"
+        ja: "埋め込み WebView には X11 または XWayland のウィンドウが必要です。この Wayland ウィンドウでは外部プレビューのみ利用できます"
+      headless:
+        en: "no display server is available"
+        zh-CN: "没有可用的显示服务器"
+        ja: "利用可能なディスプレイサーバーがありません"
+      unsupported_platform:
+        en: "the embedded WebView is not supported on this platform"
+        zh-CN: "此平台不支持内嵌 WebView"
+        ja: "このプラットフォームでは埋め込み WebView はサポートされていません"
+terminal:
+  failure:
+    shell:
+      en: "Could not start the shell: %{error}"
+      zh-CN: "无法启动终端：%{error}"
+      ja: "ターミナルを起動できませんでした: %{error}"
+    resize:
+      en: "Could not resize the terminal."
+      zh-CN: "无法调整终端大小。"
+      ja: "ターミナルのサイズを変更できませんでした。"
+  status:
+    exited_with_signal:
+      en: "Terminal exited with code %{code} (%{signal})"
+      zh-CN: "终端退出，代码 %{code}（%{signal}）"
+      ja: "ターミナルがコード %{code} で終了しました（%{signal}）"
+    exited_with_code:
+      en: "Terminal exited with code %{code}"
+      zh-CN: "终端退出，代码 %{code}"
+      ja: "ターミナルがコード %{code} で終了しました"
+    terminated_by:
+      en: "Terminal terminated by %{signal}"
+      zh-CN: "终端被 %{signal} 终止"
+      ja: "ターミナルが %{signal} により終了しました"
+    exited:
+      en: "Terminal exited"
+      zh-CN: "终端已退出"
+      ja: "ターミナルが終了しました"
+    running:
+      en: "Shell running"
+      zh-CN: "终端运行中"
+      ja: "ターミナル実行中"
+    none:
+      en: "No shell"
+      zh-CN: "无终端"
+      ja: "ターミナルなし"
+  tab:
+    label:
+      en: "Terminal %{number}"
+      zh-CN: "终端 %{number}"
+      ja: "ターミナル %{number}"
+  actions:
+    new:
+      en: "+ New"
+      zh-CN: "+ 新建"
+      ja: "+ 新規"
+    close:
+      en: "Close"
+      zh-CN: "关闭"
+      ja: "閉じる"
+    copy:
+      en: "Copy"
+      zh-CN: "复制"
+      ja: "コピー"
+    clear:
+      en: "Clear"
+      zh-CN: "清除"
+      ja: "クリア"
+    restart:
+      en: "Restart"
+      zh-CN: "重新启动"
+      ja: "再起動"
+    close_panel:
+      en: "Close terminal panel"
+      zh-CN: "关闭终端面板"
+      ja: "ターミナルパネルを閉じる"
+  empty:
+    no_project:
+      en: "No project terminal"
+      zh-CN: "无项目终端"
+      ja: "プロジェクトのターミナルがありません"

@@ -254,8 +254,8 @@ fn unsupported_shapes_fall_back_to_raw_yaml_or_an_explicit_refusal() {
         "a heterogeneous array is a validated raw-YAML control, never coerced"
     );
     assert!(matches!(by("meta").kind, ControlKind::RawYaml { .. }));
-    assert!(matches!(by("note").kind, ControlKind::ReadOnly { .. }));
-    assert!(matches!(by("legacy").kind, ControlKind::ReadOnly { .. }));
+    assert!(matches!(by("note").kind, ControlKind::ReadOnly));
+    assert!(matches!(by("legacy").kind, ControlKind::ReadOnly));
     assert!(matches!(by("fixed").kind, ControlKind::Literal { .. }));
     assert!(!by("fixed").editable);
 }
@@ -385,7 +385,7 @@ fn tags_parse_and_scalar_edits_are_typed() {
         Ok(FrontmatterValue::String(_))
     ));
     assert!(parse_value(&ControlKind::Object, "x").is_err());
-    assert!(parse_value(&ControlKind::ReadOnly { reason: "x".into() }, "x").is_err());
+    assert!(parse_value(&ControlKind::ReadOnly, "x").is_err());
 }
 
 #[test]

@@ -196,12 +196,12 @@ fn toolbar_body(
 
 fn format_label(command: FormatCommand) -> SharedString {
     match command {
-        FormatCommand::Bold => "Bold (Ctrl/Cmd+B)",
-        FormatCommand::Italic => "Italic (Ctrl/Cmd+I)",
-        FormatCommand::Link => "Link (Ctrl/Cmd+K)",
-        FormatCommand::Comment => "Markdown comment (Ctrl/Cmd+/)",
-        FormatCommand::Heading(_) => "Heading",
-        FormatCommand::Paragraph => "Paragraph",
+        FormatCommand::Bold => tr!("editor.selection_toolbar.bold"),
+        FormatCommand::Italic => tr!("editor.selection_toolbar.italic"),
+        FormatCommand::Link => tr!("editor.selection_toolbar.link"),
+        FormatCommand::Comment => tr!("editor.selection_toolbar.comment"),
+        FormatCommand::Heading(_) => tr!("editor.selection_toolbar.heading"),
+        FormatCommand::Paragraph => tr!("editor.selection_toolbar.paragraph"),
     }
     .into()
 }

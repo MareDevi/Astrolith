@@ -12,12 +12,16 @@ impl PreferencesSheet {
             return div()
                 .v_flex()
                 .gap_2()
-                .child(div().text_sm().child("No collections were discovered"))
+                .child(
+                    div()
+                        .text_sm()
+                        .child(tr!("preferences.collection.no_collections")),
+                )
                 .child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Open a project whose content configuration declares collections."),
+                        .child(tr!("preferences.collection.no_collections_hint")),
                 )
                 .into_any_element();
         }
@@ -52,14 +56,14 @@ impl PreferencesSheet {
             .into_any_element();
 
         let image_label = match self.collection_image_mode {
-            None => "Inherit project",
-            Some(ImagePathMode::Relative) => "Relative",
-            Some(ImagePathMode::Absolute) => "Absolute",
+            None => tr!("preferences.option.inherit_project"),
+            Some(ImagePathMode::Relative) => tr!("preferences.option.relative"),
+            Some(ImagePathMode::Absolute) => tr!("preferences.option.absolute"),
         };
         let extension_label = match self.collection_extension {
-            None => "Inherit project",
-            Some(FileExtension::Md) => "Markdown (.md)",
-            Some(FileExtension::Mdx) => "MDX (.mdx)",
+            None => tr!("preferences.option.inherit_project"),
+            Some(FileExtension::Md) => tr!("preferences.option.markdown"),
+            Some(FileExtension::Mdx) => tr!("preferences.option.mdx"),
         };
 
         let image_weak = weak.clone();
@@ -70,9 +74,15 @@ impl PreferencesSheet {
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu;
                 for (label, mode) in [
-                    ("Inherit project", None),
-                    ("Relative", Some(ImagePathMode::Relative)),
-                    ("Absolute", Some(ImagePathMode::Absolute)),
+                    (tr!("preferences.option.inherit_project"), None),
+                    (
+                        tr!("preferences.option.relative"),
+                        Some(ImagePathMode::Relative),
+                    ),
+                    (
+                        tr!("preferences.option.absolute"),
+                        Some(ImagePathMode::Absolute),
+                    ),
                 ] {
                     let weak = image_weak.clone();
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
@@ -94,9 +104,9 @@ impl PreferencesSheet {
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu;
                 for (label, value) in [
-                    ("Inherit project", None),
-                    ("Markdown (.md)", Some(FileExtension::Md)),
-                    ("MDX (.mdx)", Some(FileExtension::Mdx)),
+                    (tr!("preferences.option.inherit_project"), None),
+                    (tr!("preferences.option.markdown"), Some(FileExtension::Md)),
+                    (tr!("preferences.option.mdx"), Some(FileExtension::Mdx)),
                 ] {
                     let weak = extension_weak.clone();
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
@@ -113,11 +123,11 @@ impl PreferencesSheet {
         let directories = vec![
             self.field(
                 "preferences-field-collection-content",
-                "Content directory",
+                tr!("preferences.collection.content_directory"),
                 self.control(FieldId::CollectionContent),
                 FieldExtras {
                     field: Some(FieldId::CollectionContent),
-                    hint: Some("Project-relative directory that replaces this collection's base."),
+                    hint: Some(tr!("preferences.collection.content_directory_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::CollectionContent,
                         "preferences-reset-collection-content",
@@ -128,11 +138,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-collection-assets",
-                "Assets directory",
+                tr!("preferences.collection.assets_directory"),
                 self.control(FieldId::CollectionAssets),
                 FieldExtras {
                     field: Some(FieldId::CollectionAssets),
-                    hint: Some("Project-relative directory for this collection's images."),
+                    hint: Some(tr!("preferences.collection.assets_directory_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::CollectionAssets,
                         "preferences-reset-collection-assets",
@@ -143,22 +153,22 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-collection-image-mode",
-                "Image paths",
+                tr!("preferences.collection.image_paths"),
                 image_mode,
                 FieldExtras {
                     field: None,
-                    hint: Some("Overrides the project image path mode."),
+                    hint: Some(tr!("preferences.collection.image_paths_hint").into()),
                     trailing: None,
                 },
                 cx,
             ),
             self.field(
                 "preferences-field-collection-extension",
-                "New files",
+                tr!("preferences.collection.new_files"),
                 extension,
                 FieldExtras {
                     field: None,
-                    hint: Some("Overrides the project new-file type."),
+                    hint: Some(tr!("preferences.collection.new_files_hint").into()),
                     trailing: None,
                 },
                 cx,
@@ -168,11 +178,11 @@ impl PreferencesSheet {
         let mappings = vec![
             self.field(
                 "preferences-field-collection-title",
-                "Title field",
+                tr!("preferences.collection.title_field"),
                 self.control(FieldId::CollectionTitle),
                 FieldExtras {
                     field: Some(FieldId::CollectionTitle),
-                    hint: Some("Checked against this collection's schema kinds."),
+                    hint: Some(tr!("preferences.collection.mapping_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::CollectionTitle,
                         "preferences-reset-collection-title",
@@ -183,11 +193,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-collection-date",
-                "Date field",
+                tr!("preferences.collection.date_field"),
                 self.control(FieldId::CollectionDate),
                 FieldExtras {
                     field: Some(FieldId::CollectionDate),
-                    hint: Some("Checked against this collection's schema kinds."),
+                    hint: Some(tr!("preferences.collection.mapping_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::CollectionDate,
                         "preferences-reset-collection-date",
@@ -198,11 +208,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-collection-description",
-                "Description field",
+                tr!("preferences.collection.description_field"),
                 self.control(FieldId::CollectionDescription),
                 FieldExtras {
                     field: Some(FieldId::CollectionDescription),
-                    hint: Some("Checked against this collection's schema kinds."),
+                    hint: Some(tr!("preferences.collection.mapping_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::CollectionDescription,
                         "preferences-reset-collection-description",
@@ -213,11 +223,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-collection-draft",
-                "Draft field",
+                tr!("preferences.collection.draft_field"),
                 self.control(FieldId::CollectionDraft),
                 FieldExtras {
                     field: Some(FieldId::CollectionDraft),
-                    hint: Some("Must be a boolean field in this collection's schema."),
+                    hint: Some(tr!("preferences.collection.draft_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::CollectionDraft,
                         "preferences-reset-collection-draft",
@@ -230,11 +240,11 @@ impl PreferencesSheet {
 
         let url = vec![self.field(
             "preferences-field-collection-url",
-            "Content Finder URL pattern",
+            tr!("preferences.collection.url_pattern"),
             self.control(FieldId::CollectionUrlPattern),
             FieldExtras {
                 field: Some(FieldId::CollectionUrlPattern),
-                hint: Some("Empty links to the entry file. {slug} is URL-encoded."),
+                hint: Some(tr!("preferences.collection.url_pattern_hint").into()),
                 trailing: Some(self.reset_button(
                     FieldId::CollectionUrlPattern,
                     "preferences-reset-collection-url",
@@ -253,24 +263,29 @@ impl PreferencesSheet {
                     .v_flex()
                     .w_full()
                     .gap_1()
-                    .child(div().text_sm().font_semibold().child("Collection"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .child(tr!("preferences.collection.collection")),
+                    )
                     .child(selector),
             )
             .child(self.section(
-                "Directories",
-                Some("Empty fields inherit the project setting."),
+                tr!("preferences.collection.directories"),
+                Some(tr!("preferences.collection.directories_hint").into()),
                 directories,
                 cx,
             ))
             .child(self.section(
-                "Frontmatter fields",
-                Some("Collection mappings win over project mappings."),
+                tr!("preferences.collection.frontmatter_fields"),
+                Some(tr!("preferences.collection.frontmatter_fields_hint").into()),
                 mappings,
                 cx,
             ))
             .child(self.section(
-                "Links",
-                Some("Used when inserting a Content Finder entry as a Markdown link."),
+                tr!("preferences.collection.links"),
+                Some(tr!("preferences.collection.links_hint").into()),
                 url,
                 cx,
             ))

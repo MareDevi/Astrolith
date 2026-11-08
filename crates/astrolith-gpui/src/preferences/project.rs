@@ -2,27 +2,23 @@
 
 use super::*;
 
-/// Shown when the project declares `astro-auto-import`; never changes a setting.
-const AUTO_IMPORT_REMINDER: &str = "This project declares astro-auto-import. Components may already \
-be available without imports; Astrolith never enables import insertion for you.";
-
 impl PreferencesSheet {
     pub(super) fn project_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.weak_entity();
         let image_label = match self.project_image_mode {
-            None => "Inherit (relative)",
-            Some(ImagePathMode::Relative) => "Relative",
-            Some(ImagePathMode::Absolute) => "Absolute",
+            None => tr!("preferences.option.inherit_relative"),
+            Some(ImagePathMode::Relative) => tr!("preferences.option.relative"),
+            Some(ImagePathMode::Absolute) => tr!("preferences.option.absolute"),
         };
         let extension_label = match self.project_extension {
-            None => "Inherit global",
-            Some(FileExtension::Md) => "Markdown (.md)",
-            Some(FileExtension::Mdx) => "MDX (.mdx)",
+            None => tr!("preferences.option.inherit_global"),
+            Some(FileExtension::Md) => tr!("preferences.option.markdown"),
+            Some(FileExtension::Mdx) => tr!("preferences.option.mdx"),
         };
         let imports_label = match self.project_insert_imports {
-            None => "Inherit",
-            Some(true) => "On",
-            Some(false) => "Off",
+            None => tr!("preferences.option.inherit"),
+            Some(true) => tr!("preferences.option.on"),
+            Some(false) => tr!("preferences.option.off"),
         };
 
         let image_weak = weak.clone();
@@ -33,9 +29,15 @@ impl PreferencesSheet {
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu;
                 for (label, mode) in [
-                    ("Inherit (relative)", None),
-                    ("Relative", Some(ImagePathMode::Relative)),
-                    ("Absolute", Some(ImagePathMode::Absolute)),
+                    (tr!("preferences.option.inherit_relative"), None),
+                    (
+                        tr!("preferences.option.relative"),
+                        Some(ImagePathMode::Relative),
+                    ),
+                    (
+                        tr!("preferences.option.absolute"),
+                        Some(ImagePathMode::Absolute),
+                    ),
                 ] {
                     let weak = image_weak.clone();
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
@@ -57,9 +59,9 @@ impl PreferencesSheet {
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu;
                 for (label, value) in [
-                    ("Inherit global", None),
-                    ("Markdown (.md)", Some(FileExtension::Md)),
-                    ("MDX (.mdx)", Some(FileExtension::Mdx)),
+                    (tr!("preferences.option.inherit_global"), None),
+                    (tr!("preferences.option.markdown"), Some(FileExtension::Md)),
+                    (tr!("preferences.option.mdx"), Some(FileExtension::Mdx)),
                 ] {
                     let weak = extension_weak.clone();
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
@@ -80,8 +82,11 @@ impl PreferencesSheet {
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu;
-                for (label, value) in [("Inherit", None), ("On", Some(true)), ("Off", Some(false))]
-                {
+                for (label, value) in [
+                    (tr!("preferences.option.inherit"), None),
+                    (tr!("preferences.option.on"), Some(true)),
+                    (tr!("preferences.option.off"), Some(false)),
+                ] {
                     let weak = imports_weak.clone();
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
                         let _ = weak.update(cx, |sheet, cx| {
@@ -101,11 +106,11 @@ impl PreferencesSheet {
         let mut directories = vec![
             self.field(
                 "preferences-field-project-content",
-                "Content directory",
+                tr!("preferences.project.content_directory"),
                 self.control(FieldId::ProjectContent),
                 FieldExtras {
                     field: Some(FieldId::ProjectContent),
-                    hint: Some("Project-relative root that contains the collection directories."),
+                    hint: Some(tr!("preferences.project.content_directory_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::ProjectContent,
                         "preferences-reset-project-content",
@@ -116,11 +121,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-project-assets",
-                "Assets directory",
+                tr!("preferences.project.assets_directory"),
                 self.control(FieldId::ProjectAssets),
                 FieldExtras {
                     field: Some(FieldId::ProjectAssets),
-                    hint: Some("Project-relative directory for dropped and picked images."),
+                    hint: Some(tr!("preferences.project.assets_directory_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::ProjectAssets,
                         "preferences-reset-project-assets",
@@ -131,11 +136,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-project-mdx",
-                "MDX component directory",
+                tr!("preferences.project.mdx_directory"),
                 self.control(FieldId::ProjectMdx),
                 FieldExtras {
                     field: Some(FieldId::ProjectMdx),
-                    hint: Some("Only projects have an MDX component directory."),
+                    hint: Some(tr!("preferences.project.mdx_directory_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::ProjectMdx,
                         "preferences-reset-project-mdx",
@@ -147,22 +152,22 @@ impl PreferencesSheet {
         ];
         directories.push(self.field(
             "preferences-field-project-image-mode",
-            "Image paths",
+            tr!("preferences.project.image_paths"),
             image_mode,
             FieldExtras {
                 field: None,
-                hint: Some("Absolute paths start at the project root; relative paths start at the document."),
+                hint: Some(tr!("preferences.project.image_paths_hint").into()),
                 trailing: None,
             },
             cx,
         ));
         directories.push(self.field(
             "preferences-field-project-extension",
-            "New files",
+            tr!("preferences.project.new_files"),
             extension,
             FieldExtras {
                 field: None,
-                hint: Some("Overrides the General new-file type for this project."),
+                hint: Some(tr!("preferences.project.new_files_hint").into()),
                 trailing: None,
             },
             cx,
@@ -184,18 +189,18 @@ impl PreferencesSheet {
                         div()
                             .text_xs()
                             .text_color(cx.theme().foreground)
-                            .child(AUTO_IMPORT_REMINDER),
+                            .child(tr!("preferences.project.auto_import_notice")),
                     )
                     .into_any_element(),
             );
         }
         imports_section.push(self.field(
             "preferences-field-project-imports",
-            "Insert MDX imports",
+            tr!("preferences.project.insert_imports"),
             imports,
             FieldExtras {
                 field: None,
-                hint: Some("Experimental. Inherit leaves the choice to publisher defaults (off)."),
+                hint: Some(tr!("preferences.project.insert_imports_hint").into()),
                 trailing: None,
             },
             cx,
@@ -204,11 +209,11 @@ impl PreferencesSheet {
         let mappings = vec![
             self.field(
                 "preferences-field-project-title",
-                "Title field",
+                tr!("preferences.project.title_field"),
                 self.control(FieldId::ProjectTitle),
                 FieldExtras {
                     field: Some(FieldId::ProjectTitle),
-                    hint: Some("Schema field mapped to the entry title; empty uses “title”."),
+                    hint: Some(tr!("preferences.project.title_field_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::ProjectTitle,
                         "preferences-reset-project-title",
@@ -219,11 +224,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-project-date",
-                "Date field",
+                tr!("preferences.project.date_field"),
                 self.control(FieldId::ProjectDate),
                 FieldExtras {
                     field: Some(FieldId::ProjectDate),
-                    hint: Some("Schema field mapped to the publication date; empty uses “date”."),
+                    hint: Some(tr!("preferences.project.date_field_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::ProjectDate,
                         "preferences-reset-project-date",
@@ -234,11 +239,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-project-description",
-                "Description field",
+                tr!("preferences.project.description_field"),
                 self.control(FieldId::ProjectDescription),
                 FieldExtras {
                     field: Some(FieldId::ProjectDescription),
-                    hint: Some("Schema field mapped to the description; empty uses “description”."),
+                    hint: Some(tr!("preferences.project.description_field_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::ProjectDescription,
                         "preferences-reset-project-description",
@@ -249,13 +254,11 @@ impl PreferencesSheet {
             ),
             self.field(
                 "preferences-field-project-draft",
-                "Draft field",
+                tr!("preferences.project.draft_field"),
                 self.control(FieldId::ProjectDraft),
                 FieldExtras {
                     field: Some(FieldId::ProjectDraft),
-                    hint: Some(
-                        "Boolean schema field mapped to the draft flag; empty uses “draft”.",
-                    ),
+                    hint: Some(tr!("preferences.project.draft_field_hint").into()),
                     trailing: Some(self.reset_button(
                         FieldId::ProjectDraft,
                         "preferences-reset-project-draft",
@@ -271,15 +274,20 @@ impl PreferencesSheet {
             .w_full()
             .gap_6()
             .child(self.section(
-                "Directories and paths",
-                Some("Empty fields inherit the Astro configuration or the global default."),
+                tr!("preferences.project.directories"),
+                Some(tr!("preferences.project.directories_hint").into()),
                 directories,
                 cx,
             ))
-            .child(self.section("MDX imports", None, imports_section, cx))
             .child(self.section(
-                "Frontmatter fields",
-                Some("Mappings are checked against the generated collection schemas."),
+                tr!("preferences.project.mdx_imports"),
+                None,
+                imports_section,
+                cx,
+            ))
+            .child(self.section(
+                tr!("preferences.project.frontmatter_fields"),
+                Some(tr!("preferences.project.frontmatter_fields_hint").into()),
                 mappings,
                 cx,
             ))

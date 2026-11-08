@@ -22,6 +22,11 @@ pub(crate) struct WorkspacePanel {
     id: &'static str,
     title: SharedString,
     content: SharedString,
+    /// Translation key of the placeholder title, or `None` when a document
+    /// file name owns the title.
+    title_key: Option<&'static str>,
+    /// Translation key of the empty-state body, or `None` for live copy.
+    content_key: Option<&'static str>,
     focus: FocusHandle,
     pub editor: Option<Entity<EditorState>>,
     readonly: bool,
@@ -75,6 +80,7 @@ impl WorkspacePanel {
     ) {
         self.readonly = true;
         self.wiring = None;
+        self.title_key = None;
         self.title = source
             .path
             .file_name()
@@ -119,6 +125,7 @@ impl WorkspacePanel {
         wiring: Option<EditorWiring>,
         cx: &mut Context<Self>,
     ) {
+        self.title_key = None;
         self.title = title.into();
         self.editor = Some(editor);
         self.readonly = false;
@@ -184,13 +191,16 @@ impl WorkspacePanel {
     pub fn clear_editor(&mut self, cx: &mut Context<Self>) {
         self.editor = None;
         self.wiring = None;
-        self.title = "Document".into();
-        self.content = "Choose an entry from the library to begin writing.".into();
+        self.title_key = Some("shell.panel.document");
+        self.content_key = Some("shell.empty.document");
+        self.title = tr!("shell.panel.document").into();
+        self.content = tr!("shell.empty.document").into();
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
     }
 
     pub fn set_content(&mut self, content: String, cx: &mut Context<Self>) {
+        self.content_key = None;
         if self.content.as_ref() == content {
             return;
         }
@@ -198,10 +208,64 @@ impl WorkspacePanel {
         cx.notify();
     }
 
+    /// Show a localized empty-state body from its translation key.
+    pub fn set_content_key(&mut self, key: &'static str, cx: &mut Context<Self>) {
+        self.content_key = Some(key);
+        let content = tr!(key);
+        if self.content.as_ref() == content.as_str() {
+            return;
+        }
+        self.content = content.into();
+        cx.notify();
+    }
+
+    /// Mark the title and empty-state body as placeholder copy that follows
+    /// the active locale.
+    ///
+    /// Opening a document clears the title key, so a language change rewrites
+    /// placeholder copy only and never a live document's file name.
+    pub(crate) fn with_placeholders(
+        mut self,
+        title: Option<&'static str>,
+        content: Option<&'static str>,
+    ) -> Self {
+        if let Some(key) = title {
+            self.title_key = Some(key);
+            self.title = tr!(key).into();
+        }
+        if let Some(key) = content {
+            self.content_key = Some(key);
+            self.content = tr!(key).into();
+        }
+        self
+    }
+
+    /// Rewrite localized placeholder copy in the active locale.
+    pub fn retranslate(&mut self, cx: &mut Context<Self>) {
+        let mut changed = false;
+        if let Some(key) = self.title_key {
+            let title = tr!(key);
+            if self.title.as_ref() != title.as_str() {
+                self.title = title.into();
+                changed = true;
+            }
+        }
+        if let Some(key) = self.content_key {
+            let content = tr!(key);
+            if self.content.as_ref() != content.as_str() {
+                self.content = content.into();
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     pub fn new(
         id: &'static str,
-        title: &'static str,
-        content: &'static str,
+        title: impl Into<SharedString>,
+        content: impl Into<SharedString>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -210,6 +274,8 @@ impl WorkspacePanel {
             id,
             title: title.into(),
             content: content.into(),
+            title_key: None,
+            content_key: None,
             focus: cx.focus_handle().tab_stop(true),
             editor: None,
             readonly: true,
@@ -418,11 +484,11 @@ impl Render for WorkspacePanel {
                     .readonly(self.readonly)
                     .bordered(false)
                     .aria_label(if code {
-                        "Source file, editable"
+                        tr!("shell.editor.source_file_editable")
                     } else if self.readonly {
-                        "Document source, readonly"
+                        tr!("shell.editor.document_readonly")
                     } else {
-                        "Document source, editable"
+                        tr!("shell.editor.document_editable")
                     })
                     .size_full();
                 if code {
@@ -536,7 +602,7 @@ impl Render for WorkspacePanel {
                 view.child(crate::ui::empty_state(
                     "document-empty",
                     IconName::NotebookPen,
-                    "No file open",
+                    tr!("shell.panel.no_file_open"),
                     self.content.clone(),
                     None,
                     cx,

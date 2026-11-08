@@ -132,7 +132,7 @@ impl ProjectWorkspace {
             "starting guarded save"
         );
         if request.kind == SaveKind::Manual {
-            self.status = "Saving…".into();
+            self.status = tr!("browser.save.saving");
         }
         cx.notify();
         // Retain the bytes this attempt persists: a newer revision typed during
@@ -219,7 +219,7 @@ impl ProjectWorkspace {
         let Some(session) = self.sessions.get(path).cloned() else {
             self.save_coordinator.forget(path);
             self.pending_after_save.clear();
-            self.status = "Document closed before the save finished.".into();
+            self.status = tr!("browser.save.closed_before_finish");
             return;
         };
         match completion {
@@ -270,9 +270,9 @@ impl ProjectWorkspace {
                 }
                 if request.kind == SaveKind::Manual || manual {
                     self.status = if current && confirmed {
-                        "Saved.".into()
+                        tr!("browser.save.saved")
                     } else {
-                        "Saved an earlier revision; newer edits remain unsaved.".into()
+                        tr!("browser.save.saved_earlier")
                     };
                 }
                 self.update_tab_state(path, cx);
@@ -288,14 +288,14 @@ impl ProjectWorkspace {
                     session.externally_changed = true;
                     cx.notify();
                 });
-                self.status = "Save conflict: the file changed on disk. Your edits are kept. Choose “Reload from Disk (discard my edits)”, “Overwrite Disk with My Edits”, or “Save My Edits as a Copy” to resolve it.".into();
+                self.status = tr!("browser.save.conflict");
                 self.update_tab_state(path, cx);
                 cx.emit(SessionChanged);
                 self.abandon_pending_after_save(path);
             }
             SaveCompletion::Failed { message, .. } => {
                 tracing::error!(path = %path.display(), %message, "document save failed");
-                self.status = format!("Save failed: {message}");
+                self.status = tr!("browser.save.failed", error = message);
                 self.update_tab_state(path, cx);
                 cx.emit(SessionChanged);
                 self.schedule_recovery(cx);
@@ -361,18 +361,22 @@ impl ProjectWorkspace {
             return;
         };
         let consequence = match pending {
-            PendingAfterSave::Rename { .. } => "The rename was not applied.",
-            PendingAfterSave::Duplicate { .. } => "The entry was not duplicated.",
-            PendingAfterSave::Trash { .. } => "The entry was not moved to the Trash.",
-            PendingAfterSave::Close { .. } => "The document stays open.",
+            PendingAfterSave::Rename { .. } => tr!("browser.save.rename_not_applied"),
+            PendingAfterSave::Duplicate { .. } => tr!("browser.save.not_duplicated"),
+            PendingAfterSave::Trash { .. } => tr!("browser.save.not_trashed"),
+            PendingAfterSave::Close { .. } => tr!("browser.save.document_stays_open"),
         };
-        self.status = format!("{} {consequence}", self.status);
+        self.status = tr!(
+            "browser.save.with_consequence",
+            status = self.status.clone(),
+            consequence = consequence
+        );
     }
 
     /// Save the active document with conflict detection.
     pub fn save_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.active.clone() else {
-            self.status = "No document is open to save.".into();
+            self.status = tr!("browser.save.no_document_to_save");
             cx.notify();
             return;
         };
@@ -386,7 +390,7 @@ impl ProjectWorkspace {
     /// the session's baseline, fingerprint and clean state follow those bytes.
     pub(crate) fn resolve_conflict_reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.active.clone() else {
-            self.status = "No document is open to reload.".into();
+            self.status = tr!("browser.save.no_document_to_reload");
             cx.notify();
             return;
         };
@@ -395,7 +399,7 @@ impl ProjectWorkspace {
         };
         let identity = session.read(cx).buffer.identity().clone();
         let read_path = path.clone();
-        self.status = "Reloading the document from disk…".into();
+        self.status = tr!("browser.save.reloading");
         cx.notify();
         let work = runtime::blocking(cx, move || {
             read_bounded(&read_path, MAX_DOCUMENT_BYTES).map_err(|error| error.to_string())
@@ -422,20 +426,18 @@ impl ProjectWorkspace {
                                     });
                                     task.detach();
                                 }
-                                this.status = format!(
-                                    "Reloaded {} from disk; your unsaved edits were discarded.",
-                                    file_label(&path)
-                                );
+                                this.status =
+                                    tr!("browser.save.reloaded", file = file_label(&path));
                                 this.update_tab_state(&path, cx);
                                 cx.emit(SessionChanged);
                             }
                             Err(error) => {
-                                this.status = format!("Could not reload the document: {error}");
+                                this.status = tr!("browser.save.reload_failed", error = error);
                             }
                         }
                     }
                     Err(error) => {
-                        this.status = format!("Could not read the document from disk: {error}");
+                        this.status = tr!("browser.save.read_failed", error = error);
                     }
                 }
                 cx.notify();
@@ -454,7 +456,7 @@ impl ProjectWorkspace {
         cx: &mut Context<Self>,
     ) {
         let Some(path) = self.active.clone() else {
-            self.status = "No document is open to overwrite.".into();
+            self.status = tr!("browser.save.no_document_to_overwrite");
             cx.notify();
             return;
         };
@@ -471,7 +473,7 @@ impl ProjectWorkspace {
         });
         let persisted = content.clone();
         let write_path = path.clone();
-        self.status = "Overwriting the file with your edits…".into();
+        self.status = tr!("browser.save.overwriting");
         cx.notify();
         let work = runtime::spawn(cx, async move {
             overwrite_document(&write_path, &content)
@@ -507,15 +509,15 @@ impl ProjectWorkspace {
                             task.detach();
                         }
                         this.status = if confirmed {
-                            format!("Overwrote {} with your edits.", file_label(&path))
+                            tr!("browser.save.overwrote", file = file_label(&path))
                         } else {
-                            "Wrote an earlier revision; newer edits remain unsaved.".into()
+                            tr!("browser.save.wrote_earlier")
                         };
                         this.update_tab_state(&path, cx);
                         cx.emit(SessionChanged);
                     }
                     Err(error) => {
-                        this.status = format!("Could not overwrite the file: {error}");
+                        this.status = tr!("browser.save.overwrite_failed", error = error);
                     }
                 }
                 cx.notify();
@@ -533,7 +535,7 @@ impl ProjectWorkspace {
         cx: &mut Context<Self>,
     ) {
         let Some(path) = self.active.clone() else {
-            self.status = "No document is open to copy.".into();
+            self.status = tr!("browser.save.no_document_to_copy");
             cx.notify();
             return;
         };
@@ -545,7 +547,7 @@ impl ProjectWorkspace {
             session.buffer.current_text().to_owned()
         });
         let source = path.clone();
-        self.status = "Saving a copy of your edits…".into();
+        self.status = tr!("browser.save.saving_copy");
         cx.notify();
         let work = runtime::spawn(cx, async move {
             save_document_copy(&source, &content)
@@ -562,13 +564,14 @@ impl ProjectWorkspace {
                             .and_then(|root| copy.strip_prefix(root).ok())
                             .map(|relative| relative.display().to_string())
                             .unwrap_or_else(|| copy.display().to_string());
-                        this.status = format!(
-                            "Saved a copy to {shown}. {} keeps your unsaved edits.",
-                            file_label(&path)
+                        this.status = tr!(
+                            "browser.save.saved_copy",
+                            shown = shown,
+                            file = file_label(&path)
                         );
                     }
                     Err(error) => {
-                        this.status = format!("Could not save a copy: {error}");
+                        this.status = tr!("browser.save.copy_failed", error = error);
                     }
                 }
                 cx.notify();
@@ -610,7 +613,7 @@ impl ProjectWorkspace {
             Some(request) => self.begin_save(request, window, cx),
             None => {
                 if kind == SaveKind::Manual {
-                    self.status = "Saving…".into();
+                    self.status = tr!("browser.save.saving");
                 }
             }
         }
@@ -644,10 +647,7 @@ impl ProjectWorkspace {
                     path = %path.display(),
                     "aborting a pending trash: newer edits are still unsaved"
                 );
-                self.status = format!(
-                    "{} was not moved to the Trash because newer edits were typed while saving. Save again, then trash it.",
-                    name(&path)
-                );
+                self.status = tr!("browser.save.trash_aborted_newer", file = name(&path));
                 self.schedule_recovery(cx);
             }
             PendingAfterSave::Close { path } => {
@@ -655,10 +655,7 @@ impl ProjectWorkspace {
                     path = %path.display(),
                     "keeping a document open: newer edits are still unsaved"
                 );
-                self.status = format!(
-                    "{} was not closed because newer edits were typed while saving. Save again, then close it.",
-                    name(&path)
-                );
+                self.status = tr!("browser.save.close_aborted_newer", file = name(&path));
                 self.schedule_recovery(cx);
             }
             PendingAfterSave::Duplicate { path } => {
@@ -666,10 +663,7 @@ impl ProjectWorkspace {
                     path = %path.display(),
                     "aborting a pending duplicate: newer edits are still unsaved"
                 );
-                self.status = format!(
-                    "{} was not duplicated because newer edits were typed while saving. Save again, then duplicate it.",
-                    name(&path)
-                );
+                self.status = tr!("browser.save.duplicate_aborted_newer", file = name(&path));
                 self.schedule_recovery(cx);
             }
         }

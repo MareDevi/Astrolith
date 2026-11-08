@@ -178,7 +178,7 @@ impl ProjectWorkspace {
                 }
                 let count = records.len();
                 this.pending_recovery = records;
-                this.status = format!("Restoring {count} unsaved document(s) from recovery…");
+                this.status = tr!("browser.recovery.restoring", count = count);
                 // Auto-apply: restore pending records as dirty sessions immediately
                 // instead of only prompting. `recover_pending` is idempotent and never
                 // writes to disk, so the manual command remains safe afterwards.
@@ -191,7 +191,7 @@ impl ProjectWorkspace {
     /// Restore pending recovery records as dirty sessions (reads happen off the UI thread).
     pub fn recover_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending_recovery.is_empty() {
-            self.status = "No recovery records to restore.".into();
+            self.status = tr!("browser.recovery.none");
             cx.notify();
             return;
         }
@@ -277,10 +277,12 @@ impl ProjectWorkspace {
                 }
                 tracing::info!(restored, conflicts, "recovered unsaved documents");
                 this.status = if conflicts == 0 {
-                    format!("Restored {restored} unsaved document(s) from recovery.")
+                    tr!("browser.recovery.restored", restored = restored)
                 } else {
-                    format!(
-                        "Restored {restored} unsaved document(s) from recovery. {conflicts} changed on disk since the record; the recovery content is kept and a save will conflict until you resolve it."
+                    tr!(
+                        "browser.recovery.restored_conflicts",
+                        restored = restored,
+                        conflicts = conflicts
                     )
                 };
                 cx.notify();

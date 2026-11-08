@@ -44,9 +44,13 @@ pub(crate) fn entries(records: &[ProjectRecord]) -> Vec<RecentEntry> {
                     .and_then(Path::file_name)
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                format!("Open {name} ({parent})")
+                tr!(
+                    "browser.recent.open_in_parent",
+                    name = name,
+                    parent = parent
+                )
             } else {
-                format!("Open {name}")
+                tr!("browser.recent.open", name = name)
             };
             RecentEntry {
                 id: record.id.clone(),

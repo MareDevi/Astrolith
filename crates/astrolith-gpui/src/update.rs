@@ -26,7 +26,30 @@ pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// A version component above this is not a plausible Astrolith release.
 const MAX_VERSION_COMPONENT: u64 = 9_999;
 
-const NOT_CONFIGURED: &str = "Update checks are not configured in this build.";
+/// Why this build cannot check for updates.
+///
+/// Typed so the explanatory sentence is translated when the dialog renders,
+/// not when the capability is detected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DisabledReason {
+    /// The packaging pipeline baked in no manifest URL or public key.
+    NotConfigured,
+    /// The configured manifest URL was not HTTPS.
+    InsecureManifestUrl,
+    /// The configured public key was not one 32-byte Ed25519 key.
+    InvalidPublicKey,
+}
+
+impl DisabledReason {
+    /// One user-facing sentence explaining why checks cannot run.
+    fn message(self) -> String {
+        tr!(match self {
+            Self::NotConfigured => "update.capability.not_configured",
+            Self::InsecureManifestUrl => "update.capability.insecure_manifest_url",
+            Self::InvalidPublicKey => "update.capability.invalid_public_key",
+        })
+    }
+}
 
 /// Compile-time update configuration.
 ///
@@ -38,7 +61,7 @@ pub(crate) enum CapabilityState {
     /// Both values are valid; checks may run.
     Enabled(Capability),
     /// The build cannot check for updates, with the reason to show the user.
-    Disabled(String),
+    Disabled(DisabledReason),
 }
 
 /// One validated manifest URL and its pinned Ed25519 public key.
@@ -60,18 +83,18 @@ impl CapabilityState {
     /// Decide the capability from raw configuration values.
     pub(crate) fn from_parts(manifest_url: Option<&str>, public_key: Option<&str>) -> Self {
         let (Some(manifest_url), Some(public_key)) = (manifest_url, public_key) else {
-            return Self::Disabled(NOT_CONFIGURED.to_owned());
+            return Self::Disabled(DisabledReason::NotConfigured);
         };
         let manifest_url = manifest_url.trim();
         let public_key = public_key.trim();
         if !is_https(manifest_url) {
-            return Self::Disabled("The configured update manifest URL is not HTTPS.".to_owned());
+            return Self::Disabled(DisabledReason::InsecureManifestUrl);
         }
         let Ok(public_key) = STANDARD.decode(public_key) else {
-            return Self::Disabled("The configured update public key is invalid.".to_owned());
+            return Self::Disabled(DisabledReason::InvalidPublicKey);
         };
         if public_key.len() != 32 {
-            return Self::Disabled("The configured update public key is invalid.".to_owned());
+            return Self::Disabled(DisabledReason::InvalidPublicKey);
         }
         Self::Enabled(Capability {
             manifest_url: manifest_url.to_owned(),
@@ -166,7 +189,7 @@ pub(crate) enum CheckOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Status {
     /// This build cannot check for updates.
-    Disabled(String),
+    Disabled(DisabledReason),
     /// No check has finished yet.
     Idle,
     /// A check is in flight.
@@ -178,7 +201,7 @@ pub(crate) enum Status {
     /// A newer release exists but the user skipped that exact version.
     Skipped(Release),
     /// The last check failed with a recoverable error.
-    Failed(String),
+    Failed(UpdateError),
 }
 
 impl Status {
@@ -186,7 +209,7 @@ impl Status {
     pub(crate) fn initial(capability: &CapabilityState) -> Self {
         match capability {
             CapabilityState::Enabled(_) => Self::Idle,
-            CapabilityState::Disabled(reason) => Self::Disabled(reason.clone()),
+            CapabilityState::Disabled(reason) => Self::Disabled(*reason),
         }
     }
 
@@ -203,29 +226,24 @@ impl Status {
                     Self::Available(release)
                 }
             }
-            Err(error) => Self::Failed(error.to_string()),
+            Err(error) => Self::Failed(error),
         }
     }
 
     /// One user-facing sentence for palette status and dialogs.
     pub(crate) fn message(&self) -> String {
         match self {
-            Self::Disabled(reason) => format!("{reason} Check for updates is unavailable."),
-            Self::Idle => "Updates have not been checked yet.".to_owned(),
-            Self::Checking => "Checking for updates…".to_owned(),
-            Self::UpToDate(latest) => {
-                format!("Astrolith {latest} is the latest version.")
-            }
-            Self::Available(release) => format!(
-                "Astrolith {} is available. This build is {}.",
-                release.version,
-                env!("CARGO_PKG_VERSION")
+            Self::Disabled(reason) => reason.message(),
+            Self::Idle => tr!("update.status.idle"),
+            Self::Checking => tr!("update.status.checking"),
+            Self::UpToDate(latest) => tr!("update.status.up_to_date", version = latest),
+            Self::Available(release) => tr!(
+                "update.status.available",
+                version = release.version,
+                current = env!("CARGO_PKG_VERSION")
             ),
-            Self::Skipped(release) => format!(
-                "Astrolith {} is available, but you chose to skip this version.",
-                release.version
-            ),
-            Self::Failed(reason) => format!("Could not check for updates. {reason}"),
+            Self::Skipped(release) => tr!("update.status.skipped", version = release.version),
+            Self::Failed(reason) => tr!("update.status.failed", reason = reason),
         }
     }
 
@@ -238,52 +256,65 @@ impl Status {
     }
 }
 
+/// Which manifest URL was not HTTPS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UrlKind {
+    /// The manifest URL baked into the build.
+    Manifest,
+    /// The release page the dialog opens externally.
+    ReleasePage,
+    /// The artifact download URL.
+    Artifact,
+}
+
 /// Why a check could not produce a usable manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum UpdateError {
     /// The transport itself failed.
     Network(String),
+    /// The server answered with a non-success HTTP status.
+    HttpStatus(u16),
     /// The response exceeded [`MAX_MANIFEST_BYTES`].
     TooLarge,
     /// JSON, base64, version or digest syntax was invalid.
     Malformed(String),
+    /// A base64 field was not a valid encoding.
+    InvalidEncoding(String),
     /// The signature did not verify against the compiled-in key.
     Signature,
     /// A manifest, release page or artifact URL was not HTTPS.
-    InsecureUrl(&'static str),
+    InsecureUrl(UrlKind),
     /// The version text was not a plausible `x.y.z` release.
     UnsupportedVersion(String),
     /// No artifact matched [`PLATFORM`].
     NoArtifact,
+    /// The artifact digest was not a 64-character SHA-256 hex string.
+    InvalidDigest,
 }
 
 impl std::fmt::Display for UpdateError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Network(reason) => write!(
-                formatter,
-                "The update server could not be reached: {reason}"
-            ),
-            Self::TooLarge => write!(
-                formatter,
-                "The update manifest is larger than {} bytes.",
-                MAX_MANIFEST_BYTES
-            ),
-            Self::Malformed(reason) => {
-                write!(formatter, "The update manifest is malformed: {reason}")
+        let message = match self {
+            Self::Network(reason) => tr!("update.error.network", reason = reason),
+            Self::HttpStatus(status) => tr!("update.error.http_status", status = status),
+            Self::TooLarge => tr!("update.error.too_large", bytes = MAX_MANIFEST_BYTES),
+            Self::Malformed(reason) => tr!("update.error.malformed", reason = reason),
+            Self::InvalidEncoding(reason) => {
+                tr!("update.error.invalid_encoding", reason = reason)
             }
-            Self::Signature => formatter.write_str("The update manifest signature is not valid."),
-            Self::InsecureUrl(kind) => {
-                write!(formatter, "The update {kind} URL is not HTTPS.")
+            Self::Signature => tr!("update.error.signature"),
+            Self::InsecureUrl(kind) => tr!(match kind {
+                UrlKind::Manifest => "update.error.insecure_manifest_url",
+                UrlKind::ReleasePage => "update.error.insecure_release_page_url",
+                UrlKind::Artifact => "update.error.insecure_artifact_url",
+            }),
+            Self::UnsupportedVersion(version) => {
+                tr!("update.error.unsupported_version", version = version)
             }
-            Self::UnsupportedVersion(version) => write!(
-                formatter,
-                "The update manifest declares an unsupported version: {version}"
-            ),
-            Self::NoArtifact => {
-                formatter.write_str("The update manifest has no download for this platform.")
-            }
-        }
+            Self::NoArtifact => tr!("update.error.no_artifact"),
+            Self::InvalidDigest => tr!("update.error.invalid_digest"),
+        };
+        formatter.write_str(&message)
     }
 }
 
@@ -296,6 +327,10 @@ pub(crate) enum FetchError {
     Network(String),
     /// The body crossed the manifest cap.
     TooLarge,
+    /// The server answered with a non-success status.
+    Status(u16),
+    /// The URL was not HTTPS.
+    Insecure,
 }
 
 /// Injectable manifest transport; tests never touch the network.
@@ -310,9 +345,7 @@ pub(crate) struct HttpTransport;
 impl Transport for HttpTransport {
     fn fetch(&self, url: &str, limit: usize) -> Result<Vec<u8>, FetchError> {
         if !is_https(url) {
-            return Err(FetchError::Network(
-                "the manifest URL is not HTTPS".to_owned(),
-            ));
+            return Err(FetchError::Insecure);
         }
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
@@ -326,10 +359,7 @@ impl Transport for HttpTransport {
             .call()
             .map_err(|error| FetchError::Network(error.to_string()))?;
         if !response.status().is_success() {
-            return Err(FetchError::Network(format!(
-                "the update server answered {}",
-                response.status()
-            )));
+            return Err(FetchError::Status(response.status().as_u16()));
         }
         let body = response.body_mut();
         if body
@@ -396,13 +426,15 @@ pub(crate) fn check(
     running: Version,
 ) -> Result<CheckOutcome, UpdateError> {
     if !is_https(&capability.manifest_url) {
-        return Err(UpdateError::InsecureUrl("manifest"));
+        return Err(UpdateError::InsecureUrl(UrlKind::Manifest));
     }
     let bytes = transport
         .fetch(&capability.manifest_url, MAX_MANIFEST_BYTES)
         .map_err(|error| match error {
             FetchError::Network(reason) => UpdateError::Network(reason),
             FetchError::TooLarge => UpdateError::TooLarge,
+            FetchError::Status(status) => UpdateError::HttpStatus(status),
+            FetchError::Insecure => UpdateError::InsecureUrl(UrlKind::Manifest),
         })?;
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(UpdateError::TooLarge);
@@ -424,7 +456,7 @@ pub(crate) fn check(
         .map_err(|error| UpdateError::Malformed(error.to_string()))?;
     let version = Version::parse(&payload.version)?;
     if !is_https(&payload.page) {
-        return Err(UpdateError::InsecureUrl("release page"));
+        return Err(UpdateError::InsecureUrl(UrlKind::ReleasePage));
     }
     let artifact = payload
         .artifacts
@@ -432,13 +464,11 @@ pub(crate) fn check(
         .find(|artifact| artifact.platform == PLATFORM)
         .ok_or(UpdateError::NoArtifact)?;
     if !is_https(&artifact.url) {
-        return Err(UpdateError::InsecureUrl("artifact"));
+        return Err(UpdateError::InsecureUrl(UrlKind::Artifact));
     }
     let sha256 = artifact.sha256.trim().to_ascii_lowercase();
     if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(UpdateError::Malformed(
-            "the artifact digest is not a 64-character SHA-256 hex string".to_owned(),
-        ));
+        return Err(UpdateError::InvalidDigest);
     }
     let release = Release {
         version,
@@ -457,7 +487,7 @@ pub(crate) fn check(
 fn decode_base64(text: &str) -> Result<Vec<u8>, UpdateError> {
     STANDARD
         .decode(text.trim())
-        .map_err(|error| UpdateError::Malformed(format!("invalid base64: {error}")))
+        .map_err(|error| UpdateError::InvalidEncoding(error.to_string()))
 }
 
 fn is_https(text: &str) -> bool {
@@ -505,7 +535,7 @@ mod tests {
             Some(&encoded),
         ) {
             CapabilityState::Enabled(capability) => capability,
-            CapabilityState::Disabled(reason) => panic!("capability disabled: {reason}"),
+            CapabilityState::Disabled(reason) => panic!("capability disabled: {reason:?}"),
         }
     }
 
@@ -657,7 +687,12 @@ mod tests {
             let error =
                 check(&StaticTransport { body }, &capability, running("0.1.0")).unwrap_err();
             assert!(
-                matches!(error, UpdateError::Malformed(_) | UpdateError::Signature),
+                matches!(
+                    error,
+                    UpdateError::Malformed(_)
+                        | UpdateError::InvalidEncoding(_)
+                        | UpdateError::Signature
+                ),
                 "{label}: {error}"
             );
         }
@@ -668,7 +703,7 @@ mod tests {
         let body = envelope(&serde_json::to_vec(&payload).unwrap(), &keys.pair);
         assert!(matches!(
             check(&StaticTransport { body }, &capability, running("0.1.0")),
-            Err(UpdateError::Malformed(_))
+            Err(UpdateError::InvalidDigest)
         ));
     }
 
@@ -744,7 +779,7 @@ mod tests {
     fn capability_requires_both_valid_configuration_values() {
         assert!(matches!(
             CapabilityState::from_parts(None, Some("AAAA")),
-            CapabilityState::Disabled(reason) if reason.contains("not configured")
+            CapabilityState::Disabled(DisabledReason::NotConfigured)
         ));
         let encoded = STANDARD.encode([0u8; 32]);
         assert!(
@@ -760,7 +795,7 @@ mod tests {
                     Some("https://updates.example.test/manifest.json"),
                     Some(key)
                 ),
-                CapabilityState::Disabled(reason) if reason.contains("public key")
+                CapabilityState::Disabled(DisabledReason::InvalidPublicKey)
             ));
         }
         assert!(matches!(
@@ -789,7 +824,7 @@ mod tests {
             Status::Available(_)
         ));
         assert!(
-            Status::Disabled(NOT_CONFIGURED.to_owned())
+            Status::Disabled(DisabledReason::NotConfigured)
                 .message()
                 .contains("not configured")
         );
@@ -799,8 +834,8 @@ mod tests {
                 .contains("signature")
         );
         assert_eq!(
-            Status::initial(&CapabilityState::Disabled(NOT_CONFIGURED.to_owned())),
-            Status::Disabled(NOT_CONFIGURED.to_owned())
+            Status::initial(&CapabilityState::Disabled(DisabledReason::NotConfigured)),
+            Status::Disabled(DisabledReason::NotConfigured)
         );
     }
 }

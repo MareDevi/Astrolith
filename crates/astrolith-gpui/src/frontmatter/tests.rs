@@ -129,7 +129,7 @@ fn maps_every_field_kind_to_its_native_control() {
         by_path("tags").kind,
         Tags if by_path("tags").editable
     ));
-    assert!(matches!(by_path("meta").kind, ReadOnly { .. }));
+    assert!(matches!(by_path("meta").kind, ReadOnly));
 
     // Scalars and tags are editable; literals, containers and unsupported
     // constructs are read-only with an explicit reason.
@@ -150,13 +150,13 @@ fn maps_every_field_kind_to_its_native_control() {
     assert!(by_path("version").refusal.is_some());
     assert!(!by_path("meta").editable);
     assert_eq!(
-        by_path("meta").refusal.as_deref(),
-        Some("record values are preserved verbatim")
+        by_path("meta").refusal.as_ref().map(RefusalReason::text),
+        Some("record values are preserved verbatim".to_owned())
     );
     assert!(!by_path("union").editable);
     assert_eq!(
-        by_path("union").refusal.as_deref(),
-        Some("heterogeneous union"),
+        by_path("union").refusal.as_ref().map(RefusalReason::text),
+        Some("heterogeneous union".to_owned()),
         "unsupported unions surface their explicit refusal reason"
     );
 }
@@ -360,16 +360,11 @@ fn unsupported_fields_are_never_coerced_to_string() {
             reason: "heterogeneous union [string, number]".to_owned(),
         },
     )]);
-    assert_eq!(
-        controls[0].kind,
-        ControlKind::ReadOnly {
-            reason: "heterogeneous union [string, number]".to_owned()
-        }
-    );
+    assert_eq!(controls[0].kind, ControlKind::ReadOnly);
     assert!(!controls[0].editable);
     assert_eq!(
-        controls[0].refusal.as_deref(),
-        Some("heterogeneous union [string, number]"),
+        controls[0].refusal.as_ref().map(RefusalReason::text),
+        Some("heterogeneous union [string, number]".to_owned()),
         "the schema's refusal reason is surfaced verbatim"
     );
 }

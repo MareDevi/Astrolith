@@ -151,7 +151,7 @@ pub fn open(cx: &mut App) {
                     (
                         None,
                         GlobalPreferencesV2::default(),
-                        Some(format!("Preferences unavailable: {error}")),
+                        Some(tr!("shell.warning.preferences_unavailable", error = error)),
                     )
                 }
             };
@@ -417,7 +417,14 @@ pub(crate) struct Shell {
     /// Entry waiting for the project index that proves membership.
     pending_entry: Option<PathBuf>,
     /// Last menu model installed, so render does not rebuild unchanged menus.
-    menu_signature: Option<(CommandAvailability, Vec<RecentEntry>, Vec<CollectionItem>)>,
+    /// The active language is part of the identity: a locale change rebuilds
+    /// every native menu even when availability did not move.
+    menu_signature: Option<(
+        CommandAvailability,
+        Vec<RecentEntry>,
+        Vec<CollectionItem>,
+        String,
+    )>,
     /// Set by the change handlers that can change menu inputs (mode, project
     /// notify, session change, preferences, recent list, collections, dock).
     /// The next frame installs the menus once instead of every frame.
@@ -461,22 +468,14 @@ impl Shell {
         let layout = settings.layouts.get(mode).clone();
         theme::apply(&settings, window.appearance(), cx);
         let navigator = cx.new(|cx| {
-            WorkspacePanel::new(
-                "navigator-panel",
-                "Project",
-                "No project open\n\nOpen a project to browse its library.",
-                window,
-                cx,
-            )
-            .with_surface()
+            WorkspacePanel::new("navigator-panel", "", "", window, cx)
+                .with_placeholders(Some("shell.panel.project"), Some("shell.empty.navigator"))
+                .with_surface()
         });
         let document = cx.new(|cx| {
-            WorkspacePanel::new(
-                "document-panel",
-                "Welcome",
-                document_empty_copy(mode, false),
-                window,
-                cx,
+            WorkspacePanel::new("document-panel", "", "", window, cx).with_placeholders(
+                Some("shell.panel.welcome"),
+                Some(document_empty_key(mode, false)),
             )
         });
         let project = cx.new(|cx| ProjectWorkspace::new(document.clone(), window, cx));
@@ -505,23 +504,28 @@ impl Shell {
         });
         let host = HostEnvironment::detect_with(cfg!(feature = "embedded-webview"));
         let preview_capability = host.capability();
-        let preview_unavailable_reason =
-            host.embedded_unavailable().map(|reason| reason.to_string());
+        let preview_unavailable_reason = host
+            .embedded_unavailable()
+            .map(crate::preview::embedded_unavailable_text);
         let preview = cx.new(PreviewPanel::new);
-        let preview_panel = cx.new(|cx| WorkspacePanel::new("preview-panel", "Astro preview", "No preview running\n\nStart the Astro dev server, then open the active entry in your browser.", window, cx));
+        let preview_panel = cx.new(|cx| {
+            WorkspacePanel::new("preview-panel", "", "", window, cx).with_placeholders(
+                Some("shell.panel.astro_preview"),
+                Some("shell.empty.astro_preview"),
+            )
+        });
         preview_panel.update(cx, |panel, cx| panel.set_view(preview.clone().into(), cx));
         let rendered = cx.new(RenderedDocument::new);
-        let rendered_panel =
-            cx.new(|cx| WorkspacePanel::new("rendered-preview-panel", "Preview", "", window, cx));
+        let rendered_panel = cx.new(|cx| {
+            WorkspacePanel::new("rendered-preview-panel", "", "", window, cx)
+                .with_placeholders(Some("shell.panel.preview"), None)
+        });
         rendered_panel.update(cx, |panel, cx| panel.set_view(rendered.clone().into(), cx));
         let embedded = cx.new(EmbeddedPreview::new);
         let embedded_panel = cx.new(|cx| {
-            WorkspacePanel::new(
-                "embedded-preview-panel",
-                "Embedded preview",
-                "Start the preview server to load the page.",
-                window,
-                cx,
+            WorkspacePanel::new("embedded-preview-panel", "", "", window, cx).with_placeholders(
+                Some("shell.panel.embedded_preview"),
+                Some("shell.empty.embedded_preview"),
             )
         });
         embedded_panel.update(cx, |panel, cx| panel.set_view(embedded.clone().into(), cx));
@@ -537,13 +541,8 @@ impl Shell {
         let embedded_center_active = false;
         let terminal = cx.new(|cx| TerminalPanel::new(window, cx));
         let terminal_panel = cx.new(|cx| {
-            WorkspacePanel::new(
-                "terminal-panel",
-                "Terminal",
-                "No project terminal\n\nOpen a project to start an interactive shell.",
-                window,
-                cx,
-            )
+            WorkspacePanel::new("terminal-panel", "", "", window, cx)
+                .with_placeholders(Some("shell.panel.terminal"), Some("shell.empty.terminal"))
         });
         terminal_panel.update(cx, |panel, cx| panel.set_view(terminal.clone().into(), cx));
         let (dock, skin) = DockSkin::dock_area("astrolith-workspace", Some(1), window, cx);
@@ -910,7 +909,7 @@ impl Shell {
             opening: false,
             opening_task: None,
             source_picker_task: None,
-            file_status: "Readonly · No file open".into(),
+            file_status: String::new(),
             preview_sync_key: None,
             last_viewport: window.viewport_size(),
             _skin: skin,
@@ -1160,16 +1159,18 @@ impl Shell {
         }
         self.menus_dirty = false;
         let availability = self.availability(window, cx);
+        let language = self.settings.language.clone();
         let unchanged = {
             let project = self.project.read(cx);
             let collections = project.collection_items();
-            self.menu_signature
-                .as_ref()
-                .is_some_and(|(last, recent, last_collections)| {
+            self.menu_signature.as_ref().is_some_and(
+                |(last, recent, last_collections, last_language)| {
                     *last == availability
                         && *recent == self.recent
                         && last_collections.as_slice() == collections
-                })
+                        && *last_language == language
+                },
+            )
         };
         if unchanged {
             return;
@@ -1186,7 +1187,7 @@ impl Shell {
             &self.recent,
             &collections,
         );
-        self.menu_signature = Some((availability, self.recent.clone(), collections));
+        self.menu_signature = Some((availability, self.recent.clone(), collections, language));
     }
 
     /// Open one collection through its generated registry command.
@@ -1206,7 +1207,7 @@ impl Shell {
             .find(|record| record.id == id)
             .cloned()
         else {
-            self.warning = Some("That project is no longer in the recent list.".into());
+            self.warning = Some(tr!("shell.recent.missing"));
             cx.notify();
             return;
         };
@@ -1238,10 +1239,10 @@ impl Shell {
                     }
                     Ok(Ok(false)) => {}
                     Ok(Err(error)) => {
-                        this.warning = Some(format!("Could not update recent projects: {error}"));
+                        this.warning = Some(tr!("shell.recent.update_failed", error = error));
                     }
                     Err(error) => {
-                        this.warning = Some(format!("Could not update recent projects: {error}"));
+                        this.warning = Some(tr!("shell.recent.update_failed", error = error));
                     }
                 }
                 cx.notify();
@@ -1260,7 +1261,7 @@ impl Shell {
         window.open_dialog(cx, move |dialog, _, cx| {
             let mut body = div().v_flex().gap_2();
             if entries.is_empty() {
-                body = body.child(div().text_sm().child("No projects have been opened yet."));
+                body = body.child(div().text_sm().child(tr!("shell.recent.empty")));
             }
             for entry in &entries {
                 let open_owner = owner.clone();
@@ -1291,7 +1292,7 @@ impl Shell {
                                         "recent-open-{}",
                                         entry.id
                                     )))
-                                    .label("Open")
+                                    .label(tr!("shell.recent.open"))
                                     .on_click(
                                         move |_, window, cx| {
                                             window.close_dialog(cx);
@@ -1306,7 +1307,7 @@ impl Shell {
                                         "recent-remove-{}",
                                         entry.id
                                     )))
-                                    .label("Remove")
+                                    .label(tr!("shell.recent.remove"))
                                     .on_click(
                                         move |_, window, cx| {
                                             let _ = remove_owner.update(cx, |this, cx| {
@@ -1318,7 +1319,10 @@ impl Shell {
                         ),
                 );
             }
-            dialog.title("Recent projects").w(px(560.)).child(body)
+            dialog
+                .title(tr!("shell.recent.title"))
+                .w(px(560.))
+                .child(body)
         });
     }
 
@@ -1402,7 +1406,7 @@ impl Shell {
         let checked = checked.unwrap_or_else(|error| Err(update::UpdateError::Network(error)));
         self.update_status = update::Status::finish(checked, skipped);
         if let update::Status::Failed(reason) = &self.update_status {
-            self.warning = Some(format!("Could not check for updates. {reason}"));
+            self.warning = Some(tr!("shell.warning.update_check_failed", reason = reason));
         }
     }
 
@@ -1414,13 +1418,16 @@ impl Shell {
         let status = self.update_status.clone();
         let owner = cx.weak_entity();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let title = match &status {
-                update::Status::Disabled(_) => "Updates unavailable",
-                update::Status::Failed(_) => "Update check failed",
-                update::Status::UpToDate(_) => "No updates",
-                update::Status::Available(_) | update::Status::Skipped(_) => "Update available",
-                update::Status::Idle | update::Status::Checking => "Update check",
+            let title_key = match &status {
+                update::Status::Disabled(_) => "shell.update.title_unavailable",
+                update::Status::Failed(_) => "shell.update.title_failed",
+                update::Status::UpToDate(_) => "shell.update.title_up_to_date",
+                update::Status::Available(_) | update::Status::Skipped(_) => {
+                    "shell.update.title_available"
+                }
+                update::Status::Idle | update::Status::Checking => "shell.update.title_check",
             };
+            let title = tr!(title_key);
             let mut body = div()
                 .v_flex()
                 .gap_3()
@@ -1436,7 +1443,7 @@ impl Shell {
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Release notes"),
+                                    .child(tr!("shell.update.release_notes")),
                             )
                             .child(div().text_sm().child(release.notes.clone())),
                     )
@@ -1444,19 +1451,19 @@ impl Shell {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(format!("SHA-256 · {}", release.sha256))),
+                            .child(tr!("shell.update.checksum", hash = release.sha256)),
                     );
                 let mut actions = div().h_flex().gap_2();
                 let download = release.artifact_url.clone();
                 actions = actions.child(
                     Button::new("update-download")
-                        .label("Download for this platform")
+                        .label(tr!("shell.update.download"))
                         .on_click(move |_, _, cx| cx.open_url(&download)),
                 );
                 let page = release.page.clone();
                 actions = actions.child(
                     Button::new("update-release-page")
-                        .label("Open release page")
+                        .label(tr!("shell.update.release_page"))
                         .on_click(move |_, _, cx| cx.open_url(&page)),
                 );
                 if matches!(&status, update::Status::Available(_)) {
@@ -1464,7 +1471,7 @@ impl Shell {
                     let skip_owner = owner.clone();
                     actions = actions.child(
                         Button::new("update-skip-version")
-                            .label("Skip this version")
+                            .label(tr!("shell.update.skip_version"))
                             .on_click(move |_, window, cx| {
                                 let _ = skip_owner
                                     .update(cx, |this, cx| this.skip_update_version(&version, cx));
@@ -1496,7 +1503,7 @@ impl Shell {
             return;
         }
         window.open_dialog(cx, |dialog, _, cx| {
-            dialog.title("About Astrolith").w(px(420.)).child(
+            dialog.title(tr!("shell.about.title")).w(px(420.)).child(
                 div()
                     .v_flex()
                     .gap_1()
@@ -1506,7 +1513,7 @@ impl Shell {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("A local-first Astro content editor."),
+                            .child(tr!("shell.about.subtitle")),
                     ),
             )
         });
@@ -1817,7 +1824,10 @@ impl Shell {
                         .save_project(revision, &preferences)
                         .err()
                         .map(|error| {
-                            format!("Could not save previous project preferences: {error}")
+                            tr!(
+                                "shell.warning.previous_preferences_save_failed",
+                                error = error
+                            )
                         })
                 });
                 let package_name = project_package_name(&root);
@@ -1855,7 +1865,7 @@ impl Shell {
             Ok(loaded) => loaded,
             Err(error) => {
                 tracing::warn!(%error, "could not load project preferences");
-                self.warning = Some(format!("Could not load project preferences: {error}"));
+                self.warning = Some(tr!("shell.warning.preferences_open_failed", error = error));
                 // The scope is global again; make the visible layout match it
                 // so later changes are persisted where they belong.
                 let layout = self.active_layout(self.mode);
@@ -2117,8 +2127,11 @@ impl Shell {
                                     .small()
                                     .ghost()
                                     .icon(IconName::X)
-                                    .tooltip("Close file")
-                                    .accessibility_label(format!("Close {}", tab.label))
+                                    .tooltip(tr!("shell.tabs.close_file"))
+                                    .accessibility_label(tr!(
+                                        "shell.tabs.close_file_label",
+                                        name = tab.label
+                                    ))
                                     .on_click(move |_, window, cx| {
                                         let _ = close_owner.update(cx, |_, cx| {
                                             close_project.update(cx, |project, cx| {
@@ -2142,8 +2155,8 @@ impl Shell {
                             .small()
                             .ghost()
                             .icon(IconName::GitBranch)
-                            .tooltip("Source Control")
-                            .accessibility_label("Git source control")
+                            .tooltip(tr!("shell.git.title"))
+                            .accessibility_label(tr!("shell.git.accessibility"))
                             .selected(self.git_open)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.toggle_git(window, cx)),
@@ -2154,8 +2167,8 @@ impl Shell {
                             .small()
                             .ghost()
                             .icon(IconName::Terminal)
-                            .tooltip("Terminal")
-                            .accessibility_label("Toggle terminal")
+                            .tooltip(tr!("shell.panel.terminal"))
+                            .accessibility_label(tr!("shell.tabs.toggle_terminal"))
                             .selected(terminal_open)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx)),
@@ -2183,12 +2196,13 @@ impl Shell {
             .bg(cx.theme().tab_bar_segmented)
             .children(WorkspaceMode::ALL.map(|mode| {
                 let owner = owner.clone();
-                Button::new(mode.label())
+                let label = mode_label(mode);
+                Button::new(mode_id(mode))
                     .ghost()
                     .rounded(cx.theme().radius)
-                    .label(mode.label())
+                    .label(label.clone())
                     .selected(mode == current)
-                    .tooltip(mode.label())
+                    .tooltip(label)
                     .on_click(move |_, window, cx| {
                         let _ = owner.update(cx, |this, cx| this.set_mode(mode, window, cx));
                     })
@@ -2198,9 +2212,36 @@ impl Shell {
     /// Keep the document empty state aligned with the navigation the mode shows.
     fn sync_document_empty_copy(&mut self, cx: &mut Context<Self>) {
         let has_project = self.project.read(cx).project_root().is_some();
-        let copy = document_empty_copy(self.mode, has_project);
+        let key = document_empty_key(self.mode, has_project);
         self.document
-            .update(cx, |document, cx| document.set_content(copy.to_owned(), cx));
+            .update(cx, |document, cx| document.set_content_key(key, cx));
+    }
+
+    /// Rewrite cached window chrome in the active locale.
+    ///
+    /// Only locale-dependent placeholder copy is retranslated: a panel showing
+    /// a live document keeps its file name and body, and status lines stay as
+    /// the action that produced them wrote them.
+    fn retranslate_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for panel in [
+            &self.navigator,
+            &self.document,
+            &self.preview_panel,
+            &self.rendered_panel,
+            &self.embedded_panel,
+            &self.terminal_panel,
+        ] {
+            panel.update(cx, |panel, cx| panel.retranslate(cx));
+        }
+        // The commit input caches its placeholder inside its own state.
+        if let Some(message) = self.git_message.clone() {
+            message.update(cx, |message, cx| {
+                message.set_placeholder(tr!("shell.git.commit_message"), window, cx)
+            });
+        }
+        // Recent-project entries and their menu actions cache their labels.
+        self.recent = recent_projects::entries(&self.recent_records);
+        self.menus_dirty = true;
     }
 
     /// Switch the workspace mode without touching the open document.
@@ -2276,8 +2317,9 @@ impl Shell {
                 self.git_focus = Some(cx.focus_handle());
             }
             if self.git_message.is_none() {
-                self.git_message =
-                    Some(cx.new(|cx| InputState::new(window, cx).placeholder("Commit message")));
+                self.git_message = Some(cx.new(|cx| {
+                    InputState::new(window, cx).placeholder(tr!("shell.git.commit_message"))
+                }));
             }
             self.git_return_focus = window.focused(cx).map(|focus| focus.downgrade());
             if let Some(focus) = &self.git_focus {
@@ -2298,7 +2340,7 @@ impl Shell {
 
     fn run_git_action(&mut self, action: GitPanelAction, cx: &mut Context<Self>) {
         let Some(root) = self.project.read(cx).project_root() else {
-            self.git_error = Some("Open an Astro project first.".into());
+            self.git_error = Some(tr!("shell.git.open_project_first"));
             cx.notify();
             return;
         };
@@ -2374,7 +2416,7 @@ impl Shell {
                 Button::new(format!("git-diff-{group}-{}", path.path.display()))
                     .small()
                     .ghost()
-                    .label("Diff")
+                    .label(tr!("shell.git.diff"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.run_git_action(GitPanelAction::Diff(action_path.clone(), staged), cx)
                     })),
@@ -2383,7 +2425,11 @@ impl Shell {
                 Button::new(format!("git-stage-{group}-{}", path.path.display()))
                     .small()
                     .ghost()
-                    .label(if staged { "Unstage" } else { "Stage" })
+                    .label(if staged {
+                        tr!("shell.git.unstage")
+                    } else {
+                        tr!("shell.git.stage")
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.run_git_action(
                             if staged {
@@ -2422,7 +2468,9 @@ impl Shell {
         let (project_name, status) = {
             let project = self.project.read(cx);
             (
-                project.project_name().unwrap_or_else(|| "Git".into()),
+                project
+                    .project_name()
+                    .unwrap_or_else(|| tr!("shell.git.fallback_name").into()),
                 project.git_status(),
             )
         };
@@ -2447,7 +2495,7 @@ impl Shell {
                     div()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Open a project to inspect Git status."),
+                        .child(tr!("shell.git.open_project_status")),
                 )
             }
             Some(Err(error)) => {
@@ -2473,7 +2521,7 @@ impl Shell {
                 let has_staged = staged_count > 0;
                 let branch = current_branch
                     .clone()
-                    .unwrap_or_else(|| "Detached HEAD".into());
+                    .unwrap_or_else(|| tr!("shell.git.detached_head"));
                 body = body.child(
                     div()
                         .h_flex()
@@ -2506,7 +2554,7 @@ impl Shell {
                             Button::new("git-fetch")
                                 .small()
                                 .ghost()
-                                .label("Fetch")
+                                .label(tr!("shell.git.fetch"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.run_git_action(GitPanelAction::Fetch, cx)
                                 })),
@@ -2515,7 +2563,7 @@ impl Shell {
                             Button::new("git-push")
                                 .small()
                                 .ghost()
-                                .label("Push")
+                                .label(tr!("shell.git.push"))
                                 .disabled(!status.has_upstream && status.remotes.is_empty())
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.run_git_action(GitPanelAction::Push, cx)
@@ -2525,7 +2573,7 @@ impl Shell {
                             Button::new("git-pull")
                                 .small()
                                 .ghost()
-                                .label("Pull")
+                                .label(tr!("shell.git.pull"))
                                 .disabled(!status.has_upstream)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.run_git_action(GitPanelAction::Pull, cx)
@@ -2533,7 +2581,11 @@ impl Shell {
                         ),
                 );
                 if let Some(message) = &self.git_message {
-                    body = body.child(Input::new(message).small().aria_label("Commit message"));
+                    body = body.child(
+                        Input::new(message)
+                            .small()
+                            .aria_label(tr!("shell.git.commit_message")),
+                    );
                 }
                 let owner = cx.weak_entity();
                 let message_empty = self
@@ -2543,7 +2595,7 @@ impl Shell {
                 body = body.child(
                     Button::new("git-commit")
                         .primary()
-                        .label("Commit")
+                        .label(tr!("shell.git.commit"))
                         .disabled(!has_staged || message_empty)
                         .on_click(move |_, _, cx| {
                             let _ = owner.update(cx, |this, cx| {
@@ -2569,7 +2621,7 @@ impl Shell {
                         .pb_1()
                         .text_xs()
                         .font_semibold()
-                        .child("Staged Changes")
+                        .child(tr!("shell.git.staged_changes"))
                         .child(
                             div()
                                 .text_color(cx.theme().muted_foreground)
@@ -2586,7 +2638,7 @@ impl Shell {
                         .pb_1()
                         .text_xs()
                         .font_semibold()
-                        .child("Changes")
+                        .child(tr!("shell.git.changes"))
                         .child(
                             div()
                                 .text_color(cx.theme().muted_foreground)
@@ -2607,7 +2659,7 @@ impl Shell {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Working tree clean"),
+                            .child(tr!("shell.git.working_tree_clean")),
                     );
                 } else {
                     if staged_count > 0 {
@@ -2626,7 +2678,7 @@ impl Shell {
                             .pb_1()
                             .text_xs()
                             .font_semibold()
-                            .child("Branches"),
+                            .child(tr!("shell.git.branches")),
                     );
                     for branch in status.branches {
                         let current = current_branch.as_deref() == Some(branch.as_str());
@@ -2652,12 +2704,13 @@ impl Shell {
             }
         }
         if let Some((path, patch, staged)) = &self.git_diff {
+            let header = if *staged {
+                tr!("shell.git.diff_staged", path = path.display())
+            } else {
+                tr!("shell.git.diff_working", path = path.display())
+            };
             body = body
-                .child(div().text_xs().font_semibold().child(format!(
-                    "{} · {}",
-                    path.display(),
-                    if *staged { "staged" } else { "working tree" }
-                )))
+                .child(div().text_xs().font_semibold().child(header))
                 .child(
                     div()
                         .max_h(px(240.))
@@ -2669,7 +2722,7 @@ impl Shell {
                         .text_xs()
                         .font_family(cx.theme().mono_font_family.clone())
                         .child(if patch.is_empty() {
-                            "No diff".to_owned()
+                            tr!("shell.git.no_diff")
                         } else {
                             patch.clone()
                         }),
@@ -2710,7 +2763,12 @@ impl Shell {
                                 div()
                                     .v_flex()
                                     .gap_0p5()
-                                    .child(div().text_sm().font_semibold().child("Source Control"))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_semibold()
+                                            .child(tr!("shell.git.title")),
+                                    )
                                     .child(
                                         div()
                                             .text_xs()
@@ -2723,8 +2781,8 @@ impl Shell {
                                     .small()
                                     .ghost()
                                     .icon(IconName::RefreshCw)
-                                    .tooltip("Refresh")
-                                    .accessibility_label("Refresh Git status")
+                                    .tooltip(tr!("shell.git.refresh"))
+                                    .accessibility_label(tr!("shell.git.refresh_accessibility"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.project
                                             .update(cx, |project, cx| project.refresh_git(cx))
@@ -2879,8 +2937,13 @@ impl Shell {
             .get(project.active_tab_index())
             .and_then(|tab| tab.collection.as_ref())
             .map_or_else(
-                || "Entry details".to_owned(),
-                |collection| format!("Entry details · {collection}"),
+                || tr!("shell.inspector.entry_details"),
+                |collection| {
+                    tr!(
+                        "shell.inspector.entry_details_collection",
+                        collection = collection
+                    )
+                },
             );
         let surface = div()
             .id("frontmatter-inspector-surface")
@@ -2908,7 +2971,12 @@ impl Shell {
                     .py_3()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(div().text_sm().font_semibold().child("Frontmatter"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .child(tr!("shell.inspector.title")),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -3074,7 +3142,7 @@ impl Shell {
             .embedded_failure
             .clone()
             .or_else(|| self.preview_unavailable_reason.clone())
-            .unwrap_or_else(|| "embedded preview is unavailable on this host".to_owned());
+            .unwrap_or_else(|| tr!("shell.warning.embedded_unavailable"));
         self.preview.update(cx, |preview, cx| {
             preview.note_embedded_unavailable(&reason, cx)
         });
@@ -3391,22 +3459,13 @@ impl Shell {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Vec<(&'static str, Vec<PaletteEntry>)> {
+    ) -> Vec<(String, Vec<PaletteEntry>)> {
         let copyedit = self.settings.copyedit.clone();
         let availability = self.availability(window, cx);
-        let order = [
-            "File",
-            "View",
-            "Format",
-            "Writer",
-            "Preview",
-            "Help",
-            "Application",
-            "Recent projects",
-            "Collections",
-        ];
-        let mut groups: Vec<(&'static str, Vec<PaletteEntry>)> =
-            order.iter().map(|title| (*title, Vec::new())).collect();
+        let mut groups: Vec<(String, Vec<PaletteEntry>)> = commands::command_group_names()
+            .into_iter()
+            .map(|title| (title, Vec::new()))
+            .collect();
         for command in COMMANDS
             .iter()
             .copied()
@@ -3434,19 +3493,17 @@ impl Shell {
             }
         }
         if !self.recent.is_empty() {
-            let entries = groups
-                .iter_mut()
-                .find(|(name, _)| *name == "Recent projects")
-                .map(|(_, entries)| entries)
-                .expect("the recent group exists");
-            for entry in &self.recent {
-                entries.push(PaletteEntry {
+            let entries = self
+                .recent
+                .iter()
+                .map(|entry| PaletteEntry {
                     label: entry.label.clone().into(),
                     shortcut: SharedString::default(),
                     icon: IconName::FolderOpen,
                     action: PaletteAction::RecentProject(entry.id.clone()),
-                });
-            }
+                })
+                .collect();
+            groups.push((tr!("shell.palette.group.recent"), entries));
         }
         let project = self.project.read(cx);
         let available_collections: Vec<_> = project
@@ -3455,28 +3512,19 @@ impl Shell {
             .filter(|collection| !collection.active)
             .collect();
         if !available_collections.is_empty() {
-            let entries = groups
-                .iter_mut()
-                .find(|(name, _)| *name == "Collections")
-                .map(|(_, entries)| entries)
-                .expect("the collections group exists");
-            for collection in available_collections {
-                entries.push(PaletteEntry {
+            let entries = available_collections
+                .iter()
+                .map(|collection| PaletteEntry {
                     label: commands::collection_command_label(&collection.name).into(),
                     shortcut: SharedString::default(),
                     icon: IconName::Folder,
                     action: PaletteAction::Collection(collection.name.clone()),
-                });
-            }
+                })
+                .collect();
+            groups.push((tr!("shell.palette.group.collections"), entries));
         }
-        let groups: Vec<(&'static str, Vec<PaletteEntry>)> = groups
-            .into_iter()
-            .filter(|(_, entries)| !entries.is_empty())
-            .collect();
+        groups.retain(|(_, entries)| !entries.is_empty());
         groups
-            .into_iter()
-            .filter(|(_, entries)| !entries.is_empty())
-            .collect()
     }
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3494,7 +3542,7 @@ impl Shell {
             let groups_for_confirm = groups.clone();
             let mut palette_command = Command::new(&palette)
                 .bordered(false)
-                .placeholder("Search commands…");
+                .placeholder(tr!("shell.palette.search"));
             for (title, entries) in &groups {
                 let items = entries.iter().map(|entry| {
                     let entry = entry.clone();
@@ -3538,7 +3586,7 @@ impl Shell {
                         )
                 });
                 palette_command =
-                    palette_command.group(CommandGroup::new().label(*title).items(items));
+                    palette_command.group(CommandGroup::new().label(title.clone()).items(items));
             }
             let palette_command = palette_command
                 .empty(|_, _, cx| {
@@ -3546,7 +3594,7 @@ impl Shell {
                         .p_4()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("No matching commands")
+                        .child(tr!("shell.palette.empty"))
                 })
                 .on_confirm(move |index, window, cx| {
                     let Some(entry) = groups_for_confirm
@@ -3564,7 +3612,7 @@ impl Shell {
                     });
                 });
             dialog
-                .title("Command palette")
+                .title(tr!("shell.palette.title"))
                 .w_128()
                 .child(palette_command)
         });
@@ -3618,7 +3666,7 @@ impl Shell {
                 view.read(cx).focus_handle(cx).focus(window, cx);
             }
             dialog
-                .title("Preferences")
+                .title(tr!("shell.preferences.title"))
                 .centered()
                 .w(dialog_width)
                 .h(dialog_height)
@@ -3661,6 +3709,7 @@ impl Shell {
         };
         if gpui_kit::component::locale().to_string() != language {
             gpui_kit::component::set_locale(language);
+            self.retranslate_ui(window, cx);
             cx.refresh_windows();
         }
         if let Some(preferences) = edits.project
@@ -3738,7 +3787,7 @@ impl Shell {
             .command_availability(cx, window)
             .mdx_document
         {
-            self.file_status = "The component builder is available in MDX documents only.".into();
+            self.file_status = tr!("shell.component_builder.mdx_only");
             cx.notify();
             return;
         }
@@ -3757,7 +3806,7 @@ impl Shell {
         window.open_dialog(cx, move |dialog, _, _| {
             let close = close.clone();
             dialog
-                .title("Insert MDX component")
+                .title(tr!("shell.component_builder.title"))
                 .w_128()
                 .on_close(move |_, _, cx| {
                     let _ = close.update(cx, |builder, cx| builder.close(cx));
@@ -3826,7 +3875,7 @@ impl Shell {
             let insert_owner = insert_owner.clone();
             let insert_hits = insert_hits.clone();
             let insert_palette = insert_palette.clone();
-            dialog.title("Content Finder").w_128().child(
+            dialog.title(tr!("shell.finder.title")).w_128().child(
                 div()
                     .key_context("ContentFinder")
                     .on_action(move |_: &commands::ContentFinderInsert, window, cx| {
@@ -3846,7 +3895,7 @@ impl Shell {
                     .child(
                         Command::new(&palette)
                             .bordered(false)
-                            .placeholder("Search entries by title or ID…")
+                            .placeholder(tr!("shell.finder.search"))
                             .filterable(false)
                             .on_query(move |query, window, _| {
                                 if let Ok(mut slot) = query_hits.lock() {
@@ -3873,7 +3922,7 @@ impl Shell {
                                     .p_4()
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("No matching entries")
+                                    .child(tr!("shell.finder.empty"))
                             })
                             .on_confirm(move |index, window, cx| {
                                 let Some(entry) = confirm_rows.get(index.row).cloned() else {
@@ -3911,7 +3960,7 @@ impl Shell {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Open UTF-8 text file".into()),
+            prompt: Some(tr!("shell.file.open_prompt").into()),
         });
         self.opening_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = match selected.await {
@@ -3947,7 +3996,7 @@ impl Shell {
                     }
                     Some(Err(error)) => {
                         tracing::warn!(%error, "could not open a text file");
-                        this.file_status = format!("Could not open file: {error}");
+                        this.file_status = tr!("shell.file.open_failed", error = error);
                     }
                     None => {}
                 }
@@ -3962,7 +4011,7 @@ impl Shell {
             return;
         }
         let Some(root) = self.project.read(cx).project_root() else {
-            self.file_status = "Open a project before opening its sources.".into();
+            self.file_status = tr!("shell.file.open_project_first");
             return;
         };
         let scan = runtime::blocking(cx, move || scan_project_astro_sources(&root));
@@ -3971,7 +4020,7 @@ impl Shell {
             let _ = this.update_in(cx, |this, window, cx| match sources {
                 Ok(sources) => this.show_source_picker(sources, window, cx),
                 Err(error) => {
-                    this.file_status = format!("Could not scan project sources: {error}");
+                    this.file_status = tr!("shell.file.scan_failed", error = error);
                     cx.notify();
                 }
             });
@@ -3991,7 +4040,7 @@ impl Shell {
                     .p_4()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("No .astro sources were found in this project.")
+                    .child(tr!("shell.file.no_astro_sources"))
                     .into_any_element()
             } else {
                 div()
@@ -4023,7 +4072,10 @@ impl Shell {
                     }))
                     .into_any_element()
             };
-            dialog.title("Open project source").w(px(560.)).child(rows)
+            dialog
+                .title(tr!("shell.file.open_source_title"))
+                .w(px(560.))
+                .child(rows)
         });
     }
 
@@ -4049,10 +4101,10 @@ impl Shell {
                 .unwrap_or_default()
                 .to_string_lossy()
         ));
-        self.file_status = format!(
-            "Readonly · {} bytes · {}",
-            source.source.len(),
-            source.path.display()
+        self.file_status = tr!(
+            "shell.file.readonly_bytes",
+            bytes = source.source.len(),
+            path = source.path.display()
         );
         self.document
             .update(cx, |panel, cx| panel.show_source(source, window, cx));
@@ -4076,7 +4128,7 @@ impl Shell {
                     Ok(source) => this.show_document(source, window, cx),
                     Err(error) => {
                         tracing::warn!(%error, "could not open a project file");
-                        this.file_status = format!("Could not open file: {error}");
+                        this.file_status = tr!("shell.file.open_failed", error = error);
                         cx.notify();
                     }
                 }
@@ -4360,7 +4412,7 @@ impl Render for Shell {
         // Surface them in a compact status line; the neutral "no file" copy
         // stays implicit so a healthy window keeps its original layout.
         let file_status = self.file_status.clone();
-        let show_file_status = file_status != "Readonly · No file open" && !file_status.is_empty();
+        let show_file_status = !file_status.is_empty();
         let motion = cx.theme().motion_tokens();
         let status_presence = Presence::new("file-status-presence", show_file_status)
             .transition(Transition::new(motion.duration_fast).easing(motion.easing_enter.clone()))
@@ -4555,13 +4607,29 @@ impl Render for Shell {
 }
 
 /// Empty document copy for the navigation the active mode shows.
-fn document_empty_copy(mode: WorkspaceMode, has_project: bool) -> &'static str {
+fn document_empty_key(mode: WorkspaceMode, has_project: bool) -> &'static str {
     match (mode, has_project) {
-        (WorkspaceMode::Build, true) => "Choose a file from the explorer to open it.",
-        (WorkspaceMode::Build, false) => "Open a project to browse its files.",
-        (WorkspaceMode::Writing | WorkspaceMode::Preview, _) => {
-            "Open a project, then choose an entry from the library to begin writing."
-        }
+        (WorkspaceMode::Build, true) => "shell.empty.document_build_file",
+        (WorkspaceMode::Build, false) => "shell.empty.document_build_no_project",
+        (WorkspaceMode::Writing | WorkspaceMode::Preview, _) => "shell.empty.document_project",
+    }
+}
+
+/// Stable element id of one workspace mode button.
+fn mode_id(mode: WorkspaceMode) -> &'static str {
+    match mode {
+        WorkspaceMode::Writing => "workspace-mode-writing",
+        WorkspaceMode::Build => "workspace-mode-build",
+        WorkspaceMode::Preview => "workspace-mode-preview",
+    }
+}
+
+/// The translated mode name shown in the toolbar and its tooltip.
+fn mode_label(mode: WorkspaceMode) -> String {
+    match mode {
+        WorkspaceMode::Writing => tr!("shell.mode.writing"),
+        WorkspaceMode::Build => tr!("shell.mode.build"),
+        WorkspaceMode::Preview => tr!("shell.mode.preview"),
     }
 }
 
@@ -4661,7 +4729,7 @@ where
             if current {
                 this.warning = result
                     .err()
-                    .map(|error| format!("Could not save preferences: {error}"));
+                    .map(|error| tr!("shell.warning.preferences_save_failed", error = error));
             }
             // Test and status consumers wait for this notification, not just
             // for the file to appear.
@@ -8445,11 +8513,11 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(
                 window.find("open-preferences").label(),
-                Some(CommandId::OpenPreferences.label())
+                Some(CommandId::OpenPreferences.label().as_str())
             );
             assert_eq!(
                 window.find("command-palette").label(),
-                Some(CommandId::OpenPalette.label())
+                Some(CommandId::OpenPalette.label().as_str())
             );
         })
         .unwrap();
@@ -8490,7 +8558,7 @@ mod tests {
                     continue;
                 }
                 let snapshot = window.find(pane.element_id());
-                assert_eq!(snapshot.label(), Some(pane.label()));
+                assert_eq!(snapshot.label(), Some(pane.label().as_str()));
                 assert!(snapshot.visible(), "{} is not visible", pane.label());
             }
         })

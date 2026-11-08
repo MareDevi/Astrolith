@@ -1,0 +1,391 @@
+_version: 2
+shell:
+  panel:
+    project:
+      en: Project
+      zh-CN: 项目
+      ja: プロジェクト
+    welcome:
+      en: Welcome
+      zh-CN: 欢迎
+      ja: ようこそ
+    document:
+      en: Document
+      zh-CN: 文档
+      ja: ドキュメント
+    preview:
+      en: Preview
+      zh-CN: 预览
+      ja: プレビュー
+    astro_preview:
+      en: Astro preview
+      zh-CN: Astro 预览
+      ja: Astro プレビュー
+    embedded_preview:
+      en: Embedded preview
+      zh-CN: 内嵌预览
+      ja: 埋め込みプレビュー
+    terminal:
+      en: Terminal
+      zh-CN: 终端
+      ja: ターミナル
+    no_file_open:
+      en: No file open
+      zh-CN: 未打开文件
+      ja: ファイルを開いていません
+  empty:
+    navigator:
+      en: "No project open\n\nOpen a project to browse its library."
+      zh-CN: "未打开项目\n\n打开项目以浏览其内容库。"
+      ja: "プロジェクトが開かれていません\n\nプロジェクトを開くとライブラリを閲覧できます。"
+    astro_preview:
+      en: "No preview running\n\nStart the Astro dev server, then open the active entry in your browser."
+      zh-CN: "预览未运行\n\n启动 Astro 开发服务器，然后在浏览器中打开当前条目。"
+      ja: "プレビューは実行されていません\n\nAstro 開発サーバーを起動し、ブラウザで現在のエントリを開いてください。"
+    embedded_preview:
+      en: Start the preview server to load the page.
+      zh-CN: 启动预览服务器以加载页面。
+      ja: プレビューサーバーを起動してページを読み込みます。
+    terminal:
+      en: "No project terminal\n\nOpen a project to start an interactive shell."
+      zh-CN: "没有项目终端\n\n打开项目以启动交互式 shell。"
+      ja: "プロジェクトのターミナルはありません\n\nプロジェクトを開くと対話シェルを起動できます。"
+    document:
+      en: Choose an entry from the library to begin writing.
+      zh-CN: 从内容库中选择一个条目开始写作。
+      ja: ライブラリからエントリを選んで執筆を始めましょう。
+    document_build_file:
+      en: Choose a file from the explorer to open it.
+      zh-CN: 从资源管理器中选择文件以打开。
+      ja: エクスプローラーからファイルを選んで開きます。
+    document_build_no_project:
+      en: Open a project to browse its files.
+      zh-CN: 打开项目以浏览其文件。
+      ja: プロジェクトを開くとファイルを閲覧できます。
+    document_project:
+      en: Open a project, then choose an entry from the library to begin writing.
+      zh-CN: 打开项目，然后从内容库中选择一个条目开始写作。
+      ja: プロジェクトを開き、ライブラリからエントリを選んで執筆を始めましょう。
+  editor:
+    source_file_editable:
+      en: Source file, editable
+      zh-CN: 源文件，可编辑
+      ja: ソースファイル、編集可能
+    document_readonly:
+      en: Document source, readonly
+      zh-CN: 文档源，只读
+      ja: ドキュメントソース、読み取り専用
+    document_editable:
+      en: Document source, editable
+      zh-CN: 文档源，可编辑
+      ja: ドキュメントソース、編集可能
+  recent:
+    title:
+      en: Recent projects
+      zh-CN: 最近的项目
+      ja: 最近のプロジェクト
+    empty:
+      en: No projects have been opened yet.
+      zh-CN: 尚未打开任何项目。
+      ja: まだプロジェクトを開いていません。
+    open:
+      en: Open
+      zh-CN: 打开
+      ja: 開く
+    remove:
+      en: Remove
+      zh-CN: 移除
+      ja: 削除
+    missing:
+      en: That project is no longer in the recent list.
+      zh-CN: 该项目已不在最近列表中。
+      ja: そのプロジェクトは最近の一覧にありません。
+    update_failed:
+      en: "Could not update recent projects: %{error}"
+      zh-CN: "无法更新最近项目：%{error}"
+      ja: "最近のプロジェクトを更新できませんでした: %{error}"
+  update:
+    title_unavailable:
+      en: Updates unavailable
+      zh-CN: 更新不可用
+      ja: アップデートを利用できません
+    title_failed:
+      en: Update check failed
+      zh-CN: 更新检查失败
+      ja: アップデート確認に失敗しました
+    title_up_to_date:
+      en: No updates
+      zh-CN: 无更新
+      ja: 最新です
+    title_available:
+      en: Update available
+      zh-CN: 有可用更新
+      ja: アップデートがあります
+    title_check:
+      en: Update check
+      zh-CN: 更新检查
+      ja: アップデート確認
+    release_notes:
+      en: Release notes
+      zh-CN: 发布说明
+      ja: リリースノート
+    checksum:
+      en: "SHA-256 · %{hash}"
+      zh-CN: "SHA-256 · %{hash}"
+      ja: "SHA-256 · %{hash}"
+    download:
+      en: Download for this platform
+      zh-CN: 下载适用于此平台的版本
+      ja: このプラットフォーム用をダウンロード
+    release_page:
+      en: Open release page
+      zh-CN: 打开发布页面
+      ja: リリースページを開く
+    skip_version:
+      en: Skip this version
+      zh-CN: 跳过此版本
+      ja: このバージョンをスキップ
+  about:
+    title:
+      en: About Astrolith
+      zh-CN: 关于 Astrolith
+      ja: Astrolith について
+    subtitle:
+      en: A local-first Astro content editor.
+      zh-CN: 本地优先的 Astro 内容编辑器。
+      ja: ローカルファーストの Astro コンテンツエディター。
+  preferences:
+    title:
+      en: Preferences
+      zh-CN: 偏好设置
+      ja: 設定
+  warning:
+    preferences_unavailable:
+      en: "Preferences unavailable: %{error}"
+      zh-CN: "偏好设置不可用：%{error}"
+      ja: "設定を利用できません: %{error}"
+    preferences_open_failed:
+      en: "Could not load project preferences: %{error}"
+      zh-CN: "无法加载项目偏好设置：%{error}"
+      ja: "プロジェクト設定を読み込めませんでした: %{error}"
+    preferences_save_failed:
+      en: "Could not save preferences: %{error}"
+      zh-CN: "无法保存偏好设置：%{error}"
+      ja: "設定を保存できませんでした: %{error}"
+    previous_preferences_save_failed:
+      en: "Could not save previous project preferences: %{error}"
+      zh-CN: "无法保存之前的项目偏好设置：%{error}"
+      ja: "以前のプロジェクト設定を保存できませんでした: %{error}"
+    update_check_failed:
+      en: "Could not check for updates. %{reason}"
+      zh-CN: "无法检查更新。%{reason}"
+      ja: "アップデートを確認できませんでした。%{reason}"
+    embedded_unavailable:
+      en: embedded preview is unavailable on this host
+      zh-CN: 此主机上无法使用内嵌预览
+      ja: このホストでは埋め込みプレビューを利用できません
+  tabs:
+    close_file:
+      en: Close file
+      zh-CN: 关闭文件
+      ja: ファイルを閉じる
+    close_file_label:
+      en: "Close %{name}"
+      zh-CN: "关闭 %{name}"
+      ja: "%{name} を閉じる"
+    toggle_terminal:
+      en: Toggle terminal
+      zh-CN: 切换终端
+      ja: ターミナルを切り替え
+  git:
+    title:
+      en: Source Control
+      zh-CN: 源代码管理
+      ja: ソース管理
+    accessibility:
+      en: Git source control
+      zh-CN: Git 源代码管理
+      ja: Git ソース管理
+    fallback_name:
+      en: Git
+      zh-CN: Git
+      ja: Git
+    open_project_first:
+      en: Open an Astro project first.
+      zh-CN: 请先打开 Astro 项目。
+      ja: 先に Astro プロジェクトを開いてください。
+    open_project_status:
+      en: Open a project to inspect Git status.
+      zh-CN: 打开项目以查看 Git 状态。
+      ja: プロジェクトを開くと Git の状態を確認できます。
+    detached_head:
+      en: Detached HEAD
+      zh-CN: 分离的 HEAD
+      ja: デタッチされた HEAD
+    fetch:
+      en: Fetch
+      zh-CN: 获取
+      ja: フェッチ
+    push:
+      en: Push
+      zh-CN: 推送
+      ja: プッシュ
+    pull:
+      en: Pull
+      zh-CN: 拉取
+      ja: プル
+    commit:
+      en: Commit
+      zh-CN: 提交
+      ja: コミット
+    commit_message:
+      en: Commit message
+      zh-CN: 提交信息
+      ja: コミットメッセージ
+    diff:
+      en: Diff
+      zh-CN: 差异
+      ja: 差分
+    stage:
+      en: Stage
+      zh-CN: 暂存
+      ja: ステージ
+    unstage:
+      en: Unstage
+      zh-CN: 取消暂存
+      ja: ステージ解除
+    staged_changes:
+      en: Staged Changes
+      zh-CN: 已暂存的更改
+      ja: ステージ済みの変更
+    changes:
+      en: Changes
+      zh-CN: 更改
+      ja: 変更
+    working_tree_clean:
+      en: Working tree clean
+      zh-CN: 工作区干净
+      ja: 作業ツリーはクリーンです
+    branches:
+      en: Branches
+      zh-CN: 分支
+      ja: ブランチ
+    diff_staged:
+      en: "%{path} · staged"
+      zh-CN: "%{path} · 已暂存"
+      ja: "%{path} · ステージ済み"
+    diff_working:
+      en: "%{path} · working tree"
+      zh-CN: "%{path} · 工作区"
+      ja: "%{path} · 作業ツリー"
+    no_diff:
+      en: No diff
+      zh-CN: 无差异
+      ja: 差分なし
+    refresh:
+      en: Refresh
+      zh-CN: 刷新
+      ja: 更新
+    refresh_accessibility:
+      en: Refresh Git status
+      zh-CN: 刷新 Git 状态
+      ja: Git 状態を更新
+  inspector:
+    title:
+      en: Frontmatter
+      zh-CN: 前置元数据
+      ja: フロントマター
+    entry_details:
+      en: Entry details
+      zh-CN: 条目详情
+      ja: エントリの詳細
+    entry_details_collection:
+      en: "Entry details · %{collection}"
+      zh-CN: "条目详情 · %{collection}"
+      ja: "エントリの詳細 · %{collection}"
+  palette:
+    title:
+      en: Command palette
+      zh-CN: 命令面板
+      ja: コマンドパレット
+    search:
+      en: Search commands…
+      zh-CN: 搜索命令…
+      ja: コマンドを検索…
+    empty:
+      en: No matching commands
+      zh-CN: 没有匹配的命令
+      ja: 一致するコマンドはありません
+    group:
+      recent:
+        en: Recent projects
+        zh-CN: 最近的项目
+        ja: 最近のプロジェクト
+      collections:
+        en: Collections
+        zh-CN: 内容库
+        ja: コレクション
+  finder:
+    title:
+      en: Content Finder
+      zh-CN: 内容查找器
+      ja: コンテンツファインダー
+    search:
+      en: Search entries by title or ID…
+      zh-CN: 按标题或 ID 搜索条目…
+      ja: タイトルまたは ID でエントリを検索…
+    empty:
+      en: No matching entries
+      zh-CN: 没有匹配的条目
+      ja: 一致するエントリはありません
+  component_builder:
+    title:
+      en: Insert MDX component
+      zh-CN: 插入 MDX 组件
+      ja: MDX コンポーネントを挿入
+    mdx_only:
+      en: The component builder is available in MDX documents only.
+      zh-CN: 组件构建器仅适用于 MDX 文档。
+      ja: コンポーネントビルダーは MDX ドキュメントでのみ使用できます。
+  file:
+    open_prompt:
+      en: Open UTF-8 text file
+      zh-CN: 打开 UTF-8 文本文件
+      ja: UTF-8 テキストファイルを開く
+    open_failed:
+      en: "Could not open file: %{error}"
+      zh-CN: "无法打开文件：%{error}"
+      ja: "ファイルを開けませんでした: %{error}"
+    open_project_first:
+      en: Open a project before opening its sources.
+      zh-CN: 请先打开项目再打开其源文件。
+      ja: ソースを開く前にプロジェクトを開いてください。
+    scan_failed:
+      en: "Could not scan project sources: %{error}"
+      zh-CN: "无法扫描项目源文件：%{error}"
+      ja: "プロジェクトのソースをスキャンできませんでした: %{error}"
+    no_astro_sources:
+      en: No .astro sources were found in this project.
+      zh-CN: 在此项目中未找到 .astro 源文件。
+      ja: このプロジェクトに .astro ソースが見つかりませんでした。
+    open_source_title:
+      en: Open project source
+      zh-CN: 打开项目源文件
+      ja: プロジェクトのソースを開く
+    readonly_bytes:
+      en: "Readonly · %{bytes} bytes · %{path}"
+      zh-CN: "只读 · %{bytes} 字节 · %{path}"
+      ja: "読み取り専用 · %{bytes} バイト · %{path}"
+  mode:
+    writing:
+      en: Writing
+      zh-CN: 写作
+      ja: 執筆
+    build:
+      en: Build
+      zh-CN: 构建
+      ja: ビルド
+    preview:
+      en: Preview
+      zh-CN: 预览
+      ja: プレビュー

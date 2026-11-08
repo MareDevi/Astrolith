@@ -7,6 +7,16 @@ pub fn extend_i18n() {
     rust_i18n::extend!(gpui_component);
 }
 
+/// Translate one application message into an owned string.
+///
+/// GPUI shared strings and element text take owned values, so every UI site
+/// uses this instead of calling `rust_i18n::t!` and converting by hand.
+macro_rules! tr {
+    ($($arg:tt)*) => {
+        rust_i18n::t!($($arg)*).to_string()
+    };
+}
+
 mod commands;
 mod desktop_actions;
 mod drag_drop;

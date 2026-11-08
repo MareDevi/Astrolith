@@ -103,6 +103,32 @@ enum CrumbAction {
     Directory(Vec<String>),
 }
 
+/// Translate a project-root refusal for display.
+pub(crate) fn project_root_error_message(error: &paths::ProjectRootError) -> String {
+    match error {
+        paths::ProjectRootError::Unreadable { path, message } => tr!(
+            "browser.project_error.unreadable",
+            path = path.display(),
+            error = message
+        ),
+        paths::ProjectRootError::NotADirectory(path) => tr!(
+            "browser.project_error.not_a_directory",
+            path = path.display()
+        ),
+        paths::ProjectRootError::Blocked(blocked) => blocked_root_message(*blocked),
+    }
+}
+
+/// Translate the reason a protected directory cannot be a project.
+pub(crate) fn blocked_root_message(root: paths::BlockedRoot) -> String {
+    match root {
+        paths::BlockedRoot::FilesystemRoot => tr!("browser.blocked_root.filesystem_root"),
+        paths::BlockedRoot::HomeDirectory => tr!("browser.blocked_root.home_directory"),
+        paths::BlockedRoot::SystemDirectory => tr!("browser.blocked_root.system_directory"),
+        paths::BlockedRoot::CredentialDirectory => tr!("browser.blocked_root.credential_directory"),
+    }
+}
+
 fn parent_directory(directory: &[String]) -> Option<Vec<String>> {
     (!directory.is_empty()).then(|| directory[..directory.len() - 1].to_vec())
 }
@@ -546,7 +572,7 @@ impl ListDelegate for EntryList {
             .upgrade()
             .map(|project| project.read(cx).command_availability(cx, window))
             .unwrap_or_default();
-        let badge = |label: &'static str, color: gpui_kit::Hsla| {
+        let badge = |label: SharedString, color: gpui_kit::Hsla| {
             div()
                 .flex_shrink_0()
                 .text_xs()
@@ -591,9 +617,14 @@ impl ListDelegate for EntryList {
                     }),
             )
             .when(mdx, |row| {
-                row.child(badge("MDX", cx.theme().muted_foreground))
+                row.child(badge("MDX".into(), cx.theme().muted_foreground))
             })
-            .when(draft, |row| row.child(badge("Draft", cx.theme().warning)))
+            .when(draft, |row| {
+                row.child(badge(
+                    tr!("browser.library.draft_badge").into(),
+                    cx.theme().warning,
+                ))
+            })
             .when(!date.is_empty(), |row| {
                 row.child(
                     div()
@@ -823,8 +854,8 @@ pub(crate) struct ProjectWorkspace {
     list_filter: EntryFilter,
     /// Active file-list ordering.
     list_sort: EntrySort,
-    /// Sort menu entries derived from the installed collection schemas.
-    sort_options: Vec<(SortMode, SharedString)>,
+    /// Sort modes offered by the menu, derived from the installed schemas.
+    sort_options: Vec<SortMode>,
     /// Operations to run once the guarded save of a dirty session succeeds,
     /// keyed by the canonical source path whose save releases them.
     pending_after_save: BTreeMap<PathBuf, PendingAfterSave>,
@@ -1178,7 +1209,7 @@ impl ProjectWorkspace {
         let generation = self.generation;
         self.git_request = self.git_request.wrapping_add(1);
         let request = self.git_request;
-        self.git_status = Some(Err("Checking repository…".into()));
+        self.git_status = Some(Err(tr!("browser.status.checking_repository")));
         let work = runtime::blocking(cx, move || {
             GitRepository::discover(&root)
                 .and_then(|repository| repository.status())
@@ -1529,7 +1560,10 @@ impl ProjectWorkspace {
                 this.rebuild_references();
                 for diagnostic in diagnostics {
                     tracing::warn!(%diagnostic, "data collection unavailable");
-                    this.status = format!("Data collection unavailable: {diagnostic}");
+                    this.status = tr!(
+                        "browser.status.data_collection_unavailable",
+                        diagnostic = diagnostic
+                    );
                 }
                 cx.notify();
             });
@@ -1624,7 +1658,7 @@ impl ProjectWorkspace {
     fn asset_location(&self, collection: Option<&str>) -> Result<AssetLocation, String> {
         let root = self
             .project_root()
-            .ok_or_else(|| "Open a project before copying assets.".to_owned())?;
+            .ok_or_else(|| tr!("browser.status.open_project_before_copy_assets"))?;
         let resolved = self.resolved_for(collection);
         AssetLocation::resolve(root, resolved.assets_directory.as_deref())
             .map_err(|error| error.to_string())
@@ -1690,7 +1724,7 @@ impl ProjectWorkspace {
         match position {
             Some(position) => self.open_entry(position, window, cx),
             None => {
-                self.status = "That entry is no longer in the project index.".into();
+                self.status = tr!("browser.status.entry_not_indexed");
                 cx.notify();
             }
         }
@@ -1704,7 +1738,7 @@ impl ProjectWorkspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(document) = self.active_relative_source() else {
-            self.status = "Open a document before inserting a link.".into();
+            self.status = tr!("browser.status.open_document_for_link");
             cx.notify();
             return false;
         };
@@ -1722,9 +1756,9 @@ impl ProjectWorkspace {
             session.insert_snippet(markdown, window, cx)
         });
         self.status = if inserted {
-            format!("Inserted a link to {}.", entry.title)
+            tr!("browser.status.link_inserted", title = entry.title)
         } else {
-            "The link could not be inserted at the current selection.".into()
+            tr!("browser.status.link_not_inserted")
         };
         cx.notify();
         inserted
@@ -1791,7 +1825,7 @@ impl ProjectWorkspace {
         let path = self
             .active
             .clone()
-            .ok_or_else(|| "Open an MDX document before inserting components.".to_owned())?;
+            .ok_or_else(|| tr!("browser.status.open_mdx_for_components"))?;
         let collection = self.session_collections.get(&path).cloned();
         let resolved = self.resolved_for(collection.as_deref());
         let images = (|| {
@@ -1829,26 +1863,26 @@ impl ProjectWorkspace {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let Some(path) = self.active.clone() else {
-            return Err("Open an MDX document before inserting components.".to_owned());
+            return Err(tr!("browser.status.open_mdx_for_components"));
         };
         let collection = self.session_collections.get(&path).cloned();
         let Some(session) = self.sessions.get(&path).cloned() else {
-            return Err("The active document is not editable.".to_owned());
+            return Err(tr!("browser.status.active_document_not_editable"));
         };
         // Menus reach this executor without the palette's availability gate, so
         // the document kind is checked again here, not only when it opens.
         if session.read(cx).kind() != DocumentKind::Mdx {
-            let message = "Components can only be inserted into MDX documents.".to_owned();
+            let message = tr!("browser.status.components_only_mdx");
             self.status = message.clone();
             cx.notify();
             return Err(message);
         }
         let root = self
             .project_root()
-            .ok_or_else(|| "Open a project before inserting components.".to_owned())?;
+            .ok_or_else(|| tr!("browser.status.open_project_for_components"))?;
         let source = self
             .active_relative_source()
-            .ok_or_else(|| "The active document is outside the project.".to_owned())?;
+            .ok_or_else(|| tr!("browser.status.active_document_outside_project"))?;
         let document = root.join(&source);
         session.update(cx, |session, cx| session.sync_buffer(cx));
         let text = session.read(cx).buffer.current_text().to_owned();
@@ -1888,12 +1922,15 @@ impl ProjectWorkspace {
         match result {
             Ok(()) => {
                 self.status = if imported {
-                    format!(
-                        "Inserted {}. Its import was added; undo removes only the component.",
-                        selection.component.name
+                    tr!(
+                        "browser.status.component_inserted_with_import",
+                        component = selection.component.name
                     )
                 } else {
-                    format!("Inserted {}.", selection.component.name)
+                    tr!(
+                        "browser.status.component_inserted",
+                        component = selection.component.name
+                    )
                 };
                 if !warnings.is_empty() {
                     self.status.push(' ');
@@ -1952,7 +1989,7 @@ impl ProjectWorkspace {
             return;
         }
         let Some(document) = self.active_relative_source() else {
-            self.status = "Open a Markdown or MDX document before dropping files.".into();
+            self.status = tr!("browser.status.open_document_for_drop");
             cx.notify();
             return;
         };
@@ -1963,7 +2000,7 @@ impl ProjectWorkspace {
             return;
         };
         if session.read(cx).kind() == DocumentKind::Plain {
-            self.status = "Files can only be dropped on a Markdown or MDX document.".into();
+            self.status = tr!("browser.status.drop_requires_markdown");
             cx.notify();
             return;
         }
@@ -1972,7 +2009,7 @@ impl ProjectWorkspace {
         let location = match self.asset_location(collection.as_deref()) {
             Ok(location) => location,
             Err(error) => {
-                self.status = format!("Assets directory unavailable: {error}");
+                self.status = tr!("browser.status.assets_dir_unavailable", error = error);
                 cx.notify();
                 return;
             }
@@ -2001,7 +2038,7 @@ impl ProjectWorkspace {
         let (assets, failures) = match result {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.status = format!("Assets were not copied: {error}");
+                self.status = tr!("browser.status.assets_not_copied", error = error);
                 cx.notify();
                 return;
             }
@@ -2021,8 +2058,7 @@ impl ProjectWorkspace {
         if let Some(failure) = asset_insertion::drop_failure_status(&failures) {
             self.status = failure;
         } else if insert_failed {
-            self.status =
-                "The asset files were copied but their Markdown could not be inserted.".into();
+            self.status = tr!("browser.status.assets_markdown_not_inserted");
         } else if !assets.is_empty() {
             self.status = asset_insertion::drop_success_status(&assets);
         }
@@ -2084,8 +2120,9 @@ impl ProjectWorkspace {
                     }
                     FrontmatterEdit::Remove { path } => document.remove_field(path),
                     FrontmatterEdit::Raw { path, raw } => {
-                        astrolith_document::yaml::validate_value(raw)
-                            .map_err(|reason| format!("invalid raw YAML: {reason}"))?;
+                        astrolith_document::yaml::validate_value(raw).map_err(|reason| {
+                            tr!("browser.status.invalid_raw_yaml", error = reason)
+                        })?;
                         document.replace_raw(path, raw)
                     }
                 }
@@ -2097,7 +2134,7 @@ impl ProjectWorkspace {
             Ok(()) => cx.notify(),
             Err(error) => {
                 tracing::warn!(%error, "could not apply a frontmatter edit");
-                self.status = format!("Could not edit frontmatter: {error}");
+                self.status = tr!("browser.status.frontmatter_edit_failed", error = error);
                 cx.notify();
             }
         }
@@ -2110,7 +2147,7 @@ impl ProjectWorkspace {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Open Astro project".into()),
+            prompt: Some(tr!("browser.entry.open_project_prompt").into()),
         });
         self.loading = true;
         cx.notify();
@@ -2127,7 +2164,7 @@ impl ProjectWorkspace {
                     }
                     Ok(Ok(None)) => {}
                     _ => {
-                        this.status = "Could not select a project directory.".into();
+                        this.status = tr!("browser.status.project_directory_select_failed");
                     }
                 }
                 cx.notify();
@@ -2144,13 +2181,13 @@ impl ProjectWorkspace {
         self.open_error = None;
         self.selected_collection = None;
         self.selected_directory.clear();
-        self.status = "Checking the project folder…".into();
+        self.status = tr!("browser.status.checking_project_folder");
         cx.notify();
         let home = paths::home_directory();
         let requested = root.clone();
         let work = runtime::blocking(cx, move || {
             paths::validate_project_root(&requested, home.as_deref())
-                .map_err(|error| error.message())
+                .map_err(|error| project_root_error_message(&error))
         });
         self.retain_command_task(cx.spawn_in(window, async move |this, cx| {
             let result = work.await.and_then(|result| result);
@@ -2160,7 +2197,7 @@ impl ProjectWorkspace {
                     tracing::warn!(%message, "refused a project root");
                     this.loading = false;
                     this.open_error = Some(message.clone());
-                    this.status = format!("Could not open project: {message}");
+                    this.status = tr!("browser.status.project_open_failed", error = message);
                     cx.notify();
                 }
             });
@@ -2174,7 +2211,7 @@ impl ProjectWorkspace {
     /// only when the entry itself changed.
     pub(crate) fn reload_collections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.manifest.is_none() {
-            self.status = "Open a project before reloading collections.".into();
+            self.status = tr!("browser.status.open_project_before_reload");
             cx.notify();
             return;
         }
@@ -2182,7 +2219,7 @@ impl ProjectWorkspace {
         let Some(index) = self.start_index_request(cx) else {
             return;
         };
-        self.status = "Reloading collections…".into();
+        self.status = tr!("browser.status.reloading_collections");
         self.index_task = Some(cx.spawn_in(window, async move |this, cx| {
             let _ = index.await;
             let _ = this.update_in(cx, |this, _window, cx| {
@@ -2190,8 +2227,11 @@ impl ProjectWorkspace {
                     return;
                 }
                 this.status = match this.index_error.as_ref() {
-                    Some(error) => format!("Could not reload collections: {error}"),
-                    None => format!("Collections reloaded · {} entries.", this.entries.len()),
+                    Some(error) => tr!("browser.status.collections_reload_failed", error = error),
+                    None => tr!(
+                        "browser.status.collections_reloaded",
+                        count = this.entries.len()
+                    ),
                 };
                 cx.notify();
             });
@@ -2245,13 +2285,13 @@ impl ProjectWorkspace {
             .iter()
             .position(|section| section.title.as_ref() == name);
         let Some(section) = section else {
-            self.status = format!("Collection “{name}” has no entries to show.");
+            self.status = tr!("browser.status.collection_no_entries_show", name = name);
             cx.notify();
             return;
         };
         let rows = self.list.read(cx).delegate().sections[section].rows.len();
         if rows == 0 {
-            self.status = format!("Collection “{name}” has no entries yet.");
+            self.status = tr!("browser.status.collection_no_entries", name = name);
             cx.notify();
             return;
         }
@@ -2260,7 +2300,11 @@ impl ProjectWorkspace {
             list.scroll_to_selected_item(window, cx);
             cx.notify();
         });
-        self.status = format!("Collection “{name}” · {rows} entries.");
+        self.status = tr!(
+            "browser.status.collection_entries",
+            name = name,
+            count = rows
+        );
         cx.notify();
     }
 
@@ -2273,22 +2317,21 @@ impl ProjectWorkspace {
     ) -> Result<(), String> {
         let root = self
             .project_root()
-            .ok_or_else(|| "Open the project before opening an entry.".to_owned())?;
-        let canonical = path
-            .canonicalize()
-            .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+            .ok_or_else(|| tr!("browser.load.open_project_before_entry"))?;
+        let canonical = path.canonicalize().map_err(|error| {
+            tr!(
+                "browser.status.read_failed",
+                path = path.display(),
+                error = error
+            )
+        })?;
         let source = relative_source(&root, &canonical)
-            .ok_or_else(|| format!("{} is outside the open project.", path.display()))?;
+            .ok_or_else(|| tr!("browser.status.path_outside_project", path = path.display()))?;
         let index = self
             .entries
             .iter()
             .position(|entry| entry.entry().source() == &source)
-            .ok_or_else(|| {
-                format!(
-                    "{} is not a content entry in this project's collections.",
-                    path.display()
-                )
-            })?;
+            .ok_or_else(|| tr!("browser.load.not_content_entry", path = path.display()))?;
         self.open_entry(index, window, cx);
         Ok(())
     }
@@ -2347,20 +2390,24 @@ impl ProjectWorkspace {
         cx: &mut Context<Self>,
     ) {
         let Some(root) = self.project_root() else {
-            self.status = "Open a project before browsing its files.".into();
+            self.status = tr!("browser.status.open_project_before_browse");
             cx.notify();
             return;
         };
         let canonical = match path.canonicalize() {
             Ok(canonical) => canonical,
             Err(error) => {
-                self.status = format!("Could not open {}: {error}", path.display());
+                self.status = tr!(
+                    "browser.status.file_open_failed",
+                    path = path.display(),
+                    error = error
+                );
                 cx.notify();
                 return;
             }
         };
         if !canonical.starts_with(&root) {
-            self.status = format!("{} is outside the open project.", path.display());
+            self.status = tr!("browser.status.path_outside_project", path = path.display());
             cx.notify();
             return;
         }
@@ -2392,10 +2439,7 @@ impl ProjectWorkspace {
     ) {
         let availability = self.command_availability(cx, window);
         if !command.is_available(availability) {
-            self.status = format!(
-                "{} is unavailable until an IDE is configured and a project is open.",
-                command.label()
-            );
+            self.status = tr!("browser.status.ide_unavailable", command = command.label());
             cx.notify();
             return;
         }
@@ -2433,8 +2477,8 @@ impl ProjectWorkspace {
             let result = spawn.await.and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.status = match result {
-                    Ok(()) => "Opened in the IDE.".into(),
-                    Err(error) => format!("Could not open the IDE: {error}"),
+                    Ok(()) => tr!("browser.status.ide_opened"),
+                    Err(error) => tr!("browser.status.ide_open_failed", error = error),
                 };
                 cx.notify();
             });
@@ -2499,13 +2543,12 @@ impl ProjectWorkspace {
         for session in self.sessions.keys() {
             match self.save_coordinator.status(session) {
                 Some(SaveStatus::Conflict) => {
-                    blocked = Some(
-                        "Project switch cancelled: a document changed on disk and was not overwritten. Resolve the conflict (reload, overwrite, or save a copy), then switch.".to_string(),
-                    );
+                    blocked = Some(tr!("browser.status.switch_cancelled_conflict"));
                 }
                 Some(SaveStatus::Failed(message)) => {
-                    blocked = Some(format!(
-                        "Project switch cancelled: the document could not be saved ({message})."
+                    blocked = Some(tr!(
+                        "browser.status.switch_cancelled_save_failed",
+                        error = message
                     ));
                 }
                 _ => {}
@@ -2533,7 +2576,7 @@ impl ProjectWorkspace {
         self.cancellation.cancel();
         self.cancellation = Cancellation::default();
         let Some(next) = self.generation.checked_add(1) else {
-            self.status = "Project generation exhausted; restart the application.".into();
+            self.status = tr!("browser.status.generation_exhausted");
             return;
         };
         self.generation = next;
@@ -2566,7 +2609,7 @@ impl ProjectWorkspace {
         self.refreshing = false;
         self.index_error = None;
         self.open_error = None;
-        self.status = "Discovering project…".into();
+        self.status = tr!("browser.status.discovering_project");
         self.watch_task = None;
         self.schema_task = None;
         self.schema_in_flight = false;
@@ -2680,7 +2723,7 @@ impl ProjectWorkspace {
                             %error,
                             "could not open Astro project"
                         );
-                        this.status = format!("Could not open project: {error}");
+                        this.status = tr!("browser.status.project_open_failed", error = error);
                         this.open_error = Some(error);
                     }
                 }
@@ -2849,21 +2892,21 @@ impl ProjectWorkspace {
                 let save_owner = owner.clone();
                 let save_path = path.clone();
                 dialog
-                    .title(format!("Close “{title}”?"))
-                    .child("The document has unsaved changes.")
+                    .title(tr!("browser.dialog.close_title", title = title))
+                    .child(tr!("browser.dialog.close_body"))
                     .footer(
                         div()
                             .h_flex()
                             .gap_2()
                             .child(
                                 Button::new("keep-editing")
-                                    .label("Keep editing")
+                                    .label(tr!("browser.dialog.keep_editing"))
                                     .on_click(|_, window, cx| window.close_dialog(cx)),
                             )
                             .child(
                                 Button::new("discard-document")
                                     .danger()
-                                    .label("Discard changes")
+                                    .label(tr!("browser.dialog.discard_changes"))
                                     .on_click(move |_, window, cx| {
                                         window.close_dialog(cx);
                                         let _ = discard_owner.update(cx, |this, cx| {
@@ -2874,7 +2917,7 @@ impl ProjectWorkspace {
                             .child(
                                 Button::new("save-and-close")
                                     .primary()
-                                    .label("Save and close")
+                                    .label(tr!("browser.dialog.save_and_close"))
                                     .on_click(move |_, window, cx| {
                                         window.close_dialog(cx);
                                         let _ = save_owner.update(cx, |this, cx| {
@@ -2939,30 +2982,61 @@ impl ProjectWorkspace {
         if !window.has_active_dialog(cx) {
             let owner = cx.weak_entity();
             let save_owner = owner.clone();
-            window.open_dialog(cx,move|dialog,_,_| {
+            window.open_dialog(cx, move |dialog, _, _| {
                 let owner = owner.clone();
                 let save_owner = save_owner.clone();
-                dialog.title("Unsaved documents")
-                    .child("Changes exist only in memory. Save them, keep the window open, or discard them.")
-                    .footer(div().h_flex().gap_2()
-                        .child(Button::new("keep-window").label("Keep editing").on_click(|_,window,cx|window.close_dialog(cx)))
-                        .child(Button::new("discard-window").danger().label("Discard and close").on_click(move|_,window,cx| {
-                            let _=owner.update(cx,|this,cx| {
-                                if let Some(store)=this.recovery.clone() {
-                                    let identities: Vec<_> = this.sessions.values().map(|session| session.read(cx).buffer.identity().clone()).collect();
-                                    let task = runtime::blocking(cx, move || { for identity in identities { let _ = store.clear(&identity); } });
-                                    task.detach();
-                                }
-                                this.pending_quit = false;
-                                this.shutdown_lsp(cx);
-                                this.sessions.clear();
-                            });
-                            window.close_dialog(cx);window.remove_window();
-                        }))
-                        .child(Button::new("save-all-and-quit").primary().label("Save all and quit").on_click(move|_,window,cx| {
-                            window.close_dialog(cx);
-                            let _=save_owner.update(cx,|this,cx| this.save_and_quit(window,cx));
-                        })))
+                dialog
+                    .title(tr!("browser.dialog.unsaved_title"))
+                    .child(tr!("browser.dialog.unsaved_body"))
+                    .footer(
+                        div()
+                            .h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("keep-window")
+                                    .label(tr!("browser.dialog.keep_editing"))
+                                    .on_click(|_, window, cx| window.close_dialog(cx)),
+                            )
+                            .child(
+                                Button::new("discard-window")
+                                    .danger()
+                                    .label(tr!("browser.dialog.discard_and_close"))
+                                    .on_click(move |_, window, cx| {
+                                        let _ = owner.update(cx, |this, cx| {
+                                            if let Some(store) = this.recovery.clone() {
+                                                let identities: Vec<_> = this
+                                                    .sessions
+                                                    .values()
+                                                    .map(|session| {
+                                                        session.read(cx).buffer.identity().clone()
+                                                    })
+                                                    .collect();
+                                                let task = runtime::blocking(cx, move || {
+                                                    for identity in identities {
+                                                        let _ = store.clear(&identity);
+                                                    }
+                                                });
+                                                task.detach();
+                                            }
+                                            this.pending_quit = false;
+                                            this.shutdown_lsp(cx);
+                                            this.sessions.clear();
+                                        });
+                                        window.close_dialog(cx);
+                                        window.remove_window();
+                                    }),
+                            )
+                            .child(
+                                Button::new("save-all-and-quit")
+                                    .primary()
+                                    .label(tr!("browser.dialog.save_all_and_quit"))
+                                    .on_click(move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                        let _ = save_owner
+                                            .update(cx, |this, cx| this.save_and_quit(window, cx));
+                                    }),
+                            ),
+                    )
             });
         }
         false
@@ -2987,13 +3061,12 @@ impl ProjectWorkspace {
         for session in self.sessions.keys() {
             match self.save_coordinator.status(session) {
                 Some(SaveStatus::Conflict) => {
-                    blocked = Some(
-                        "Quit cancelled: a document changed on disk and was not overwritten. Resolve the conflict (reload, overwrite, or save a copy), then quit.".to_string(),
-                    );
+                    blocked = Some(tr!("browser.status.quit_cancelled_conflict"));
                 }
                 Some(SaveStatus::Failed(message)) => {
-                    blocked = Some(format!(
-                        "Quit cancelled: a document could not be saved ({message})."
+                    blocked = Some(tr!(
+                        "browser.status.quit_cancelled_save_failed",
+                        error = message
                     ));
                 }
                 _ => {}
@@ -3063,9 +3136,7 @@ impl ProjectWorkspace {
                     .iter()
                     .any(|descriptor| descriptor.id().as_str() == name)
                 {
-                    problems.push(format!(
-                        "The content directory override names unknown collection “{name}”; it was ignored."
-                    ));
+                    problems.push(tr!("browser.warning.unknown_collection", name = name));
                 }
             }
         }
@@ -3093,21 +3164,20 @@ impl ProjectWorkspace {
                 (Some(directory), _) => PathBuf::from(directory),
                 (None, Some(directory)) => {
                     let Some(shared) = shared.as_deref() else {
-                        problems.push(
-                            "The project content directory cannot be applied because the collection bases share no common root."
-                                .to_owned(),
-                        );
+                        problems.push(tr!("browser.warning.no_common_root"));
                         continue;
                     };
                     let Some(config_base) = self.config_bases.get(collection) else {
-                        problems.push(format!(
-                            "Reopen the project to apply the project content directory to {collection}."
+                        problems.push(tr!(
+                            "browser.warning.reopen_to_apply",
+                            collection = collection
                         ));
                         continue;
                     };
                     let Ok(relative) = config_base.strip_prefix(shared) else {
-                        problems.push(format!(
-                            "The project content directory cannot be applied to {collection} because its base is outside the shared collection root."
+                        problems.push(tr!(
+                            "browser.warning.base_outside_root",
+                            collection = collection
                         ));
                         continue;
                     };
@@ -3120,11 +3190,16 @@ impl ProjectWorkspace {
                 Ok(path) if path.is_dir() => {
                     bases.insert(collection.to_owned(), candidate);
                 }
-                Ok(_) => problems.push(format!(
-                    "The content directory override “{shown}” for {collection} is not a directory; using the collection base from the Astro configuration."
+                Ok(_) => problems.push(tr!(
+                    "browser.warning.override_not_directory",
+                    shown = shown,
+                    collection = collection
                 )),
-                Err(error) => problems.push(format!(
-                    "The content directory override “{shown}” for {collection} is invalid ({error}); using the collection base from the Astro configuration."
+                Err(error) => problems.push(tr!(
+                    "browser.warning.override_invalid",
+                    shown = shown,
+                    collection = collection,
+                    error = error
                 )),
             }
         }
@@ -3203,17 +3278,16 @@ impl ProjectWorkspace {
             }
         }
         let mut options = vec![
-            (SortMode::Default, SharedString::from("Default")),
-            (SortMode::Title, SharedString::from("Title")),
-            (SortMode::Filename, SharedString::from("Filename")),
-            (SortMode::LastModified, SharedString::from("Last modified")),
+            SortMode::Default,
+            SortMode::Title,
+            SortMode::Filename,
+            SortMode::LastModified,
         ];
         for date in dates {
-            let label = SharedString::from(format!("Date · {date}"));
-            options.push((SortMode::DateField(date), label));
+            options.push(SortMode::DateField(date));
         }
-        options.push((SortMode::Order, SharedString::from("Order")));
-        if !options.iter().any(|(mode, _)| mode == &self.list_sort.mode) {
+        options.push(SortMode::Order);
+        if !options.contains(&self.list_sort.mode) {
             self.list_sort.mode = SortMode::Default;
         }
         self.sort_options = options;
@@ -3337,7 +3411,7 @@ impl ProjectWorkspace {
         let allowed = availability.editor_focused
             && (command != FormatCommand::Comment || availability.markdown_document);
         if !allowed {
-            self.status = "Formatting is unavailable while this document is not focused.".into();
+            self.status = tr!("browser.status.formatting_unfocused");
             cx.notify();
             return false;
         }
@@ -3547,7 +3621,7 @@ impl ProjectWorkspace {
         };
         let moved = session.update(cx, |session, cx| session.go_to_line(line, window, cx));
         if !moved {
-            self.status = format!("Line {line} is outside this document.");
+            self.status = tr!("browser.status.line_outside_document", line = line);
         }
         cx.notify();
         moved
@@ -3559,28 +3633,29 @@ impl ProjectWorkspace {
             return;
         }
         let Some(session) = self.active_session(cx) else {
-            self.status = "Open a document before going to a line.".into();
+            self.status = tr!("browser.status.open_document_for_goto");
             cx.notify();
             return;
         };
         let lines = session.read(cx).line_count(cx);
         let owner = cx.weak_entity();
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Line number"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr!("browser.dialog.line_number_placeholder"))
+        });
         let focus_input = input.clone();
         window.open_dialog(cx, move |dialog, _, _| {
             let owner = owner.clone();
             let input = input.clone();
             dialog
-                .title("Go to line")
+                .title(tr!("browser.dialog.goto_line_title"))
                 .child(
                     div()
                         .v_flex()
                         .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .child(SharedString::from(format!("Document has {lines} lines"))),
-                        )
+                        .child(div().text_sm().child(SharedString::from(tr!(
+                            "browser.dialog.document_lines",
+                            lines = lines
+                        ))))
                         .child(Input::new(&input)),
                 )
                 .footer(
@@ -3589,13 +3664,13 @@ impl ProjectWorkspace {
                         .gap_2()
                         .child(
                             Button::new("goto-line-cancel")
-                                .label("Cancel")
+                                .label(tr!("browser.dialog.cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("goto-line-confirm")
                                 .primary()
-                                .label("Go")
+                                .label(tr!("browser.dialog.go"))
                                 .on_click(move |_, window, cx| {
                                     let typed = input.read(cx).value().to_string();
                                     window.close_dialog(cx);
@@ -3606,7 +3681,7 @@ impl ProjectWorkspace {
                                             }
                                             Err(_) => {
                                                 project.status =
-                                                    "Enter a line number to go to.".into();
+                                                    tr!("browser.status.enter_line_number");
                                                 cx.notify();
                                             }
                                         }
@@ -3648,9 +3723,9 @@ impl ProjectWorkspace {
             .iter()
             .position(|entry| entry.entry().source() == source)
         else {
-            self.status = format!(
-                "{} was written but is not indexed by its collection pattern.",
-                source.as_str()
+            self.status = tr!(
+                "browser.status.written_not_indexed",
+                source = source.as_str()
             );
             cx.notify();
             return;
@@ -3939,14 +4014,14 @@ impl Render for ProjectWorkspace {
                 .ghost()
                 .icon(IconName::ArrowLeft)
                 .tooltip(if back_directory.is_empty() {
-                    "All collections"
+                    tr!("browser.library.all_collections")
                 } else {
-                    "Up one folder"
+                    tr!("browser.library.up_one_folder")
                 })
                 .accessibility_label(if back_directory.is_empty() {
-                    "All collections"
+                    tr!("browser.library.all_collections")
                 } else {
-                    "Up one folder"
+                    tr!("browser.library.up_one_folder")
                 })
                 .on_click(move |_, window, cx| {
                     let _ = back_owner.update(cx, |project, cx| {
@@ -3958,7 +4033,7 @@ impl Render for ProjectWorkspace {
         let crumb_owner = cx.weak_entity();
         let mut trail: Vec<(String, Option<CrumbAction>)> = Vec::new();
         if let Some(collection) = selected_collection.as_ref() {
-            trail.push(("Library".to_owned(), Some(CrumbAction::Collections)));
+            trail.push((tr!("browser.library.title"), Some(CrumbAction::Collections)));
             let collection_label = collection_title(collection);
             if selected_directory.is_empty() {
                 trail.push((collection_label, None));
@@ -3982,7 +4057,7 @@ impl Render for ProjectWorkspace {
                         .text_sm()
                         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .truncate()
-                        .child(SharedString::from("Library")),
+                        .child(SharedString::from(tr!("browser.library.title"))),
                 );
             } else {
                 let last_index = trail.len().saturating_sub(1);
@@ -4055,7 +4130,7 @@ impl Render for ProjectWorkspace {
                         .child(ui::icon_button(
                             "open-project",
                             IconName::FolderOpen,
-                            "Open project…",
+                            tr!("browser.library.open_project"),
                         ))
                         .when(selected_collection.is_some(), |row| {
                             row.child(
@@ -4063,8 +4138,8 @@ impl Render for ProjectWorkspace {
                                     .small()
                                     .ghost()
                                     .icon(IconName::Ellipsis)
-                                    .tooltip("Library actions")
-                                    .accessibility_label("Library actions")
+                                    .tooltip(tr!("browser.library.actions"))
+                                    .accessibility_label(tr!("browser.library.actions"))
                                     .dropdown_menu(move |menu, _, _| {
                                         let mut menu = menu;
                                         for command in [
@@ -4090,64 +4165,68 @@ impl Render for ProjectWorkspace {
                                         menu = menu
                                             .separator()
                                             .item(
-                                                PopupMenuItem::new("Copy relative path")
-                                                    .disabled(
-                                                        !CommandId::CopyPathRelative
-                                                            .is_available(availability),
-                                                    )
-                                                    .on_click(move |_, window, cx| {
+                                                PopupMenuItem::new(tr!(
+                                                    "browser.library.copy_relative_path"
+                                                ))
+                                                .disabled(
+                                                    !CommandId::CopyPathRelative
+                                                        .is_available(availability),
+                                                )
+                                                .on_click(move |_, window, cx| {
+                                                    let _ = owner.update(cx, |project, cx| {
+                                                        project.entry_command(
+                                                            CommandId::CopyPathRelative,
+                                                            None,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    });
+                                                }),
+                                            )
+                                            .item(
+                                                PopupMenuItem::new(tr!(
+                                                    "browser.library.copy_absolute_path"
+                                                ))
+                                                .disabled(
+                                                    !CommandId::CopyPathAbsolute
+                                                        .is_available(availability),
+                                                )
+                                                .on_click({
+                                                    let owner = absolute_owner.clone();
+                                                    move |_, window, cx| {
                                                         let _ = owner.update(cx, |project, cx| {
                                                             project.entry_command(
-                                                                CommandId::CopyPathRelative,
+                                                                CommandId::CopyPathAbsolute,
                                                                 None,
                                                                 window,
                                                                 cx,
                                                             )
                                                         });
-                                                    }),
-                                            )
-                                            .item(
-                                                PopupMenuItem::new("Copy absolute path")
-                                                    .disabled(
-                                                        !CommandId::CopyPathAbsolute
-                                                            .is_available(availability),
-                                                    )
-                                                    .on_click({
-                                                        let owner = absolute_owner.clone();
-                                                        move |_, window, cx| {
-                                                            let _ =
-                                                                owner.update(cx, |project, cx| {
-                                                                    project.entry_command(
-                                                                        CommandId::CopyPathAbsolute,
-                                                                        None,
-                                                                        window,
-                                                                        cx,
-                                                                    )
-                                                                });
-                                                        }
-                                                    }),
+                                                    }
+                                                }),
                                             )
                                             .separator()
                                             .item(
-                                                PopupMenuItem::new("Show drafts only")
-                                                    .checked(drafts_only)
-                                                    .on_click({
-                                                        let owner = menu_owner.clone();
-                                                        move |_, _, cx| {
-                                                            let _ =
-                                                                owner.update(cx, |project, cx| {
-                                                                    project.toggle_drafts_only(cx)
-                                                                });
-                                                        }
-                                                    }),
+                                                PopupMenuItem::new(tr!(
+                                                    "browser.library.show_drafts_only"
+                                                ))
+                                                .checked(drafts_only)
+                                                .on_click({
+                                                    let owner = menu_owner.clone();
+                                                    move |_, _, cx| {
+                                                        let _ = owner.update(cx, |project, cx| {
+                                                            project.toggle_drafts_only(cx)
+                                                        });
+                                                    }
+                                                }),
                                             )
                                             .separator();
-                                        for (mode, label) in menu_options.iter().cloned() {
+                                        for mode in menu_options.iter().cloned() {
                                             let owner = menu_owner.clone();
                                             let selected = mode == menu_current;
                                             let chosen = mode.clone();
                                             menu = menu.item(
-                                                PopupMenuItem::new(label)
+                                                PopupMenuItem::new(sort_label(&mode))
                                                     .checked(selected)
                                                     .on_click(move |_, _, cx| {
                                                         let _ = owner.update(cx, |project, cx| {
@@ -4159,27 +4238,29 @@ impl Render for ProjectWorkspace {
                                         }
                                         let owner = menu_owner.clone();
                                         menu.item(
-                                            PopupMenuItem::new("Reverse sort direction")
-                                                .disabled(default_sort)
-                                                .on_click(move |_, _, cx| {
-                                                    let _ = owner.update(cx, |project, cx| {
-                                                        project.toggle_sort_direction(cx)
-                                                    });
-                                                }),
+                                            PopupMenuItem::new(tr!(
+                                                "browser.library.reverse_sort_direction"
+                                            ))
+                                            .disabled(default_sort)
+                                            .on_click(move |_, _, cx| {
+                                                let _ = owner.update(cx, |project, cx| {
+                                                    project.toggle_sort_direction(cx)
+                                                });
+                                            }),
                                         )
                                         .when(
                                             filter_active,
                                             |menu| {
                                                 let owner = menu_owner.clone();
                                                 menu.separator().item(
-                                                    PopupMenuItem::new("Clear filter").on_click(
-                                                        move |_, window, cx| {
-                                                            let _ =
-                                                                owner.update(cx, |project, cx| {
-                                                                    project.clear_filter(window, cx)
-                                                                });
-                                                        },
-                                                    ),
+                                                    PopupMenuItem::new(tr!(
+                                                        "browser.library.clear_filter"
+                                                    ))
+                                                    .on_click(move |_, window, cx| {
+                                                        let _ = owner.update(cx, |project, cx| {
+                                                            project.clear_filter(window, cx)
+                                                        });
+                                                    }),
                                                 )
                                             },
                                         )
@@ -4204,12 +4285,16 @@ impl Render for ProjectWorkspace {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(SharedString::from(if selected_collection.is_some() {
                                     if filter_active {
-                                        format!("{visible} of {total} entries")
+                                        tr!(
+                                            "browser.count.visible_of_total",
+                                            visible = visible,
+                                            total = total
+                                        )
                                     } else {
-                                        format!("{total} entries")
+                                        tr!("browser.count.entries", count = total)
                                     }
                                 } else {
-                                    format!("{} collections", collections.len())
+                                    tr!("browser.count.collections", count = collections.len())
                                 }))
                                 .when(filter_active, |row| {
                                     row.child(
@@ -4230,7 +4315,7 @@ impl Render for ProjectWorkspace {
                                 Button::new("entry-new")
                                     .small()
                                     .icon(IconName::PenLine)
-                                    .label("New entry")
+                                    .label(tr!("browser.library.new_entry"))
                                     .tooltip(CommandId::NewEntry.label())
                                     .disabled(!CommandId::NewEntry.is_available(availability))
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -4243,7 +4328,7 @@ impl Render for ProjectWorkspace {
                                 Button::new("clear-filter")
                                     .small()
                                     .ghost()
-                                    .label("Clear filter")
+                                    .label(tr!("browser.library.clear_filter"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.clear_filter(window, cx)
                                     })),
@@ -4271,13 +4356,17 @@ impl Render for ProjectWorkspace {
                                 .size_6()
                                 .text_color(cx.theme().muted_foreground),
                         )
-                        .child(div().text_sm().child("No collections"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .child(tr!("browser.library.no_collections_title")),
+                        )
                         .child(
                             div()
                                 .text_xs()
                                 .text_center()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("This project declares no content collections."),
+                                .child(tr!("browser.library.no_collections_body")),
                         ),
                 );
             } else {
@@ -4343,14 +4432,17 @@ impl Render for ProjectWorkspace {
                                                                     cx.theme().muted_foreground,
                                                                 )
                                                                 .child(SharedString::from(
-                                                                    format!(
-                                                                        "{count} {}",
-                                                                        if *count == 1 {
-                                                                            "entry"
-                                                                        } else {
-                                                                            "entries"
-                                                                        }
-                                                                    ),
+                                                                    if *count == 1 {
+                                                                        tr!(
+                                                                            "browser.count.entry",
+                                                                            count = count
+                                                                        )
+                                                                    } else {
+                                                                        tr!(
+                                                                            "browser.count.entries",
+                                                                            count = count
+                                                                        )
+                                                                    },
                                                                 )),
                                                         ),
                                                 )
@@ -4374,39 +4466,43 @@ impl Render for ProjectWorkspace {
                     );
             }
         } else if let Some(error) = index_error {
-            view =
-                view.child(
-                    div()
-                        .id("project-error")
-                        .test_support()
-                        .v_flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .p_6()
-                        .child(
-                            Icon::new(IconName::TriangleAlert)
-                                .size_6()
-                                .text_color(cx.theme().danger),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().danger)
-                                .child("Project index unavailable"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_center()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(error),
-                        )
-                        .child(Button::new("retry-index").small().label("Retry").on_click(
-                            cx.listener(|this, _, window, cx| this.retry_index(window, cx)),
-                        )),
-                );
+            view = view.child(
+                div()
+                    .id("project-error")
+                    .test_support()
+                    .v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .p_6()
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size_6()
+                            .text_color(cx.theme().danger),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().danger)
+                            .child(tr!("browser.library.index_unavailable")),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_center()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(error),
+                    )
+                    .child(
+                        Button::new("retry-index")
+                            .small()
+                            .label(tr!("browser.library.retry"))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.retry_index(window, cx)),
+                            ),
+                    ),
+            );
         } else if visible_rows == 0 {
             view = view.child(if filter_active {
                 div()
@@ -4423,13 +4519,17 @@ impl Render for ProjectWorkspace {
                             .size_6()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .child(div().text_sm().child("No entries match the filter"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(tr!("browser.library.filtered_empty_title")),
+                    )
                     .child(
                         div()
                             .text_xs()
                             .text_center()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Change the search text or clear the draft filter."),
+                            .child(tr!("browser.library.filtered_empty_body")),
                     )
             } else {
                 div()
@@ -4446,23 +4546,19 @@ impl Render for ProjectWorkspace {
                             .size_6()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .child(div().text_sm().child("No entries"))
+                    .child(div().text_sm().child(tr!("browser.library.empty_title")))
                     .child(
                         div()
                             .text_xs()
                             .text_center()
                             .text_color(cx.theme().muted_foreground)
-                            .child("This collection contains no Markdown or MDX files."),
+                            .child(tr!("browser.library.empty_body")),
                     )
             });
         } else {
-            view = view.child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .p_2()
-                    .child(List::new(&self.list).search_placeholder("Filter by file or title")),
-            );
+            view = view.child(div().flex_1().min_h_0().p_2().child(
+                List::new(&self.list).search_placeholder(tr!("browser.library.search_placeholder")),
+            ));
         }
 
         if !override_problems.is_empty() {
@@ -4518,10 +4614,22 @@ fn collection_title(name: &str) -> String {
 
 fn filter_label(drafts_only: bool, query: &str) -> String {
     match (drafts_only, query.is_empty()) {
-        (true, true) => "Drafts only".to_owned(),
-        (true, false) => format!("Drafts · “{query}”"),
-        (false, false) => format!("“{query}”"),
+        (true, true) => tr!("browser.filter.drafts_only"),
+        (true, false) => tr!("browser.filter.drafts_query", query = query),
+        (false, false) => tr!("browser.filter.query", query = query),
         (false, true) => String::new(),
+    }
+}
+
+/// Reader-facing label for one sort mode; translated at render time.
+fn sort_label(mode: &SortMode) -> SharedString {
+    match mode {
+        SortMode::Default => tr!("browser.sort.default").into(),
+        SortMode::Title => tr!("browser.sort.title").into(),
+        SortMode::Filename => tr!("browser.sort.filename").into(),
+        SortMode::LastModified => tr!("browser.sort.last_modified").into(),
+        SortMode::DateField(field) => tr!("browser.sort.date_field", field = field).into(),
+        SortMode::Order => tr!("browser.sort.order").into(),
     }
 }
 
@@ -4541,12 +4649,12 @@ fn project_loading_state(cx: &mut Context<ProjectWorkspace>) -> impl IntoElement
                 .large()
                 .color(cx.theme().muted_foreground),
         )
-        .child(div().text_sm().child("Scanning collections…"))
+        .child(div().text_sm().child(tr!("browser.library.scanning")))
         .child(
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child("The project index is loading."),
+                .child(tr!("browser.library.loading_body")),
         )
 }
 
@@ -4555,12 +4663,12 @@ fn project_open_error_state(message: &str, cx: &mut Context<ProjectWorkspace>) -
     ui::empty_state(
         "project-open-error",
         IconName::TriangleAlert,
-        "Could not open project",
+        tr!("browser.library.open_error_title"),
         message.to_owned(),
         Some(
             Button::new("retry-open-project")
                 .small()
-                .label("Choose another project…")
+                .label(tr!("browser.library.choose_another_project"))
                 .on_click(cx.listener(|this, _, window, cx| this.prompt(window, cx)))
                 .into_any_element(),
         ),
@@ -4573,12 +4681,12 @@ fn project_empty_state(loading: bool, cx: &mut Context<ProjectWorkspace>) -> imp
     ui::empty_state(
         "project-empty",
         IconName::FolderOpen,
-        "No project open",
-        "Open an Astro project to browse its content collections.",
+        tr!("browser.library.no_project_title"),
+        tr!("browser.library.no_project_body"),
         Some(
             Button::new("open-project")
                 .small()
-                .label("Open project…")
+                .label(tr!("browser.library.open_project"))
                 .disabled(loading)
                 .on_click(cx.listener(|this, _, window, cx| this.prompt(window, cx)))
                 .into_any_element(),
@@ -4632,8 +4740,13 @@ pub(crate) fn scan_project_astro_sources(root: &Path) -> Result<Vec<(PathBuf, St
         if depth > 12 || inspected >= 5_000 || found.len() >= 500 {
             break;
         }
-        let entries = std::fs::read_dir(&directory)
-            .map_err(|error| format!("Could not read {}: {error}", directory.display()))?;
+        let entries = std::fs::read_dir(&directory).map_err(|error| {
+            tr!(
+                "browser.status.read_failed",
+                path = directory.display(),
+                error = error
+            )
+        })?;
         for entry in entries {
             let entry = entry.map_err(|error| error.to_string())?;
             inspected += 1;
@@ -4701,7 +4814,7 @@ async fn open_directory(directory: &Path) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = tokio::process::Command::new("xdg-open");
     #[cfg(not(any(unix, windows)))]
-    return Err("opening a file manager is unsupported on this platform".into());
+    return Err(tr!("browser.status.file_manager_unsupported"));
     #[allow(unreachable_code)]
     {
         let status = command
@@ -4712,7 +4825,7 @@ async fn open_directory(directory: &Path) -> Result<(), String> {
         if status.success() {
             Ok(())
         } else {
-            Err(format!("the file manager exited with {status}"))
+            Err(tr!("browser.status.file_manager_exited", status = status))
         }
     }
 }

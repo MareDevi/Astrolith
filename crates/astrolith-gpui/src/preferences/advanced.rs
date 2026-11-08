@@ -42,16 +42,16 @@ impl Versions {
         vec![
             ("Astrolith".into(), self.app.to_owned()),
             (
-                "Global preferences".into(),
-                format!("version {}", self.global),
+                tr!("preferences.advanced.global_preferences"),
+                tr!("preferences.advanced.version", version = self.global),
             ),
             (
-                "Project preferences".into(),
-                format!("version {}", self.project),
+                tr!("preferences.advanced.project_preferences"),
+                tr!("preferences.advanced.version", version = self.project),
             ),
             (
-                "Project registry".into(),
-                format!("version {}", self.registry),
+                tr!("preferences.advanced.project_registry"),
+                tr!("preferences.advanced.version", version = self.registry),
             ),
         ]
     }
@@ -140,11 +140,11 @@ impl PreferencesSheet {
         let folder_label = folder
             .as_ref()
             .map(|folder| folder.display().to_string())
-            .unwrap_or_else(|| "Preferences folder unavailable".to_owned());
+            .unwrap_or_else(|| tr!("preferences.advanced.folder_unavailable"));
         let open = folder.clone();
         let open_button = Button::new("preferences-open-folder")
             .disabled(open.is_none())
-            .label("Open preferences folder")
+            .label(tr!("preferences.advanced.open_folder"))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if let Some(folder) = open.clone() {
                     this.open_folder(folder, cx);
@@ -155,10 +155,10 @@ impl PreferencesSheet {
             .v_flex()
             .w_full()
             .gap_6()
-            .child(self.section("Versions", None, rows, cx))
+            .child(self.section(tr!("preferences.advanced.versions"), None, rows, cx))
             .child(self.section(
-                "Preferences folder",
-                Some("Open the folder that holds the preference files."),
+                tr!("preferences.advanced.preferences_folder"),
+                Some(tr!("preferences.advanced.preferences_folder_hint").into()),
                 vec![
                     div()
                         .id("preferences-folder-path")
@@ -172,15 +172,12 @@ impl PreferencesSheet {
                 cx,
             ))
             .child(self.section(
-                "Reset",
-                Some(
-                    "Deletes only preferences and the project registry. Recovery snapshots, save \
-                     failures and logs are kept. Astrolith restarts immediately.",
-                ),
+                tr!("preferences.advanced.reset_section"),
+                Some(tr!("preferences.advanced.reset_section_hint").into()),
                 vec![
                     Button::new("preferences-reset-all")
                         .danger()
-                        .label("Reset all preferences…")
+                        .label(tr!("preferences.advanced.reset_all"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.confirm_reset_all(window, cx)
                         }))
@@ -197,8 +194,8 @@ impl PreferencesSheet {
             let result = opened.await.and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 this.notice = Some(SharedString::from(match result {
-                    Ok(()) => "Opened the preferences folder.".to_owned(),
-                    Err(error) => format!("Could not open the preferences folder: {error}"),
+                    Ok(()) => tr!("preferences.advanced.folder_opened"),
+                    Err(error) => tr!("preferences.advanced.folder_open_failed", error = error),
                 }));
                 cx.notify();
             });
@@ -213,9 +210,9 @@ impl PreferencesSheet {
             .as_ref()
             .and_then(|context| context.preferences_folder.clone());
         let Some(folder) = folder else {
-            self.notice = Some(SharedString::from(
-                "The preferences folder is unavailable, so Reset All cannot run.",
-            ));
+            self.notice = Some(SharedString::from(tr!(
+                "preferences.advanced.folder_unavailable_notice"
+            )));
             cx.notify();
             return;
         };
@@ -224,16 +221,14 @@ impl PreferencesSheet {
             let weak = weak.clone();
             alert
                 .confirm()
-                .title("Reset all preferences?")
-                .description(format!(
-                    "This deletes global and project preferences and the project registry in {}. \
-                     Recovery snapshots, save-failure records and logs are kept. Astrolith \
-                     restarts immediately and reopens with defaults.",
-                    folder.display()
+                .title(tr!("preferences.advanced.reset_title"))
+                .description(tr!(
+                    "preferences.advanced.reset_body",
+                    folder = folder.display()
                 ))
-                .ok_text("Reset and restart")
+                .ok_text(tr!("preferences.advanced.reset_confirm"))
                 .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
-                .cancel_text("Keep preferences")
+                .cancel_text(tr!("preferences.advanced.reset_cancel"))
                 .show_cancel(true)
                 .on_ok(move |_, window, cx| {
                     let _ = weak.update(cx, |sheet, cx| {
@@ -255,7 +250,7 @@ async fn open_directory(directory: &Path) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = tokio::process::Command::new("xdg-open");
     #[cfg(not(any(unix, windows)))]
-    return Err("opening a file manager is unsupported on this platform".into());
+    return Err(tr!("preferences.advanced.file_manager_unsupported"));
     #[allow(unreachable_code)]
     {
         let status = command
@@ -266,7 +261,10 @@ async fn open_directory(directory: &Path) -> Result<(), String> {
         if status.success() {
             Ok(())
         } else {
-            Err(format!("the file manager exited with {status}"))
+            Err(tr!(
+                "preferences.advanced.file_manager_failed",
+                status = status
+            ))
         }
     }
 }

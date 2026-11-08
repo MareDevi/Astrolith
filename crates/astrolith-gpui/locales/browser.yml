@@ -1,0 +1,913 @@
+_version: 2
+browser:
+  explorer:
+    title:
+      en: Explorer
+      zh-CN: 资源管理器
+      ja: エクスプローラー
+    refresh:
+      en: Refresh files
+      zh-CN: 刷新文件
+      ja: ファイルを更新
+    error_title:
+      en: Could not read project files
+      zh-CN: 无法读取项目文件
+      ja: プロジェクトのファイルを読み込めませんでした
+    empty_title:
+      en: No project files
+      zh-CN: 没有项目文件
+      ja: プロジェクトファイルがありません
+    empty_body:
+      en: This project contains no readable files.
+      zh-CN: 此项目不包含可读取的文件。
+      ja: このプロジェクトには読み取り可能なファイルがありません。
+    truncated:
+      en: Some project files are hidden by the scan limit.
+      zh-CN: 部分项目文件因扫描上限而隐藏。
+      ja: 一部のプロジェクトファイルはスキャン上限により非表示になっています。
+  recent:
+    open:
+      en: "Open %{name}"
+      zh-CN: "打开 %{name}"
+      ja: "%{name} を開く"
+    open_in_parent:
+      en: "Open %{name} (%{parent})"
+      zh-CN: "打开 %{name}（%{parent}）"
+      ja: "%{name}（%{parent}）を開く"
+  library:
+    title:
+      en: Library
+      zh-CN: 资料库
+      ja: ライブラリ
+    all_collections:
+      en: All collections
+      zh-CN: 所有集合
+      ja: すべてのコレクション
+    up_one_folder:
+      en: Up one folder
+      zh-CN: 返回上一级
+      ja: 一つ上のフォルダーへ
+    open_project:
+      en: Open project…
+      zh-CN: 打开项目…
+      ja: プロジェクトを開く…
+    actions:
+      en: Library actions
+      zh-CN: 资料库操作
+      ja: ライブラリの操作
+    copy_relative_path:
+      en: Copy relative path
+      zh-CN: 复制相对路径
+      ja: 相対パスをコピー
+    copy_absolute_path:
+      en: Copy absolute path
+      zh-CN: 复制绝对路径
+      ja: 絶対パスをコピー
+    show_drafts_only:
+      en: Show drafts only
+      zh-CN: 仅显示草稿
+      ja: 下書きのみ表示
+    reverse_sort_direction:
+      en: Reverse sort direction
+      zh-CN: 反转排序方向
+      ja: 並び順を反転
+    clear_filter:
+      en: Clear filter
+      zh-CN: 清除筛选
+      ja: フィルターをクリア
+    new_entry:
+      en: New entry
+      zh-CN: 新建条目
+      ja: 新規エントリ
+    no_collections_title:
+      en: No collections
+      zh-CN: 没有集合
+      ja: コレクションがありません
+    no_collections_body:
+      en: This project declares no content collections.
+      zh-CN: 此项目未声明任何内容集合。
+      ja: このプロジェクトにはコンテンツコレクションが宣言されていません。
+    index_unavailable:
+      en: Project index unavailable
+      zh-CN: 项目索引不可用
+      ja: プロジェクトインデックスを利用できません
+    retry:
+      en: Retry
+      zh-CN: 重试
+      ja: 再試行
+    filtered_empty_title:
+      en: No entries match the filter
+      zh-CN: 没有条目符合筛选条件
+      ja: フィルターに一致するエントリがありません
+    filtered_empty_body:
+      en: Change the search text or clear the draft filter.
+      zh-CN: 请更改搜索文本或清除草稿筛选。
+      ja: 検索テキストを変更するか、下書きフィルターを解除してください。
+    empty_title:
+      en: No entries
+      zh-CN: 没有条目
+      ja: エントリがありません
+    empty_body:
+      en: This collection contains no Markdown or MDX files.
+      zh-CN: 此集合不包含 Markdown 或 MDX 文件。
+      ja: このコレクションには Markdown または MDX ファイルがありません。
+    search_placeholder:
+      en: Filter by file or title
+      zh-CN: 按文件或标题筛选
+      ja: ファイルまたはタイトルで絞り込む
+    scanning:
+      en: Scanning collections…
+      zh-CN: 正在扫描集合…
+      ja: コレクションをスキャンしています…
+    loading_body:
+      en: The project index is loading.
+      zh-CN: 项目索引正在加载。
+      ja: プロジェクトインデックスを読み込み中です。
+    open_error_title:
+      en: Could not open project
+      zh-CN: 无法打开项目
+      ja: プロジェクトを開けませんでした
+    choose_another_project:
+      en: Choose another project…
+      zh-CN: 选择其他项目…
+      ja: 別のプロジェクトを選択…
+    no_project_title:
+      en: No project open
+      zh-CN: 未打开项目
+      ja: プロジェクトが開かれていません
+    no_project_body:
+      en: Open an Astro project to browse its content collections.
+      zh-CN: 打开一个 Astro 项目以浏览其内容集合。
+      ja: Astro プロジェクトを開いてコンテンツコレクションを閲覧します。
+    draft_badge:
+      en: Draft
+      zh-CN: 草稿
+      ja: 下書き
+  filter:
+    drafts_only:
+      en: Drafts only
+      zh-CN: 仅草稿
+      ja: 下書きのみ
+    drafts_query:
+      en: "Drafts · “%{query}”"
+      zh-CN: "草稿 · “%{query}”"
+      ja: "下書き · “%{query}”"
+    query:
+      en: "“%{query}”"
+      zh-CN: "“%{query}”"
+      ja: "“%{query}”"
+  sort:
+    default:
+      en: Default
+      zh-CN: 默认
+      ja: 既定
+    title:
+      en: Title
+      zh-CN: 标题
+      ja: タイトル
+    filename:
+      en: Filename
+      zh-CN: 文件名
+      ja: ファイル名
+    last_modified:
+      en: Last modified
+      zh-CN: 上次修改时间
+      ja: 最終更新日時
+    date_field:
+      en: "Date · %{field}"
+      zh-CN: "日期 · %{field}"
+      ja: "日付 · %{field}"
+    order:
+      en: Order
+      zh-CN: 顺序
+      ja: 並び順
+  count:
+    entry:
+      en: "%{count} entry"
+      zh-CN: "%{count} 个条目"
+      ja: "%{count} 件のエントリ"
+    entries:
+      en: "%{count} entries"
+      zh-CN: "%{count} 个条目"
+      ja: "%{count} 件のエントリ"
+    collections:
+      en: "%{count} collections"
+      zh-CN: "%{count} 个集合"
+      ja: "%{count} 件のコレクション"
+    visible_of_total:
+      en: "%{visible} of %{total} entries"
+      zh-CN: "共 %{total} 个条目，显示 %{visible} 个"
+      ja: "%{total} 件中 %{visible} 件を表示"
+  status:
+    data_collection_unavailable:
+      en: "Data collection unavailable: %{diagnostic}"
+      zh-CN: "数据集合不可用：%{diagnostic}"
+      ja: "データコレクションを利用できません：%{diagnostic}"
+    entry_not_indexed:
+      en: That entry is no longer in the project index.
+      zh-CN: 该条目已不在项目索引中。
+      ja: そのエントリはプロジェクトインデックスに存在しません。
+    open_document_for_link:
+      en: Open a document before inserting a link.
+      zh-CN: 请在插入链接前打开文档。
+      ja: リンクを挿入する前にドキュメントを開いてください。
+    link_inserted:
+      en: "Inserted a link to %{title}."
+      zh-CN: "已插入指向 %{title} 的链接。"
+      ja: "%{title} へのリンクを挿入しました。"
+    link_not_inserted:
+      en: The link could not be inserted at the current selection.
+      zh-CN: 无法在当前选区插入链接。
+      ja: 現在の選択範囲にリンクを挿入できませんでした。
+    open_document_for_drop:
+      en: Open a Markdown or MDX document before dropping files.
+      zh-CN: 请先打开 Markdown 或 MDX 文档再拖放文件。
+      ja: ファイルをドロップする前に Markdown または MDX ドキュメントを開いてください。
+    drop_requires_markdown:
+      en: Files can only be dropped on a Markdown or MDX document.
+      zh-CN: 只能将文件拖放到 Markdown 或 MDX 文档。
+      ja: ファイルは Markdown または MDX ドキュメントにのみドロップできます。
+    assets_dir_unavailable:
+      en: "Assets directory unavailable: %{error}"
+      zh-CN: "资源目录不可用：%{error}"
+      ja: "アセットディレクトリを利用できません：%{error}"
+    assets_not_copied:
+      en: "Assets were not copied: %{error}"
+      zh-CN: "未复制资源：%{error}"
+      ja: "アセットをコピーできませんでした：%{error}"
+    assets_markdown_not_inserted:
+      en: The asset files were copied but their Markdown could not be inserted.
+      zh-CN: 资源文件已复制，但其 Markdown 无法插入。
+      ja: アセットファイルはコピーされましたが、その Markdown を挿入できませんでした。
+    frontmatter_edit_failed:
+      en: "Could not edit frontmatter: %{error}"
+      zh-CN: "无法编辑前置元数据：%{error}"
+      ja: "フロントマターを編集できませんでした：%{error}"
+    invalid_raw_yaml:
+      en: "invalid raw YAML: %{error}"
+      zh-CN: "无效的原始 YAML：%{error}"
+      ja: "無効な生 YAML: %{error}"
+    project_directory_select_failed:
+      en: Could not select a project directory.
+      zh-CN: 无法选择项目目录。
+      ja: プロジェクトディレクトリを選択できませんでした。
+    checking_project_folder:
+      en: Checking the project folder…
+      zh-CN: 正在检查项目文件夹…
+      ja: プロジェクトフォルダーを確認しています…
+    project_open_failed:
+      en: "Could not open project: %{error}"
+      zh-CN: "无法打开项目：%{error}"
+      ja: "プロジェクトを開けませんでした：%{error}"
+    open_project_before_reload:
+      en: Open a project before reloading collections.
+      zh-CN: 请先打开项目再重新加载集合。
+      ja: コレクションを再読み込みする前にプロジェクトを開いてください。
+    reloading_collections:
+      en: Reloading collections…
+      zh-CN: 正在重新加载集合…
+      ja: コレクションを再読み込みしています…
+    collections_reload_failed:
+      en: "Could not reload collections: %{error}"
+      zh-CN: "无法重新加载集合：%{error}"
+      ja: "コレクションを再読み込みできませんでした：%{error}"
+    collections_reloaded:
+      en: "Collections reloaded · %{count} entries."
+      zh-CN: "集合已重新加载 · %{count} 个条目。"
+      ja: "コレクションを再読み込みしました · %{count} 件のエントリ。"
+    collection_no_entries_show:
+      en: "Collection “%{name}” has no entries to show."
+      zh-CN: "集合“%{name}”没有可显示的条目。"
+      ja: "コレクション「%{name}」に表示できるエントリがありません。"
+    collection_no_entries:
+      en: "Collection “%{name}” has no entries yet."
+      zh-CN: "集合“%{name}”尚无条目。"
+      ja: "コレクション「%{name}」にはまだエントリがありません。"
+    collection_entries:
+      en: "Collection “%{name}” · %{count} entries."
+      zh-CN: "集合“%{name}” · %{count} 个条目。"
+      ja: "コレクション「%{name}」 · %{count} 件のエントリ。"
+    open_project_before_browse:
+      en: Open a project before browsing its files.
+      zh-CN: 请先打开项目再浏览其文件。
+      ja: ファイルを閲覧する前にプロジェクトを開いてください。
+    file_open_failed:
+      en: "Could not open %{path}: %{error}"
+      zh-CN: "无法打开 %{path}：%{error}"
+      ja: "%{path} を開けませんでした：%{error}"
+    read_failed:
+      en: "Could not read %{path}: %{error}"
+      zh-CN: "无法读取 %{path}：%{error}"
+      ja: "%{path} を読み込めませんでした：%{error}"
+    path_outside_project:
+      en: "%{path} is outside the open project."
+      zh-CN: "%{path} 位于当前项目之外。"
+      ja: "%{path} は開いているプロジェクトの外にあります。"
+    ide_unavailable:
+      en: "%{command} is unavailable until an IDE is configured and a project is open."
+      zh-CN: "在配置 IDE 并打开项目之前，%{command} 不可用。"
+      ja: "IDE が設定され、プロジェクトが開かれるまで %{command} は使用できません。"
+    ide_opened:
+      en: Opened in the IDE.
+      zh-CN: 已在 IDE 中打开。
+      ja: IDE で開きました。
+    ide_open_failed:
+      en: "Could not open the IDE: %{error}"
+      zh-CN: "无法打开 IDE：%{error}"
+      ja: "IDE を開けませんでした：%{error}"
+    switch_cancelled_conflict:
+      en: "Project switch cancelled: a document changed on disk and was not overwritten. Resolve the conflict (reload, overwrite, or save a copy), then switch."
+      zh-CN: "已取消切换项目：某个文档在磁盘上已更改且未被覆盖。请先解决冲突（重新加载、覆盖或另存副本），然后切换。"
+      ja: "プロジェクトの切り替えを中止しました：ドキュメントがディスク上で変更されており、上書きされませんでした。競合を解決（再読み込み、上書き、またはコピーとして保存）してから切り替えてください。"
+    switch_cancelled_save_failed:
+      en: "Project switch cancelled: the document could not be saved (%{error})."
+      zh-CN: "已取消切换项目：文档无法保存（%{error}）。"
+      ja: "プロジェクトの切り替えを中止しました：ドキュメントを保存できませんでした（%{error}）。"
+    quit_cancelled_conflict:
+      en: "Quit cancelled: a document changed on disk and was not overwritten. Resolve the conflict (reload, overwrite, or save a copy), then quit."
+      zh-CN: "已取消退出：某个文档在磁盘上已更改且未被覆盖。请先解决冲突（重新加载、覆盖或另存副本），然后退出。"
+      ja: "終了を中止しました：ドキュメントがディスク上で変更されており、上書きされませんでした。競合を解決（再読み込み、上書き、またはコピーとして保存）してから終了してください。"
+    quit_cancelled_save_failed:
+      en: "Quit cancelled: a document could not be saved (%{error})."
+      zh-CN: "已取消退出：文档无法保存（%{error}）。"
+      ja: "終了を中止しました：ドキュメントを保存できませんでした（%{error}）。"
+    generation_exhausted:
+      en: Project generation exhausted; restart the application.
+      zh-CN: 项目代次已耗尽；请重新启动应用。
+      ja: プロジェクトの世代が上限に達しました。アプリケーションを再起動してください。
+    discovering_project:
+      en: Discovering project…
+      zh-CN: 正在发现项目…
+      ja: プロジェクトを検出しています…
+    formatting_unfocused:
+      en: Formatting is unavailable while this document is not focused.
+      zh-CN: 文档未获得焦点时无法使用格式化。
+      ja: ドキュメントにフォーカスがないため書式設定を利用できません。
+    line_outside_document:
+      en: "Line %{line} is outside this document."
+      zh-CN: "第 %{line} 行超出此文档范围。"
+      ja: "%{line} 行目はこのドキュメントの範囲外です。"
+    open_document_for_goto:
+      en: Open a document before going to a line.
+      zh-CN: 请先打开文档再跳转到行。
+      ja: 行に移動する前にドキュメントを開いてください。
+    enter_line_number:
+      en: Enter a line number to go to.
+      zh-CN: 请输入要跳转的行号。
+      ja: 移動先の行番号を入力してください。
+    written_not_indexed:
+      en: "%{source} was written but is not indexed by its collection pattern."
+      zh-CN: "%{source} 已写入，但未被其集合模式索引。"
+      ja: "%{source} は書き込まれましたが、コレクションのパターンでインデックスされていません。"
+    project_diagnostics:
+      en: "Project diagnostics: %{diagnostics}"
+      zh-CN: "项目诊断：%{diagnostics}"
+      ja: "プロジェクトの診断：%{diagnostics}"
+    index_refreshed:
+      en: Index refreshed; open buffers retained. Close and reopen an unchanged document to reload it.
+      zh-CN: 索引已刷新；打开的缓冲区已保留。关闭并重新打开未更改的文档以重新加载。
+      ja: インデックスを更新しました。開いているバッファは保持されています。未変更のドキュメントを再読み込みするには、閉じてから開き直してください。
+    index_unavailable_buffers:
+      en: Project index unavailable. Open buffers retained.
+      zh-CN: 项目索引不可用。打开的缓冲区已保留。
+      ja: プロジェクトインデックスを利用できません。開いているバッファは保持されています。
+    checking_repository:
+      en: Checking repository…
+      zh-CN: 正在检查仓库…
+      ja: リポジトリを確認しています…
+    open_project_before_copy_assets:
+      en: Open a project before copying assets.
+      zh-CN: 请先打开项目再复制资源。
+      ja: アセットをコピーする前にプロジェクトを開いてください。
+    open_mdx_for_components:
+      en: Open an MDX document before inserting components.
+      zh-CN: 请先打开 MDX 文档再插入组件。
+      ja: コンポーネントを挿入する前に MDX ドキュメントを開いてください。
+    active_document_not_editable:
+      en: The active document is not editable.
+      zh-CN: 当前文档不可编辑。
+      ja: アクティブなドキュメントは編集できません。
+    components_only_mdx:
+      en: Components can only be inserted into MDX documents.
+      zh-CN: 只能将组件插入 MDX 文档。
+      ja: コンポーネントは MDX ドキュメントにのみ挿入できます。
+    open_project_for_components:
+      en: Open a project before inserting components.
+      zh-CN: 请先打开项目再插入组件。
+      ja: コンポーネントを挿入する前にプロジェクトを開いてください。
+    active_document_outside_project:
+      en: The active document is outside the project.
+      zh-CN: 当前文档位于项目之外。
+      ja: アクティブなドキュメントはプロジェクトの外にあります。
+    component_inserted_with_import:
+      en: "Inserted %{component}. Its import was added; undo removes only the component."
+      zh-CN: "已插入 %{component}。已添加其导入；撤销只会移除该组件。"
+      ja: "%{component} を挿入しました。インポートを追加しました。元に戻すとコンポーネントのみが削除されます。"
+    component_inserted:
+      en: "Inserted %{component}."
+      zh-CN: "已插入 %{component}。"
+      ja: "%{component} を挿入しました。"
+    file_manager_unsupported:
+      en: Opening a file manager is unsupported on this platform.
+      zh-CN: 此平台不支持打开文件管理器。
+      ja: このプラットフォームではファイルマネージャーを開けません。
+    file_manager_exited:
+      en: "The file manager exited with %{status}."
+      zh-CN: "文件管理器以 %{status} 退出。"
+      ja: "ファイルマネージャーが %{status} で終了しました。"
+  load:
+    open_project_before_source:
+      en: Open the project before opening a source file.
+      zh-CN: 请先打开项目再打开源文件。
+      ja: ソースファイルを開く前にプロジェクトを開いてください。
+    not_editable_source:
+      en: "%{path} is not an editable project source file."
+      zh-CN: "%{path} 不是可编辑的项目源文件。"
+      ja: "%{path} は編集可能なプロジェクトソースファイルではありません。"
+    two_documents_loading:
+      en: Two documents are loading; try again when one finishes.
+      zh-CN: 两个文档正在加载；请等待其中一个完成后重试。
+      ja: 2 つのドキュメントを読み込み中です。いずれかが完了してから再試行してください。
+    document_limit:
+      en: Close an open document before opening more than 32 documents.
+      zh-CN: 请先关闭一个已打开的文档，再打开超过 32 个文档。
+      ja: 32 個を超えてドキュメントを開く前に、開いているドキュメントを閉じてください。
+    source_budget:
+      en: Close documents before exceeding the 32 MiB loaded-source budget.
+      zh-CN: 请先关闭文档，以免超出 32 MiB 的已加载源预算。
+      ja: 読み込み済みソースの上限 32 MiB を超える前に、ドキュメントを閉じてください。
+    project_not_ready:
+      en: The project is not ready; try again after it opens.
+      zh-CN: 项目尚未就绪；请在打开后重试。
+      ja: プロジェクトの準備ができていません。開いた後に再試行してください。
+    source_mapping_changed_reopen:
+      en: Source mapping changed; reopen the project.
+      zh-CN: 源映射已更改；请重新打开项目。
+      ja: ソースマッピングが変更されました。プロジェクトを開き直してください。
+    source_mapping_changed_rescan:
+      en: Source mapping changed; rescan the project.
+      zh-CN: 源映射已更改；请重新扫描项目。
+      ja: ソースマッピングが変更されました。プロジェクトを再スキャンしてください。
+    line_limit:
+      en: Documents are limited to 50,000 lines.
+      zh-CN: 文档限制为 50,000 行。
+      ja: ドキュメントは 50,000 行までです。
+    loading_document:
+      en: Loading document…
+      zh-CN: 正在加载文档…
+      ja: ドキュメントを読み込んでいます…
+    refreshing_index:
+      en: Refreshing the project index; select this entry again when it finishes.
+      zh-CN: 正在刷新项目索引；完成后请再次选择此条目。
+      ja: プロジェクトインデックスを更新しています。完了後にこのエントリをもう一度選択してください。
+    two_documents_loading_entry:
+      en: Two documents are loading; select this entry again when one finishes.
+      zh-CN: 两个文档正在加载；请等待其中一个完成后再选择此条目。
+      ja: 2 つのドキュメントを読み込み中です。いずれかが完了してからこのエントリを再度選択してください。
+    entry_open_failed:
+      en: "Could not open entry: %{error}"
+      zh-CN: "无法打开条目：%{error}"
+      ja: "エントリを開けませんでした：%{error}"
+    external_change:
+      en: Document changed on disk. This buffer is retained; resolve it with Reload from Disk, Overwrite Disk with My Edits, or Save My Edits as a Copy.
+      zh-CN: 文档已在磁盘上更改。此缓冲区已保留；请使用“从磁盘重新加载”、“用我的编辑覆盖磁盘”或“将我的编辑另存为副本”解决。
+      ja: ドキュメントがディスク上で変更されました。このバッファは保持されています。「ディスクから再読み込み」「自分の編集でディスクを上書き」「編集をコピーとして保存」で解決してください。
+    open_project_before_entry:
+      en: Open the project before opening an entry.
+      zh-CN: 请先打开项目再打开条目。
+      ja: エントリを開く前にプロジェクトを開いてください。
+    not_content_entry:
+      en: "%{path} is not a content entry in this project's collections."
+      zh-CN: "%{path} 不是此项目集合中的内容条目。"
+      ja: "%{path} はこのプロジェクトのコレクション内のコンテンツエントリではありません。"
+  entry:
+    command_unavailable:
+      en: "%{command} is unavailable right now."
+      zh-CN: "%{command} 目前不可用。"
+      ja: "%{command} は現在利用できません。"
+    wait_for_index:
+      en: Wait for the project index to finish before creating an entry.
+      zh-CN: 请等待项目索引完成后再创建条目。
+      ja: エントリを作成する前にプロジェクトインデックスの完了を待ってください。
+    no_collection_for_create:
+      en: Open an Astro project with a content collection to create an entry.
+      zh-CN: 请打开带有内容集合的 Astro 项目以创建条目。
+      ja: エントリを作成するには、コンテンツコレクションのある Astro プロジェクトを開いてください。
+    collection_extension_mismatch:
+      en: "The %{collection} collection does not include .%{extension} entries; change the default extension."
+      zh-CN: "%{collection} 集合不包含 .%{extension} 条目；请更改默认扩展名。"
+      ja: "%{collection} コレクションには .%{extension} エントリが含まれていません。既定の拡張子を変更してください。"
+    create_unsupported:
+      en: "Cannot create a %{collection} entry: required field(s) %{fields} are containers the create form cannot represent. Nothing was written."
+      zh-CN: "无法创建 %{collection} 条目：必填字段 %{fields} 是创建表单无法表示的容器。未写入任何内容。"
+      ja: "%{collection} エントリを作成できません：必須フィールド %{fields} は作成フォームで表現できないコンテナです。何も書き込まれていません。"
+    creating:
+      en: Creating entry…
+      zh-CN: 正在创建条目…
+      ja: エントリを作成しています…
+    created:
+      en: "Created %{source}."
+      zh-CN: "已创建 %{source}。"
+      ja: "%{source} を作成しました。"
+    create_failed:
+      en: "Could not create the entry: %{error}"
+      zh-CN: "无法创建条目：%{error}"
+      ja: "エントリを作成できませんでした：%{error}"
+    path_unchanged:
+      en: The entry path is unchanged.
+      zh-CN: 条目路径未更改。
+      ja: エントリのパスは変更されていません。
+    invalid_destination:
+      en: "“%{destination}” is not a valid project-relative path."
+      zh-CN: "“%{destination}” 不是有效的项目相对路径。"
+      ja: "「%{destination}」は有効なプロジェクト相対パスではありません。"
+    extension_not_indexed:
+      en: "This collection does not include .%{extension} entries; the file would not be indexed."
+      zh-CN: "此集合不包含 .%{extension} 条目；该文件将不会被索引。"
+      ja: "このコレクションには .%{extension} エントリが含まれていません。このファイルはインデックスされません。"
+    renaming:
+      en: Renaming entry…
+      zh-CN: 正在重命名条目…
+      ja: エントリの名前を変更しています…
+    renamed_dirty:
+      en: "Renamed to %{source}. Newer edits remain unsaved; they are recorded for recovery."
+      zh-CN: "已重命名为 %{source}。较新的编辑仍未保存；它们已记录以便恢复。"
+      ja: "%{source} に名前を変更しました。新しい編集は未保存のままです。復元用に記録されています。"
+    renamed:
+      en: "Renamed to %{source}."
+      zh-CN: "已重命名为 %{source}。"
+      ja: "%{source} に名前を変更しました。"
+    rename_failed:
+      en: "Could not rename the entry: %{error}"
+      zh-CN: "无法重命名条目：%{error}"
+      ja: "エントリの名前を変更できませんでした：%{error}"
+    duplicating:
+      en: Duplicating entry…
+      zh-CN: 正在复制条目…
+      ja: エントリを複製しています…
+    duplicated:
+      en: "Duplicated as %{source}."
+      zh-CN: "已复制为 %{source}。"
+      ja: "%{source} として複製しました。"
+    duplicate_failed:
+      en: "Could not duplicate the entry: %{error}"
+      zh-CN: "无法复制条目：%{error}"
+      ja: "エントリを複製できませんでした：%{error}"
+    moving_to_trash:
+      en: Moving entry to the Trash…
+      zh-CN: 正在将条目移到废纸篓…
+      ja: エントリをゴミ箱に移動しています…
+    moved_to_trash:
+      en: "Moved %{source} to the Trash."
+      zh-CN: "已将 %{source} 移到废纸篓。"
+      ja: "%{source} をゴミ箱に移動しました。"
+    trash_failed:
+      en: "Could not move the entry to the Trash: %{error}. The file is unchanged."
+      zh-CN: "无法将条目移到废纸篓：%{error}。文件未更改。"
+      ja: "エントリをゴミ箱に移動できませんでした：%{error}。ファイルは変更されていません。"
+    opening_directory:
+      en: "Opening %{directory}…"
+      zh-CN: "正在打开 %{directory}…"
+      ja: "%{directory} を開いています…"
+    opened_folder:
+      en: Opened the containing folder.
+      zh-CN: 已打开所在文件夹。
+      ja: 格納先フォルダーを開きました。
+    file_manager_failed:
+      en: "Could not open the file manager: %{error}"
+      zh-CN: "无法打开文件管理器：%{error}"
+      ja: "ファイルマネージャーを開けませんでした：%{error}"
+    reveal_failed:
+      en: "Could not reveal the entry: %{error}"
+      zh-CN: "无法显示条目：%{error}"
+      ja: "エントリを表示できませんでした：%{error}"
+    copied_path:
+      en: "Copied %{path}."
+      zh-CN: "已复制 %{path}。"
+      ja: "%{path} をコピーしました。"
+    copy_path_failed:
+      en: "Could not copy the path: %{error}"
+      zh-CN: "无法复制路径：%{error}"
+      ja: "パスをコピーできませんでした：%{error}"
+    image_hint:
+      en: Project-relative image path; external copy arrives with the asset service
+      zh-CN: 项目相对图片路径；外部复制功能将随资源服务提供
+      ja: プロジェクト相対の画像パス。外部からのコピーはアセットサービスで提供予定です
+    image_list_hint:
+      en: Comma-separated project-relative image paths
+      zh-CN: 以逗号分隔的项目相对图片路径
+      ja: カンマ区切りのプロジェクト相対画像パス
+    tags_hint:
+      en: Comma-separated values
+      zh-CN: 以逗号分隔的值
+      ja: カンマ区切りの値
+    reference_list_hint:
+      en: "Comma-separated ids · %{hint}"
+      zh-CN: "以逗号分隔的 ID · %{hint}"
+      ja: "カンマ区切りの ID · %{hint}"
+    no_reference_entries:
+      en: "%{collection}: no entries"
+      zh-CN: "%{collection}：没有条目"
+      ja: "%{collection}：エントリがありません"
+    reference_id:
+      en: Reference id
+      zh-CN: 引用 ID
+      ja: 参照 ID
+    project_root:
+      en: (project root)
+      zh-CN: (项目根目录)
+      ja: （プロジェクトルート）
+    open_project_prompt:
+      en: Open Astro project
+      zh-CN: 打开 Astro 项目
+      ja: Astro プロジェクトを開く
+  warning:
+    unknown_collection:
+      en: "The content directory override names unknown collection “%{name}”; it was ignored."
+      zh-CN: "内容目录覆盖指定了未知集合“%{name}”；已忽略。"
+      ja: "コンテンツディレクトリの上書きが不明なコレクション「%{name}」を指定しています。無視されました。"
+    no_common_root:
+      en: The project content directory cannot be applied because the collection bases share no common root.
+      zh-CN: 无法应用项目内容目录，因为各集合基目录没有共同根目录。
+      ja: コレクションのベースに共通ルートがないため、プロジェクトのコンテンツディレクトリを適用できません。
+    reopen_to_apply:
+      en: "Reopen the project to apply the project content directory to %{collection}."
+      zh-CN: "请重新打开项目以将项目内容目录应用于 %{collection}。"
+      ja: "プロジェクトのコンテンツディレクトリを %{collection} に適用するには、プロジェクトを開き直してください。"
+    base_outside_root:
+      en: "The project content directory cannot be applied to %{collection} because its base is outside the shared collection root."
+      zh-CN: "无法将项目内容目录应用于 %{collection}，因为其基目录位于共享集合根目录之外。"
+      ja: "コレクションのベースが共有コレクションルートの外にあるため、プロジェクトのコンテンツディレクトリを %{collection} に適用できません。"
+    override_not_directory:
+      en: "The content directory override “%{shown}” for %{collection} is not a directory; using the collection base from the Astro configuration."
+      zh-CN: "集合 %{collection} 的内容目录覆盖“%{shown}”不是目录；将使用 Astro 配置中的集合基目录。"
+      ja: "%{collection} のコンテンツディレクトリ上書き「%{shown}」はディレクトリではありません。Astro 設定のコレクションベースを使用します。"
+    override_invalid:
+      en: "The content directory override “%{shown}” for %{collection} is invalid (%{error}); using the collection base from the Astro configuration."
+      zh-CN: "集合 %{collection} 的内容目录覆盖“%{shown}”无效（%{error}）；将使用 Astro 配置中的集合基目录。"
+      ja: "%{collection} のコンテンツディレクトリ上書き「%{shown}」は無効です（%{error}）。Astro 設定のコレクションベースを使用します。"
+  dialog:
+    close_title:
+      en: "Close “%{title}”?"
+      zh-CN: "关闭“%{title}”？"
+      ja: "「%{title}」を閉じますか？"
+    close_body:
+      en: The document has unsaved changes.
+      zh-CN: 此文档有未保存的更改。
+      ja: このドキュメントには保存されていない変更があります。
+    keep_editing:
+      en: Keep editing
+      zh-CN: 继续编辑
+      ja: 編集を続ける
+    discard_changes:
+      en: Discard changes
+      zh-CN: 放弃更改
+      ja: 変更を破棄
+    save_and_close:
+      en: Save and close
+      zh-CN: 保存并关闭
+      ja: 保存して閉じる
+    unsaved_title:
+      en: Unsaved documents
+      zh-CN: 未保存的文档
+      ja: 未保存のドキュメント
+    unsaved_body:
+      en: Changes exist only in memory. Save them, keep the window open, or discard them.
+      zh-CN: 更改仅存在于内存中。请保存它们、保持窗口打开，或放弃它们。
+      ja: 変更はメモリ内にのみ存在します。保存するか、ウィンドウを開いたままにするか、破棄してください。
+    discard_and_close:
+      en: Discard and close
+      zh-CN: 放弃并关闭
+      ja: 破棄して閉じる
+    save_all_and_quit:
+      en: Save all and quit
+      zh-CN: 全部保存并退出
+      ja: すべて保存して終了
+    goto_line_title:
+      en: Go to line
+      zh-CN: 跳转到行
+      ja: 行に移動
+    line_number_placeholder:
+      en: Line number
+      zh-CN: 行号
+      ja: 行番号
+    document_lines:
+      en: "Document has %{lines} lines"
+      zh-CN: "文档共有 %{lines} 行"
+      ja: "ドキュメントは %{lines} 行です"
+    cancel:
+      en: Cancel
+      zh-CN: 取消
+      ja: キャンセル
+    go:
+      en: Go
+      zh-CN: 跳转
+      ja: 移動
+    new_entry_title:
+      en: New entry
+      zh-CN: 新建条目
+      ja: 新規エントリ
+    file_name:
+      en: File name
+      zh-CN: 文件名
+      ja: ファイル名
+    create:
+      en: Create
+      zh-CN: 创建
+      ja: 作成
+    rename_title:
+      en: Rename or move entry
+      zh-CN: 重命名或移动条目
+      ja: エントリの名前変更または移動
+    project_relative_path:
+      en: Project-relative path
+      zh-CN: 项目相对路径
+      ja: プロジェクト相対パス
+    rename:
+      en: Rename
+      zh-CN: 重命名
+      ja: 名前を変更
+    trash_title:
+      en: "Move “%{title}” to the Trash?"
+      zh-CN: "将“%{title}”移到废纸篓？"
+      ja: "「%{title}」をゴミ箱に移動しますか？"
+    trash_dirty_body:
+      en: The document has unsaved changes. Save them first, or discard them and move the file to the Trash.
+      zh-CN: 此文档有未保存的更改。请先保存，或放弃更改并将文件移到废纸篓。
+      ja: このドキュメントには保存されていない変更があります。先に保存するか、変更を破棄してファイルをゴミ箱に移動してください。
+    discard_and_trash:
+      en: Discard changes and trash
+      zh-CN: 放弃更改并移到废纸篓
+      ja: 変更を破棄してゴミ箱へ
+    save_and_trash:
+      en: Save and trash
+      zh-CN: 保存并移到废纸篓
+      ja: 保存してゴミ箱へ
+    trash_body:
+      en: The file moves to the desktop Trash; it is never permanently deleted here.
+      zh-CN: 文件将移到桌面废纸篓；在此处绝不会被永久删除。
+      ja: ファイルはデスクトップのゴミ箱に移動します。ここで完全に削除されることはありません。
+    move_to_trash:
+      en: Move to Trash
+      zh-CN: 移到废纸篓
+      ja: ゴミ箱に移動
+  recovery:
+    restoring:
+      en: "Restoring %{count} unsaved document(s) from recovery…"
+      zh-CN: "正在从恢复记录还原 %{count} 个未保存的文档…"
+      ja: "復元レコードから未保存のドキュメント %{count} 件を復元しています…"
+    none:
+      en: No recovery records to restore.
+      zh-CN: 没有可还原的恢复记录。
+      ja: 復元できるレコードがありません。
+    restored:
+      en: "Restored %{restored} unsaved document(s) from recovery."
+      zh-CN: "已从恢复记录还原 %{restored} 个未保存的文档。"
+      ja: "復元レコードから未保存のドキュメント %{restored} 件を復元しました。"
+    restored_conflicts:
+      en: "Restored %{restored} unsaved document(s) from recovery. %{conflicts} changed on disk since the record; the recovery content is kept and a save will conflict until you resolve it."
+      zh-CN: "已从恢复记录还原 %{restored} 个未保存的文档。%{conflicts} 个文档自记录以来在磁盘上已更改；恢复内容已保留，解决冲突前保存将会失败。"
+      ja: "復元レコードから未保存のドキュメント %{restored} 件を復元しました。%{conflicts} 件はレコード以降にディスク上で変更されています。復元内容は保持されており、解決するまで保存は競合します。"
+  save:
+    saving:
+      en: Saving…
+      zh-CN: 正在保存…
+      ja: 保存しています…
+    closed_before_finish:
+      en: Document closed before the save finished.
+      zh-CN: 文档在保存完成前已关闭。
+      ja: 保存が完了する前にドキュメントが閉じられました。
+    saved:
+      en: Saved.
+      zh-CN: 已保存。
+      ja: 保存しました。
+    saved_earlier:
+      en: Saved an earlier revision; newer edits remain unsaved.
+      zh-CN: 已保存较早的修订版；较新的编辑仍未保存。
+      ja: 以前のリビジョンを保存しました。新しい編集は未保存のままです。
+    conflict:
+      en: "Save conflict: the file changed on disk. Your edits are kept. Choose “Reload from Disk (discard my edits)”, “Overwrite Disk with My Edits”, or “Save My Edits as a Copy” to resolve it."
+      zh-CN: "保存冲突：文件已在磁盘上更改。你的编辑已保留。请选择“从磁盘重新加载（放弃我的编辑）”、“用我的编辑覆盖磁盘”或“将我的编辑另存为副本”来解决。"
+      ja: "保存の競合：ファイルがディスク上で変更されました。編集内容は保持されています。「ディスクから再読み込み（自分の編集を破棄）」「自分の編集でディスクを上書き」「編集をコピーとして保存」のいずれかで解決してください。"
+    failed:
+      en: "Save failed: %{error}"
+      zh-CN: "保存失败：%{error}"
+      ja: "保存に失敗しました：%{error}"
+    with_consequence:
+      en: "%{status} %{consequence}"
+      zh-CN: "%{status}%{consequence}"
+      ja: "%{status}%{consequence}"
+    rename_not_applied:
+      en: The rename was not applied.
+      zh-CN: 重命名未应用。
+      ja: 名前の変更は適用されませんでした。
+    not_duplicated:
+      en: The entry was not duplicated.
+      zh-CN: 条目未复制。
+      ja: エントリは複製されませんでした。
+    not_trashed:
+      en: The entry was not moved to the Trash.
+      zh-CN: 条目未移到废纸篓。
+      ja: エントリはゴミ箱に移動されませんでした。
+    document_stays_open:
+      en: The document stays open.
+      zh-CN: 文档保持打开。
+      ja: ドキュメントは開いたままです。
+    no_document_to_save:
+      en: No document is open to save.
+      zh-CN: 没有可保存的文档。
+      ja: 保存するドキュメントがありません。
+    no_document_to_reload:
+      en: No document is open to reload.
+      zh-CN: 没有可重新加载的文档。
+      ja: 再読み込みするドキュメントがありません。
+    reloading:
+      en: Reloading the document from disk…
+      zh-CN: 正在从磁盘重新加载文档…
+      ja: ディスクからドキュメントを再読み込みしています…
+    reloaded:
+      en: "Reloaded %{file} from disk; your unsaved edits were discarded."
+      zh-CN: "已从磁盘重新加载 %{file}；未保存的编辑已被放弃。"
+      ja: "ディスクから %{file} を再読み込みしました。未保存の編集は破棄されました。"
+    reload_failed:
+      en: "Could not reload the document: %{error}"
+      zh-CN: "无法重新加载文档：%{error}"
+      ja: "ドキュメントを再読み込みできませんでした：%{error}"
+    read_failed:
+      en: "Could not read the document from disk: %{error}"
+      zh-CN: "无法从磁盘读取文档：%{error}"
+      ja: "ディスクからドキュメントを読み込めませんでした：%{error}"
+    no_document_to_overwrite:
+      en: No document is open to overwrite.
+      zh-CN: 没有可覆盖的文档。
+      ja: 上書きするドキュメントがありません。
+    overwriting:
+      en: Overwriting the file with your edits…
+      zh-CN: 正在用你的编辑覆盖文件…
+      ja: 自分の編集でファイルを上書きしています…
+    overwrote:
+      en: "Overwrote %{file} with your edits."
+      zh-CN: "已用你的编辑覆盖 %{file}。"
+      ja: "%{file} を自分の編集で上書きしました。"
+    wrote_earlier:
+      en: Wrote an earlier revision; newer edits remain unsaved.
+      zh-CN: 已写入较早的修订版；较新的编辑仍未保存。
+      ja: 以前のリビジョンを書き込みました。新しい編集は未保存のままです。
+    overwrite_failed:
+      en: "Could not overwrite the file: %{error}"
+      zh-CN: "无法覆盖文件：%{error}"
+      ja: "ファイルを上書きできませんでした：%{error}"
+    no_document_to_copy:
+      en: No document is open to copy.
+      zh-CN: 没有可复制其编辑的文档。
+      ja: コピーするドキュメントがありません。
+    saving_copy:
+      en: Saving a copy of your edits…
+      zh-CN: 正在保存编辑副本…
+      ja: 編集のコピーを保存しています…
+    saved_copy:
+      en: "Saved a copy to %{shown}. %{file} keeps your unsaved edits."
+      zh-CN: "已将副本保存到 %{shown}。%{file} 保留你的未保存编辑。"
+      ja: "コピーを %{shown} に保存しました。%{file} には未保存の編集が残っています。"
+    copy_failed:
+      en: "Could not save a copy: %{error}"
+      zh-CN: "无法保存副本：%{error}"
+      ja: "コピーを保存できませんでした：%{error}"
+    trash_aborted_newer:
+      en: "%{file} was not moved to the Trash because newer edits were typed while saving. Save again, then trash it."
+      zh-CN: "%{file} 未移到废纸篓，因为保存期间输入了更新的编辑。请再次保存，然后再移到废纸篓。"
+      ja: "保存中に新しい編集が入力されたため、%{file} はゴミ箱に移動されませんでした。もう一度保存してからゴミ箱に移動してください。"
+    close_aborted_newer:
+      en: "%{file} was not closed because newer edits were typed while saving. Save again, then close it."
+      zh-CN: "%{file} 未关闭，因为保存期间输入了更新的编辑。请再次保存，然后再关闭。"
+      ja: "保存中に新しい編集が入力されたため、%{file} は閉じられませんでした。もう一度保存してから閉じてください。"
+    duplicate_aborted_newer:
+      en: "%{file} was not duplicated because newer edits were typed while saving. Save again, then duplicate it."
+      zh-CN: "%{file} 未复制，因为保存期间输入了更新的编辑。请再次保存，然后再复制。"
+      ja: "保存中に新しい編集が入力されたため、%{file} は複製されませんでした。もう一度保存してから複製してください。"
+  project_error:
+    unreadable:
+      en: "Could not open %{path}: %{error}"
+      zh-CN: "无法打开 %{path}：%{error}"
+      ja: "%{path} を開けませんでした：%{error}"
+    not_a_directory:
+      en: "Choose a project directory, not %{path}."
+      zh-CN: "请选择项目目录，而不是 %{path}。"
+      ja: "プロジェクトディレクトリを選択してください（%{path} ではありません）。"
+  blocked_root:
+    filesystem_root:
+      en: "The filesystem root cannot be opened as a project. Choose the project folder instead."
+      zh-CN: "无法将文件系统根目录作为项目打开。请改为选择项目文件夹。"
+      ja: "ファイルシステムのルートはプロジェクトとして開けません。プロジェクトのフォルダを選択してください。"
+    home_directory:
+      en: "The home directory cannot be opened as a project. Choose the project folder instead."
+      zh-CN: "无法将主目录作为项目打开。请改为选择项目文件夹。"
+      ja: "ホームディレクトリはプロジェクトとして開けません。プロジェクトのフォルダを選択してください。"
+    system_directory:
+      en: "System directories such as /usr and /etc cannot be opened as projects."
+      zh-CN: "诸如 /usr 和 /etc 的系统目录不能作为项目打开。"
+      ja: "/usr や /etc などのシステムディレクトリはプロジェクトとして開けません。"
+    credential_directory:
+      en: "Credential directories such as ~/.ssh and ~/.aws cannot be opened as projects."
+      zh-CN: "诸如 ~/.ssh 和 ~/.aws 的凭据目录不能作为项目打开。"
+      ja: "~/.ssh や ~/.aws などの認証情報ディレクトリはプロジェクトとして開けません。"

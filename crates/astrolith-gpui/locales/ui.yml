@@ -9,11 +9,511 @@ app:
     zh-CN: 选择应用界面语言。
     ja: アプリの表示言語を選択します。
 gpui_component:
-  Select:
-    placeholder:
-      zh-CN: 请选择
-      ja: 選択してください
+  Attachment:
+    Remove:
+      en: Remove
+      zh-CN: 移除
+      ja: 削除
+    Retry:
+      en: Retry
+      zh-CN: 重试
+      ja: 再試行
+  Calendar:
+    week.0:
+      en: Su
+      zh-CN: 日
+      ja: 日
+    week.1:
+      en: Mo
+      zh-CN: 一
+      ja: 月
+    week.2:
+      en: Tu
+      zh-CN: 二
+      ja: 火
+    week.3:
+      en: We
+      zh-CN: 三
+      ja: 水
+    week.4:
+      en: Th
+      zh-CN: 四
+      ja: 木
+    week.5:
+      en: Fr
+      zh-CN: 五
+      ja: 金
+    week.6:
+      en: Sa
+      zh-CN: 六
+      ja: 土
+    month.January:
+      en: January
+      zh-CN: 一月
+      ja: 1月
+    month.February:
+      en: February
+      zh-CN: 二月
+      ja: 2月
+    month.March:
+      en: March
+      zh-CN: 三月
+      ja: 3月
+    month.April:
+      en: April
+      zh-CN: 四月
+      ja: 4月
+    month.May:
+      en: May
+      zh-CN: 五月
+      ja: 5月
+    month.June:
+      en: June
+      zh-CN: 六月
+      ja: 6月
+    month.July:
+      en: July
+      zh-CN: 七月
+      ja: 7月
+    month.August:
+      en: August
+      zh-CN: 八月
+      ja: 8月
+    month.September:
+      en: September
+      zh-CN: 九月
+      ja: 9月
+    month.October:
+      en: October
+      zh-CN: 十月
+      ja: 10月
+    month.November:
+      en: November
+      zh-CN: 十一月
+      ja: 11月
+    month.December:
+      en: December
+      zh-CN: 十二月
+      ja: 12月
   DatePicker:
     placeholder:
+      en: Select date
       zh-CN: 选择日期
       ja: 日付を選択
+    time:
+      en: Time
+      zh-CN: 时间
+      ja: 時刻
+  Select:
+    placeholder:
+      en: Please select
+      zh-CN: 请选择
+      ja: 選択してください
+  ComboBox:
+    placeholder:
+      en: Please select
+      zh-CN: 请选择
+      ja: 選択してください
+    search_placeholder:
+      en: Search...
+      zh-CN: 搜索...
+      ja: 検索...
+    empty:
+      en: No results
+      zh-CN: 暂无数据
+      ja: 結果がありません
+  DropdownButton:
+    more_options:
+      en: More options
+      zh-CN: 更多选项
+      ja: その他のオプション
+  Dock:
+    Unnamed:
+      en: Unnamed
+      zh-CN: 未命名
+      ja: 名称未設定
+    Close:
+      en: Close
+      zh-CN: 关闭
+      ja: 閉じる
+    Zoom In:
+      en: Zoom In
+      zh-CN: 放大
+      ja: 拡大
+    Zoom Out:
+      en: Zoom Out
+      zh-CN: 缩小
+      ja: 縮小
+    Collapse:
+      en: Collapse
+      zh-CN: 隐藏
+      ja: 折りたたむ
+    Expand:
+      en: Expand
+      zh-CN: 展开
+      ja: 展開
+    Unavailable Panel:
+      en: This panel isn’t available in this version.
+      zh-CN: 当前版本无法显示该面板。
+      ja: このパネルはこのバージョンでは利用できません。
+  ColorPicker:
+    Palette:
+      en: Palette
+      zh-CN: 调色板
+      ja: パレット
+    HSLA:
+      en: HSLA
+      zh-CN: HSLA
+      ja: HSLA
+    Hue:
+      en: Hue
+      zh-CN: 色相
+      ja: 色相
+    Saturation:
+      en: Saturation
+      zh-CN: 饱和度
+      ja: 彩度
+    Lightness:
+      en: Lightness
+      zh-CN: 亮度
+      ja: 明度
+    Alpha:
+      en: Alpha
+      zh-CN: 透明度
+      ja: 不透明度
+  Dialog:
+    ok:
+      en: OK
+      zh-CN: 确定
+      ja: OK
+    cancel:
+      en: Cancel
+      zh-CN: 取消
+      ja: キャンセル
+  Command:
+    placeholder:
+      en: Type a command or search...
+      zh-CN: 输入命令或搜索...
+      ja: コマンドを入力するか検索...
+    empty:
+      en: No results found.
+      zh-CN: 未找到结果。
+      ja: 結果が見つかりません。
+  List:
+    search_placeholder:
+      en: Search...
+      zh-CN: 搜索...
+      ja: 検索...
+  Input:
+    Decrement:
+      en: Decrement
+      zh-CN: 减少
+      ja: 減らす
+    Increment:
+      en: Increment
+      zh-CN: 增加
+      ja: 増やす
+    Replace:
+      en: Replace
+      zh-CN: 替换
+      ja: 置換
+    Replace All:
+      en: Replace All
+      zh-CN: 全部替换
+      ja: すべて置換
+    Clear:
+      en: Clear
+      zh-CN: 清除
+      ja: クリア
+    Cut:
+      en: Cut
+      zh-CN: 剪切
+      ja: 切り取り
+    Copy:
+      en: Copy
+      zh-CN: 复制
+      ja: コピー
+    Paste:
+      en: Paste
+      zh-CN: 粘贴
+      ja: 貼り付け
+    Select All:
+      en: Select All
+      zh-CN: 全选
+      ja: すべて選択
+    Go to Definition:
+      en: Go to Definition
+      zh-CN: 跳转到定义
+      ja: 定義へ移動
+    Show Code Actions:
+      en: Show Code Actions
+      zh-CN: 显示代码操作
+      ja: コードアクションを表示
+    Show Password:
+      en: Show password
+      zh-CN: 显示密码
+      ja: パスワードを表示
+    Hide Password:
+      en: Hide password
+      zh-CN: 隐藏密码
+      ja: パスワードを非表示
+  Settings:
+    search_placeholder:
+      en: Search...
+      zh-CN: 搜索...
+      ja: 検索...
+    no_results:
+      en: No matching settings
+      zh-CN: 没有匹配的设置
+      ja: 一致する設定がありません
+    no_results_description:
+      en: Try a different keyword.
+      zh-CN: 请尝试其他关键词。
+      ja: 別のキーワードをお試しください。
+    Reset All:
+      en: Reset All
+      zh-CN: 重置全部
+      ja: すべてリセット
+  Pagination:
+    previous:
+      en: Previous
+      zh-CN: 上一页
+      ja: 前へ
+    next:
+      en: Next
+      zh-CN: 下一页
+      ja: 次へ
+  Carousel:
+    label:
+      en: Carousel
+      zh-CN: 轮播
+      ja: カルーセル
+    previous:
+      en: Previous slide
+      zh-CN: 上一张
+      ja: 前のスライド
+    next:
+      en: Next slide
+      zh-CN: 下一张
+      ja: 次のスライド
+    slide:
+      en: Slide %{current} of %{total}
+      zh-CN: 第 %{current} 张，共 %{total} 张
+      ja: スライド %{current}/%{total}
+    pagination:
+      en: Carousel pagination
+      zh-CN: 轮播分页
+      ja: カルーセルのページ送り
+    go_to_slide:
+      en: Go to slide %{current}
+      zh-CN: 前往第 %{current} 张
+      ja: スライド %{current} へ移動
+  Table:
+    SortBy:
+      en: Sort by %{column}
+      zh-CN: 按 %{column} 排序
+      ja: '%{column} で並べ替え'
+  Chart:
+    open:
+      en: Open
+      zh-CN: 开盘
+      ja: 始値
+    high:
+      en: High
+      zh-CN: 最高
+      ja: 高値
+    low:
+      en: Low
+      zh-CN: 最低
+      ja: 安値
+    close:
+      en: Close
+      zh-CN: 收盘
+      ja: 終値
+  Questionnaire:
+    progress:
+      en: Question %{current} of %{total}
+      zh-CN: 第 %{current} 题，共 %{total} 题
+      ja: 質問 %{current}/%{total}
+    previous:
+      en: Previous
+      zh-CN: 上一题
+      ja: 前へ
+    next:
+      en: Next
+      zh-CN: 下一题
+      ja: 次へ
+    skip:
+      en: Skip
+      zh-CN: 跳过
+      ja: スキップ
+    submit:
+      en: Submit
+      zh-CN: 提交
+      ja: 送信
+    error.required:
+      en: Choose an answer to continue.
+      zh-CN: 请选择一个答案后继续。
+      ja: 続行するには回答を選択してください。
+    error.optional:
+      en: Choose an answer or skip this question.
+      zh-CN: 请选择一个答案，或跳过此题。
+      ja: 回答を選択するか、この質問をスキップしてください。
+  Speech:
+    Start:
+      en: Dictate
+      zh-CN: 语音输入
+      ja: 音声入力
+    Stop:
+      en: Stop dictation
+      zh-CN: 停止语音输入
+      ja: 音声入力を停止
+    Unavailable:
+      en: Dictation unavailable
+      zh-CN: 语音输入不可用
+      ja: 音声入力を利用できません
+  Diff:
+    BinaryChanges:
+      en: Binary file changed
+      zh-CN: 二进制文件已变更
+      ja: バイナリファイルが変更されました
+    NoTextChanges:
+      en: No text changes in this patch
+      zh-CN: 此 patch 没有文本变更
+      ja: このパッチにはテキストの変更がありません
+    NoChanges:
+      en: No changes
+      zh-CN: 没有变更
+      ja: 変更なし
+    EmptyFile:
+      en: Empty file
+      zh-CN: 空文件
+      ja: 空のファイル
+    AddedFile:
+      en: Added file
+      zh-CN: 新增文件
+      ja: 追加されたファイル
+    DeletedFile:
+      en: Deleted file
+      zh-CN: 已删除文件
+      ja: 削除されたファイル
+    RenamedFile:
+      en: Renamed
+      zh-CN: 已重命名
+      ja: 名前変更済み
+    CopiedFile:
+      en: Copied
+      zh-CN: 已复制
+      ja: コピー済み
+    HiddenLines:
+      en: '%{count} lines not in patch'
+      zh-CN: patch 中未包含 %{count} 行
+      ja: パッチに含まれない %{count} 行
+    ExpandAbove:
+      en: Show %{count} lines above
+      zh-CN: 显示上方 %{count} 行
+      ja: 上に %{count} 行を表示
+    ExpandBelow:
+      en: Show %{count} lines below
+      zh-CN: 显示下方 %{count} 行
+      ja: 下に %{count} 行を表示
+    CollapseFile:
+      en: Collapse %{name}
+      zh-CN: 收起 %{name}
+      ja: '%{name} を折りたたむ'
+    ExpandFile:
+      en: Expand %{name}
+      zh-CN: 展开 %{name}
+      ja: '%{name} を展開'
+    AddAnnotation:
+      en: Add annotation to line %{line}
+      zh-CN: 为第 %{line} 行添加批注
+      ja: '%{line} 行目に注釈を追加'
+    ConflictedFile:
+      en: Conflicts
+      zh-CN: 有冲突
+      ja: 競合
+    CurrentChange:
+      en: Current change
+      zh-CN: 当前更改
+      ja: 現在の変更
+    IncomingChange:
+      en: Incoming change
+      zh-CN: 传入的更改
+      ja: 取り込む変更
+    BaseChange:
+      en: Common ancestor
+      zh-CN: 共同祖先
+      ja: 共通の祖先
+    AcceptCurrent:
+      en: Accept Current
+      zh-CN: 采用当前更改
+      ja: 現在の変更を採用
+    AcceptIncoming:
+      en: Accept Incoming
+      zh-CN: 采用传入的更改
+      ja: 取り込む変更を採用
+    AcceptBoth:
+      en: Accept Both
+      zh-CN: 保留双方更改
+      ja: 両方の変更を採用
+    AcceptedCurrent:
+      en: Accepted current change
+      zh-CN: 已采用当前更改
+      ja: 現在の変更を採用しました
+    AcceptedIncoming:
+      en: Accepted incoming change
+      zh-CN: 已采用传入的更改
+      ja: 取り込む変更を採用しました
+    AcceptedBoth:
+      en: Accepted both changes
+      zh-CN: 已保留双方更改
+      ja: 両方の変更を採用しました
+    UndoResolution:
+      en: Undo
+      zh-CN: 撤销
+      ja: 元に戻す
+    Original:
+      en: Original
+      zh-CN: 原版
+      ja: 元のバージョン
+    Modified:
+      en: Modified
+      zh-CN: 新版
+      ja: 変更後
+    ExpandLines:
+      en: Expand %{count} unchanged lines
+      zh-CN: 展开 %{count} 行未变更内容
+      ja: 変更のない %{count} 行を展開
+    SourceLine:
+      en: '%{side} line %{line}'
+      zh-CN: '%{side}第 %{line} 行'
+      ja: '%{side}の %{line} 行目'
+    AddedLine:
+      en: '%{side} line %{line}, added'
+      zh-CN: '%{side}第 %{line} 行，新增'
+      ja: '%{side}の %{line} 行目（追加）'
+    RemovedLine:
+      en: '%{side} line %{line}, removed'
+      zh-CN: '%{side}第 %{line} 行，删除'
+      ja: '%{side}の %{line} 行目（削除）'
+    UnchangedLines:
+      en: '%{count} unchanged lines'
+      zh-CN: '%{count} 行未变更内容'
+      ja: 変更のない %{count} 行
+    SelectLine:
+      en: Select %{side} line %{line}
+      zh-CN: 选择%{side}第 %{line} 行
+      ja: '%{side}の %{line} 行目を選択'
+    NoNewline:
+      en: No newline at end of file
+      zh-CN: 文件末尾没有换行
+      ja: ファイル末尾に改行がありません
+    Viewer:
+      en: Diff for %{name}
+      zh-CN: '%{name} 的差异'
+      ja: '%{name} の差分'
+    ViewerFiles:
+      en: Diff for %{count} files
+      zh-CN: '%{count} 个文件的差异'
+      ja: '%{count} 個のファイルの差分'

@@ -79,26 +79,26 @@ impl Pane {
     ];
 
     /// Navigation label.
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> String {
         match self {
-            Self::Appearance => "Appearance",
-            Self::Workspace => "Workspace",
-            Self::Preview => "Preview",
-            Self::Project => "Project Settings",
-            Self::Collections => "Collections",
-            Self::Advanced => "Advanced",
+            Self::Appearance => tr!("preferences.pane.appearance.label"),
+            Self::Workspace => tr!("preferences.pane.workspace.label"),
+            Self::Preview => tr!("preferences.pane.preview.label"),
+            Self::Project => tr!("preferences.pane.project.label"),
+            Self::Collections => tr!("preferences.pane.collections.label"),
+            Self::Advanced => tr!("preferences.pane.advanced.label"),
         }
     }
 
     /// One-line explanation shown above the pane body.
-    pub(crate) fn description(self) -> &'static str {
+    pub(crate) fn description(self) -> String {
         match self {
-            Self::Appearance => "Theme, interface type and document typography.",
-            Self::Workspace => "Startup behavior, panel layouts, saving and file defaults.",
-            Self::Preview => "How the live site opens and which browser to use.",
-            Self::Project => "Defaults for this project's content workflow.",
-            Self::Collections => "Directories, field mappings and style per collection.",
-            Self::Advanced => "Paths, integrations and reset actions.",
+            Self::Appearance => tr!("preferences.pane.appearance.description"),
+            Self::Workspace => tr!("preferences.pane.workspace.description"),
+            Self::Preview => tr!("preferences.pane.preview.description"),
+            Self::Project => tr!("preferences.pane.project.description"),
+            Self::Collections => tr!("preferences.pane.collections.description"),
+            Self::Advanced => tr!("preferences.pane.advanced.description"),
         }
     }
 
@@ -232,7 +232,7 @@ pub(crate) enum FieldId {
 /// Optional decoration around one preference field row.
 pub(crate) struct FieldExtras {
     pub field: Option<FieldId>,
-    pub hint: Option<&'static str>,
+    pub hint: Option<SharedString>,
     pub trailing: Option<AnyElement>,
 }
 
@@ -343,7 +343,9 @@ impl PreferencesSheet {
             inputs: Inputs {
                 ide_executable: input!("hx or code"),
                 ide_arguments,
-                preview_browser_executable: input!("Empty uses the system browser"),
+                preview_browser_executable: input!(tr!(
+                    "preferences.placeholder.browser_executable"
+                )),
                 preview_browser_arguments: {
                     let input = cx.new(|cx| TextareaState::new(window, cx));
                     subscriptions.push(cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
@@ -355,30 +357,30 @@ impl PreferencesSheet {
                 },
                 heading_light: input!("#1f2328"),
                 heading_dark: input!("#e6edf3"),
-                ui_font_family: input!("System UI font"),
+                ui_font_family: input!(tr!("preferences.placeholder.ui_font_family")),
                 ui_font_size: input!(format_number(GlobalPreferencesV2::default().ui_font_size)),
                 panel_radius: input!(format_number(GlobalPreferencesV2::default().panel_radius)),
                 prose_font_family: input!("Inter / system sans"),
                 font_size: input!("16"),
-                build_font_family: input!("System monospace font"),
+                build_font_family: input!(tr!("preferences.placeholder.build_font_family")),
                 build_font_size: input!("14"),
                 preview_font_family: input!("Inter / system sans"),
                 preview_font_size: input!("16"),
                 line_height: input!("2"),
                 page_width_percent: input!("64"),
-                project_content: input!("Inherit the Astro content directory"),
-                project_assets: input!("Inherit the configured assets directory"),
-                project_mdx: input!("Inherit the MDX component directory"),
+                project_content: input!(tr!("preferences.placeholder.project_content")),
+                project_assets: input!(tr!("preferences.placeholder.project_assets")),
+                project_mdx: input!(tr!("preferences.placeholder.project_mdx")),
                 project_title: input!("title"),
                 project_date: input!("date"),
                 project_description: input!("description"),
                 project_draft: input!("draft"),
-                collection_content: input!("Inherit the project content directory"),
-                collection_assets: input!("Inherit the project assets directory"),
-                collection_title: input!("Inherit the project mapping"),
-                collection_date: input!("Inherit the project mapping"),
-                collection_description: input!("Inherit the project mapping"),
-                collection_draft: input!("Inherit the project mapping"),
+                collection_content: input!(tr!("preferences.placeholder.collection_content")),
+                collection_assets: input!(tr!("preferences.placeholder.collection_assets")),
+                collection_title: input!(tr!("preferences.placeholder.collection_mapping")),
+                collection_date: input!(tr!("preferences.placeholder.collection_mapping")),
+                collection_description: input!(tr!("preferences.placeholder.collection_mapping")),
+                collection_draft: input!(tr!("preferences.placeholder.collection_mapping")),
                 collection_url_pattern: input!("/blog/{slug}/"),
             },
             errors: BTreeMap::new(),
@@ -1202,9 +1204,9 @@ impl PreferencesSheet {
         if !theme::font_family_available(cx, &ui_font_family) {
             insert(
                 FieldId::UiFontFamily,
-                format!(
-                    "“{}” is not an installed font family.",
-                    ui_font_family.trim()
+                tr!(
+                    "preferences.error.font_family",
+                    name = ui_font_family.trim()
                 ),
             );
         }
@@ -1218,23 +1220,27 @@ impl PreferencesSheet {
         if !theme::font_family_available(cx, &prose_font_family) {
             insert(
                 FieldId::ProseFontFamily,
-                format!(
-                    "“{}” is not an installed font family.",
-                    prose_font_family.trim()
+                tr!(
+                    "preferences.error.font_family",
+                    name = prose_font_family.trim()
                 ),
             );
         }
-        for (field, label) in [
-            (FieldId::BuildFontFamily, "Build"),
-            (FieldId::PreviewFontFamily, "Preview"),
+        for (field, surface) in [
+            (FieldId::BuildFontFamily, tr!("preferences.surface.build")),
+            (
+                FieldId::PreviewFontFamily,
+                tr!("preferences.surface.preview"),
+            ),
         ] {
             let family = self.text(field, cx);
             if !theme::font_family_available(cx, &family) {
                 insert(
                     field,
-                    format!(
-                        "“{}” is not an installed font family for {label}.",
-                        family.trim()
+                    tr!(
+                        "preferences.error.font_family_for",
+                        name = family.trim(),
+                        surface = surface
                     ),
                 );
             }
@@ -1271,13 +1277,13 @@ impl PreferencesSheet {
         if context.project.is_none() {
             return errors;
         }
-        for (field, label) in [
-            (FieldId::ProjectContent, "Content"),
-            (FieldId::ProjectAssets, "Assets"),
-            (FieldId::ProjectMdx, "MDX components"),
+        for field in [
+            FieldId::ProjectContent,
+            FieldId::ProjectAssets,
+            FieldId::ProjectMdx,
         ] {
             if let Err(message) = directory_value(&self.text(field, cx)) {
-                insert(field, format!("{label}: {message}"));
+                insert(field, message);
             }
         }
         let schemas: Vec<&CollectionSchema> = context
@@ -1296,12 +1302,9 @@ impl PreferencesSheet {
             }
         }
         if let Some(entry) = self.collection_entry() {
-            for (field, name) in [
-                (FieldId::CollectionContent, "Content directory"),
-                (FieldId::CollectionAssets, "Assets directory"),
-            ] {
+            for field in [FieldId::CollectionContent, FieldId::CollectionAssets] {
                 if let Err(message) = directory_value(&self.text(field, cx)) {
-                    insert(field, format!("{name}: {message}"));
+                    insert(field, message);
                 }
             }
             let schemas: Vec<&CollectionSchema> = entry.schema.as_deref().into_iter().collect();
@@ -1469,7 +1472,7 @@ impl PreferencesSheet {
         Button::new(id)
             .xsmall()
             .ghost()
-            .label("Reset")
+            .label(tr!("preferences.sheet.reset"))
             .on_click(cx.listener(move |this, _, window, cx| this.reset_field(field, window, cx)))
             .into_any_element()
     }
@@ -1529,11 +1532,12 @@ impl PreferencesSheet {
     /// One titled group of related settings.
     pub(super) fn section(
         &self,
-        title: &'static str,
-        hint: Option<&'static str>,
+        title: impl Into<SharedString>,
+        hint: Option<SharedString>,
         children: Vec<AnyElement>,
         cx: &App,
     ) -> AnyElement {
+        let title = title.into();
         div()
             .v_flex()
             .w_full()
@@ -1602,9 +1606,9 @@ impl Render for PreferencesSheet {
             .filter(|pane| pane.available(has_project))
         {
             let group = match pane {
-                Pane::Appearance => Some("GENERAL"),
-                Pane::Project => Some("PROJECT"),
-                Pane::Advanced => Some("ADVANCED"),
+                Pane::Appearance => Some(tr!("preferences.group.general")),
+                Pane::Project => Some(tr!("preferences.group.project")),
+                Pane::Advanced => Some(tr!("preferences.group.advanced")),
                 _ => None,
             };
             if let Some(group) = group {
@@ -1662,7 +1666,7 @@ impl Render for PreferencesSheet {
                             .ghost()
                             .w_full()
                             .justify_start()
-                            .label("User guide")
+                            .label(tr!("preferences.sheet.user_guide"))
                             .tab_index(0)
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(PreferencesEvent::OpenUserGuide);
@@ -1673,7 +1677,7 @@ impl Render for PreferencesSheet {
                             .ghost()
                             .w_full()
                             .justify_start()
-                            .label("Keyboard shortcuts")
+                            .label(tr!("preferences.sheet.keyboard_shortcuts"))
                             .tab_index(0)
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(PreferencesEvent::OpenKeyboardShortcuts);
@@ -1726,9 +1730,9 @@ impl Render for PreferencesSheet {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(if apply_disabled {
-                                "Fix the highlighted values before applying."
+                                tr!("preferences.sheet.fix_errors")
                             } else {
-                                "Changes apply immediately and persist atomically."
+                                tr!("preferences.sheet.apply_note")
                             }),
                     ),
             )
@@ -1739,7 +1743,7 @@ impl Render for PreferencesSheet {
                     .gap_2()
                     .child(
                         Button::new("preferences-cancel")
-                            .label("Cancel")
+                            .label(tr!("preferences.sheet.cancel"))
                             .tab_index(1)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.emit(PreferencesEvent::Cancel);
@@ -1750,7 +1754,7 @@ impl Render for PreferencesSheet {
                     .child(
                         Button::new("preferences-apply")
                             .primary()
-                            .label("Apply")
+                            .label(tr!("preferences.sheet.apply"))
                             .tab_index(1)
                             .disabled(apply_disabled)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -1790,7 +1794,7 @@ impl Render for PreferencesSheet {
                                 .overflow_y_scrollbar()
                                 .child(
                                     div().w_full().child(body).with_animation(
-                                        pane.label(),
+                                        pane.element_id(),
                                         Animation::new(motion.duration_fast)
                                             .with_easing(gpui_kit::base::animation::ease_out_cubic),
                                         |body, progress| body.opacity(progress),
@@ -1837,12 +1841,12 @@ impl MappingRole {
         }
     }
 
-    fn expected(self) -> &'static str {
+    fn mismatch(self, value: &str) -> String {
         match self {
-            Self::Title => "a string field for the title",
-            Self::Date => "a date field for the publication date",
-            Self::Description => "a string field for the description",
-            Self::Draft => "a boolean field for the draft flag",
+            Self::Title => tr!("preferences.validation.mapping_title", value = value),
+            Self::Date => tr!("preferences.validation.mapping_date", value = value),
+            Self::Description => tr!("preferences.validation.mapping_description", value = value),
+            Self::Draft => tr!("preferences.validation.mapping_draft", value = value),
         }
     }
 }
@@ -1854,14 +1858,14 @@ pub(crate) fn directory_value(value: &str) -> Result<Option<String>, String> {
         return Ok(None);
     }
     if value.chars().any(char::is_control) {
-        return Err("Directories cannot contain control characters.".into());
+        return Err(tr!("preferences.validation.directory_control_chars"));
     }
     if value == "~" || value.starts_with("~/") {
-        return Err("Use a project-relative directory, not a home-directory path.".into());
+        return Err(tr!("preferences.validation.directory_home"));
     }
     let path = std::path::Path::new(value);
     if path.is_absolute() {
-        return Err("Use a project-relative directory, not an absolute path.".into());
+        return Err(tr!("preferences.validation.directory_absolute"));
     }
     let mut normalized = std::path::PathBuf::new();
     for component in path.components() {
@@ -1869,15 +1873,15 @@ pub(crate) fn directory_value(value: &str) -> Result<Option<String>, String> {
             std::path::Component::Normal(segment) => normalized.push(segment),
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                return Err("Directories must stay inside the project root.".into());
+                return Err(tr!("preferences.validation.directory_escape"));
             }
             std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                return Err("Use a project-relative directory, not an absolute path.".into());
+                return Err(tr!("preferences.validation.directory_absolute"));
             }
         }
     }
     if normalized.as_os_str().is_empty() {
-        return Err("Enter a directory name or leave the field empty to inherit.".into());
+        return Err(tr!("preferences.validation.directory_empty"));
     }
     Ok(Some(normalized.to_string_lossy().replace('\\', "/")))
 }
@@ -1886,10 +1890,10 @@ pub(crate) fn directory_value(value: &str) -> Result<Option<String>, String> {
 pub(crate) fn font_size_value(value: &str) -> Result<f32, String> {
     let value = value.trim();
     let Ok(size) = value.parse::<f32>() else {
-        return Err("Enter a font size between 1 and 30.".into());
+        return Err(tr!("preferences.validation.font_size_parse"));
     };
     if !size.is_finite() || !(1.0..=30.0).contains(&size) {
-        return Err("Font size must be between 1 and 30.".into());
+        return Err(tr!("preferences.validation.font_size_range"));
     }
     Ok(size)
 }
@@ -1898,10 +1902,10 @@ pub(crate) fn font_size_value(value: &str) -> Result<f32, String> {
 pub(crate) fn line_height_value(value: &str) -> Result<f32, String> {
     let value = value.trim();
     let Ok(height) = value.parse::<f32>() else {
-        return Err("Enter a line height between 1.2 and 3.0.".into());
+        return Err(tr!("preferences.validation.line_height_parse"));
     };
     if !height.is_finite() || !(1.2..=3.0).contains(&height) {
-        return Err("Line height must be between 1.2 and 3.0.".into());
+        return Err(tr!("preferences.validation.line_height_range"));
     }
     Ok(height)
 }
@@ -1910,10 +1914,10 @@ pub(crate) fn line_height_value(value: &str) -> Result<f32, String> {
 pub(crate) fn page_width_value(value: &str) -> Result<f32, String> {
     let value = value.trim();
     let Ok(width) = value.parse::<f32>() else {
-        return Err("Enter a page width between 30 and 100 percent.".into());
+        return Err(tr!("preferences.validation.page_width_parse"));
     };
     if !width.is_finite() || !(30.0..=100.0).contains(&width) {
-        return Err("Page width must be between 30 and 100 percent.".into());
+        return Err(tr!("preferences.validation.page_width_range"));
     }
     Ok(width)
 }
@@ -1922,10 +1926,10 @@ pub(crate) fn page_width_value(value: &str) -> Result<f32, String> {
 pub(crate) fn panel_radius_value(value: &str) -> Result<f32, String> {
     let value = value.trim();
     let Ok(radius) = value.parse::<f32>() else {
-        return Err("Enter a shared corner radius between 0 and 24.".into());
+        return Err(tr!("preferences.validation.panel_radius_parse"));
     };
     if !radius.is_finite() || !(0.0..=24.0).contains(&radius) {
-        return Err("Shared corner radius must be between 0 and 24.".into());
+        return Err(tr!("preferences.validation.panel_radius_range"));
     }
     Ok(radius)
 }
@@ -1934,10 +1938,10 @@ pub(crate) fn panel_radius_value(value: &str) -> Result<f32, String> {
 pub(crate) fn ui_font_size_value(value: &str) -> Result<f32, String> {
     let value = value.trim();
     let Ok(size) = value.parse::<f32>() else {
-        return Err("Enter an interface size between 8 and 28.".into());
+        return Err(tr!("preferences.validation.ui_font_size_parse"));
     };
     if !size.is_finite() || !(8.0..=28.0).contains(&size) {
-        return Err("Interface size must be between 8 and 28.".into());
+        return Err(tr!("preferences.validation.ui_font_size_range"));
     }
     Ok(size)
 }
@@ -1950,14 +1954,14 @@ pub(crate) fn heading_color_value(value: &str) -> Result<Option<String>, String>
     }
     theme::color_from_hex(value)
         .map(|_| Some(value.to_ascii_lowercase()))
-        .ok_or_else(|| "Enter a colour as #rrggbb or #rrggbbaa.".into())
+        .ok_or_else(|| tr!("preferences.validation.heading_color"))
 }
 
 /// Validate an IDE command; argv is never interpreted by a shell.
 pub(crate) fn ide_command_value(executable: &str, arguments: &str) -> Result<IdeCommand, String> {
     let executable = executable.trim();
     if executable.chars().any(char::is_control) {
-        return Err("The IDE executable cannot contain control characters.".into());
+        return Err(tr!("preferences.validation.ide_executable_control_chars"));
     }
     let arguments: Vec<String> = arguments
         .lines()
@@ -1969,28 +1973,29 @@ pub(crate) fn ide_command_value(executable: &str, arguments: &str) -> Result<Ide
         if arguments.is_empty() {
             return Ok(IdeCommand::default());
         }
-        return Err("Enter the IDE executable before its arguments.".into());
+        return Err(tr!("preferences.validation.ide_missing_executable"));
     }
     for argument in &arguments {
         if argument.chars().any(char::is_control) {
-            return Err("IDE arguments cannot contain control characters.".into());
+            return Err(tr!("preferences.validation.ide_argument_control_chars"));
         }
         let mut rest = argument.as_str();
         while let Some(open) = rest.find('{') {
             let after = &rest[open + 1..];
             let Some(close) = after.find('}') else {
-                return Err("IDE arguments have an unclosed placeholder.".into());
+                return Err(tr!("preferences.validation.ide_unclosed_placeholder"));
             };
             let name = &after[..close];
             if !matches!(name, "project" | "file" | "line" | "column") {
-                return Err(format!(
-                    "Unknown IDE placeholder {{{name}}}; use {{project}}, {{file}}, {{line}} or {{column}}."
+                return Err(tr!(
+                    "preferences.validation.ide_unknown_placeholder",
+                    name = name
                 ));
             }
             rest = &after[close + 1..];
         }
         if rest.contains('}') {
-            return Err("IDE arguments have an unmatched closing brace.".into());
+            return Err(tr!("preferences.validation.ide_stray_brace"));
         }
     }
     Ok(IdeCommand {
@@ -2009,17 +2014,17 @@ pub(crate) fn url_pattern_value(value: &str) -> Result<Option<String>, String> {
         .chars()
         .any(|character| character.is_control() || character.is_whitespace())
     {
-        return Err("The URL pattern cannot contain spaces or control characters.".into());
+        return Err(tr!("preferences.validation.url_whitespace"));
     }
     if !value.contains("{slug}") {
-        return Err("The URL pattern must contain {slug}.".into());
+        return Err(tr!("preferences.validation.url_slug_required"));
     }
     let without_slug = value.replace("{slug}", "");
     if without_slug.contains('{') || without_slug.contains('}') {
-        return Err("Only the {slug} placeholder is supported.".into());
+        return Err(tr!("preferences.validation.url_slug_only"));
     }
     if !(value.starts_with('/') || value.starts_with("http://") || value.starts_with("https://")) {
-        return Err("Start the pattern with / or with http:// or https://.".into());
+        return Err(tr!("preferences.validation.url_absolute"));
     }
     Ok(Some(value.to_owned()))
 }
@@ -2038,7 +2043,7 @@ pub(crate) fn mapping_value(
         .chars()
         .any(|character| character.is_control() || character.is_whitespace())
     {
-        return Err("Field names cannot contain spaces or control characters.".into());
+        return Err(tr!("preferences.validation.mapping_control_chars"));
     }
     if schemas.is_empty() {
         return Ok(Some(value.to_owned()));
@@ -2056,10 +2061,11 @@ pub(crate) fn mapping_value(
         }
     }
     if found {
-        Err(format!("“{value}” is not {}.", role.expected()))
+        Err(role.mismatch(value))
     } else {
-        Err(format!(
-            "No collection schema declares a field named “{value}”."
+        Err(tr!(
+            "preferences.validation.mapping_missing_field",
+            value = value
         ))
     }
 }
@@ -2094,7 +2100,9 @@ pub(super) fn ide_command(executable: &str, arguments: &str) -> Option<IdeComman
 pub(super) fn browser_command(executable: &str, arguments: &str) -> Result<BrowserCommand, String> {
     let executable = executable.trim();
     if executable.chars().any(char::is_control) {
-        return Err("The browser executable cannot contain control characters.".into());
+        return Err(tr!(
+            "preferences.validation.browser_executable_control_chars"
+        ));
     }
     let arguments: Vec<String> = arguments
         .lines()
@@ -2106,28 +2114,29 @@ pub(super) fn browser_command(executable: &str, arguments: &str) -> Result<Brows
         if arguments.is_empty() {
             return Ok(BrowserCommand::default());
         }
-        return Err("Enter the browser executable before its arguments.".into());
+        return Err(tr!("preferences.validation.browser_missing_executable"));
     }
     for argument in &arguments {
         if argument.chars().any(char::is_control) {
-            return Err("Browser arguments cannot contain control characters.".into());
+            return Err(tr!("preferences.validation.browser_argument_control_chars"));
         }
         let mut rest = argument.as_str();
         while let Some(open) = rest.find('{') {
             let after = &rest[open + 1..];
             let Some(close) = after.find('}') else {
-                return Err("Browser arguments have an unclosed placeholder.".into());
+                return Err(tr!("preferences.validation.browser_unclosed_placeholder"));
             };
             let name = &after[..close];
             if name != "url" {
-                return Err(format!(
-                    "Unknown browser placeholder {{{name}}}; use {{url}}."
+                return Err(tr!(
+                    "preferences.validation.browser_unknown_placeholder",
+                    name = name
                 ));
             }
             rest = &after[close + 1..];
         }
         if rest.contains('}') {
-            return Err("Browser arguments have an unmatched closing brace.".into());
+            return Err(tr!("preferences.validation.browser_stray_brace"));
         }
     }
     Ok(BrowserCommand {

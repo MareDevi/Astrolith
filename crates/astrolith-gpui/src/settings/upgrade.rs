@@ -68,37 +68,31 @@ pub(super) fn import_legacy(global_path: &Path, legacy_path: Option<&Path>) -> O
             legacy,
             unique_destination(&legacy.with_file_name("preferences.v1.ignored.json")),
         ) {
-            Ok(()) => Some(format!(
-                "Legacy preferences at {} were not imported because global preferences already exist; the file was moved aside.",
-                legacy.display()
+            Ok(()) => Some(tr!(
+                "settings.upgrade.legacy_ignored",
+                path = legacy.display()
             )),
-            Err(error) => Some(format!(
-                "Could not retire the legacy preferences at {}: {error}.",
-                legacy.display()
+            Err(error) => Some(tr!(
+                "settings.upgrade.legacy_retire_failed",
+                path = legacy.display(),
+                error = error
             )),
         };
     }
     let bytes = match fs::read(legacy) {
         Ok(bytes) => bytes,
         Err(error) => {
-            return Some(format!(
-                "Could not read legacy preferences at {}: {error}.",
-                legacy.display()
+            return Some(tr!(
+                "settings.upgrade.legacy_read_failed",
+                path = legacy.display(),
+                error = error
             ));
         }
     };
     let preferences = match serde_json::from_slice::<LegacyPreferencesV1>(&bytes) {
         Ok(preferences) if preferences.version == 1 => preferences,
         Ok(preferences) => {
-            return retire_once(
-                legacy,
-                "preferences.v1.ignored.json",
-                format!(
-                    "Unsupported legacy preference version {} at {}; the file was moved aside.",
-                    preferences.version,
-                    legacy.display()
-                ),
-            );
+            return retire_once(legacy, "preferences.v1.ignored.json", preferences.version);
         }
         Err(error) => {
             return Some(quarantine_legacy(legacy, &error));
@@ -111,11 +105,14 @@ pub(super) fn import_legacy(global_path: &Path, legacy_path: Option<&Path>) -> O
     let encoded = match serde_json::to_vec_pretty(&global) {
         Ok(encoded) => encoded,
         Err(error) => {
-            return Some(format!("Could not encode migrated preferences: {error}."));
+            return Some(tr!(
+                "settings.upgrade.migrated_encode_failed",
+                error = error
+            ));
         }
     };
     if let Err(error) = write_atomic(global_path, &encoded) {
-        return Some(format!("Could not write migrated preferences: {error}."));
+        return Some(tr!("settings.upgrade.migrated_write_failed", error = error));
     }
     let migrated = unique_destination(&legacy.with_file_name("preferences.v1.migrated.json"));
     match fs::rename(legacy, &migrated) {
@@ -127,32 +124,45 @@ pub(super) fn import_legacy(global_path: &Path, legacy_path: Option<&Path>) -> O
             );
             None
         }
-        Err(error) => Some(format!(
-            "Preferences were imported, but the legacy file at {} could not be retained as {}: {error}.",
-            legacy.display(),
-            migrated.display()
+        Err(error) => Some(tr!(
+            "settings.upgrade.legacy_retain_failed",
+            path = legacy.display(),
+            destination = migrated.display(),
+            error = error
         )),
     }
 }
 
 /// Rename a legacy file out of the read path and warn exactly once.
-fn retire_once(legacy: &Path, name: &str, warning: String) -> Option<String> {
+fn retire_once(legacy: &Path, name: &str, version: u32) -> Option<String> {
     let destination = unique_destination(&legacy.with_file_name(name));
     match fs::rename(legacy, &destination) {
-        Ok(()) => Some(warning),
-        Err(error) => Some(format!("{warning} The file could not be moved ({error}).")),
+        Ok(()) => Some(tr!(
+            "settings.upgrade.unsupported_version",
+            version = version,
+            path = legacy.display()
+        )),
+        Err(error) => Some(tr!(
+            "settings.upgrade.unsupported_version_not_moved",
+            version = version,
+            path = legacy.display(),
+            error = error
+        )),
     }
 }
 
 fn quarantine_legacy(path: &Path, error: &dyn std::fmt::Display) -> String {
     let destination = unique_destination(&path.with_file_name("preferences.v1.corrupt.json"));
     match fs::rename(path, &destination) {
-        Ok(()) => format!(
-            "Could not import legacy preferences: {error}. The invalid file was moved to {}; defaults are active.",
-            destination.display()
+        Ok(()) => tr!(
+            "settings.upgrade.legacy_quarantined",
+            error = error,
+            destination = destination.display()
         ),
-        Err(rename_error) => format!(
-            "Could not import legacy preferences: {error}. The file is preserved ({rename_error})."
+        Err(rename_error) => tr!(
+            "settings.upgrade.legacy_quarantine_failed",
+            error = error,
+            rename_error = rename_error
         ),
     }
 }
@@ -193,7 +203,7 @@ pub(super) fn upgrade_global(stored: &mut Stored<GlobalPreferencesV2>) -> Option
                     upgraded.insert("default_mode".to_owned(), value);
                 }
                 Err(error) => {
-                    return Some(format!("Could not encode the default mode: {error}."));
+                    return Some(tr!("settings.upgrade.default_mode_failed", error = error));
                 }
             }
         }
@@ -203,7 +213,7 @@ pub(super) fn upgrade_global(stored: &mut Stored<GlobalPreferencesV2>) -> Option
                     upgraded.insert("layouts".to_owned(), value);
                 }
                 Err(error) => {
-                    return Some(format!("Could not encode the mode layouts: {error}."));
+                    return Some(tr!("settings.upgrade.mode_layouts_failed", error = error));
                 }
             }
         }
@@ -268,9 +278,9 @@ where
     let baseline = match stored.baseline.as_deref() {
         Some(baseline) => baseline,
         None => {
-            return Err(Some(format!(
-                "Could not upgrade {} because the previous file content is unavailable.",
-                stored.path.display()
+            return Err(Some(tr!(
+                "settings.upgrade.baseline_missing",
+                path = stored.path.display()
             )));
         }
     };
@@ -285,34 +295,38 @@ where
             .with_file_name(format!("{file_name}.v{old_version}.bak")),
     );
     if let Err(error) = write_backup(&backup, baseline) {
-        return Err(Some(format!(
-            "Could not back up preferences to {}: {error}. The settings file is preserved.",
-            backup.display()
+        return Err(Some(tr!(
+            "settings.upgrade.backup_failed",
+            path = backup.display(),
+            error = error
         )));
     }
     let value = match serde_json::from_value::<T>(Value::Object(upgraded.clone())) {
         Ok(value) => value,
         Err(error) => {
-            return Err(Some(format!(
-                "Could not read the upgraded preferences in {}: {error}. The original was backed up to {}.",
-                stored.path.display(),
-                backup.display()
+            return Err(Some(tr!(
+                "settings.upgrade.upgraded_read_failed",
+                path = stored.path.display(),
+                error = error,
+                backup = backup.display()
             )));
         }
     };
     let bytes = match serde_json::to_vec_pretty(&Value::Object(upgraded.clone())) {
         Ok(bytes) => bytes,
         Err(error) => {
-            return Err(Some(format!(
-                "Could not encode the upgraded preferences: {error}."
+            return Err(Some(tr!(
+                "settings.upgrade.upgraded_encode_failed",
+                error = error
             )));
         }
     };
     if let Err(error) = write_atomic(&stored.path, &bytes) {
-        return Err(Some(format!(
-            "Could not write the upgraded preferences in {}: {error}. The original was backed up to {}.",
-            stored.path.display(),
-            backup.display()
+        return Err(Some(tr!(
+            "settings.upgrade.upgraded_write_failed",
+            path = stored.path.display(),
+            error = error,
+            backup = backup.display()
         )));
     }
     stored.baseline = Some(bytes);

@@ -13,8 +13,8 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{
-    App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString, Window,
-    div, prelude::*,
+    App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Window, div,
+    prelude::*,
 };
 
 /// Emitted when the embedded surface asks the shell for another action.
@@ -24,11 +24,32 @@ pub(crate) enum EmbeddedPreviewEvent {
     OpenExternal,
 }
 
+/// Why the embedded surface cannot be shown.
+#[derive(Clone, Debug)]
+// One variant is only constructed by the other build configuration.
+#[allow(dead_code)]
+pub(crate) enum EmbeddedFailure {
+    /// The native WebView could not be created.
+    Create(String),
+    /// This build was compiled without the embedded surface.
+    FeatureDisabled,
+}
+
+impl EmbeddedFailure {
+    /// The failure rendered in the current interface language.
+    pub(crate) fn text(&self) -> String {
+        match self {
+            Self::Create(error) => tr!("preview.embedded.create_failed", error = error.as_str()),
+            Self::FeatureDisabled => tr!("preview.embedded.feature_disabled"),
+        }
+    }
+}
+
 /// A retained embedded WebView and its status.
 pub(crate) struct EmbeddedPreview {
     url: Option<Url>,
     /// Why the surface could not be created, if it failed.
-    failure: Option<String>,
+    failure: Option<EmbeddedFailure>,
     #[cfg(feature = "embedded-webview")]
     webview: Option<gpui_kit::Entity<gpui_webview::WebView>>,
     active: bool,
@@ -92,9 +113,10 @@ impl EmbeddedPreview {
                     Ok(())
                 }
                 Err(error) => {
-                    let message = format!("could not create the embedded WebView: {error}");
                     tracing::warn!(%error, "could not create the embedded WebView");
-                    self.failure = Some(message.clone());
+                    let failure = EmbeddedFailure::Create(error.to_string());
+                    let message = failure.text();
+                    self.failure = Some(failure);
                     self.url = None;
                     cx.notify();
                     Err(message)
@@ -104,8 +126,9 @@ impl EmbeddedPreview {
         #[cfg(not(feature = "embedded-webview"))]
         {
             let _ = window;
-            let message = "this build was compiled without the embedded-webview feature".to_owned();
-            self.failure = Some(message.clone());
+            let failure = EmbeddedFailure::FeatureDisabled;
+            let message = failure.text();
+            self.failure = Some(failure);
             self.url = None;
             cx.notify();
             Err(message)
@@ -166,8 +189,8 @@ impl EmbeddedPreview {
     }
 
     #[cfg(all(test, not(feature = "embedded-webview")))]
-    pub(crate) fn failure(&self) -> Option<&str> {
-        self.failure.as_deref()
+    pub(crate) fn failure(&self) -> Option<String> {
+        self.failure.as_ref().map(EmbeddedFailure::text)
     }
 }
 
@@ -207,7 +230,7 @@ impl Render for EmbeddedPreview {
                         div()
                             .text_xs()
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child("Embedded preview"),
+                            .child(tr!("preview.embedded.title")),
                     )
                     .child(
                         div()
@@ -216,15 +239,16 @@ impl Render for EmbeddedPreview {
                             .truncate()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(
-                                url.clone().unwrap_or_else(|| "no page loaded".to_owned()),
-                            )),
+                            .child(
+                                url.clone()
+                                    .unwrap_or_else(|| tr!("preview.embedded.no_page")),
+                            ),
                     )
                     .child(
                         Button::new("embedded-preview-reload")
                             .xsmall()
                             .ghost()
-                            .label("Reload")
+                            .label(tr!("preview.actions.reload"))
                             .disabled(!has_webview)
                             .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
                     )
@@ -232,7 +256,7 @@ impl Render for EmbeddedPreview {
                         Button::new("embedded-preview-open-external")
                             .xsmall()
                             .outline()
-                            .label("Open in browser")
+                            .label(tr!("preview.actions.open"))
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(EmbeddedPreviewEvent::OpenExternal)
                             })),
@@ -262,15 +286,15 @@ impl EmbeddedPreview {
     fn status_body(
         &self,
         loading: bool,
-        failure: Option<String>,
+        failure: Option<EmbeddedFailure>,
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
         let message = if let Some(failure) = failure {
-            failure
+            failure.text()
         } else if loading {
-            "Start the preview server to load the page.".to_owned()
+            tr!("preview.embedded.start_prompt")
         } else {
-            "The preview server is not ready yet.".to_owned()
+            tr!("preview.embedded.not_ready")
         };
         div()
             .flex_1()

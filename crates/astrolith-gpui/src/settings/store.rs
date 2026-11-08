@@ -58,9 +58,10 @@ where
             }
             Err(error) => {
                 stored.writable = false;
-                stored.warning = Some(format!(
-                    "Could not read preferences at {}: {error}. The file is preserved; fix it and restart to enable persistence.",
-                    path.display()
+                stored.warning = Some(tr!(
+                    "settings_store.read_failed",
+                    path = path.display().to_string(),
+                    error = error.to_string()
                 ));
                 return stored;
             }
@@ -69,7 +70,7 @@ where
         let map = match parsed {
             Ok(Value::Object(map)) => map,
             Ok(_) => {
-                stored.quarantine(&"preferences must be a JSON object");
+                stored.quarantine(&tr!("settings_store.not_object"));
                 return stored;
             }
             Err(error) => {
@@ -85,16 +86,16 @@ where
             // A newer version is preserved read-only rather than overwritten.
             Some(Value::Number(number)) if number.as_u64().is_some() => {
                 stored.writable = false;
-                stored.warning = Some(format!(
-                    "Unsupported preference version in {}. The file is preserved and will not be overwritten.",
-                    path.display()
+                stored.warning = Some(tr!(
+                    "settings_store.unsupported_version",
+                    path = path.display().to_string()
                 ));
                 return stored;
             }
             // A missing, negative, fractional or non-numeric version is not a
             // valid envelope: recover through the corruption path.
             _ => {
-                stored.quarantine(&"preference envelope must carry a non-negative integer version");
+                stored.quarantine(&tr!("settings_store.invalid_envelope"));
                 return stored;
             }
         }
@@ -114,9 +115,11 @@ where
             Ok(destination) => destination,
             Err(rename_error) => {
                 self.writable = false;
-                self.warning = Some(format!(
-                    "Could not load preferences at {}: {error}. The file is preserved; fix it and restart to enable persistence ({rename_error}).",
-                    self.path.display()
+                self.warning = Some(tr!(
+                    "settings_store.quarantine_failed",
+                    path = self.path.display().to_string(),
+                    error = error.to_string(),
+                    rename_error = rename_error.to_string()
                 ));
                 return;
             }
@@ -127,30 +130,27 @@ where
             %error,
             "quarantined invalid preferences"
         );
-        self.warning = Some(format!(
-            "Could not load preferences at {}: {error}. The invalid file was moved to {}; defaults are active.",
-            self.path.display(),
-            destination.display()
+        self.warning = Some(tr!(
+            "settings_store.quarantined",
+            path = self.path.display().to_string(),
+            error = error.to_string(),
+            destination = destination.display().to_string()
         ));
     }
 
     /// Serialize writers; stale tasks cannot replace a newer successful snapshot.
     fn save(&mut self, revision: u64, value: &T) -> io::Result<bool> {
         if !self.writable {
-            return Err(io::Error::other(
-                "Preferences are read-only after a load error; fix the file and restart.",
-            ));
+            return Err(io::Error::other(tr!("settings_store.read_only")));
         }
         if revision <= self.revision {
             return Ok(false);
         }
         if read_existing(&self.path)? != self.baseline {
-            return Err(io::Error::other(
-                "Preferences changed outside Astrolith; restart before saving settings.",
-            ));
+            return Err(io::Error::other(tr!("settings_store.changed_externally")));
         }
         let Value::Object(typed) = serde_json::to_value(value).map_err(io::Error::other)? else {
-            return Err(io::Error::other("Preference value must be an object."));
+            return Err(io::Error::other(tr!("settings_store.value_not_object")));
         };
         let mut merged = self.envelope.clone().unwrap_or_default();
         for (key, value) in typed {
@@ -175,7 +175,7 @@ where
         let revision = self
             .revision
             .checked_add(1)
-            .ok_or_else(|| io::Error::other("Preference revision exhausted."))?;
+            .ok_or_else(|| io::Error::other(tr!("settings_store.revision_exhausted")))?;
         let value = self.value.clone();
         self.save(revision, &value)
     }
@@ -247,7 +247,7 @@ impl PreferencesStore {
             Err(_) => (
                 ProjectRegistry::default(),
                 0,
-                Some("Project registry unavailable.".into()),
+                Some(tr!("settings_store.registry_unavailable")),
             ),
         }
     }
@@ -259,7 +259,7 @@ impl PreferencesStore {
                 registry.value.recent().into_iter().cloned().collect(),
                 registry.warning.clone(),
             ),
-            Err(_) => (Vec::new(), Some("Project registry unavailable.".into())),
+            Err(_) => (Vec::new(), Some(tr!("settings_store.registry_unavailable"))),
         }
     }
 
@@ -282,7 +282,7 @@ impl PreferencesStore {
         let mut projects = self
             .projects
             .lock()
-            .map_err(|_| io::Error::other("Project preference store unavailable."))?;
+            .map_err(|_| io::Error::other(tr!("settings_store.project_store_unavailable")))?;
         let stored = match projects.entry(id.to_owned()) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
@@ -310,7 +310,7 @@ impl PreferencesStore {
         let mut projects = self
             .projects
             .lock()
-            .map_err(|_| io::Error::other("Project preference store unavailable."))?;
+            .map_err(|_| io::Error::other(tr!("settings_store.project_store_unavailable")))?;
         let stored = projects
             .entry(id.to_owned())
             .or_insert_with(|| self.load_project(path));
@@ -328,17 +328,21 @@ impl PreferencesStore {
     ) -> io::Result<ProjectOpen> {
         let canonical = fs::canonicalize(path)?;
         if !canonical.is_dir() {
-            return Err(io::Error::other("Choose a project directory."));
+            return Err(io::Error::other(tr!(
+                "settings_store.choose_project_directory"
+            )));
         }
         if let Some(blocked) = astrolith_workspace::paths::blocked_root(
             &canonical,
             astrolith_workspace::paths::home_directory().as_deref(),
         ) {
-            return Err(io::Error::other(blocked.message()));
+            return Err(io::Error::other(
+                crate::project_discovery::blocked_root_message(blocked),
+            ));
         }
         let canonical = canonical
             .to_str()
-            .ok_or_else(|| io::Error::other("Project path is not valid UTF-8."))?
+            .ok_or_else(|| io::Error::other(tr!("settings_store.path_not_utf8")))?
             .to_owned();
         let mut registry = lock(&self.registry)?;
         let open = registry
@@ -350,7 +354,7 @@ impl PreferencesStore {
         let mut projects = self
             .projects
             .lock()
-            .map_err(|_| io::Error::other("Project preference store unavailable."))?;
+            .map_err(|_| io::Error::other(tr!("settings_store.project_store_unavailable")))?;
         let stored = projects
             .entry(open.id.clone())
             .or_insert_with(|| self.load_project(project_path));
@@ -384,7 +388,9 @@ impl PreferencesStore {
                 character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
             })
         {
-            return Err(io::Error::other("Invalid project identity."));
+            return Err(io::Error::other(tr!(
+                "settings_store.invalid_project_identity"
+            )));
         }
         Ok(self.projects_dir.join(format!("{id}.json")))
     }
@@ -393,7 +399,7 @@ impl PreferencesStore {
 fn lock<T>(mutex: &Mutex<T>) -> io::Result<std::sync::MutexGuard<'_, T>> {
     mutex
         .lock()
-        .map_err(|_| io::Error::other("Preference store unavailable."))
+        .map_err(|_| io::Error::other(tr!("settings_store.store_unavailable")))
 }
 
 fn combine_warnings<const N: usize>(warnings: [Option<String>; N]) -> Option<String> {
@@ -410,7 +416,10 @@ fn read_existing(path: &Path) -> io::Result<Option<Vec<u8>>> {
             if bytes.len() as u64 > MAX_PREFERENCE_BYTES {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("Preferences exceed {} KiB.", MAX_PREFERENCE_BYTES / 1024),
+                    tr!(
+                        "settings_store.exceeds_limit",
+                        limit = MAX_PREFERENCE_BYTES / 1024
+                    ),
                 ));
             }
             Ok(Some(bytes))
@@ -424,7 +433,7 @@ pub(super) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| io::Error::other("Preferences need a parent directory."))?;
+        .ok_or_else(|| io::Error::other(tr!("settings_store.missing_parent")))?;
     fs::create_dir_all(parent)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.write_all(bytes)?;
@@ -442,7 +451,7 @@ fn quarantine_file(path: &Path) -> io::Result<PathBuf> {
     if !path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "preference file is missing",
+            tr!("settings_store.file_missing"),
         ));
     }
     let destination = unique_destination(&path.with_file_name(format!(
@@ -489,7 +498,7 @@ fn application_config_dir() -> io::Result<PathBuf> {
         .filter(|path| path.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
     base.filter(|path| path.is_absolute())
-        .ok_or_else(|| io::Error::other("Application configuration directory unavailable."))
+        .ok_or_else(|| io::Error::other(tr!("settings_store.config_dir_unavailable")))
 }
 
 pub(crate) fn settings_path() -> io::Result<PathBuf> {
@@ -498,9 +507,9 @@ pub(crate) fn settings_path() -> io::Result<PathBuf> {
         return if path.is_absolute() {
             Ok(path)
         } else {
-            Err(io::Error::other(
-                "ASTROLITH_SETTINGS_PATH must be absolute.",
-            ))
+            Err(io::Error::other(tr!(
+                "settings_store.settings_path_absolute"
+            )))
         };
     }
     Ok(application_config_dir()?.join("astrolith/preferences/global.json"))
@@ -513,9 +522,9 @@ pub(crate) fn save_failure_dir() -> io::Result<PathBuf> {
         return if path.is_absolute() {
             Ok(path)
         } else {
-            Err(io::Error::other(
-                "ASTROLITH_SAVE_FAILURE_DIR must be absolute.",
-            ))
+            Err(io::Error::other(tr!(
+                "settings_store.save_failure_dir_absolute"
+            )))
         };
     }
     Ok(application_config_dir()?.join("astrolith/save-failures"))
@@ -528,7 +537,9 @@ pub(crate) fn recovery_dir() -> io::Result<PathBuf> {
         return if path.is_absolute() {
             Ok(path)
         } else {
-            Err(io::Error::other("ASTROLITH_RECOVERY_DIR must be absolute."))
+            Err(io::Error::other(tr!(
+                "settings_store.recovery_dir_absolute"
+            )))
         };
     }
     Ok(application_config_dir()?.join("astrolith/recovery"))
