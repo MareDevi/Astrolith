@@ -938,13 +938,14 @@ impl BlockLayout {
                     {
                         partial.break_cursor += 1;
                     }
+                    let previous_break = partial.last_break;
                     partial.width += f32::from(advance);
                     if self.breaks.get(partial.break_cursor.saturating_sub(1)) == Some(&next) {
                         partial.last_break = Some((next, partial.width));
                     }
                     if partial.width > f32::from(width) && next > partial.start {
-                        match partial.last_break {
-                            Some((offset, _)) if offset > partial.start && offset < next => {
+                        match previous_break {
+                            Some((offset, _)) if offset > partial.start => {
                                 self.push_row(partial.start..offset);
                                 partial = PartialRow {
                                     start: offset,
@@ -952,16 +953,6 @@ impl BlockLayout {
                                     width: 0.,
                                     last_break: None,
                                     break_cursor: self.cursor_at(offset),
-                                };
-                            }
-                            Some((offset, _)) if offset == next => {
-                                self.push_row(partial.start..next);
-                                partial = PartialRow {
-                                    start: next,
-                                    scan: next,
-                                    width: 0.,
-                                    last_break: None,
-                                    break_cursor: partial.break_cursor,
                                 };
                             }
                             _ if partial.scan == partial.start => {

@@ -80,6 +80,35 @@ fn rows_stay_on_grapheme_and_break_boundaries(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn wrapping_moves_a_cjk_grapheme_that_exceeds_the_column(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        let text_system = WindowTextSystem::new(cx.text_system().clone());
+        let style = test_style();
+        let font_id = text_system.resolve_font(&style.font);
+        let glyph_width = f32::from(text_system.layout_width(font_id, style.font_size, '中'));
+        let width = px(glyph_width * 4.25);
+        let source = "中文字符需要在窄列中完整换行显示";
+        let mut layout = TextLayout::new(parse(source), style, width, &ImageMetrics::default());
+
+        prepare_all(&mut layout, &text_system, 2_000.);
+
+        let block = &layout.blocks[0];
+        assert!(block.rows.len() > 1, "fixture wraps into multiple rows");
+        for row in &block.rows {
+            let graphemes = source[row.range.clone()].graphemes(true).count();
+            if graphemes > 1 {
+                let shaped_width = f32::from(row.shaped.as_ref().unwrap().width());
+                assert!(
+                    shaped_width <= f32::from(width) + 0.5,
+                    "wrapped row ends inside its column: {shaped_width}px > {width:?}"
+                );
+            }
+        }
+    });
+}
+
+#[gpui_kit::test]
 fn long_block_wraps_and_shapes_only_the_viewport(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
