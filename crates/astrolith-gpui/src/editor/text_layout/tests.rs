@@ -38,6 +38,15 @@ fn text_selection_fill_differs_from_light_and_dark_canvas() {
     );
 }
 
+#[test]
+fn local_selection_bounds_follow_the_canvas_window_origin() {
+    let local = Bounds::new(point(px(24.), px(48.)), size(px(120.), px(28.)));
+    let translated = local_to_window_bounds(point(px(160.), px(90.)), local);
+
+    assert_eq!(translated.origin, point(px(184.), px(138.)));
+    assert_eq!(translated.size, local.size);
+}
+
 fn parse(text: &str) -> Arc<WysiwygDocument> {
     Arc::new(WysiwygDocument::parse(text))
 }

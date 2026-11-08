@@ -2090,13 +2090,16 @@ fn paint_block_rows(
         {
             let clipped = quad.intersect(&row_bounds).intersect(visible);
             if clipped.size.width > px(0.) && clipped.size.height > px(0.) {
-                window.paint_quad(fill(clipped, *color));
+                window.paint_quad(fill(local_to_window_bounds(origin, clipped), *color));
             }
         }
         for quad in quads.iter().filter(|quad| quad.intersects(&row_bounds)) {
             let clipped = quad.intersect(&row_bounds).intersect(visible);
             if clipped.size.width > px(0.) && clipped.size.height > px(0.) {
-                window.paint_quad(fill(clipped, selection_color));
+                window.paint_quad(fill(
+                    local_to_window_bounds(origin, clipped),
+                    selection_color,
+                ));
             }
         }
         let _ = shaped.paint(
@@ -2131,6 +2134,13 @@ fn paint_block_rows(
         painted += 1;
     }
     painted
+}
+
+fn local_to_window_bounds(origin: Point<Pixels>, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds::new(
+        point(origin.x + bounds.origin.x, origin.y + bounds.origin.y),
+        bounds.size,
+    )
 }
 
 /// Shape one row that is not yet shaped.
