@@ -10,7 +10,9 @@ use std::{
     time::Duration,
 };
 
-use astrolith_terminal::{ExitInfo, TerminalSession};
+use astrolith_terminal::{
+    ExitInfo, TerminalCell, TerminalColor, TerminalSession, TerminalSnapshot,
+};
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, StyledExt,
     button::{Button, ButtonVariants},
@@ -21,7 +23,6 @@ use gpui_kit::{
 };
 
 use crate::theme::METRICS;
-use astrolith_terminal::vt100;
 
 /// Advance used for the cell grid until the mono face has been measured.
 const FALLBACK_CELL_WIDTH: f32 = 7.8;
@@ -101,6 +102,7 @@ struct RunStyle {
     foreground: Hsla,
     background: Hsla,
     bold: bool,
+    italic: bool,
     underline: bool,
     /// Kept in the key so a wide glyph never shares a run with narrow ones.
     wide: bool,
@@ -148,22 +150,12 @@ struct RowView {
 /// is a flat clone of the visible screen; everything expensive happens after
 /// the lock is released.
 struct ScreenSnapshot {
-    cells: Vec<Option<vt100::Cell>>,
-    cols: u16,
-    rows: u16,
-    cursor: (u16, u16),
-    cursor_hidden: bool,
-    live: bool,
+    terminal: TerminalSnapshot,
 }
 
 impl ScreenSnapshot {
-    fn cell(&self, row: u16, col: u16) -> Option<&vt100::Cell> {
-        if row >= self.rows || col >= self.cols {
-            return None;
-        }
-        self.cells
-            .get(usize::from(row) * usize::from(self.cols) + usize::from(col))
-            .and_then(Option::as_ref)
+    fn cell(&self, row: u16, col: u16) -> Option<&TerminalCell> {
+        self.terminal.cell(row, col)
     }
 }
 
@@ -308,7 +300,7 @@ impl TerminalPanel {
     pub(crate) fn screen_contents(&self) -> String {
         self.session
             .as_ref()
-            .map(|session| session.with_screen(|screen| screen.contents()))
+            .map(TerminalSession::contents)
             .unwrap_or_default()
     }
 
@@ -341,8 +333,7 @@ impl TerminalPanel {
             return false;
         };
         let (start, end) = selection.ordered();
-        let text = session
-            .with_screen(|screen| screen.contents_between(start.row, start.col, end.row, end.col));
+        let text = session.contents_between((start.row, start.col), (end.row, end.col));
         if text.is_empty() {
             return false;
         }
@@ -546,14 +537,14 @@ impl TerminalPanel {
         }
         if (modifiers.control || modifiers.platform) && key.eq_ignore_ascii_case("v") {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                let bracketed = session.with_screen(|screen| screen.bracketed_paste());
+                let bracketed = session.bracketed_paste();
                 let _ = session.write(&paste_payload(&text, bracketed));
                 session.scroll_to_bottom();
                 return true;
             }
             return false;
         }
-        let application_cursor = session.with_screen(|screen| screen.application_cursor());
+        let application_cursor = session.application_cursor();
         let bytes = translate_key(event, application_cursor);
         if let Some(bytes) = bytes {
             if session.write(&bytes).is_ok() {
@@ -569,23 +560,9 @@ impl TerminalPanel {
     /// Copy the visible screen under the parser lock, once per frame.
     fn snapshot(&self) -> Option<ScreenSnapshot> {
         let session = self.session.as_ref()?;
-        let (cols, rows) = session.size();
-        Some(session.with_screen(|screen| {
-            let mut cells = Vec::with_capacity(usize::from(cols) * usize::from(rows));
-            for row in 0..rows {
-                for col in 0..cols {
-                    cells.push(screen.cell(row, col).cloned());
-                }
-            }
-            ScreenSnapshot {
-                cells,
-                cols,
-                rows,
-                cursor: screen.cursor_position(),
-                cursor_hidden: screen.hide_cursor(),
-                live: screen.scrollback() == 0,
-            }
-        }))
+        Some(ScreenSnapshot {
+            terminal: session.snapshot(),
+        })
     }
 
     fn render_rows(&self, window: &Window, cx: &App) -> Vec<RowView> {
@@ -596,10 +573,10 @@ impl TerminalPanel {
         let background: Hsla = cx.theme().background;
         let cursor_color: Hsla = cx.theme().foreground;
         let selection_color: Hsla = cx.theme().selection;
-        let cursor = snapshot.cursor;
+        let cursor = snapshot.terminal.cursor();
         let selection = self.selection;
         let focused = self.focus.is_focused(window);
-        let (cols, rows) = (snapshot.cols, snapshot.rows);
+        let (cols, rows) = snapshot.terminal.size();
         let mut output = Vec::with_capacity(usize::from(rows));
         for row in 0..rows {
             // Find the last cell that paints something: trailing blanks
@@ -611,20 +588,20 @@ impl TerminalPanel {
                 let Some(cell) = snapshot.cell(row, col) else {
                     continue;
                 };
-                if cell.is_wide_continuation() {
+                if cell.wide_continuation() {
                     continue;
                 }
                 let point = GridPoint { row, col };
                 let padding = cell.contents().is_empty()
-                    && matches!(cell.bgcolor(), vt100::Color::Default)
+                    && matches!(cell.background(), TerminalColor::Default)
                     && !cell.inverse()
                     && !selection.is_some_and(|selection| selection.contains(point))
-                    && !(snapshot.live
-                        && !snapshot.cursor_hidden
+                    && !(snapshot.terminal.is_live()
+                        && !snapshot.terminal.cursor_hidden()
                         && cursor == (row, col)
                         && focused);
                 if !padding {
-                    end = col + if cell.is_wide() { 2 } else { 1 };
+                    end = col + if cell.wide() { 2 } else { 1 };
                     break;
                 }
             }
@@ -635,16 +612,18 @@ impl TerminalPanel {
                 let Some(cell) = snapshot.cell(row, col) else {
                     break;
                 };
-                if cell.is_wide_continuation() {
+                if cell.wide_continuation() {
                     col += 1;
                     continue;
                 }
                 let point = GridPoint { row, col };
                 let selected = selection.is_some_and(|selection| selection.contains(point));
-                let is_cursor =
-                    snapshot.live && !snapshot.cursor_hidden && cursor == (row, col) && focused;
-                let mut fg = ansi_color(cell.fgcolor(), foreground);
-                let mut bg = ansi_color(cell.bgcolor(), background);
+                let is_cursor = snapshot.terminal.is_live()
+                    && !snapshot.terminal.cursor_hidden()
+                    && cursor == (row, col)
+                    && focused;
+                let mut fg = ansi_color(cell.foreground(), foreground);
+                let mut bg = ansi_color(cell.background(), background);
                 if cell.inverse() {
                     std::mem::swap(&mut fg, &mut bg);
                 }
@@ -665,7 +644,7 @@ impl TerminalPanel {
                 } else {
                     cell.contents()
                 };
-                let wide = cell.is_wide();
+                let wide = cell.wide();
                 let width_cells = if wide { 2 } else { 1 };
                 RunView::push(
                     &mut runs,
@@ -675,6 +654,7 @@ impl TerminalPanel {
                         foreground: fg,
                         background: bg,
                         bold: cell.bold(),
+                        italic: cell.italic(),
                         underline: cell.underline(),
                         wide,
                         highlight: selected || is_cursor,
@@ -890,6 +870,7 @@ impl Render for TerminalPanel {
                                             .when(run.style.bold, |run| {
                                                 run.font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             })
+                                            .when(run.style.italic, |run| run.italic())
                                             .when(run.style.underline, |run| run.underline())
                                             .child(SharedString::from(run.text))
                                     }))
@@ -1031,14 +1012,14 @@ fn translate_key(event: &gpui_kit::KeystrokeEvent, application_cursor: bool) -> 
 }
 
 /// Map a vt100 color to the terminal surface; indexed values use xterm's palette.
-fn ansi_color(color: vt100::Color, default: Hsla) -> Hsla {
+fn ansi_color(color: TerminalColor, default: Hsla) -> Hsla {
     match color {
-        vt100::Color::Default => default,
-        vt100::Color::Rgb(red, green, blue) => gpui_kit::rgba(
+        TerminalColor::Default => default,
+        TerminalColor::Rgb(red, green, blue) => gpui_kit::rgba(
             u32::from(red) << 24 | u32::from(green) << 16 | u32::from(blue) << 8 | 0xff,
         )
         .into(),
-        vt100::Color::Idx(index) => indexed_color(index).into(),
+        TerminalColor::Indexed(index) => indexed_color(index).into(),
     }
 }
 
@@ -1084,6 +1065,7 @@ mod tests {
             foreground: gpui_kit::hsla(0., 0., 1., 1.),
             background: gpui_kit::hsla(0., 0., 0., 1.),
             bold: false,
+            italic: false,
             underline: false,
             wide: false,
             highlight: false,

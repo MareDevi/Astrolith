@@ -22,8 +22,6 @@ use nix::{
     unistd::Pid,
 };
 
-pub use vt100;
-
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 /// Default visible rows when the view has not measured itself yet.
@@ -66,6 +64,114 @@ pub struct ExitInfo {
     pub code: Option<u32>,
     /// Signal or platform description when available.
     pub detail: Option<String>,
+}
+
+/// ANSI color resolved by a terminal backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalColor {
+    /// Use the application terminal foreground or background.
+    Default,
+    /// 24-bit RGB color.
+    Rgb(u8, u8, u8),
+    /// xterm 256-color palette index.
+    Indexed(u8),
+}
+
+/// Backend-neutral terminal cell used by the renderer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalCell {
+    contents: String,
+    foreground: TerminalColor,
+    background: TerminalColor,
+    bold: bool,
+    dim: bool,
+    italic: bool,
+    underline: bool,
+    inverse: bool,
+    wide: bool,
+    wide_continuation: bool,
+}
+
+impl TerminalCell {
+    /// Cell contents, which may be empty for a styled blank cell.
+    pub fn contents(&self) -> &str {
+        &self.contents
+    }
+    /// Foreground color.
+    pub fn foreground(&self) -> TerminalColor {
+        self.foreground
+    }
+    /// Background color.
+    pub fn background(&self) -> TerminalColor {
+        self.background
+    }
+    /// Whether the cell is bold.
+    pub fn bold(&self) -> bool {
+        self.bold
+    }
+    /// Whether the cell is dimmed.
+    pub fn dim(&self) -> bool {
+        self.dim
+    }
+    /// Whether the cell is italic.
+    pub fn italic(&self) -> bool {
+        self.italic
+    }
+    /// Whether the cell is underlined.
+    pub fn underline(&self) -> bool {
+        self.underline
+    }
+    /// Whether foreground and background are inverted.
+    pub fn inverse(&self) -> bool {
+        self.inverse
+    }
+    /// Whether the cell occupies two columns.
+    pub fn wide(&self) -> bool {
+        self.wide
+    }
+    /// Whether this cell is the trailing half of a wide glyph.
+    pub fn wide_continuation(&self) -> bool {
+        self.wide_continuation
+    }
+}
+
+/// Immutable, backend-neutral copy of the visible terminal grid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalSnapshot {
+    cells: Vec<Option<TerminalCell>>,
+    cols: u16,
+    rows: u16,
+    cursor: (u16, u16),
+    cursor_hidden: bool,
+    live: bool,
+}
+
+impl TerminalSnapshot {
+    /// Visible grid dimensions.
+    pub fn size(&self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+    /// Cursor position as `(row, column)`.
+    pub fn cursor(&self) -> (u16, u16) {
+        self.cursor
+    }
+    /// Whether the terminal requested a hidden cursor.
+    pub fn cursor_hidden(&self) -> bool {
+        self.cursor_hidden
+    }
+    /// Whether the viewport is at live output.
+    pub fn is_live(&self) -> bool {
+        self.live
+    }
+    /// Cell at `(row, column)`, if the point is inside the grid.
+    pub fn cell(&self, row: u16, col: u16) -> Option<&TerminalCell> {
+        if row >= self.rows || col >= self.cols {
+            return None;
+        }
+        self.cells
+            .get(usize::from(row) * usize::from(self.cols) + usize::from(col))
+            .and_then(Option::as_ref)
+    }
 }
 
 impl ExitInfo {
@@ -211,6 +317,58 @@ impl TerminalSession {
             Ok(screen) => read(screen.screen()),
             Err(poisoned) => read(poisoned.into_inner().screen()),
         }
+    }
+
+    /// Copy the visible grid into backend-neutral renderer data.
+    pub fn snapshot(&self) -> TerminalSnapshot {
+        self.with_screen(|screen| {
+            let (rows, cols) = screen.size();
+            let mut cells = Vec::with_capacity(usize::from(rows.get()) * usize::from(cols.get()));
+            for row in 0..rows.get() {
+                for col in 0..cols.get() {
+                    cells.push(screen.cell(row, col).map(|cell| TerminalCell {
+                        contents: cell.contents().to_owned(),
+                        foreground: terminal_color(cell.fgcolor()),
+                        background: terminal_color(cell.bgcolor()),
+                        bold: cell.bold(),
+                        dim: cell.dim(),
+                        italic: cell.italic(),
+                        underline: cell.underline(),
+                        inverse: cell.inverse(),
+                        wide: cell.is_wide(),
+                        wide_continuation: cell.is_wide_continuation(),
+                    }));
+                }
+            }
+            TerminalSnapshot {
+                cells,
+                cols: cols.get(),
+                rows: rows.get(),
+                cursor: screen.cursor_position(),
+                cursor_hidden: screen.hide_cursor(),
+                live: screen.scrollback() == 0,
+            }
+        })
+    }
+
+    /// Current screen text, excluding terminal styling.
+    pub fn contents(&self) -> String {
+        self.with_screen(vt100::Screen::contents)
+    }
+
+    /// Text between two visible grid points, inclusive.
+    pub fn contents_between(&self, start: (u16, u16), end: (u16, u16)) -> String {
+        self.with_screen(|screen| screen.contents_between(start.0, start.1, end.0, end.1))
+    }
+
+    /// Whether application cursor key sequences are enabled.
+    pub fn application_cursor(&self) -> bool {
+        self.with_screen(vt100::Screen::application_cursor)
+    }
+
+    /// Whether bracketed paste is enabled.
+    pub fn bracketed_paste(&self) -> bool {
+        self.with_screen(vt100::Screen::bracketed_paste)
     }
 
     /// Send bytes to the child.
@@ -404,6 +562,14 @@ impl TerminalSession {
     }
 }
 
+fn terminal_color(color: vt100::Color) -> TerminalColor {
+    match color {
+        vt100::Color::Default => TerminalColor::Default,
+        vt100::Color::Rgb(red, green, blue) => TerminalColor::Rgb(red, green, blue),
+        vt100::Color::Idx(index) => TerminalColor::Indexed(index),
+    }
+}
+
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         self.kill();
@@ -472,7 +638,7 @@ mod tests {
             &root,
             40,
             8,
-            command("printf '\\033[31mred\\033[0m\\n'; exit 7"),
+            command("printf '\\033[31;3mred\\033[0m\\n'; exit 7"),
         )
         .unwrap();
         wait_for_text(&session, "red");
@@ -487,6 +653,12 @@ mod tests {
             "ANSI red must survive parsing, got {}",
             red.1
         );
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.size(), (40, 8));
+        let cell = snapshot.cell(0, 0).expect("first output cell");
+        assert_eq!(cell.contents(), "r");
+        assert!(cell.italic());
+        assert_eq!(cell.foreground(), TerminalColor::Indexed(1));
         let exit = loop {
             if let Some(exit) = session.poll_exit() {
                 break exit;
