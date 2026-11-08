@@ -77,6 +77,34 @@ pub enum TerminalColor {
     Indexed(u8),
 }
 
+/// Mouse reporting requested by the running terminal application.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalMouseMode {
+    /// Keep mouse input local for selection and scrollback.
+    #[default]
+    None,
+    /// Report button presses.
+    Press,
+    /// Report button presses and releases.
+    PressRelease,
+    /// Also report movement while a button is held.
+    ButtonMotion,
+    /// Report all movement.
+    AnyMotion,
+}
+
+/// Wire encoding selected for mouse reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalMouseEncoding {
+    /// Legacy single-byte coordinate encoding.
+    #[default]
+    Default,
+    /// UTF-8 coordinate encoding.
+    Utf8,
+    /// SGR coordinate encoding.
+    Sgr,
+}
+
 /// Backend-neutral terminal cell used by the renderer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalCell {
@@ -371,6 +399,25 @@ impl TerminalSession {
         self.with_screen(vt100::Screen::bracketed_paste)
     }
 
+    /// Current mouse reporting mode and wire encoding.
+    pub fn mouse_protocol(&self) -> (TerminalMouseMode, TerminalMouseEncoding) {
+        self.with_screen(|screen| {
+            let mode = match screen.mouse_protocol_mode() {
+                vt100::MouseProtocolMode::None => TerminalMouseMode::None,
+                vt100::MouseProtocolMode::Press => TerminalMouseMode::Press,
+                vt100::MouseProtocolMode::PressRelease => TerminalMouseMode::PressRelease,
+                vt100::MouseProtocolMode::ButtonMotion => TerminalMouseMode::ButtonMotion,
+                vt100::MouseProtocolMode::AnyMotion => TerminalMouseMode::AnyMotion,
+            };
+            let encoding = match screen.mouse_protocol_encoding() {
+                vt100::MouseProtocolEncoding::Default => TerminalMouseEncoding::Default,
+                vt100::MouseProtocolEncoding::Utf8 => TerminalMouseEncoding::Utf8,
+                vt100::MouseProtocolEncoding::Sgr => TerminalMouseEncoding::Sgr,
+            };
+            (mode, encoding)
+        })
+    }
+
     /// Send bytes to the child.
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         let Some(writer) = self.writer.as_mut() else {
@@ -638,7 +685,7 @@ mod tests {
             &root,
             40,
             8,
-            command("printf '\\033[31;3mred\\033[0m\\n'; exit 7"),
+            command("printf '\\033[?1000h\\033[?1006h\\033[31;3mred\\033[0m\\n'; exit 7"),
         )
         .unwrap();
         wait_for_text(&session, "red");
@@ -659,6 +706,10 @@ mod tests {
         assert_eq!(cell.contents(), "r");
         assert!(cell.italic());
         assert_eq!(cell.foreground(), TerminalColor::Indexed(1));
+        assert_eq!(
+            session.mouse_protocol(),
+            (TerminalMouseMode::PressRelease, TerminalMouseEncoding::Sgr)
+        );
         let exit = loop {
             if let Some(exit) = session.poll_exit() {
                 break exit;

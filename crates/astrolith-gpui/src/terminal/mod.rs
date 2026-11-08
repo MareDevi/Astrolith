@@ -11,7 +11,8 @@ use std::{
 };
 
 use astrolith_terminal::{
-    ExitInfo, TerminalCell, TerminalColor, TerminalSession, TerminalSnapshot,
+    ExitInfo, TerminalCell, TerminalColor, TerminalMouseEncoding, TerminalMouseMode,
+    TerminalSession, TerminalSnapshot,
 };
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, StyledExt,
@@ -19,7 +20,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, Bounds, Context, FocusHandle, Focusable, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Render, SharedString, Task, Window, canvas, div, prelude::*, px,
+    MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, Task, Window, canvas, div,
+    prelude::*, px,
 };
 
 use crate::theme::METRICS;
@@ -210,6 +212,7 @@ pub(crate) struct TerminalPanel {
     metrics: Option<CellMetrics>,
     selection: Option<Selection>,
     selecting: bool,
+    last_mouse_report: Option<(GridPoint, u8)>,
     /// Whether the terminal dock is on screen and in Build.
     active: bool,
     poll_task: Option<Task<()>>,
@@ -248,6 +251,7 @@ impl TerminalPanel {
             metrics: None,
             selection: None,
             selecting: false,
+            last_mouse_report: None,
             active: false,
             poll_task: None,
             #[cfg(test)]
@@ -657,6 +661,82 @@ impl TerminalPanel {
         }
     }
 
+    fn mouse_mode(&self) -> TerminalMouseMode {
+        self.active_session()
+            .map(|session| session.mouse_protocol().0)
+            .unwrap_or_default()
+    }
+
+    fn send_mouse_report(
+        &mut self,
+        button: u8,
+        point: GridPoint,
+        modifiers: gpui_kit::Modifiers,
+        release: bool,
+        motion: bool,
+    ) {
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        let (mode, encoding) = session.mouse_protocol();
+        if mode == TerminalMouseMode::None {
+            return;
+        }
+        let code = button
+            + u8::from(modifiers.shift) * 4
+            + u8::from(modifiers.alt) * 8
+            + u8::from(modifiers.control) * 16
+            + if motion { 32 } else { 0 };
+        let report = encode_mouse_report(code, point, release, encoding);
+        if let Some(session) = self.active_session_mut() {
+            let _ = session.write(&report);
+        }
+    }
+
+    fn handle_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus.focus(window, cx);
+        let Some(point) = self.point_at(event.position) else {
+            return;
+        };
+        if self.mouse_mode() != TerminalMouseMode::None {
+            if let Some(button) = mouse_button_code(event.button) {
+                self.send_mouse_report(button, point, event.modifiers, false, false);
+                self.last_mouse_report = Some((point, button));
+            }
+            self.selecting = false;
+            return;
+        }
+        if event.button == MouseButton::Left {
+            self.selection = Some(Selection {
+                anchor: point,
+                focus: point,
+            });
+            self.selecting = true;
+            self.last_mouse_report = None;
+            cx.notify();
+        }
+    }
+
+    fn handle_mouse_up(&mut self, event: &MouseUpEvent) {
+        let mode = self.mouse_mode();
+        if matches!(
+            mode,
+            TerminalMouseMode::PressRelease
+                | TerminalMouseMode::ButtonMotion
+                | TerminalMouseMode::AnyMotion
+        ) && let Some(point) = self.point_at(event.position)
+        {
+            self.send_mouse_report(3, point, event.modifiers, true, false);
+        }
+        self.selecting = false;
+        self.last_mouse_report = None;
+    }
+
     /// Copy the visible screen under the parser lock, once per frame.
     fn snapshot(&self) -> Option<ScreenSnapshot> {
         Some(ScreenSnapshot {
@@ -914,19 +994,45 @@ impl Render for TerminalPanel {
                     .key_context("Terminal")
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            this.focus.focus(window, cx);
-                            if let Some(point) = this.point_at(event.position) {
-                                this.selection = Some(Selection {
-                                    anchor: point,
-                                    focus: point,
-                                });
-                                this.selecting = true;
-                            }
-                            cx.notify();
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.handle_mouse_down(event, window, cx)
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.handle_mouse_down(event, window, cx)
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.handle_mouse_down(event, window, cx)
                         }),
                     )
                     .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                        let mode = this.mouse_mode();
+                        let report = match mode {
+                            TerminalMouseMode::AnyMotion => Some(
+                                event
+                                    .pressed_button
+                                    .and_then(mouse_button_code)
+                                    .unwrap_or(3),
+                            ),
+                            TerminalMouseMode::ButtonMotion => {
+                                event.pressed_button.and_then(mouse_button_code)
+                            }
+                            _ => None,
+                        };
+                        if let Some(button) = report {
+                            if let Some(point) = this.point_at(event.position)
+                                && this.last_mouse_report != Some((point, button))
+                            {
+                                this.send_mouse_report(button, point, event.modifiers, false, true);
+                                this.last_mouse_report = Some((point, button));
+                            }
+                            return;
+                        }
                         if !this.selecting {
                             return;
                         }
@@ -940,10 +1046,15 @@ impl Render for TerminalPanel {
                     }))
                     .on_mouse_up(
                         MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.selecting = false;
-                            cx.notify();
-                        }),
+                        cx.listener(|this, event: &MouseUpEvent, _, _| this.handle_mouse_up(event)),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseUpEvent, _, _| this.handle_mouse_up(event)),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Middle,
+                        cx.listener(|this, event: &MouseUpEvent, _, _| this.handle_mouse_up(event)),
                     )
                     .on_scroll(
                         cx.listener(move |this, event: &gpui_kit::ScrollEvent, _, cx| {
@@ -957,6 +1068,20 @@ impl Render for TerminalPanel {
                                 return;
                             }
                             let delta = -(lines.round() as i32) * WHEEL_ROWS;
+                            if this.mouse_mode() != TerminalMouseMode::None {
+                                if lines.abs() >= f32::EPSILON
+                                    && let Some(point) = this.point_at(event.position)
+                                {
+                                    this.send_mouse_report(
+                                        if lines < 0. { 64 } else { 65 },
+                                        point,
+                                        event.modifiers,
+                                        false,
+                                        false,
+                                    );
+                                }
+                                return;
+                            }
                             let revision = this.active_session().and_then(|session| {
                                 session.scroll(delta).then(|| session.revision())
                             });
@@ -1062,6 +1187,58 @@ fn cursor_sequence(key: &str, application_cursor: bool) -> Option<&'static str> 
     })
 }
 
+fn modified_cursor_sequence(key: &str, modifier: u8) -> Option<String> {
+    let final_byte = match key {
+        "home" => 'H',
+        "end" => 'F',
+        "up" => 'A',
+        "down" => 'B',
+        "right" => 'C',
+        "left" => 'D',
+        _ => return None,
+    };
+    Some(format!("\x1b[1;{modifier}{final_byte}"))
+}
+
+fn modified_tilde_sequence(code: u8, modifier: u8) -> Vec<u8> {
+    format!("\x1b[{code};{modifier}~").into_bytes()
+}
+
+fn tilde_sequence(code: u8, modifier: Option<u8>) -> Vec<u8> {
+    modifier.map_or_else(
+        || format!("\x1b[{code}~").into_bytes(),
+        |modifier| modified_tilde_sequence(code, modifier),
+    )
+}
+
+fn function_sequence(number: u8, modifier: Option<u8>) -> Option<Vec<u8>> {
+    let (code, final_byte) = match number {
+        1 => (None, Some('P')),
+        2 => (None, Some('Q')),
+        3 => (None, Some('R')),
+        4 => (None, Some('S')),
+        5 => (Some(15), None),
+        6 => (Some(17), None),
+        7 => (Some(18), None),
+        8 => (Some(19), None),
+        9 => (Some(20), None),
+        10 => (Some(21), None),
+        11 => (Some(23), None),
+        12 => (Some(24), None),
+        _ => return None,
+    };
+    let sequence = match (modifier, code, final_byte) {
+        (Some(modifier), Some(code), _) => modified_tilde_sequence(code, modifier),
+        (Some(modifier), _, Some(final_byte)) => {
+            format!("\x1b[1;{modifier}{final_byte}").into_bytes()
+        }
+        (None, Some(code), _) => tilde_sequence(code, None),
+        (None, _, Some(final_byte)) => format!("\x1bO{final_byte}").into_bytes(),
+        _ => return None,
+    };
+    Some(sequence)
+}
+
 /// Clipboard payload, bracketed when the child enabled paste mode.
 fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(text.len() + 12);
@@ -1075,6 +1252,43 @@ fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
     bytes
 }
 
+fn mouse_button_code(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Left => Some(0),
+        MouseButton::Middle => Some(1),
+        MouseButton::Right => Some(2),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
+fn encode_mouse_report(
+    button: u8,
+    point: GridPoint,
+    release: bool,
+    encoding: TerminalMouseEncoding,
+) -> Vec<u8> {
+    let col = u32::from(point.col) + 1;
+    let row = u32::from(point.row) + 1;
+    if encoding == TerminalMouseEncoding::Sgr {
+        let suffix = if release { 'm' } else { 'M' };
+        return format!("\x1b[<{button};{col};{row}{suffix}").into_bytes();
+    }
+
+    let mut report = vec![0x1b, b'[', b'M'];
+    let coordinates = [u32::from(button) + 32, col + 32, row + 32];
+    for coordinate in coordinates {
+        if encoding == TerminalMouseEncoding::Utf8 {
+            if let Some(character) = char::from_u32(coordinate) {
+                let mut bytes = [0; 4];
+                report.extend_from_slice(character.encode_utf8(&mut bytes).as_bytes());
+            }
+        } else {
+            report.push(coordinate.min(u32::from(u8::MAX)) as u8);
+        }
+    }
+    report
+}
+
 /// Key translation from GPUI keystrokes to terminal byte sequences.
 fn translate_key(event: &gpui_kit::KeystrokeEvent, application_cursor: bool) -> Option<Vec<u8>> {
     let key = event.keystroke.key.as_str();
@@ -1082,22 +1296,16 @@ fn translate_key(event: &gpui_kit::KeystrokeEvent, application_cursor: bool) -> 
     let control = modifiers.control;
     let alt = modifiers.alt;
     let platform = modifiers.platform;
+    let modifier = (modifiers.shift || control || alt || platform).then(|| {
+        1 + u8::from(modifiers.shift)
+            + 2 * u8::from(alt)
+            + 4 * u8::from(control)
+            + 8 * u8::from(platform)
+    });
     let function = key.starts_with('f') && key.len() > 1 && key[1..].parse::<u8>().is_ok();
-    if function && !control && !alt && !platform {
+    if function {
         let number: u8 = key[1..].parse().ok()?;
-        let sequence = match number {
-            1..=4 => format!("\x1bO{}", char::from(b'P' + number - 1)),
-            5 => "\x1b[15~".to_owned(),
-            6 => "\x1b[17~".to_owned(),
-            7 => "\x1b[18~".to_owned(),
-            8 => "\x1b[19~".to_owned(),
-            9 => "\x1b[20~".to_owned(),
-            10 => "\x1b[21~".to_owned(),
-            11 => "\x1b[23~".to_owned(),
-            12 => "\x1b[24~".to_owned(),
-            _ => return None,
-        };
-        return Some(sequence.into_bytes());
+        return function_sequence(number, modifier);
     }
     match key {
         "enter" => return Some(vec![b'\r']),
@@ -1105,11 +1313,14 @@ fn translate_key(event: &gpui_kit::KeystrokeEvent, application_cursor: bool) -> 
         "tab" => return Some(vec![b'\t']),
         "backspace" => return Some(vec![0x7f]),
         "escape" => return Some(vec![0x1b]),
-        "delete" => return Some(b"\x1b[3~".to_vec()),
-        "insert" => return Some(b"\x1b[2~".to_vec()),
-        "pageup" => return Some(b"\x1b[5~".to_vec()),
-        "pagedown" => return Some(b"\x1b[6~".to_vec()),
+        "delete" => return Some(tilde_sequence(3, modifier)),
+        "insert" => return Some(tilde_sequence(2, modifier)),
+        "pageup" => return Some(tilde_sequence(5, modifier)),
+        "pagedown" => return Some(tilde_sequence(6, modifier)),
         "home" | "end" | "up" | "down" | "right" | "left" => {
+            if let Some(modifier) = modifier {
+                return modified_cursor_sequence(key, modifier).map(String::into_bytes);
+            }
             return cursor_sequence(key, application_cursor)
                 .map(|sequence| sequence.as_bytes().to_vec());
         }
@@ -1218,11 +1429,45 @@ mod tests {
     }
 
     #[test]
+    fn modified_keys_encode_xterm_modifier_parameters() {
+        assert_eq!(
+            modified_cursor_sequence("left", 5).as_deref(),
+            Some("\x1b[1;5D")
+        );
+        assert_eq!(tilde_sequence(5, Some(3)), b"\x1b[5;3~");
+        assert_eq!(
+            function_sequence(1, Some(2)).as_deref(),
+            Some(b"\x1b[1;2P".as_slice())
+        );
+        assert_eq!(
+            function_sequence(12, None).as_deref(),
+            Some(b"\x1b[24~".as_slice())
+        );
+    }
+
+    #[test]
     fn paste_is_bracketed_only_when_the_child_enabled_it() {
         assert_eq!(paste_payload("hello", false), b"hello".to_vec());
         assert_eq!(
             paste_payload("hello", true),
             b"\x1b[200~hello\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn mouse_reports_follow_sgr_and_legacy_terminal_encodings() {
+        let point = GridPoint { row: 2, col: 1 };
+        assert_eq!(
+            encode_mouse_report(0, point, false, TerminalMouseEncoding::Sgr),
+            b"\x1b[<0;2;3M"
+        );
+        assert_eq!(
+            encode_mouse_report(3, point, true, TerminalMouseEncoding::Sgr),
+            b"\x1b[<3;2;3m"
+        );
+        assert_eq!(
+            encode_mouse_report(0, point, false, TerminalMouseEncoding::Default),
+            b"\x1b[M \"#"
         );
     }
 
