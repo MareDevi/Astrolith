@@ -30,6 +30,8 @@ use crate::theme::METRICS;
 const FALLBACK_CELL_WIDTH: f32 = 7.8;
 /// Row height used until the mono face has been measured.
 const FALLBACK_LINE_HEIGHT: f32 = 17.;
+/// Keep glyph line boxes comfortably inside each terminal grid row.
+const LINE_HEIGHT_SCALE: f32 = 1.35;
 /// Scroll rows per wheel line.
 const WHEEL_ROWS: i32 = 3;
 /// Polling cadence while the terminal dock is visible.
@@ -72,8 +74,9 @@ impl CellMetrics {
             .advance(font_id, size_px, 'M')
             .map(|size| f32::from(size.width))
             .unwrap_or(FALLBACK_CELL_WIDTH);
-        let row_height =
+        let font_metrics_height =
             f32::from(text_system.ascent(font_id, size_px) + text_system.descent(font_id, size_px));
+        let row_height = font_metrics_height.max(size * LINE_HEIGHT_SCALE);
         Self {
             family,
             size,
@@ -1181,6 +1184,7 @@ impl Render for TerminalPanel {
                                                 .flex_shrink_0()
                                                 .flex()
                                                 .items_center()
+                                                .line_height(px(row_height))
                                                 .bg(run.style.background)
                                                 .text_color(run.style.foreground)
                                                 .when(run.style.bold, |run| {
@@ -1656,6 +1660,7 @@ mod tests {
                     "fontconfig generics are not families gpui can resolve"
                 );
                 assert!(metrics.col_width > 0. && metrics.row_height > 0.);
+                assert!(metrics.row_height >= metrics.size * LINE_HEIGHT_SCALE);
             });
         })
         .unwrap();
