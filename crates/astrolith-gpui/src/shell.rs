@@ -54,7 +54,7 @@ use crate::{
 };
 use astrolith_core::preferences::{ModeLayouts, PreviewPresentation, WorkspaceMode};
 use astrolith_document::{DocumentKind, DocumentRevision};
-use astrolith_git::GitRepository;
+use astrolith_git::{ChangedPath, GitRepository};
 use astrolith_preview::{HostEnvironment, PreviewCapability};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Presence, Sheet, Transition};
@@ -2326,6 +2326,72 @@ impl Shell {
         .detach();
     }
 
+    fn git_change_row(
+        &self,
+        path: &ChangedPath,
+        staged: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let path_label = path.path.to_string_lossy().to_string();
+        let status_label = if path.untracked {
+            "??".to_owned()
+        } else if staged {
+            path.index_status.to_string()
+        } else {
+            path.worktree_status.to_string()
+        };
+        let group = if staged { "staged" } else { "changes" };
+        let action_path = path.path.clone();
+        let stage_path = path.path.clone();
+        div()
+            .id(format!("git-{group}-{}", path.path.display()))
+            .test_support()
+            .h_flex()
+            .items_center()
+            .gap_2()
+            .min_w_0()
+            .py_1()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .child(path_label),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(status_label),
+            )
+            .child(
+                Button::new(format!("git-diff-{group}-{}", path.path.display()))
+                    .small()
+                    .ghost()
+                    .label("Diff")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.run_git_action(GitPanelAction::Diff(action_path.clone(), staged), cx)
+                    })),
+            )
+            .child(
+                Button::new(format!("git-stage-{group}-{}", path.path.display()))
+                    .small()
+                    .ghost()
+                    .label(if staged { "Unstage" } else { "Stage" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.run_git_action(
+                            if staged {
+                                GitPanelAction::Unstage(stage_path.clone())
+                            } else {
+                                GitPanelAction::Stage(stage_path.clone())
+                            },
+                            cx,
+                        )
+                    })),
+            )
+    }
+
     fn render_git_panel(
         &self,
         window: &mut Window,
@@ -2348,15 +2414,20 @@ impl Shell {
             .max(px(0.))
             .min(px(416.));
         let right = inset - (width + inset) * (1. - presence.progress);
-        let project = self.project.read(cx);
-        let status = project.git_status();
+        let (project_name, status) = {
+            let project = self.project.read(cx);
+            (
+                project.project_name().unwrap_or_else(|| "Git".into()),
+                project.git_status(),
+            )
+        };
         let mut body = div()
             .v_flex()
             .flex_1()
             .min_h_0()
             .overflow_y_scrollbar()
-            .gap_2()
-            .p_4();
+            .gap_3()
+            .p_3();
         if let Some(error) = &self.git_error {
             body = body.child(
                 div()
@@ -2384,14 +2455,28 @@ impl Shell {
             }
             Some(Ok(status)) => {
                 let current_branch = status.branch.clone();
-                let has_staged = status
+                let staged_count = status
                     .paths
                     .iter()
-                    .any(|path| !path.untracked && path.index_status != ' ');
+                    .filter(|path| !path.untracked && path.index_status != ' ')
+                    .count();
+                let changes_count = status
+                    .paths
+                    .iter()
+                    .filter(|path| path.untracked || path.worktree_status != ' ' || path.conflicted)
+                    .count();
+                let has_staged = staged_count > 0;
                 let branch = current_branch
                     .clone()
                     .unwrap_or_else(|| "Detached HEAD".into());
-                body = body.child(div().text_sm().font_semibold().child(branch));
+                body = body.child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(Icon::new(IconName::GitBranch).size_4())
+                        .child(div().text_sm().font_semibold().child(branch)),
+                );
                 if let Some(head) = status.head {
                     body = body.child(
                         div()
@@ -2411,11 +2496,11 @@ impl Shell {
                 body = body.child(
                     div()
                         .h_flex()
-                        .gap_2()
+                        .gap_1()
                         .child(
                             Button::new("git-fetch")
                                 .small()
-                                .outline()
+                                .ghost()
                                 .label("Fetch")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.run_git_action(GitPanelAction::Fetch, cx)
@@ -2424,7 +2509,7 @@ impl Shell {
                         .child(
                             Button::new("git-push")
                                 .small()
-                                .outline()
+                                .ghost()
                                 .label("Push")
                                 .disabled(!status.has_upstream && status.remotes.is_empty())
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -2434,52 +2519,14 @@ impl Shell {
                         .child(
                             Button::new("git-pull")
                                 .small()
-                                .outline()
+                                .ghost()
                                 .label("Pull")
                                 .disabled(!status.has_upstream)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.run_git_action(GitPanelAction::Pull, cx)
                                 })),
-                        )
-                        .child(
-                            Button::new("git-refresh")
-                                .small()
-                                .ghost()
-                                .label("Refresh")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.project
-                                        .update(cx, |project, cx| project.refresh_git(cx))
-                                })),
                         ),
                 );
-                body = body.child(
-                    div()
-                        .pt_2()
-                        .text_xs()
-                        .font_semibold()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Branches"),
-                );
-                let branch_owner = cx.weak_entity();
-                for branch in status.branches {
-                    let current = current_branch.as_deref() == Some(branch.as_str());
-                    let owner = branch_owner.clone();
-                    body = body.child(
-                        Button::new(format!("git-branch-{branch}"))
-                            .small()
-                            .ghost()
-                            .label(branch.clone())
-                            .selected(current)
-                            .on_click(move |_, _, cx| {
-                                let _ = owner.update(cx, |this, cx| {
-                                    this.run_git_action(
-                                        GitPanelAction::Checkout(branch.clone()),
-                                        cx,
-                                    )
-                                });
-                            }),
-                    );
-                }
                 if let Some(message) = &self.git_message {
                     body = body.child(Input::new(message).small().aria_label("Commit message"));
                 }
@@ -2490,8 +2537,8 @@ impl Shell {
                     .is_none_or(|message| message.read(cx).value().trim().is_empty());
                 body = body.child(
                     Button::new("git-commit")
-                        .small()
-                        .label("Commit staged changes")
+                        .primary()
+                        .label("Commit")
                         .disabled(!has_staged || message_empty)
                         .on_click(move |_, _, cx| {
                             let _ = owner.update(cx, |this, cx| {
@@ -2506,127 +2553,96 @@ impl Shell {
                             });
                         }),
                 );
+
+                let mut staged_section = div().v_flex().gap_1().child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .pb_1()
+                        .text_xs()
+                        .font_semibold()
+                        .child("Staged Changes")
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(staged_count.to_string()),
+                        ),
+                );
+                let mut changes_section = div().v_flex().gap_1().child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .pb_1()
+                        .text_xs()
+                        .font_semibold()
+                        .child("Changes")
+                        .child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(changes_count.to_string()),
+                        ),
+                );
+                for path in &status.paths {
+                    if !path.untracked && path.index_status != ' ' {
+                        staged_section = staged_section.child(self.git_change_row(path, true, cx));
+                    }
+                    if path.untracked || path.worktree_status != ' ' || path.conflicted {
+                        changes_section =
+                            changes_section.child(self.git_change_row(path, false, cx));
+                    }
+                }
                 if status.paths.is_empty() {
                     body = body.child(
                         div()
-                            .pt_3()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child("Working tree clean"),
                     );
+                } else {
+                    if staged_count > 0 {
+                        body = body.child(staged_section);
+                    }
+                    if changes_count > 0 {
+                        body = body.child(changes_section);
+                    }
                 }
-                for path in status.paths {
-                    let code = if path.untracked {
-                        "??".to_owned()
-                    } else {
-                        format!("{}{}", path.index_status, path.worktree_status)
-                    };
-                    let row_path = path.path.clone();
-                    let owner = cx.weak_entity();
-                    let row = div()
-                        .v_flex()
-                        .gap_1()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .py_2()
-                        .child(
-                            div()
-                                .h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .w_8()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(code),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_sm()
-                                        .child(path.path.to_string_lossy().to_string()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .h_flex()
-                                .gap_1()
-                                .child(
-                                    Button::new(format!("git-diff-{}", row_path.display()))
-                                        .small()
-                                        .ghost()
-                                        .label("Diff")
-                                        .on_click(cx.listener({
-                                            let path = row_path.clone();
-                                            move |this, _, _, cx| {
-                                                this.run_git_action(
-                                                    GitPanelAction::Diff(path.clone(), false),
-                                                    cx,
-                                                )
-                                            }
-                                        })),
-                                )
-                                .when(!path.untracked && path.index_status != ' ', |row| {
-                                    row.child(
-                                        Button::new(format!(
-                                            "git-staged-diff-{}",
-                                            row_path.display()
-                                        ))
-                                        .small()
-                                        .ghost()
-                                        .label("Staged diff")
-                                        .on_click(
-                                            cx.listener({
-                                                let path = row_path.clone();
-                                                move |this, _, _, cx| {
-                                                    this.run_git_action(
-                                                        GitPanelAction::Diff(path.clone(), true),
-                                                        cx,
-                                                    )
-                                                }
-                                            }),
-                                        ),
-                                    )
-                                })
-                                .when(path.untracked || path.worktree_status != ' ', |row| {
-                                    row.child(
-                                        Button::new(format!("git-stage-{}", row_path.display()))
-                                            .small()
-                                            .ghost()
-                                            .label("Stage")
-                                            .on_click({
-                                                let owner = owner.clone();
-                                                let path = row_path.clone();
-                                                move |_, _, cx| {
-                                                    let _ = owner.update(cx, |this, cx| {
-                                                        this.run_git_action(
-                                                            GitPanelAction::Stage(path.clone()),
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                            }),
-                                    )
-                                })
-                                .when(!path.untracked && path.index_status != ' ', |row| {
-                                    row.child(
-                                        Button::new(format!("git-unstage-{}", row_path.display()))
-                                            .small()
-                                            .ghost()
-                                            .label("Unstage")
-                                            .on_click(move |_, _, cx| {
-                                                let _ = owner.update(cx, |this, cx| {
-                                                    this.run_git_action(
-                                                        GitPanelAction::Unstage(row_path.clone()),
-                                                        cx,
-                                                    )
-                                                });
-                                            }),
-                                    )
+
+                if !status.branches.is_empty() {
+                    let mut branches = div().v_flex().gap_1().child(
+                        div()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .pb_1()
+                            .text_xs()
+                            .font_semibold()
+                            .child("Branches"),
+                    );
+                    for branch in status.branches {
+                        let current = current_branch.as_deref() == Some(branch.as_str());
+                        let owner = cx.weak_entity();
+                        branches = branches.child(
+                            Button::new(format!("git-branch-{branch}"))
+                                .small()
+                                .ghost()
+                                .label(branch.clone())
+                                .selected(current)
+                                .on_click(move |_, _, cx| {
+                                    let _ = owner.update(cx, |this, cx| {
+                                        this.run_git_action(
+                                            GitPanelAction::Checkout(branch.clone()),
+                                            cx,
+                                        )
+                                    });
                                 }),
                         );
-                    body = body.child(row);
+                    }
+                    body = body.child(branches);
                 }
             }
         }
@@ -2680,12 +2696,35 @@ impl Shell {
                     .py_3()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(div().text_sm().font_semibold().child("Source Control"))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(project.project_name().unwrap_or_else(|| "Git".into())),
+                            .h_flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .v_flex()
+                                    .gap_0p5()
+                                    .child(div().text_sm().font_semibold().child("Source Control"))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(project_name),
+                                    ),
+                            )
+                            .child(
+                                Button::new("git-refresh")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::RefreshCw)
+                                    .tooltip("Refresh")
+                                    .accessibility_label("Refresh Git status")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.project
+                                            .update(cx, |project, cx| project.refresh_git(cx))
+                                    })),
+                            ),
                     ),
             )
             .child(body);
