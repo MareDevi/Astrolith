@@ -54,6 +54,7 @@ use crate::{
 };
 use astrolith_core::preferences::{ModeLayouts, PreviewPresentation, WorkspaceMode};
 use astrolith_document::{DocumentKind, DocumentRevision};
+use astrolith_git::GitRepository;
 use astrolith_preview::{HostEnvironment, PreviewCapability};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Presence, Sheet, Transition};
@@ -62,6 +63,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     command::{Command, CommandGroup, CommandItem, CommandState},
     dock::{BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
+    input::{Input, InputState},
     kbd::Kbd,
     scroll::ScrollableElement as _,
 };
@@ -250,6 +252,54 @@ struct ProseStyleInputs {
     ui_family: SharedString,
 }
 
+enum GitPanelAction {
+    Diff(PathBuf, bool),
+    Stage(PathBuf),
+    Unstage(PathBuf),
+    Commit(String),
+    Checkout(String),
+    Fetch,
+    Pull,
+    Push,
+}
+
+enum GitPanelResult {
+    Diff(PathBuf, String, bool),
+    Changed,
+}
+
+fn perform_git_action(
+    root: &std::path::Path,
+    action: GitPanelAction,
+) -> Result<GitPanelResult, String> {
+    let repository = GitRepository::discover(root).map_err(|error| error.to_string())?;
+    match action {
+        GitPanelAction::Diff(path, staged) => {
+            let diff = if staged {
+                repository.staged_diff(&path)
+            } else {
+                repository.diff(&path)
+            }
+            .map_err(|error| error.to_string())?;
+            Ok(GitPanelResult::Diff(path, diff.patch, staged))
+        }
+        action => {
+            let result = match action {
+                GitPanelAction::Stage(path) => repository.stage(&path),
+                GitPanelAction::Unstage(path) => repository.unstage(&path),
+                GitPanelAction::Commit(message) => repository.commit(&message),
+                GitPanelAction::Checkout(branch) => repository.checkout(&branch),
+                GitPanelAction::Fetch => repository.fetch(),
+                GitPanelAction::Pull => repository.pull(),
+                GitPanelAction::Push => repository.push(),
+                GitPanelAction::Diff(..) => unreachable!(),
+            };
+            result.map_err(|error| error.to_string())?;
+            Ok(GitPanelResult::Changed)
+        }
+    }
+}
+
 impl ProseStyleInputs {
     fn matches(
         &self,
@@ -279,6 +329,13 @@ pub(crate) struct Shell {
     inspector_open: bool,
     inspector_focus: FocusHandle,
     inspector_return_focus: Option<WeakFocusHandle>,
+    /// Build's transient Source Control panel state.
+    git_open: bool,
+    git_focus: Option<FocusHandle>,
+    git_return_focus: Option<WeakFocusHandle>,
+    git_message: Option<Entity<InputState>>,
+    git_diff: Option<(PathBuf, String, bool)>,
+    git_error: Option<String>,
     /// Writing's library is a transient left-side sheet over the document.
     library_open: bool,
     library_focus: FocusHandle,
@@ -812,6 +869,12 @@ impl Shell {
             inspector_open: false,
             inspector_focus: cx.focus_handle(),
             inspector_return_focus: None,
+            git_open: false,
+            git_focus: None,
+            git_return_focus: None,
+            git_message: None,
+            git_diff: None,
+            git_error: None,
             library_open: mode == WorkspaceMode::Writing && layout.sidebar_visible,
             library_focus: cx.focus_handle(),
             library_return_focus: if mode == WorkspaceMode::Writing && layout.sidebar_visible {
@@ -2092,6 +2155,19 @@ impl Shell {
                         let _ = owner.update(cx, |this, cx| this.set_mode(mode, window, cx));
                     })
             }))
+            .when(current == WorkspaceMode::Build, |switch| {
+                let owner = owner.clone();
+                switch.child(
+                    Button::new("build-source-control")
+                        .ghost()
+                        .rounded_full()
+                        .label("Git")
+                        .selected(self.git_open)
+                        .on_click(move |_, window, cx| {
+                            let _ = owner.update(cx, |this, cx| this.toggle_git(window, cx));
+                        }),
+                )
+            })
     }
 
     /// Keep the document empty state aligned with the navigation the mode shows.
@@ -2114,6 +2190,9 @@ impl Shell {
         self.capture_layout(cx);
         let inspector_open = self.inspector_open;
         self.set_inspector_open(false, window, cx);
+        if mode != WorkspaceMode::Build {
+            self.set_git_open(false, window, cx);
+        }
         self.mode = mode;
         if mode == WorkspaceMode::Preview {
             // Re-install the reading pane once when the view becomes visible,
@@ -2154,6 +2233,455 @@ impl Shell {
         }
         self.refresh_menus(window, cx);
         cx.notify();
+    }
+
+    fn toggle_git(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != WorkspaceMode::Build {
+            return;
+        }
+        self.set_git_open(!self.git_open, window, cx);
+    }
+
+    fn set_git_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.git_open == open {
+            return;
+        }
+        if open {
+            if self.git_focus.is_none() {
+                self.git_focus = Some(cx.focus_handle());
+            }
+            if self.git_message.is_none() {
+                self.git_message =
+                    Some(cx.new(|cx| InputState::new(window, cx).placeholder("Commit message")));
+            }
+            self.git_return_focus = window.focused(cx).map(|focus| focus.downgrade());
+            if let Some(focus) = &self.git_focus {
+                focus.focus(window, cx);
+            }
+        } else if let Some(focus) = self
+            .git_return_focus
+            .take()
+            .and_then(|focus| focus.upgrade())
+        {
+            focus.focus(window, cx);
+        }
+        self.git_open = open;
+        self.project
+            .update(cx, |project, cx| project.set_git_monitoring(open, cx));
+        cx.notify();
+    }
+
+    fn run_git_action(&mut self, action: GitPanelAction, cx: &mut Context<Self>) {
+        let Some(root) = self.project.read(cx).project_root() else {
+            self.git_error = Some("Open an Astro project first.".into());
+            cx.notify();
+            return;
+        };
+        self.git_error = None;
+        let work_root = root.clone();
+        let work = runtime::blocking(cx, move || perform_git_action(&work_root, action));
+        cx.spawn(async move |this, cx| {
+            let result = work
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |this, cx| {
+                if this.project.read(cx).project_root().as_ref() != Some(&root) {
+                    return;
+                }
+                match result {
+                    Ok(GitPanelResult::Diff(path, patch, staged)) => {
+                        this.git_diff = Some((path, patch, staged));
+                    }
+                    Ok(GitPanelResult::Changed) => {
+                        this.git_diff = None;
+                        this.project
+                            .update(cx, |project, cx| project.refresh_git(cx));
+                    }
+                    Err(error) => this.git_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_git_panel(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        if self.mode != WorkspaceMode::Build {
+            return None;
+        }
+        let motion = cx.theme().motion_tokens();
+        let transition = Transition::new(motion.duration_normal).easing(motion.easing_move.clone());
+        let presence = Presence::new("git-inspector-motion", self.git_open)
+            .transition(transition)
+            .sample(window, cx);
+        if !self.git_open && presence.progress <= 0. {
+            return None;
+        }
+        let git_focus = self.git_focus.clone()?;
+        let inset = window.rem_size();
+        let width = (window.viewport_size().width - inset * 2.)
+            .max(px(0.))
+            .min(px(416.));
+        let right = inset - (width + inset) * (1. - presence.progress);
+        let project = self.project.read(cx);
+        let status = project.git_status();
+        let mut body = div()
+            .v_flex()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .gap_2()
+            .p_4();
+        if let Some(error) = &self.git_error {
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().danger)
+                    .child(error.clone()),
+            );
+        }
+        match status {
+            None => {
+                body = body.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Open a project to inspect Git status."),
+                )
+            }
+            Some(Err(error)) => {
+                body = body.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(error),
+                )
+            }
+            Some(Ok(status)) => {
+                let current_branch = status.branch.clone();
+                let has_staged = status
+                    .paths
+                    .iter()
+                    .any(|path| !path.untracked && path.index_status != ' ');
+                let branch = current_branch
+                    .clone()
+                    .unwrap_or_else(|| "Detached HEAD".into());
+                body = body.child(div().text_sm().font_semibold().child(branch));
+                if let Some(head) = status.head {
+                    body = body.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(head),
+                    );
+                }
+                if status.has_upstream {
+                    body = body.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("↑ {} · ↓ {}", status.ahead, status.behind)),
+                    );
+                }
+                body = body.child(
+                    div()
+                        .h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("git-fetch")
+                                .small()
+                                .outline()
+                                .label("Fetch")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.run_git_action(GitPanelAction::Fetch, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("git-push")
+                                .small()
+                                .outline()
+                                .label("Push")
+                                .disabled(!status.has_upstream && status.remotes.is_empty())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.run_git_action(GitPanelAction::Push, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("git-pull")
+                                .small()
+                                .outline()
+                                .label("Pull")
+                                .disabled(!status.has_upstream)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.run_git_action(GitPanelAction::Pull, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("git-refresh")
+                                .small()
+                                .ghost()
+                                .label("Refresh")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.project
+                                        .update(cx, |project, cx| project.refresh_git(cx))
+                                })),
+                        ),
+                );
+                body = body.child(
+                    div()
+                        .pt_2()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Branches"),
+                );
+                let branch_owner = cx.weak_entity();
+                for branch in status.branches {
+                    let current = current_branch.as_deref() == Some(branch.as_str());
+                    let owner = branch_owner.clone();
+                    body = body.child(
+                        Button::new(format!("git-branch-{branch}"))
+                            .small()
+                            .ghost()
+                            .label(branch.clone())
+                            .selected(current)
+                            .on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |this, cx| {
+                                    this.run_git_action(
+                                        GitPanelAction::Checkout(branch.clone()),
+                                        cx,
+                                    )
+                                });
+                            }),
+                    );
+                }
+                if let Some(message) = &self.git_message {
+                    body = body.child(Input::new(message).small().aria_label("Commit message"));
+                }
+                let owner = cx.weak_entity();
+                let message_empty = self
+                    .git_message
+                    .as_ref()
+                    .is_none_or(|message| message.read(cx).value().trim().is_empty());
+                body = body.child(
+                    Button::new("git-commit")
+                        .small()
+                        .label("Commit staged changes")
+                        .disabled(!has_staged || message_empty)
+                        .on_click(move |_, _, cx| {
+                            let _ = owner.update(cx, |this, cx| {
+                                if let Some(message) = &this.git_message {
+                                    this.run_git_action(
+                                        GitPanelAction::Commit(
+                                            message.read(cx).value().to_string(),
+                                        ),
+                                        cx,
+                                    );
+                                }
+                            });
+                        }),
+                );
+                if status.paths.is_empty() {
+                    body = body.child(
+                        div()
+                            .pt_3()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Working tree clean"),
+                    );
+                }
+                for path in status.paths {
+                    let code = if path.untracked {
+                        "??".to_owned()
+                    } else {
+                        format!("{}{}", path.index_status, path.worktree_status)
+                    };
+                    let row_path = path.path.clone();
+                    let owner = cx.weak_entity();
+                    let row = div()
+                        .v_flex()
+                        .gap_1()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .py_2()
+                        .child(
+                            div()
+                                .h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .w_8()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(code),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_sm()
+                                        .child(path.path.to_string_lossy().to_string()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new(format!("git-diff-{}", row_path.display()))
+                                        .small()
+                                        .ghost()
+                                        .label("Diff")
+                                        .on_click(cx.listener({
+                                            let path = row_path.clone();
+                                            move |this, _, _, cx| {
+                                                this.run_git_action(
+                                                    GitPanelAction::Diff(path.clone(), false),
+                                                    cx,
+                                                )
+                                            }
+                                        })),
+                                )
+                                .when(!path.untracked && path.index_status != ' ', |row| {
+                                    row.child(
+                                        Button::new(format!(
+                                            "git-staged-diff-{}",
+                                            row_path.display()
+                                        ))
+                                        .small()
+                                        .ghost()
+                                        .label("Staged diff")
+                                        .on_click(
+                                            cx.listener({
+                                                let path = row_path.clone();
+                                                move |this, _, _, cx| {
+                                                    this.run_git_action(
+                                                        GitPanelAction::Diff(path.clone(), true),
+                                                        cx,
+                                                    )
+                                                }
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .when(path.untracked || path.worktree_status != ' ', |row| {
+                                    row.child(
+                                        Button::new(format!("git-stage-{}", row_path.display()))
+                                            .small()
+                                            .ghost()
+                                            .label("Stage")
+                                            .on_click({
+                                                let owner = owner.clone();
+                                                let path = row_path.clone();
+                                                move |_, _, cx| {
+                                                    let _ = owner.update(cx, |this, cx| {
+                                                        this.run_git_action(
+                                                            GitPanelAction::Stage(path.clone()),
+                                                            cx,
+                                                        );
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                })
+                                .when(!path.untracked && path.index_status != ' ', |row| {
+                                    row.child(
+                                        Button::new(format!("git-unstage-{}", row_path.display()))
+                                            .small()
+                                            .ghost()
+                                            .label("Unstage")
+                                            .on_click(move |_, _, cx| {
+                                                let _ = owner.update(cx, |this, cx| {
+                                                    this.run_git_action(
+                                                        GitPanelAction::Unstage(row_path.clone()),
+                                                        cx,
+                                                    )
+                                                });
+                                            }),
+                                    )
+                                }),
+                        );
+                    body = body.child(row);
+                }
+            }
+        }
+        if let Some((path, patch, staged)) = &self.git_diff {
+            body = body
+                .child(div().text_xs().font_semibold().child(format!(
+                    "{} · {}",
+                    path.display(),
+                    if *staged { "staged" } else { "working tree" }
+                )))
+                .child(
+                    div()
+                        .max_h(px(240.))
+                        .overflow_y_scrollbar()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .rounded_md()
+                        .p_2()
+                        .text_xs()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .child(if patch.is_empty() {
+                            "No diff".to_owned()
+                        } else {
+                            patch.clone()
+                        }),
+                );
+        }
+        let surface = div()
+            .id("git-inspector-surface")
+            .test_support()
+            .absolute()
+            .top(rems(4.5))
+            .right(right)
+            .bottom(inset)
+            .w(width)
+            .occlude()
+            .v_flex()
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .opacity(presence.progress)
+            .shadow_xl()
+            .child(
+                div()
+                    .v_flex()
+                    .flex_shrink_0()
+                    .gap_0p5()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(div().text_sm().font_semibold().child("Source Control"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(project.project_name().unwrap_or_else(|| "Git".into())),
+                    ),
+            )
+            .child(body);
+        let owner = cx.weak_entity();
+        let sheet = Sheet::new(cx)
+            .focus_handle(git_focus)
+            .request_close(move |window, cx| {
+                let _ = owner.update(cx, |this, cx| this.set_git_open(false, window, cx));
+            })
+            .surface(surface);
+        let sheet = if self.git_open {
+            sheet.overlay(div().absolute().inset_0().occlude())
+        } else {
+            sheet
+        };
+        Some(deferred(sheet).into_any_element())
     }
 
     /// `ToggleTerminal` from another mode enters Build and *shows* the dock.
@@ -3765,7 +4293,7 @@ impl Render for Shell {
         let status_presence = Presence::new("file-status-presence", show_file_status)
             .transition(Transition::new(motion.duration_fast).easing(motion.easing_enter.clone()))
             .sample(window, cx);
-        let file_status = status_presence.should_render().then(|| {
+        let file_status = (show_file_status || status_presence.progress > 0.).then(|| {
             div()
                 .id("file-status")
                 .test_support()
@@ -3949,6 +4477,7 @@ impl Render for Shell {
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
             .children(self.render_library(window, cx))
             .children(self.render_inspector(window, cx))
+            .children(self.render_git_panel(window, cx))
             .children(file_status)
     }
 }
@@ -4517,6 +5046,32 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn build_git_panel_uses_the_floating_inspector_surface(cx: &mut TestAppContext) {
+        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        cx.update_window(handle.into(), |_, window, cx| {
+            cx.set_reduce_motion(true);
+            view.update(cx, |shell, cx| {
+                shell.set_mode(WorkspaceMode::Build, window, cx)
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("build-source-control").is_some());
+            window.click("build-source-control", cx);
+            window.render_frame(cx);
+            assert!(window.find("git-inspector-surface").visible());
+            let panel = window.find("git-inspector-surface").bounds();
+            assert!(
+                (window.viewport_size().width - panel.right() - window.rem_size()).abs() <= px(1.)
+            );
+            assert!(
+                window.try_find("git-fetch").is_none(),
+                "repository actions wait for an open project"
+            );
+        })
+        .unwrap();
+        assert!(view.read_with(cx, |shell, _| shell.git_open));
+    }
+
+    #[gpui_kit::test]
     async fn inspector_escape_restores_editor_focus_and_mode_switch_closes_it(
         cx: &mut TestAppContext,
     ) {
@@ -4854,6 +5409,7 @@ mod tests {
 
         // Writing: writer page with the document rail and its inspector trigger.
         cx.update_window(handle.into(), |_, window, cx| {
+            cx.set_reduce_motion(true);
             window.render_frame(cx);
             assert!(window.find("document-panel").visible());
             assert!(window.find("document-header").visible());
@@ -5094,6 +5650,7 @@ mod tests {
 
         // An empty Build leaves no buffer strip behind.
         cx.update_window(handle.into(), |_, window, cx| {
+            cx.set_reduce_motion(true);
             view.update(cx, |shell, cx| {
                 shell.set_mode(WorkspaceMode::Build, window, cx)
             });

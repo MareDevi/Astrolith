@@ -30,6 +30,7 @@ lsp-types = "=0.97.0"
 anyhow = "1.0.104"
 astrolith-preview = { path = "../astrolith-preview" }
 astrolith-terminal = { path = "../astrolith-terminal" }
+astrolith-git = { path = "../astrolith-git" }
 astrolith-observability = { path = "../astrolith-observability" }
 gpui-kit = { workspace = true, features = [
     "tree-sitter-markdown",

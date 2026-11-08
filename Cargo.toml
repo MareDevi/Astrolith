@@ -9,6 +9,7 @@ members = [
     "crates/astrolith-workspace",
     "crates/astrolith-preview",
     "crates/astrolith-terminal",
+    "crates/astrolith-git",
     "crates/astrolith-observability",
 ]
 resolver = "3"

@@ -6,10 +6,11 @@
 //! the chosen path for the workspace to resolve.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
+use astrolith_git::GitStatus;
 use astrolith_workspace::files::{ProjectFile, absolute_path, scan_project_files};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -40,6 +41,7 @@ struct FileRow {
     directory: bool,
     has_children: bool,
     expanded: bool,
+    status: Option<String>,
 }
 
 struct FileList {
@@ -132,7 +134,19 @@ impl ListDelegate for FileList {
                                 .truncate()
                                 .text_sm()
                                 .child(row.label.clone()),
-                        ),
+                        )
+                        .when_some(row.status.clone(), |row, status| {
+                            row.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if status == "!" {
+                                        cx.theme().danger
+                                    } else {
+                                        cx.theme().muted_foreground
+                                    })
+                                    .child(status),
+                            )
+                        }),
                 ),
         )
     }
@@ -164,6 +178,7 @@ pub(crate) struct FileBrowser {
     active: Option<PathBuf>,
     loading: bool,
     error: Option<String>,
+    git_status: HashMap<PathBuf, String>,
     truncated: bool,
     /// Newest scan request; older results are discarded.
     request: u64,
@@ -187,6 +202,7 @@ impl FileBrowser {
             active: None,
             loading: false,
             error: None,
+            git_status: HashMap::new(),
             truncated: false,
             request: 0,
             task: None,
@@ -208,6 +224,7 @@ impl FileBrowser {
             self.root = root;
             self.expanded.clear();
             self.active = None;
+            self.git_status.clear();
             self.refresh(cx);
             return;
         }
@@ -282,6 +299,46 @@ impl FileBrowser {
         });
     }
 
+    /// Mark changed files and their ancestor directories from one Git snapshot.
+    pub(crate) fn set_git_status(&mut self, status: Option<GitStatus>, cx: &mut Context<Self>) {
+        self.git_status.clear();
+        if let Some(status) = status {
+            let Some(root) = &self.root else { return };
+            for changed in status.paths {
+                let path = status.repository_root.join(changed.path);
+                let Ok(path) = path.strip_prefix(root) else {
+                    continue;
+                };
+                let absolute = root.join(path);
+                let code = if changed.conflicted {
+                    "!".to_owned()
+                } else if changed.untracked {
+                    "?".to_owned()
+                } else if changed.index_status != ' ' {
+                    changed.index_status.to_string()
+                } else {
+                    changed.worktree_status.to_string()
+                };
+                self.git_status.insert(absolute.clone(), code);
+                let mut parent = absolute.parent();
+                while let Some(directory) = parent {
+                    if !directory.starts_with(root) {
+                        break;
+                    }
+                    self.git_status
+                        .entry(directory.to_path_buf())
+                        .or_insert_with(|| "•".into());
+                    if directory == root {
+                        break;
+                    }
+                    parent = directory.parent();
+                }
+            }
+        }
+        self.publish_rows(cx);
+        cx.notify();
+    }
+
     /// Confirm one row: expand a directory, or open a file.
     fn confirm(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some((id, path, directory, has_children)) =
@@ -323,7 +380,7 @@ impl FileBrowser {
                 .update(cx, |list, _| list.delegate_mut().replace(Vec::new(), None));
             return;
         };
-        let rows = visible_rows(&self.report, &root, &self.expanded);
+        let rows = visible_rows(&self.report, &root, &self.expanded, &self.git_status);
         let selected = selected.and_then(|id| rows.iter().position(|row| row.id == id));
         let active = self.active.clone();
         self.list.update(cx, |list, cx| {
@@ -374,9 +431,10 @@ fn visible_rows(
     entries: &[ProjectFile],
     root: &Path,
     expanded: &HashSet<SharedString>,
+    git_status: &HashMap<PathBuf, String>,
 ) -> Vec<FileRow> {
     let mut rows = Vec::new();
-    push_rows(entries, root, expanded, 0, &mut rows);
+    push_rows(entries, root, expanded, git_status, 0, &mut rows);
     rows
 }
 
@@ -384,6 +442,7 @@ fn push_rows(
     entries: &[ProjectFile],
     root: &Path,
     expanded: &HashSet<SharedString>,
+    git_status: &HashMap<PathBuf, String>,
     depth: usize,
     rows: &mut Vec<FileRow>,
 ) {
@@ -398,9 +457,10 @@ fn push_rows(
             directory: entry.directory,
             has_children: !entry.children.is_empty(),
             expanded: open,
+            status: git_status.get(&absolute_path(root, entry)).cloned(),
         });
         if open {
-            push_rows(&entry.children, root, expanded, depth + 1, rows);
+            push_rows(&entry.children, root, expanded, git_status, depth + 1, rows);
         }
     }
 }

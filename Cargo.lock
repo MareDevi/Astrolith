@@ -363,6 +363,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrolith-git"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "astrolith-gpui"
 version = "0.1.0"
 dependencies = [
@@ -370,6 +377,7 @@ dependencies = [
  "astrolith-astro",
  "astrolith-core",
  "astrolith-document",
+ "astrolith-git",
  "astrolith-lsp",
  "astrolith-observability",
  "astrolith-preview",

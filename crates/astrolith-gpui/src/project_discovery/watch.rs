@@ -268,6 +268,9 @@ impl ProjectWorkspace {
         if batch.schema {
             self.load_collection_schemas(cx);
         }
+        if self.git_monitoring && (batch.changed || batch.needs_rescan) {
+            self.refresh_git(cx);
+        }
         batch.changed || batch.needs_rescan
     }
 

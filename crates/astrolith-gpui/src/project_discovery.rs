@@ -44,6 +44,7 @@ use astrolith_document::{
     FormatCommand, MAX_DOCUMENT_BYTES, RecoveryRecord, RecoveryStore, SaveOutcome, TokenSummary,
     overwrite_document, parse_document, save_document_copy, save_snapshot,
 };
+use astrolith_git::{GitRepository, GitStatus};
 use astrolith_preview::RouteMapping;
 use astrolith_workspace::{
     CollectionEntry, CollectionWatcher, MetaValue, ReferenceOption, WatchBatch,
@@ -849,6 +850,10 @@ pub(crate) struct ProjectWorkspace {
     writing: WritingModes,
     /// Language servers shared by every Build document of the open project.
     lsp: LspRegistry,
+    git_status: Option<Result<GitStatus, String>>,
+    git_task: Option<Task<()>>,
+    git_request: u64,
+    git_monitoring: bool,
     /// Test seam replacing process discovery and spawning.
     #[cfg(test)]
     lsp_start_hook: Option<Arc<lsp::LspStartHook>>,
@@ -1092,6 +1097,10 @@ impl ProjectWorkspace {
             data_references_task: None,
             writing: WritingModes::default(),
             lsp: LspRegistry::default(),
+            git_status: None,
+            git_task: None,
+            git_request: 0,
+            git_monitoring: false,
             #[cfg(test)]
             lsp_start_hook: None,
             source_view: false,
@@ -1135,6 +1144,52 @@ impl ProjectWorkspace {
         self.manifest
             .as_ref()
             .map(|manifest| manifest.root().to_path_buf())
+    }
+
+    /// Current repository state, populated asynchronously for the open project.
+    pub(crate) fn git_status(&self) -> Option<Result<GitStatus, String>> {
+        self.git_status.clone()
+    }
+
+    /// Refresh Git state only while the Source Control panel is visible.
+    pub(crate) fn set_git_monitoring(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.git_monitoring = active;
+        if active {
+            self.refresh_git(cx);
+        }
+    }
+
+    /// Refresh Git status without blocking the window thread.
+    pub(crate) fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.project_root() else {
+            self.git_status = None;
+            self.git_task = None;
+            self.file_browser
+                .update(cx, |browser, cx| browser.set_git_status(None, cx));
+            return;
+        };
+        let generation = self.generation;
+        self.git_request = self.git_request.wrapping_add(1);
+        let request = self.git_request;
+        self.git_status = Some(Err("Checking repository…".into()));
+        let work = runtime::blocking(cx, move || {
+            GitRepository::discover(&root)
+                .and_then(|repository| repository.status())
+                .map_err(|error| error.to_string())
+        });
+        self.git_task = Some(cx.spawn(async move |this, cx| {
+            let Ok(result) = work.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation || this.git_request != request {
+                    return;
+                }
+                this.file_browser.update(cx, |browser, cx| {
+                    browser.set_git_status(result.as_ref().ok().cloned(), cx)
+                });
+                this.git_status = Some(result);
+                cx.notify();
+            });
+        }));
     }
 
     /// Point the Build explorer at the open project; Build rescans on every
@@ -2516,6 +2571,9 @@ impl ProjectWorkspace {
         self.schema_dirty = false;
         self.watcher_owner = None;
         self.command_tasks.clear();
+        self.git_task = None;
+        self.git_status = None;
+        self.git_request = self.git_request.wrapping_add(1);
         self.loads.clear();
         self.save_coordinator.clear();
         self.save_tasks.clear();
@@ -2597,6 +2655,9 @@ impl ProjectWorkspace {
                         // manifest, entries, data-collection references and the
                         // rebuilt reference catalog exactly like a refresh does.
                         this.apply_discovered_index(manifest, entries, cx);
+                        if this.git_monitoring {
+                            this.refresh_git(cx);
+                        }
                         this.start_watcher(watcher, window, cx);
                         this.status.clear();
                         this.load_pending_recovery(window, cx);
@@ -3367,6 +3428,12 @@ impl ProjectWorkspace {
             return;
         }
         self.source_view = source;
+        if !source {
+            self.git_status = None;
+            self.git_task = None;
+            self.file_browser
+                .update(cx, |browser, cx| browser.set_git_status(None, cx));
+        }
         let root = self.project_root();
         let active = self.active.clone();
         self.file_browser.update(cx, |browser, cx| {
