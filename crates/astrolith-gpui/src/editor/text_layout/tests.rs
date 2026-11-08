@@ -21,6 +21,23 @@ fn test_style() -> Arc<LayoutStyle> {
     })
 }
 
+#[test]
+fn text_selection_fill_differs_from_light_and_dark_canvas() {
+    let light_background = gpui_kit::hsla(0., 0., 1., 1.);
+    let dark_background = gpui_kit::hsla(0., 0., 0.145, 1.);
+    let dark_primary = gpui_kit::hsla(0., 0., 0.205, 1.);
+    let light_primary = gpui_kit::hsla(0., 0., 0.922, 1.);
+
+    assert_ne!(
+        text_selection_fill(light_background, dark_primary),
+        light_background
+    );
+    assert_ne!(
+        text_selection_fill(dark_background, light_primary),
+        dark_background
+    );
+}
+
 fn parse(text: &str) -> Arc<WysiwygDocument> {
     Arc::new(WysiwygDocument::parse(text))
 }

@@ -109,7 +109,7 @@ impl LayoutStyle {
             muted_foreground: theme.muted_foreground,
             link: theme.link,
             code_background: theme.muted,
-            selection: theme.primary.opacity(0.18).blend(theme.background),
+            selection: text_selection_fill(theme.background, theme.primary),
             caret: theme.caret,
             border: theme.border,
             background: theme.background,
@@ -141,6 +141,10 @@ impl LayoutStyle {
             _ => self.font_size,
         }
     }
+}
+
+fn text_selection_fill(background: Hsla, foreground: Hsla) -> Hsla {
+    background.blend(foreground.opacity(0.18))
 }
 
 fn heading_scale(level: u8) -> f32 {
