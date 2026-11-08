@@ -190,21 +190,26 @@ impl Selection {
 }
 
 /// The terminal panel entity.
+struct TerminalInstance {
+    id: u64,
+    session: Option<TerminalSession>,
+    last_revision: u64,
+    exit: Option<ExitInfo>,
+    status: Option<String>,
+    failure: Option<String>,
+}
+
 pub(crate) struct TerminalPanel {
     root: Option<PathBuf>,
-    session: Option<TerminalSession>,
+    terminals: Vec<TerminalInstance>,
+    active_terminal: Option<u64>,
+    next_terminal_id: u64,
     focus: FocusHandle,
-    last_revision: u64,
     last_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Measured cell geometry, recomputed only when the mono face changes.
     metrics: Option<CellMetrics>,
     selection: Option<Selection>,
     selecting: bool,
-    /// Last recorded exit, kept separate from the live session so the header
-    /// keeps reporting a dead shell after the reader reached EOF.
-    exit: Option<ExitInfo>,
-    status: Option<String>,
-    failure: Option<String>,
     /// Whether the terminal dock is on screen and in Build.
     active: bool,
     poll_task: Option<Task<()>>,
@@ -235,16 +240,14 @@ impl TerminalPanel {
         });
         Self {
             root: None,
-            session: None,
+            terminals: Vec::new(),
+            active_terminal: None,
+            next_terminal_id: 1,
             focus,
-            last_revision: 0,
             last_bounds: Rc::new(Cell::new(None)),
             metrics: None,
             selection: None,
             selecting: false,
-            exit: None,
-            status: None,
-            failure: None,
             active: false,
             poll_task: None,
             #[cfg(test)]
@@ -280,17 +283,38 @@ impl TerminalPanel {
         self.focus.is_focused(window)
     }
 
+    fn active_instance(&self) -> Option<&TerminalInstance> {
+        let id = self.active_terminal?;
+        self.terminals.iter().find(|terminal| terminal.id == id)
+    }
+
+    fn active_instance_mut(&mut self) -> Option<&mut TerminalInstance> {
+        let id = self.active_terminal?;
+        self.terminals.iter_mut().find(|terminal| terminal.id == id)
+    }
+
+    fn active_session(&self) -> Option<&TerminalSession> {
+        self.active_instance()?.session.as_ref()
+    }
+
+    fn active_session_mut(&mut self) -> Option<&mut TerminalSession> {
+        self.active_instance_mut()?.session.as_mut()
+    }
+
     /// A session that has not recorded an exit or reader EOF.
     fn running_state(&self) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(|session| self.exit.is_none() && !session.is_exited())
+        self.active_instance().is_some_and(|terminal| {
+            terminal
+                .session
+                .as_ref()
+                .is_some_and(|session| terminal.exit.is_none() && !session.is_exited())
+        })
     }
 
     /// Write raw bytes to the child (service-level tests through the view).
     #[cfg(test)]
     pub(crate) fn write(&mut self, bytes: &[u8]) {
-        if let Some(session) = &mut self.session {
+        if let Some(session) = self.active_session_mut() {
             let _ = session.write(bytes);
         }
     }
@@ -298,8 +322,7 @@ impl TerminalPanel {
     /// Current parsed screen text.
     #[cfg(test)]
     pub(crate) fn screen_contents(&self) -> String {
-        self.session
-            .as_ref()
+        self.active_session()
             .map(TerminalSession::contents)
             .unwrap_or_default()
     }
@@ -307,21 +330,42 @@ impl TerminalPanel {
     /// Child process id, for lifecycle tests.
     #[cfg(test)]
     pub(crate) fn process_id(&self) -> Option<u32> {
-        self.session.as_ref().and_then(TerminalSession::process_id)
+        self.active_session().and_then(TerminalSession::process_id)
     }
 
     /// Restart the shell in the same project.
     pub(crate) fn restart(&mut self, cx: &mut Context<Self>) {
-        self.stop();
-        self.spawn(cx);
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let Some(terminal) = self.active_instance_mut() else {
+            return;
+        };
+        if let Some(mut session) = terminal.session.take() {
+            session.kill();
+        }
+        terminal.exit = None;
+        terminal.status = None;
+        terminal.failure = None;
+        match TerminalSession::spawn(&root, 80, 24) {
+            Ok(session) => {
+                terminal.last_revision = session.revision();
+                terminal.session = Some(session);
+                self.start_polling(cx);
+            }
+            Err(error) => terminal.failure = Some(format!("Could not start the shell: {error}")),
+        }
         cx.notify();
     }
 
     /// Clear the rendered screen.
     pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
-        if let Some(session) = &self.session {
+        if let Some(session) = self.active_session() {
             session.clear();
-            self.last_revision = session.revision();
+            let revision = session.revision();
+            if let Some(terminal) = self.active_instance_mut() {
+                terminal.last_revision = revision;
+            }
         }
         self.selection = None;
         cx.notify();
@@ -329,7 +373,7 @@ impl TerminalPanel {
 
     /// Copy the current selection, returning whether anything was copied.
     pub(crate) fn copy_selection(&self, cx: &mut App) -> bool {
-        let (Some(session), Some(selection)) = (&self.session, self.selection) else {
+        let (Some(session), Some(selection)) = (self.active_session(), self.selection) else {
             return false;
         };
         let (start, end) = selection.ordered();
@@ -351,13 +395,14 @@ impl TerminalPanel {
     }
 
     fn stop(&mut self) {
-        if let Some(mut session) = self.session.take() {
-            session.kill();
+        for terminal in &mut self.terminals {
+            if let Some(mut session) = terminal.session.take() {
+                session.kill();
+            }
         }
+        self.terminals.clear();
+        self.active_terminal = None;
         self.selection = None;
-        self.exit = None;
-        self.status = None;
-        self.failure = None;
         self.poll_task = None;
     }
 
@@ -365,18 +410,69 @@ impl TerminalPanel {
         let Some(root) = self.root.clone() else {
             return;
         };
-        match TerminalSession::spawn(&root, 80, 24) {
+        let id = self.next_terminal_id;
+        self.next_terminal_id = self.next_terminal_id.saturating_add(1);
+        let (session, failure) = match TerminalSession::spawn(&root, 80, 24) {
             Ok(session) => {
                 tracing::info!(root = %root.display(), "started the project terminal");
-                self.last_revision = session.revision();
-                self.session = Some(session);
-                self.start_polling(cx);
+                (Some(session), None)
             }
             Err(error) => {
                 tracing::warn!(%error, root = %root.display(), "could not start the project terminal");
-                self.failure = Some(format!("Could not start the shell: {error}"));
+                (None, Some(format!("Could not start the shell: {error}")))
             }
+        };
+        let last_revision = session.as_ref().map_or(0, TerminalSession::revision);
+        self.terminals.push(TerminalInstance {
+            id,
+            session,
+            last_revision,
+            exit: None,
+            status: None,
+            failure,
+        });
+        self.active_terminal = Some(id);
+        self.selection = None;
+        self.start_polling(cx);
+    }
+
+    /// Start another shell in the current project.
+    fn new_terminal(&mut self, cx: &mut Context<Self>) {
+        self.spawn(cx);
+        cx.notify();
+    }
+
+    /// Select a retained shell tab.
+    fn select_terminal(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.active_terminal == Some(id) {
+            return;
         }
+        if self.terminals.iter().any(|terminal| terminal.id == id) {
+            self.active_terminal = Some(id);
+            self.selection = None;
+            self.start_polling(cx);
+            cx.notify();
+        }
+    }
+
+    /// Close the selected shell and activate its nearest remaining neighbor.
+    fn close_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.active_terminal else {
+            return;
+        };
+        let Some(index) = self.terminals.iter().position(|terminal| terminal.id == id) else {
+            return;
+        };
+        let mut removed = self.terminals.remove(index);
+        if let Some(mut session) = removed.session.take() {
+            session.kill();
+        }
+        self.active_terminal = self
+            .terminals
+            .get(index.min(self.terminals.len().saturating_sub(1)))
+            .map(|terminal| terminal.id);
+        self.selection = None;
+        cx.notify();
     }
 
     /// Tell the view whether the terminal dock is on screen.
@@ -389,10 +485,15 @@ impl TerminalPanel {
             return;
         }
         self.active = active;
-        if active && self.session.is_some() && !self.running_state() {
+        if active
+            && !self
+                .terminals
+                .iter()
+                .any(|terminal| terminal.session.is_some() && terminal.exit.is_none())
+        {
             return;
         }
-        if active && self.session.is_some() {
+        if active && !self.terminals.is_empty() {
             // Restart immediately: the old task may be asleep on the slow
             // hidden interval and would delay the first visible frame.
             self.poll_task = None;
@@ -434,38 +535,41 @@ impl TerminalPanel {
 
     fn poll(&mut self, cx: &mut Context<Self>) -> bool {
         let (cols, rows) = self.grid_size();
-        let Some(session) = self.session.as_mut() else {
-            return false;
-        };
         let mut changed = false;
-        let mut resize_failed = false;
-        if session.size() != (cols, rows) && session.resize(cols, rows).is_err() {
-            resize_failed = true;
-            changed = true;
+        let active_id = self.active_terminal;
+        let mut running = false;
+        for terminal in &mut self.terminals {
+            let Some(session) = terminal.session.as_mut() else {
+                continue;
+            };
+            if Some(terminal.id) == active_id
+                && session.size() != (cols, rows)
+                && session.resize(cols, rows).is_err()
+            {
+                terminal.failure = Some("Could not resize the terminal.".into());
+                changed = true;
+            }
+            if let Some(exit) = session.poll_exit() {
+                terminal.status = Some(exit.message());
+                terminal.exit = Some(exit);
+                changed = true;
+            }
+            let revision = session.revision();
+            if revision != terminal.last_revision {
+                terminal.last_revision = revision;
+                changed = true;
+            }
+            if terminal.exit.is_none() && !session.is_exited() {
+                running = true;
+            }
         }
-        let exit = session.poll_exit();
-        let revision = session.revision();
-        let reader_exited = session.is_exited();
-        if resize_failed {
-            self.failure = Some("Could not resize the terminal.".into());
-        }
-        if let Some(exit) = exit {
-            self.status = Some(exit.message());
-            self.exit = Some(exit);
-            changed = true;
-        }
-        if revision != self.last_revision {
-            self.last_revision = revision;
-            changed = true;
-        }
-        let exited = self.exit.is_some() || reader_exited;
         if changed {
             cx.notify();
         }
-        if exited {
+        if !running {
             self.poll_task = None;
         }
-        !exited
+        running
     }
 
     /// Cached measurements, or the fallback before the first frame.
@@ -515,18 +619,14 @@ impl TerminalPanel {
     }
 
     fn selected_text(&self) -> Option<String> {
-        let session = self.session.as_ref()?;
+        let session = self.active_session()?;
         let selection = self.selection?;
         let (start, end) = selection.ordered();
-        Some(
-            session.with_screen(|screen| {
-                screen.contents_between(start.row, start.col, end.row, end.col)
-            }),
-        )
+        Some(session.contents_between((start.row, start.col), (end.row, end.col)))
     }
 
     fn handle_key(&mut self, event: &gpui_kit::KeystrokeEvent, cx: &mut App) -> bool {
-        let Some(session) = &mut self.session else {
+        let Some(session) = self.active_session_mut() else {
             return false;
         };
         let modifiers = event.keystroke.modifiers;
@@ -559,9 +659,8 @@ impl TerminalPanel {
 
     /// Copy the visible screen under the parser lock, once per frame.
     fn snapshot(&self) -> Option<ScreenSnapshot> {
-        let session = self.session.as_ref()?;
         Some(ScreenSnapshot {
-            terminal: session.snapshot(),
+            terminal: self.active_session()?.snapshot(),
         })
     }
 
@@ -683,13 +782,19 @@ impl Render for TerminalPanel {
         let rows = self.render_rows(_window, cx);
         let bounds_cell = self.last_bounds.clone();
         let running = self.running_state();
-        let exit = self.exit.clone();
+        let active = self.active_terminal;
+        let active_failure = self
+            .active_instance()
+            .and_then(|terminal| terminal.failure.clone());
         let status = self
-            .failure
-            .clone()
-            .or_else(|| {
-                exit.as_ref()
-                    .map(|exit| format!("Terminal {}", exit.message()))
+            .active_instance()
+            .and_then(|terminal| {
+                terminal.failure.clone().or_else(|| {
+                    terminal
+                        .exit
+                        .as_ref()
+                        .map(|exit| format!("Terminal {}", exit.message()))
+                })
             })
             .unwrap_or_else(|| {
                 if running {
@@ -698,9 +803,20 @@ impl Render for TerminalPanel {
                     "No shell".to_owned()
                 }
             });
+        let tabs = self
+            .terminals
+            .iter()
+            .enumerate()
+            .map(|(index, terminal)| (terminal.id, format!("Terminal {}", index + 1)))
+            .collect::<Vec<_>>();
         let selected = self.selected_text();
         let clear = cx.listener(|this, _, _, cx| this.clear(cx));
         let restart = cx.listener(|this, _, _, cx| this.restart(cx));
+        let create = cx.listener(|this, _, window, cx| {
+            this.new_terminal(cx);
+            this.focus.focus(window, cx);
+        });
+        let close = cx.listener(|this, _, _, cx| this.close_terminal(cx));
         let copy = cx.listener(|this, _, _, cx| {
             this.copy_selection(cx);
         });
@@ -724,21 +840,26 @@ impl Render for TerminalPanel {
                     .child(
                         div()
                             .h_flex()
-                            .items_center()
-                            .gap_1p5()
-                            .px(px(METRICS.space.sm as f32))
-                            .py(px(2.))
-                            .rounded(px(METRICS.radius.small))
-                            .bg(cx.theme().tab_bar_segmented)
-                            .text_xs()
-                            .child(div().size_1p5().rounded_full().bg(if running {
-                                cx.theme().success
-                            } else if self.failure.is_some() {
-                                cx.theme().danger
-                            } else {
-                                cx.theme().muted_foreground
-                            }))
-                            .child("Terminal"),
+                            .gap_1()
+                            .children(tabs.into_iter().map(|(id, label)| {
+                                let select = cx.listener(move |this, _, window, cx| {
+                                    this.select_terminal(id, cx);
+                                    this.focus.focus(window, cx);
+                                });
+                                Button::new(format!("terminal-tab-{id}"))
+                                    .small()
+                                    .ghost()
+                                    .label(label)
+                                    .when(active == Some(id), |button| button.underline())
+                                    .on_click(select)
+                            })),
+                    )
+                    .child(
+                        Button::new("terminal-new")
+                            .small()
+                            .ghost()
+                            .label("New")
+                            .on_click(create),
                     )
                     .child(
                         div()
@@ -748,6 +869,14 @@ impl Render for TerminalPanel {
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(status),
+                    )
+                    .child(
+                        Button::new("terminal-close")
+                            .small()
+                            .ghost()
+                            .label("Close")
+                            .disabled(active.is_none())
+                            .on_click(close),
                     )
                     .child(
                         Button::new("terminal-copy")
@@ -828,11 +957,14 @@ impl Render for TerminalPanel {
                                 return;
                             }
                             let delta = -(lines.round() as i32) * WHEEL_ROWS;
-                            if let Some(session) = &this.session
-                                && session.scroll(delta)
-                            {
+                            let revision = this.active_session().and_then(|session| {
+                                session.scroll(delta).then(|| session.revision())
+                            });
+                            if let Some(revision) = revision {
                                 this.selection = None;
-                                this.last_revision = session.revision();
+                                if let Some(terminal) = this.active_instance_mut() {
+                                    terminal.last_revision = revision;
+                                }
                                 cx.notify();
                             }
                         }),
@@ -887,7 +1019,7 @@ impl Render for TerminalPanel {
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(
-                                    self.failure
+                                    active_failure
                                         .clone()
                                         .unwrap_or_else(|| "No project terminal".to_owned()),
                                 ),
@@ -1240,6 +1372,64 @@ mod tests {
             hidden.iter().all(|interval| *interval == HIDDEN_POLL),
             "hidden polls must not run at frame rate: {hidden:?}"
         );
+        cx.update_window(handle.into(), |_, _, cx| {
+            panel.update(cx, |panel, cx| panel.shutdown(cx));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn terminal_tabs_keep_sessions_alive_and_close_only_the_selected_shell(
+        cx: &mut TestAppContext,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let mut panel = None;
+        let (handle, _host) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                panel = Some(cx.new(|cx| TerminalPanel::new(window, cx)));
+                cx.new(|_| Host)
+            })
+            .unwrap()
+        });
+        let handle = handle.downcast::<Root>().unwrap();
+        let panel = panel.expect("the panel is built with the window");
+        cx.update_window(handle.into(), |_, _, cx| {
+            panel.update(cx, |panel, cx| panel.attach(root.path(), cx));
+        })
+        .unwrap();
+        let first_id = panel.read_with(cx, |panel, _| panel.active_terminal.unwrap());
+        let first_pid = panel.read_with(cx, |panel, _| panel.process_id().unwrap());
+
+        cx.update_window(handle.into(), |_, _, cx| {
+            panel.update(cx, |panel, cx| panel.new_terminal(cx));
+        })
+        .unwrap();
+        let (second_id, second_pid, count) = panel.read_with(cx, |panel, _| {
+            (
+                panel.active_terminal.unwrap(),
+                panel.process_id().unwrap(),
+                panel.terminals.len(),
+            )
+        });
+        assert_ne!(first_id, second_id);
+        assert_ne!(first_pid, second_pid);
+        assert_eq!(count, 2);
+
+        cx.update_window(handle.into(), |_, _, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.select_terminal(first_id, cx);
+                assert_eq!(panel.process_id(), Some(first_pid));
+                panel.select_terminal(second_id, cx);
+                panel.close_terminal(cx);
+            });
+        })
+        .unwrap();
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.terminals.len(), 1);
+            assert_eq!(panel.active_terminal, Some(first_id));
+            assert_eq!(panel.process_id(), Some(first_pid));
+        });
         cx.update_window(handle.into(), |_, _, cx| {
             panel.update(cx, |panel, cx| panel.shutdown(cx));
         })
