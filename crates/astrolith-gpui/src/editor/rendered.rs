@@ -7,6 +7,7 @@
 //! source into pages and never copies the body on an unchanged frame.
 
 use astrolith_document::{BlockKind, DocumentKind, WysiwygDocument};
+use gpui_kit::base::AutoScroll;
 use gpui_kit::component::{ActiveTheme, StyledExt};
 use gpui_kit::{
     App, Bounds, Context, Corners, Element, ElementId, FocusHandle, GlobalElementId,
@@ -44,6 +45,7 @@ pub(crate) struct RenderedDocument {
     scroll: ScrollHandle,
     selection: Option<Selection>,
     drag_anchor: Option<Hit>,
+    auto_scroll: AutoScroll,
     /// Source offset and in-block pixel offset to restore after an update.
     pending_anchor: Option<(usize, f32)>,
     parse_task: Option<gpui_kit::Task<()>>,
@@ -70,6 +72,7 @@ struct FrameGeometry {
     origin: Point<Pixels>,
     viewport: Bounds<Pixels>,
     width: f32,
+    scroll_y: f32,
 }
 
 impl Default for FrameGeometry {
@@ -78,6 +81,7 @@ impl Default for FrameGeometry {
             origin: point(px(0.), px(0.)),
             viewport: Bounds::new(point(px(0.), px(0.)), size(px(0.), px(0.))),
             width: 0.,
+            scroll_y: 0.,
         }
     }
 }
@@ -94,6 +98,7 @@ impl RenderedDocument {
             scroll: ScrollHandle::new(),
             selection: None,
             drag_anchor: None,
+            auto_scroll: AutoScroll::default(),
             pending_anchor: None,
             parse_task: None,
             generation: 0,
@@ -177,6 +182,7 @@ impl RenderedDocument {
         self.select_all = false;
         self.selection = None;
         self.drag_anchor = None;
+        self.auto_scroll.stop();
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         if let Some((shared_text, shared_document)) = shared
@@ -393,8 +399,50 @@ impl RenderedDocument {
         let layout = layout.as_ref()?;
         layout.hit_test(point(
             position.x - geometry.origin.x,
-            position.y - geometry.origin.y,
+            position.y - geometry.origin.y
+                + px((-f32::from(self.scroll.offset().y)).max(0.) - geometry.scroll_y),
         ))
+    }
+
+    fn update_drag_autoscroll(
+        &mut self,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = self.geometry.borrow().viewport;
+        self.auto_scroll.last_drag_position = Some(position);
+        let delta = AutoScroll::compute_delta(position.y, viewport).map(|delta| -delta);
+        let window = window.window_handle();
+        let preview = cx.weak_entity();
+        self.auto_scroll.set(delta, cx, move |delta, state, cx| {
+            let offset = state.scroll.offset();
+            let max_y = f32::from(state.scroll.max_offset().y).max(0.);
+            let y = (f32::from(offset.y) + f32::from(delta)).clamp(-max_y, 0.);
+            if px(y) == offset.y {
+                state.auto_scroll.stop();
+                return;
+            }
+            state.scroll.set_offset(point(offset.x, px(y)));
+            let window = window;
+            let preview = preview.clone();
+            cx.defer(move |cx| {
+                _ = window.update(cx, |_, _window, cx| {
+                    _ = preview.update(cx, |preview, cx| {
+                        if preview.drag_anchor.is_some()
+                            && preview.auto_scroll.is_active()
+                            && let (Some(anchor), Some(position)) =
+                                (preview.drag_anchor, preview.auto_scroll.last_drag_position)
+                            && let Some(focus) = preview.hit_at(position)
+                        {
+                            preview.selection = Some(Selection { anchor, focus });
+                            preview.select_all = false;
+                            cx.notify();
+                        }
+                    });
+                });
+            });
+        });
     }
 
     fn focus_at(&self, position: Point<Pixels>) -> Option<Hit> {
@@ -606,6 +654,7 @@ impl Render for RenderedDocument {
             layout: self.layout.clone(),
             geometry: self.geometry.clone(),
             images: self.images.clone(),
+            scroll_y: scroll,
             selection: self.selection,
         };
         let content = div()
@@ -627,6 +676,7 @@ impl Render for RenderedDocument {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.auto_scroll.stop();
                     window.focus(&this.focus, cx);
                     if let Some(hit) = this.focus_at(event.position) {
                         this.drag_anchor = Some(hit);
@@ -639,7 +689,7 @@ impl Render for RenderedDocument {
                     }
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if event.pressed_button != Some(MouseButton::Left) {
                     return;
                 }
@@ -651,10 +701,12 @@ impl Render for RenderedDocument {
                     this.select_all = false;
                     cx.notify();
                 }
+                this.update_drag_autoscroll(event.position, window, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui_kit::MouseUpEvent, _, cx| {
+                    this.auto_scroll.stop();
                     let clicked = this.drag_anchor.take();
                     if let Some(hit) = this.hit_at(event.position) {
                         if let Some(url) = this.document.link_at(hit.block, hit.rendered) {
@@ -750,6 +802,7 @@ struct PreviewCanvas {
     layout: Rc<RefCell<Option<TextLayout>>>,
     geometry: Rc<RefCell<FrameGeometry>>,
     images: Rc<HashMap<String, ImageCacheItem>>,
+    scroll_y: f32,
     selection: Option<Selection>,
 }
 
@@ -813,6 +866,7 @@ impl Element for PreviewCanvas {
         geometry.origin = bounds.origin;
         geometry.width = f32::from(bounds.size.width);
         geometry.viewport = bounds.intersect(&window.content_mask().bounds);
+        geometry.scroll_y = self.scroll_y;
     }
 
     fn paint(
@@ -1055,6 +1109,88 @@ mod tests {
                 Some("A paragraph with bold and code.\nSecond")
             );
         });
+    }
+
+    #[gpui_kit::test]
+    async fn dragging_to_the_viewport_edge_scrolls_and_extends_selection(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let source = (0..2_000)
+            .map(|index| format!("Paragraph {index} with several words for selection.\n\n"))
+            .collect::<String>();
+        let (handle, preview) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |_, cx| {
+                cx.new(RenderedDocument::new)
+            })
+            .unwrap()
+        });
+        preview.update(cx, |preview, cx| {
+            preview.set_document(
+                None,
+                None,
+                Some((DocumentKind::Markdown, &source)),
+                None,
+                None,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let (start, edge, before) = preview.read_with(cx, |preview, _| {
+            let geometry = *preview.geometry.borrow();
+            let layout = preview.layout.borrow();
+            let caret = layout
+                .as_ref()
+                .unwrap()
+                .caret(Hit {
+                    block: 0,
+                    rendered: 0,
+                })
+                .unwrap();
+            (
+                point(
+                    geometry.origin.x + caret.origin.x + px(1.),
+                    geometry.origin.y + caret.origin.y + caret.height * 0.5,
+                ),
+                point(
+                    geometry.origin.x + caret.origin.x + px(140.),
+                    geometry.viewport.bottom() - px(2.),
+                ),
+                preview.scroll.offset(),
+            )
+        });
+
+        let mut visual = gpui_kit::VisualTestContext::from_window(handle, cx);
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(edge, MouseButton::Left, Default::default());
+        visual
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(64));
+        visual.run_until_parked();
+        visual.simulate_mouse_up(edge, MouseButton::Left, Default::default());
+
+        let (after, selection) = preview.read_with(cx, |preview, _| {
+            (preview.scroll.offset(), preview.selection.unwrap())
+        });
+        assert!(after.y < before.y, "dragging at the edge scrolls down");
+        assert!(
+            selection.focus > selection.anchor,
+            "selection extends toward newly revealed text"
+        );
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(64));
+        cx.run_until_parked();
+        assert_eq!(
+            preview.read_with(cx, |preview, _| preview.scroll.offset()),
+            after,
+            "auto-scroll stops after mouse-up"
+        );
     }
 
     #[gpui_kit::test]

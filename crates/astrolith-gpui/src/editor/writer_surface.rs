@@ -32,6 +32,7 @@ use std::sync::{
 use std::time::Instant;
 
 use astrolith_document::{WysiwygDocument, sentences};
+use gpui_kit::base::AutoScroll;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
     App, Bounds, Context, Element, ElementId, Focusable, GlobalElementId, Hsla, IntoElement,
@@ -49,6 +50,8 @@ struct FrameGeometry {
     viewport: Bounds<Pixels>,
     /// Width of the laid-out content column.
     width: f32,
+    /// Scroll distance used when this frame's origin was measured.
+    scroll_y: f32,
 }
 
 impl Default for FrameGeometry {
@@ -57,6 +60,7 @@ impl Default for FrameGeometry {
             origin: point(px(0.), px(0.)),
             viewport: Bounds::new(point(px(0.), px(0.)), size(px(0.), px(0.))),
             width: 0.,
+            scroll_y: 0.,
         }
     }
 }
@@ -95,6 +99,7 @@ pub(crate) struct WriterSurface {
     scroll: ScrollHandle,
     /// Source offset where the current drag began.
     drag_anchor: Option<usize>,
+    auto_scroll: AutoScroll,
     /// Buffer revision the parsed document was built from.
     document_revision: Option<u64>,
     last_cursor: Option<usize>,
@@ -148,6 +153,7 @@ impl WriterSurface {
             style,
             scroll: ScrollHandle::new(),
             drag_anchor: None,
+            auto_scroll: AutoScroll::default(),
             document_revision: None,
             last_cursor: None,
             follow_caret: false,
@@ -503,7 +509,8 @@ impl WriterSurface {
         let layout = layout.as_ref()?;
         let hit = layout.hit_test(point(
             position.x - geometry.origin.x,
-            position.y - geometry.origin.y,
+            position.y - geometry.origin.y
+                + px((-f32::from(self.scroll.offset().y)).max(0.) - geometry.scroll_y),
         ))?;
         Some((hit.block, hit.rendered))
     }
@@ -564,6 +571,43 @@ impl WriterSurface {
             self.drag_anchor = Some(offset);
         }
         cx.notify();
+    }
+
+    fn update_drag_autoscroll(
+        &mut self,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = self.geometry.borrow().viewport;
+        self.auto_scroll.last_drag_position = Some(position);
+        let delta = AutoScroll::compute_delta(position.y, viewport).map(|delta| -delta);
+        let window = window.window_handle();
+        let writer = cx.weak_entity();
+        self.auto_scroll.set(delta, cx, move |delta, state, cx| {
+            let offset = state.scroll.offset();
+            let max_y = f32::from(state.scroll.max_offset().y).max(0.);
+            let y = (f32::from(offset.y) + f32::from(delta)).clamp(-max_y, 0.);
+            if px(y) == offset.y {
+                state.auto_scroll.stop();
+                return;
+            }
+            state.scroll.set_offset(point(offset.x, px(y)));
+            let window = window;
+            let writer = writer.clone();
+            cx.defer(move |cx| {
+                _ = window.update(cx, |_, window, cx| {
+                    _ = writer.update(cx, |writer, cx| {
+                        if writer.drag_anchor.is_some()
+                            && writer.auto_scroll.is_active()
+                            && let Some(position) = writer.auto_scroll.last_drag_position
+                        {
+                            writer.select(position, true, window, cx);
+                        }
+                    });
+                });
+            });
+        });
     }
 
     /// Keep the caret in view; typewriter mode centres it.
@@ -842,6 +886,7 @@ impl Render for WriterSurface {
         let canvas = LayoutCanvas {
             layout: self.layout.clone(),
             geometry: self.geometry.clone(),
+            scroll_y: scroll,
             selection: selection_hits,
             caret: caret_hit,
             decorations,
@@ -862,6 +907,7 @@ impl Render for WriterSurface {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.auto_scroll.stop();
                     this.drag_anchor = None;
                     let extend = event.modifiers.shift;
                     this.select(event.position, extend, window, cx);
@@ -874,10 +920,12 @@ impl Render for WriterSurface {
                     return;
                 }
                 this.select(event.position, true, window, cx);
+                this.update_drag_autoscroll(event.position, window, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &gpui_kit::MouseUpEvent, _, cx| {
+                    this.auto_scroll.stop();
                     this.drag_anchor = None;
                     cx.notify();
                 }),
@@ -937,6 +985,7 @@ fn push_source_decoration(
 struct LayoutCanvas {
     layout: Rc<RefCell<Option<TextLayout>>>,
     geometry: Rc<RefCell<FrameGeometry>>,
+    scroll_y: f32,
     selection: Option<Selection>,
     caret: Option<Hit>,
     decorations: Vec<Decoration>,
@@ -1007,6 +1056,7 @@ impl Element for LayoutCanvas {
         geometry.origin = bounds.origin;
         geometry.width = f32::from(bounds.size.width);
         geometry.viewport = bounds.intersect(&window.content_mask().bounds);
+        geometry.scroll_y = self.scroll_y;
     }
 
     fn paint(
@@ -1885,6 +1935,58 @@ mod tests {
             );
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn dragging_to_the_viewport_edge_scrolls_and_extends_selection(cx: &mut TestAppContext) {
+        let (handle, session) = mount_writer(cx, &window_source(2_000));
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let (start, edge, before) = writer.read_with(cx, |writer, _| {
+            let geometry = *writer.geometry.borrow();
+            let layout = writer.layout.borrow();
+            let caret = layout
+                .as_ref()
+                .unwrap()
+                .caret(Hit {
+                    block: 0,
+                    rendered: 0,
+                })
+                .unwrap();
+            (
+                point(
+                    geometry.origin.x + caret.origin.x + px(1.),
+                    geometry.origin.y + caret.origin.y + caret.height * 0.5,
+                ),
+                point(
+                    geometry.origin.x + caret.origin.x + px(140.),
+                    geometry.viewport.bottom() - px(2.),
+                ),
+                writer.scroll.offset(),
+            )
+        });
+
+        let mut visual = gpui_kit::VisualTestContext::from_window(handle.into(), cx);
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(edge, MouseButton::Left, Default::default());
+        visual
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(64));
+        visual.run_until_parked();
+        visual.simulate_mouse_up(edge, MouseButton::Left, Default::default());
+
+        let (after, selection) = writer.read_with(cx, |writer, cx| {
+            (
+                writer.scroll.offset(),
+                session.read(cx).editor.read(cx).selected_range(),
+            )
+        });
+        assert!(after.y < before.y, "dragging at the edge scrolls down");
+        assert!(selection.end > 0, "selection extends beyond its start");
     }
 
     #[test]
