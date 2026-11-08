@@ -532,14 +532,13 @@ impl WriterSurface {
         };
         let offset = match self.source_at(position) {
             Some(offset) => offset,
-            None if self.pending_edit.is_some() && self.document_revision.is_some() => {
-                // The displayed text here has been replaced. Keep its live
-                // selection instead of interpreting obsolete geometry as EOF.
+            None => {
+                // An unshaped row or a pointer outside the layout is not EOF.
+                // Keep the current selection until hit testing resolves a real row.
                 let focus = session.read(cx).editor.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
                 return;
             }
-            None => self.source.len(),
         };
         let anchor = if extend {
             self.drag_anchor.or_else(|| {
@@ -1840,6 +1839,52 @@ mod tests {
                 "hit {source} must land in the caret block {block:?}"
             );
         });
+    }
+
+    #[gpui_kit::test]
+    fn unresolved_drag_hit_does_not_extend_selection_to_eof(cx: &mut TestAppContext) {
+        let source = window_source(2_000);
+        let (handle, session) = mount_writer(cx, &source);
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            let (position, viewport) = writer.read_with(cx, |writer, _| {
+                let geometry = *writer.geometry.borrow();
+                (
+                    point(
+                        geometry.origin.x + px(16.),
+                        geometry.viewport.bottom() + px(500.),
+                    ),
+                    geometry.viewport,
+                )
+            });
+            assert!(viewport.size.height > px(0.));
+            assert_eq!(
+                writer.read_with(cx, |writer, _| writer.source_at(position)),
+                None
+            );
+
+            writer.update(cx, |writer, cx| {
+                writer.select(position, false, window, cx);
+            });
+            assert_eq!(
+                session.read(cx).editor.read(cx).selected_range(),
+                0..0,
+                "a missed mouse-down must not place the caret at EOF"
+            );
+
+            writer.update(cx, |writer, cx| {
+                writer.drag_anchor = Some(0);
+                writer.select(position, true, window, cx);
+            });
+            assert_eq!(
+                session.read(cx).editor.read(cx).selected_range(),
+                0..0,
+                "an unresolved drag position must leave the selection unchanged"
+            );
+        })
+        .unwrap();
     }
 
     #[test]
