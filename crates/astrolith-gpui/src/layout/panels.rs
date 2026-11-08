@@ -123,6 +123,14 @@ impl WorkspacePanel {
         self.editor = Some(editor);
         self.readonly = false;
         self.wiring = wiring;
+        if let (Some(style), Some(session)) = (
+            self.prose.clone(),
+            self.wiring
+                .as_ref()
+                .and_then(|wiring| wiring.session.upgrade()),
+        ) {
+            session.update(cx, |session, cx| session.set_prose_style(style, cx));
+        }
         self.apply_editor_chrome(cx);
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
