@@ -4127,11 +4127,14 @@ impl Render for ProjectWorkspace {
                         .when_some(back, |row, back| row.child(back))
                         .child(div().flex_1().min_w_0().child(title_row))
                         .child(div().flex_1())
-                        .child(ui::icon_button(
-                            "open-project",
-                            IconName::FolderOpen,
-                            tr!("browser.library.open_project"),
-                        ))
+                        .child(
+                            ui::icon_button(
+                                "open-project",
+                                IconName::FolderOpen,
+                                tr!("browser.library.open_project"),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| this.prompt(window, cx))),
+                        )
                         .when(selected_collection.is_some(), |row| {
                             row.child(
                                 Button::new("entry-more")
