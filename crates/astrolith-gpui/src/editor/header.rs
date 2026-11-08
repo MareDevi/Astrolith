@@ -12,7 +12,6 @@ use crate::commands::CommandId;
 use crate::editor::save_coordinator::SaveStatus;
 use crate::project_discovery::ProjectWorkspace;
 use crate::ui;
-use astrolith_core::preferences::WorkspaceMode;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt,
@@ -32,25 +31,16 @@ pub(crate) struct DocumentHeader {
     project: Entity<ProjectWorkspace>,
     inspector_open: bool,
     library_open: bool,
-    preview_open: bool,
-    mode: WorkspaceMode,
     _subscription: Subscription,
 }
 
 impl DocumentHeader {
-    pub(crate) fn new(
-        project: Entity<ProjectWorkspace>,
-        mode: WorkspaceMode,
-        preview_open: bool,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub(crate) fn new(project: Entity<ProjectWorkspace>, cx: &mut Context<Self>) -> Self {
         let subscription = cx.observe(&project, |_, _, cx| cx.notify());
         Self {
             project,
             inspector_open: false,
             library_open: false,
-            preview_open,
-            mode,
             _subscription: subscription,
         }
     }
@@ -69,20 +59,6 @@ impl DocumentHeader {
             return;
         }
         self.library_open = open;
-        cx.notify();
-    }
-
-    pub(crate) fn set_workspace(
-        &mut self,
-        mode: WorkspaceMode,
-        preview_open: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if self.mode == mode && self.preview_open == preview_open {
-            return;
-        }
-        self.mode = mode;
-        self.preview_open = preview_open;
         cx.notify();
     }
 }
@@ -155,12 +131,6 @@ impl Render for DocumentHeader {
             .collect();
         let menu_active = active_path.clone();
         let writing_modes = self.project.read(cx).writing_modes();
-        let library_open = self.library_open;
-        let preview_open = self.preview_open;
-        let inspector_open = self.inspector_open;
-        let mode = self.mode;
-        let workspace_owner = cx.weak_entity();
-
         div()
             .id("document-header")
             .test_support()
@@ -223,6 +193,22 @@ impl Render for DocumentHeader {
                             }),
                         ),
                     )
+                    .child(self.writing_mode_control(
+                        "toggle-focus-mode",
+                        "Focus mode",
+                        IconName::Eye,
+                        CommandId::ToggleFocusMode,
+                        writing_modes.focus,
+                        cx,
+                    ))
+                    .child(self.writing_mode_control(
+                        "toggle-typewriter-mode",
+                        "Typewriter mode",
+                        IconName::Type,
+                        CommandId::ToggleTypewriterMode,
+                        writing_modes.typewriter,
+                        cx,
+                    ))
                     .child(self.inspector_control(cx))
                     .child(
                         Button::new("document-more")
@@ -232,51 +218,7 @@ impl Render for DocumentHeader {
                             .tooltip("Document actions")
                             .accessibility_label("Document actions")
                             .dropdown_menu(move |menu, _, _| {
-                                let command_item =
-                                    |label: &'static str, command: CommandId, checked: bool| {
-                                        let owner = workspace_owner.clone();
-                                        PopupMenuItem::new(label).checked(checked).on_click(
-                                            move |_, _, cx| {
-                                                let _ = owner.update(cx, |_, cx| {
-                                                    cx.emit(WorkspaceCommandRequested(command));
-                                                });
-                                            },
-                                        )
-                                    };
-                                let mut menu = menu
-                                    .item(command_item(
-                                        "Focus mode",
-                                        CommandId::ToggleFocusMode,
-                                        writing_modes.focus,
-                                    ))
-                                    .item(command_item(
-                                        "Typewriter mode",
-                                        CommandId::ToggleTypewriterMode,
-                                        writing_modes.typewriter,
-                                    ))
-                                    .separator()
-                                    .item(command_item(
-                                        "Library",
-                                        CommandId::ToggleSidebar,
-                                        library_open,
-                                    ))
-                                    .item(command_item(
-                                        if mode == WorkspaceMode::Build {
-                                            "Terminal"
-                                        } else {
-                                            "Astro preview"
-                                        },
-                                        CommandId::TogglePreview,
-                                        preview_open,
-                                    ));
-                                if mode == WorkspaceMode::Writing {
-                                    menu = menu.item(command_item(
-                                        "Details",
-                                        CommandId::ToggleInspector,
-                                        inspector_open,
-                                    ));
-                                }
-                                menu = menu.separator();
+                                let mut menu = menu;
                                 if let Some(path) = menu_active.clone() {
                                     let owner = menu_owner.clone();
                                     menu =
@@ -312,6 +254,31 @@ impl Render for DocumentHeader {
 }
 
 impl DocumentHeader {
+    fn writing_mode_control(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        icon: IconName,
+        command: CommandId,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        Button::new(id)
+            .small()
+            .ghost()
+            .icon(icon)
+            .selected(active)
+            .tooltip(if active {
+                format!("Turn off {label}")
+            } else {
+                format!("Turn on {label}")
+            })
+            .accessibility_label(label)
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(WorkspaceCommandRequested(command));
+            }))
+    }
+
     fn library_control(&self, cx: &mut Context<Self>) -> Button {
         Button::new("toggle-library")
             .small()

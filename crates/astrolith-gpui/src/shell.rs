@@ -431,8 +431,7 @@ impl Shell {
             navigator.set_view(project.clone().into(), cx)
         });
         let frontmatter = cx.new(FrontmatterForm::new);
-        let header =
-            cx.new(|cx| DocumentHeader::new(project.clone(), mode, layout.preview_visible, cx));
+        let header = cx.new(|cx| DocumentHeader::new(project.clone(), cx));
         document.update(cx, |document, cx| {
             document.set_header(header.clone().into(), cx)
         });
@@ -1894,9 +1893,6 @@ impl Shell {
             }
             false => dock.remove_dock(DockPlacement::Bottom, window, cx),
         });
-        self.document_header.update(cx, |header, cx| {
-            header.set_workspace(self.mode, visible, cx)
-        });
         // The Astro preview is a dock capability, not a reading-mode flag:
         // showing it is what arms Open-on-Enter and the embedded split.
         let astro_visible = visible && self.mode != WorkspaceMode::Build;
@@ -3022,6 +3018,7 @@ impl Shell {
             }
             dialog
                 .title("Preferences")
+                .centered()
                 .w(dialog_width)
                 .h(dialog_height)
                 .max_h(dialog_height)
@@ -4846,9 +4843,22 @@ mod tests {
             assert!(window.find("document-panel").visible());
             assert!(window.find("document-header").visible());
             assert!(window.try_find("toggle-inspector").is_some());
+            let save = window.find("save-document").bounds();
+            let focus = window.find("toggle-focus-mode").bounds();
+            let typewriter = window.find("toggle-typewriter-mode").bounds();
+            let formatter = window.find("toggle-inspector").bounds();
+            assert!(save.right() < focus.origin.x);
+            assert!(focus.right() < typewriter.origin.x);
+            assert!(typewriter.right() < formatter.origin.x);
             assert!(window.try_find("rendered-preview-panel").is_none());
+            window.click("toggle-focus-mode", cx);
+            window.click("toggle-typewriter-mode", cx);
         })
         .unwrap();
+        assert!(project.read_with(cx, |project, _cx| {
+            let modes = project.writing_modes();
+            modes.focus && modes.typewriter
+        }));
 
         // Preview: the rendered body replaces the editor, and the frontmatter
         // inspector is unavailable outside Writing.
@@ -7802,9 +7812,16 @@ mod tests {
             let viewport = window.viewport_size();
             let sheet = window.find("surface").bounds();
             let aspect_ratio = f32::from(sheet.size.width) / f32::from(sheet.size.height);
+            let center_x = sheet.origin.x + sheet.size.width / 2.;
+            let center_y = sheet.origin.y + sheet.size.height / 2.;
             assert!(
                 (1.5..1.9).contains(&aspect_ratio),
                 "preferences sheet should use a 16:10 landscape layout: {sheet:?}"
+            );
+            assert!(
+                (center_x - viewport.width / 2.).abs() < px(1.)
+                    && (center_y - viewport.height / 2.).abs() < px(1.),
+                "preferences sheet should be centered: {sheet:?} in {viewport:?}"
             );
             for id in ["preferences-apply", "preferences-cancel"] {
                 let bounds = window.find(id).bounds();
