@@ -76,6 +76,13 @@ pub(crate) fn system_ui_font(cx: &App) -> SharedString {
         .clone()
 }
 
+pub(crate) fn system_mono_font(cx: &App) -> SharedString {
+    static RESOLVED: OnceLock<SharedString> = OnceLock::new();
+    RESOLVED
+        .get_or_init(|| cx.theme().mono_font_family.clone())
+        .clone()
+}
+
 /// The face for interface headings.
 ///
 /// An explicit interface family is used everywhere, including these headings,
@@ -112,9 +119,14 @@ fn family_available_in(installed: &[String], family: &str) -> bool {
 ///
 /// Enumerating fonts can take a hundred milliseconds on macOS and the system
 /// font set does not change while the application runs.
-fn installed_font_names(cx: &App) -> &'static [String] {
+pub(crate) fn installed_font_names(cx: &App) -> &'static [String] {
     static NAMES: OnceLock<Vec<String>> = OnceLock::new();
-    NAMES.get_or_init(|| cx.text_system().all_font_names())
+    NAMES.get_or_init(|| {
+        let mut names = cx.text_system().all_font_names();
+        names.sort_unstable_by_key(|family| family.to_lowercase());
+        names.dedup();
+        names
+    })
 }
 
 /// The first installed candidate, or the system UI face when none is present.

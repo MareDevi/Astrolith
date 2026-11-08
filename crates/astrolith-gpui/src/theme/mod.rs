@@ -7,7 +7,7 @@ mod typography;
 pub(crate) use metrics::METRICS;
 pub(crate) use typography::{
     PROSE_INSET, PROSE_TOP, configured_prose_font, default_prose_page_width_percent, display_font,
-    font_family_available, preferred_ui_font, prose_font, system_ui_font,
+    font_family_available, installed_font_names, preferred_ui_font, prose_font, system_ui_font,
 };
 
 use astrolith_core::preferences::GlobalPreferencesV2;
@@ -99,6 +99,19 @@ pub fn apply(settings: &GlobalPreferencesV2, appearance: WindowAppearance, cx: &
         requested_font.to_owned().into()
     };
     let ui_font_size = gpui_kit::px(settings.ui_font_size.clamp(8., 28.));
+    let system_mono_font = typography::system_mono_font(cx);
+    let requested_mono = settings.build_font_family.trim();
+    let mono_font = if requested_mono.is_empty() {
+        system_mono_font.clone()
+    } else if typography::font_family_available(cx, requested_mono) {
+        requested_mono.to_owned().into()
+    } else {
+        tracing::warn!(
+            family = requested_mono,
+            "Build font is not installed; using the system monospace font"
+        );
+        system_mono_font
+    };
     let kit_mode = match mode {
         ThemeMode::Dark => gpui_kit::component::ThemeMode::Dark,
         ThemeMode::Light | ThemeMode::System => gpui_kit::component::ThemeMode::Light,
@@ -224,7 +237,8 @@ pub fn apply(settings: &GlobalPreferencesV2, appearance: WindowAppearance, cx: &
         // popovers and dialogs use the larger surface tier (14 px).
         theme.font_family = ui_font;
         theme.font_size = ui_font_size;
-        theme.mono_font_size = gpui_kit::px(METRICS.type_scale.mono);
+        theme.mono_font_family = mono_font;
+        theme.mono_font_size = gpui_kit::px(settings.build_font_size.clamp(1., 30.));
         theme.radius = gpui_kit::px(METRICS.radius.control);
         theme.radius_lg = gpui_kit::px(METRICS.radius.surface);
         theme.shadow = true;

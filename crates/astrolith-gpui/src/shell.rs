@@ -280,6 +280,10 @@ pub(crate) struct Shell {
     inspector_open: bool,
     inspector_focus: FocusHandle,
     inspector_return_focus: Option<WeakFocusHandle>,
+    /// Writing's library is a transient left-side sheet over the document.
+    library_open: bool,
+    library_focus: FocusHandle,
+    library_return_focus: Option<WeakFocusHandle>,
     preview: Entity<PreviewPanel>,
     /// Rendered Markdown/MDX reading pane shown in Preview mode.
     rendered: Entity<RenderedDocument>,
@@ -499,7 +503,7 @@ impl Shell {
                 window,
                 cx,
             );
-            if !layout.sidebar_visible {
+            if !layout.sidebar_visible || mode == WorkspaceMode::Writing {
                 area.toggle_dock(DockPlacement::Left, window, cx);
             }
             // Dock sizes are measured logical pixels, not application spacing.
@@ -782,6 +786,13 @@ impl Shell {
             inspector_open: false,
             inspector_focus: cx.focus_handle(),
             inspector_return_focus: None,
+            library_open: mode == WorkspaceMode::Writing && layout.sidebar_visible,
+            library_focus: cx.focus_handle(),
+            library_return_focus: if mode == WorkspaceMode::Writing && layout.sidebar_visible {
+                window.focused(cx).map(|focus| focus.downgrade())
+            } else {
+                None
+            },
             preview,
             rendered,
             rendered_panel,
@@ -1086,7 +1097,7 @@ impl Shell {
 
     /// Open one collection through its generated registry command.
     fn open_collection(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.dock.read(cx).is_dock_open(DockPlacement::Left) {
+        if !self.read_dock_layout(cx).sidebar_visible {
             self.toggle_panel(PanelKind::Sidebar, window, cx);
         }
         self.project
@@ -1559,7 +1570,11 @@ impl Shell {
         let current = self.active_layout(self.mode);
         let dock = self.dock.read(cx);
         LayoutState {
-            sidebar_visible: dock.is_dock_open(DockPlacement::Left),
+            sidebar_visible: if self.mode == WorkspaceMode::Writing {
+                self.library_open
+            } else {
+                dock.is_dock_open(DockPlacement::Left)
+            },
             preview_visible: dock.is_dock_open(DockPlacement::Bottom),
             sidebar_width: dock
                 .dock_size(DockPlacement::Left)
@@ -1807,8 +1822,12 @@ impl Shell {
     ) {
         layout.clamp(f32::from(window.viewport_size().width));
         self.applying_layout = true;
+        if self.mode == WorkspaceMode::Writing {
+            self.library_open = layout.sidebar_visible;
+        }
         self.dock.update(cx, |dock, cx| {
-            if dock.is_dock_open(DockPlacement::Left) != layout.sidebar_visible {
+            let sidebar_visible = layout.sidebar_visible && self.mode != WorkspaceMode::Writing;
+            if dock.is_dock_open(DockPlacement::Left) != sidebar_visible {
                 dock.toggle_dock(DockPlacement::Left, window, cx);
             }
             dock.set_dock_size(DockPlacement::Left, px(layout.sidebar_width), window, cx);
@@ -2140,6 +2159,10 @@ impl Shell {
             cx.notify();
             return;
         }
+        if self.mode == WorkspaceMode::Writing {
+            self.set_library_open(!self.library_open, window, cx);
+            return;
+        }
         let placement = match kind {
             PanelKind::Sidebar => DockPlacement::Left,
             PanelKind::Inspector | PanelKind::Preview => unreachable!("handled above"),
@@ -2147,6 +2170,29 @@ impl Shell {
         self.dock
             .update(cx, |area, cx| area.toggle_dock(placement, window, cx));
         // LayoutChanged also captures native collapse/resize controls.
+        cx.notify();
+    }
+
+    fn set_library_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.library_open == open {
+            return;
+        }
+        if open {
+            if window.has_active_sheet(cx) || window.has_active_dialog(cx) {
+                return;
+            }
+            self.library_return_focus = window.focused(cx).map(|focus| focus.downgrade());
+            self.library_focus.focus(window, cx);
+        } else if let Some(focus) = self
+            .library_return_focus
+            .take()
+            .and_then(|focus| focus.upgrade())
+        {
+            focus.focus(window, cx);
+        }
+        self.library_open = open;
+        self.menus_dirty = true;
+        self.capture_layout(cx);
         cx.notify();
     }
 
@@ -2256,6 +2302,68 @@ impl Shell {
             sheet
         };
         Some(deferred(sheet).into_any_element())
+    }
+
+    fn render_library(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        if self.mode != WorkspaceMode::Writing {
+            return None;
+        }
+        let motion = cx.theme().motion_tokens();
+        let transition = Transition::new(motion.duration_normal).easing(motion.easing_move.clone());
+        let presence = Presence::new("writing-library-motion", self.library_open)
+            .transition(transition)
+            .sample(window, cx);
+        if !self.library_open && presence.progress <= 0. {
+            return None;
+        }
+        let inset = window.rem_size();
+        let width = px(self.active_layout(self.mode).sidebar_width)
+            .min((window.viewport_size().width - inset * 2.).max(px(0.)))
+            .min(px(400.));
+        let left = inset - (width + inset) * (1. - presence.progress);
+        let owner = cx.weak_entity();
+        let surface = div()
+            .id("writing-library-surface")
+            .test_support()
+            .absolute()
+            .left(left)
+            .top(rems(4.5))
+            .bottom(inset)
+            .w(width)
+            .occlude()
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .shadow_xl()
+            .track_focus(&self.library_focus)
+            .key_context("WritingLibrary")
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::base::actions::Cancel, window, cx| {
+                    this.set_library_open(false, window, cx);
+                }),
+            )
+            .child(self.navigator.clone())
+            .child(
+                div().absolute().top_2().right_2().child(
+                    Button::new("close-writing-library")
+                        .small()
+                        .ghost()
+                        .icon(IconName::X)
+                        .tooltip("Close library")
+                        .accessibility_label("Close library")
+                        .on_click(move |_, window, cx| {
+                            let _ = owner
+                                .update(cx, |this, cx| this.set_library_open(false, window, cx));
+                        }),
+                ),
+            );
+        Some(surface.into_any_element())
     }
 }
 
@@ -2453,7 +2561,7 @@ impl Shell {
                 });
             }
             CommandId::OpenProject => {
-                if !self.dock.read(cx).is_dock_open(DockPlacement::Left) {
+                if !self.read_dock_layout(cx).sidebar_visible {
                     // Revealing the navigator is a transient UI action for the
                     // project about to open: its layout event must never reach
                     // the outgoing project's or the global scope.
@@ -3489,10 +3597,21 @@ impl Render for Shell {
         // the family scans the installed set, so it is cached until one of the
         // inputs changes.
         let ui_family = cx.theme().font_family.clone();
-        let style_changed = self.prose_style.as_ref().is_none_or(|(inputs, _)| {
-            !inputs.matches(
+        let (font_family, font_size) = if self.mode == WorkspaceMode::Preview {
+            (
+                &self.settings.preview_font_family,
+                self.settings.preview_font_size,
+            )
+        } else {
+            (
                 &self.settings.prose_font_family,
                 self.settings.editor_font_size,
+            )
+        };
+        let style_changed = self.prose_style.as_ref().is_none_or(|(inputs, _)| {
+            !inputs.matches(
+                font_family,
+                font_size,
                 self.settings.editor_line_height,
                 self.settings.page_width_percent,
                 &ui_family,
@@ -3504,15 +3623,15 @@ impl Render for Shell {
                 self.prose_style_resolutions += 1;
             }
             let style = crate::editor::writing_modes::ProseStyle::new(
-                theme::configured_prose_font(cx, &self.settings.prose_font_family),
-                self.settings.editor_font_size,
+                theme::configured_prose_font(cx, font_family),
+                font_size,
                 self.settings.editor_line_height,
                 self.settings.page_width_percent,
             );
             self.prose_style = Some((
                 ProseStyleInputs {
-                    family: self.settings.prose_font_family.clone(),
-                    font_size: self.settings.editor_font_size,
+                    family: font_family.clone(),
+                    font_size,
                     line_height: self.settings.editor_line_height,
                     page_width: self.settings.page_width_percent,
                     ui_family,
@@ -3624,6 +3743,7 @@ impl Render for Shell {
                 cx.listener(|this, _: &commands::ModSlash, window, cx| this.mod_slash(window, cx)),
             )
             .size_full()
+            .relative()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(if chrome_hidden {
@@ -3820,6 +3940,7 @@ impl Render for Shell {
                 shell.child(self.build_tab_strip(cx))
             })
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
+            .children(self.render_library(window, cx))
             .children(self.render_inspector(window, cx))
             .when(show_file_status, |shell| {
                 shell.child(
@@ -4574,7 +4695,7 @@ mod tests {
         })
         .unwrap();
         assert!(view.read_with(cx, |view, cx| {
-            view.dock.read(cx).is_dock_open(DockPlacement::Left)
+            view.library_open && !view.dock.read(cx).is_dock_open(DockPlacement::Left)
         }));
         cx.simulate_path_prompt_response(|_| None);
         cx.run_until_parked();
@@ -5397,18 +5518,21 @@ mod tests {
                 initial
             })
             .unwrap();
-        // GPUI delivers emitted DockEvent effects after the window update returns.
         cx.update_window(handle.into(), |_, window, cx| {
             assert!(!view.read(cx).settings.layouts.writing.sidebar_visible);
             window.render_frame(cx);
-            assert!(window.find("document-panel").bounds().size.width > initial.size.width);
+            assert_eq!(window.find("document-panel").bounds(), initial);
             view.update(cx, |view, cx| {
                 view.execute(CommandId::ToggleSidebar, window, cx)
             });
         })
         .unwrap();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
+            assert!(view.read(cx).library_open);
+            assert!(window.find("writing-library-surface").visible());
             assert_eq!(window.find("document-panel").bounds(), initial);
             view.update(cx, |view, cx| {
                 view.execute(CommandId::TogglePreview, window, cx)
@@ -5591,8 +5715,10 @@ mod tests {
     #[gpui_kit::test]
     fn splitter_drag_updates_geometry_without_repainting_the_shell(cx: &mut TestAppContext) {
         use std::rc::Rc;
-        let mut settings = GlobalPreferencesV2::default();
-        settings.layouts.writing.sidebar_visible = true;
+        let settings = GlobalPreferencesV2 {
+            default_mode: WorkspaceMode::Build,
+            ..GlobalPreferencesV2::default()
+        };
         let (handle, view) = mount(cx, settings);
         let notifications = Rc::new(std::cell::Cell::new(0usize));
         let count = notifications.clone();
@@ -5608,7 +5734,7 @@ mod tests {
         .unwrap();
         cx.update(|cx| {
             assert!(
-                view.read(cx).settings.layouts.writing.sidebar_width > 250.,
+                view.read(cx).settings.layouts.build.sidebar_width > 250.,
                 "the drag must still be captured"
             );
             assert_eq!(
@@ -5632,8 +5758,9 @@ mod tests {
     #[gpui_kit::test]
     fn native_drag_is_captured_and_preferences_restore_in_a_new_window(cx: &mut TestAppContext) {
         let settings = GlobalPreferencesV2 {
+            default_mode: WorkspaceMode::Build,
             layouts: ModeLayouts {
-                writing: LayoutState {
+                build: LayoutState {
                     ..LayoutState::default()
                 },
                 ..ModeLayouts::default()
@@ -5648,7 +5775,7 @@ mod tests {
         })
         .unwrap();
         let settings = cx.update(|cx| {
-            assert!(view.read(cx).settings.layouts.writing.sidebar_width > 250.);
+            assert!(view.read(cx).settings.layouts.build.sidebar_width > 250.);
             view.read(cx).settings.clone()
         });
         let (restored, _) = mount(cx, settings);
@@ -5669,8 +5796,9 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let settings = GlobalPreferencesV2 {
+            default_mode: WorkspaceMode::Build,
             layouts: ModeLayouts {
-                writing: LayoutState {
+                build: LayoutState {
                     ..LayoutState::default()
                 },
                 ..ModeLayouts::default()
@@ -5696,12 +5824,12 @@ mod tests {
             let document = window.find("document-panel").bounds();
             assert!(document.size.width >= px(280.));
             assert!(document.size.height >= px(150.));
-            for id in ["navigator-panel", "preview-panel"] {
+            for id in ["navigator-panel", "terminal-panel"] {
                 let bounds = window.find(id).bounds();
                 assert!(bounds.left() >= px(0.) && bounds.right() <= px(800.));
                 assert!(bounds.top() >= px(0.) && bounds.bottom() <= px(600.));
             }
-            assert!(view.read(cx).settings.layouts.writing.sidebar_width <= 240.);
+            assert!(view.read(cx).settings.layouts.build.sidebar_width <= 240.);
         })
         .unwrap();
     }
@@ -5711,6 +5839,7 @@ mod tests {
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
             let settings = GlobalPreferencesV2 {
                 theme: mode,
+                default_mode: WorkspaceMode::Build,
                 layouts: ModeLayouts {
                     writing: LayoutState {
                         ..LayoutState::default()
@@ -5724,12 +5853,17 @@ mod tests {
             cx.update_window(handle.into(), |_, window, cx| {
                 window.render_frame(cx);
                 assert!(window.find("title-bar").visible());
-                assert!(window.find("document-header").visible());
                 for id in ["navigator-panel", "document-panel"] {
                     let bounds = window.find(id).bounds();
                     assert!(bounds.size.width > px(50.) && bounds.size.height > px(100.));
-                    assert!(bounds.left() >= px(0.) && bounds.right() <= px(800.));
-                    assert!(bounds.top() >= px(0.) && bounds.bottom() <= px(600.));
+                    assert!(
+                        bounds.left() >= px(0.) && bounds.right() <= px(800.),
+                        "{id} bounds: {bounds:?}"
+                    );
+                    assert!(
+                        bounds.top() >= px(0.) && bounds.bottom() <= px(600.),
+                        "{id} bounds: {bounds:?}"
+                    );
                 }
             })
             .unwrap();
@@ -5775,7 +5909,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let mut settings = GlobalPreferencesV2::default();
-        settings.layouts.writing.sidebar_visible = true;
+        settings.layouts.writing.sidebar_visible = false;
         let (handle, view) = mount(cx, settings);
         cx.update_window(handle.into(), |_, window, cx| {
             let editor = cx.new(|cx| {
@@ -5799,6 +5933,10 @@ mod tests {
         .unwrap();
         cx.update_window(handle.into(), |_, window, cx| {
             use gpui_kit::{Focusable, component::WindowExt};
+            assert!(view.read(cx).settings.layouts.writing.sidebar_visible);
+            view.update(cx, |view, cx| {
+                view.execute(CommandId::ToggleSidebar, window, cx)
+            });
             assert!(!view.read(cx).settings.layouts.writing.sidebar_visible);
             window.press(
                 crate::commands::CommandId::OpenPalette.shortcut().unwrap(),
@@ -6003,9 +6141,9 @@ mod tests {
         view.read_with(cx, |shell, cx| {
             assert_eq!(shell.active_layout(WorkspaceMode::Writing), saved);
             let dock = shell.dock.read(cx);
-            assert!(dock.is_dock_open(DockPlacement::Left));
+            assert!(shell.library_open);
+            assert!(!dock.is_dock_open(DockPlacement::Left));
             assert!(dock.is_dock_open(DockPlacement::Bottom));
-            assert_eq!(dock.dock_size(DockPlacement::Left), Some(px(200.)));
             assert_eq!(dock.dock_size(DockPlacement::Bottom), Some(px(220.)));
             assert_eq!(
                 shell.settings.layouts.writing,
@@ -6015,7 +6153,10 @@ mod tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            assert_eq!(window.find("navigator-panel").bounds().size.width, px(200.));
+            assert_eq!(
+                window.find("writing-library-surface").bounds().size.width,
+                px(200.)
+            );
             assert!(
                 window
                     .try_find("frontmatter-inspector-surface")
@@ -6098,7 +6239,7 @@ mod tests {
         .await;
         view.read_with(cx, |shell, cx| {
             assert_eq!(shell.active_layout(WorkspaceMode::Writing), first_layout);
-            assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
+            assert!(!shell.read_dock_layout(cx).sidebar_visible);
         });
 
         open_project(cx, handle, &view, second.path().to_path_buf());
@@ -6111,7 +6252,7 @@ mod tests {
         .await;
         view.read_with(cx, |shell, cx| {
             assert_eq!(shell.active_layout(WorkspaceMode::Writing), second_layout);
-            assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Left));
+            assert!(shell.read_dock_layout(cx).sidebar_visible);
             assert!(shell.dock.read(cx).is_dock_open(DockPlacement::Bottom));
             assert_eq!(
                 shell.dock.read(cx).dock_size(DockPlacement::Bottom),
@@ -6129,7 +6270,7 @@ mod tests {
         .await;
         view.read_with(cx, |shell, cx| {
             assert_eq!(shell.active_layout(WorkspaceMode::Writing), first_layout);
-            assert!(!shell.dock.read(cx).is_dock_open(DockPlacement::Left));
+            assert!(!shell.read_dock_layout(cx).sidebar_visible);
         });
     }
 
@@ -6200,7 +6341,8 @@ mod tests {
         let preferences_root = workspace.path().join("preferences");
         let global_path = preferences_root.join("global.json");
         let (store, mut settings, _) = PreferencesStore::load(global_path.clone());
-        settings.layouts.writing.sidebar_visible = true;
+        settings.default_mode = WorkspaceMode::Build;
+        settings.layouts.build.sidebar_visible = true;
         store.save_global(1, &settings).unwrap();
         let project = project_fixture("width-site");
         let (handle, view) = mount(cx, settings);
@@ -6216,8 +6358,8 @@ mod tests {
         .await;
         view.read_with(cx, |shell, _| {
             assert_eq!(
-                shell.active_layout(WorkspaceMode::Writing),
-                shell.settings.layouts.writing,
+                shell.active_layout(WorkspaceMode::Build),
+                shell.settings.layouts.build,
                 "a project without a saved layout inherits the global layout"
             );
             assert!(
@@ -6227,7 +6369,7 @@ mod tests {
                     .unwrap()
                     .preferences
                     .layout_overrides
-                    .writing
+                    .build
                     .is_none()
             );
         });
@@ -6250,7 +6392,7 @@ mod tests {
             std::fs::read(path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| value["layout_overrides"]["writing"]["sidebar_width"].as_f64())
+                .and_then(|value| value["layout_overrides"]["build"]["sidebar_width"].as_f64())
                 .is_some_and(|width| width > 250.)
         })
         .await;
@@ -6266,13 +6408,13 @@ mod tests {
         });
         let project_preferences = project_file(&preferences_root, &id);
         assert_eq!(
-            project_preferences["layout_overrides"]["writing"]["sidebar_visible"], true,
+            project_preferences["layout_overrides"]["build"]["sidebar_visible"], true,
             "the project file must record the captured layout"
         );
         let (_, global, warning) = PreferencesStore::load(global_path);
         assert!(warning.is_none());
         assert_eq!(
-            global.layouts.writing.sidebar_width, 224.,
+            global.layouts.build.sidebar_width, 224.,
             "a project width must never be written to the global file"
         );
     }
@@ -6299,14 +6441,15 @@ mod tests {
         let first = project_fixture("first-scope-site");
         let second = project_fixture("second-scope-site");
         let (store, mut settings, _) = PreferencesStore::load(global_path.clone());
-        settings.layouts.writing = global_layout.clone();
+        settings.default_mode = WorkspaceMode::Build;
+        settings.layouts.build = global_layout.clone();
         store.save_global(1, &settings).unwrap();
         let second_id = {
             let layout = second_layout.clone();
             seed_project(&store, second.path(), |preferences| {
                 preferences
                     .layout_overrides
-                    .set(WorkspaceMode::Writing, Some(layout));
+                    .set(WorkspaceMode::Build, Some(layout));
             })
         };
         let (store, settings, _) = PreferencesStore::load(global_path.clone());
@@ -6332,7 +6475,7 @@ mod tests {
             std::fs::read(&written)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| value["layout_overrides"]["writing"]["sidebar_width"].as_f64())
+                .and_then(|value| value["layout_overrides"]["build"]["sidebar_width"].as_f64())
                 .is_some_and(|width| width > 250.)
         })
         .await;
@@ -6341,13 +6484,13 @@ mod tests {
         // and its file are untouched.
         view.read_with(cx, |shell, _| {
             assert_eq!(
-                shell.settings.layouts.writing, global_layout,
+                shell.settings.layouts.build, global_layout,
                 "a project layout must never reach the global preference"
             );
-            assert!(shell.active_layout(WorkspaceMode::Writing).sidebar_width > 250.);
+            assert!(shell.active_layout(WorkspaceMode::Build).sidebar_width > 250.);
         });
         let (_, global, _) = PreferencesStore::load(global_path.clone());
-        assert_eq!(global.layouts.writing, global_layout);
+        assert_eq!(global.layouts.build, global_layout);
 
         // The next project restores only its own file, on the same global.
         open_project(cx, handle, &view, second.path().to_path_buf());
@@ -6357,15 +6500,15 @@ mod tests {
                 shell.project_scope.as_ref().unwrap().preferences.project_id,
                 second_id
             );
-            assert_eq!(shell.active_layout(WorkspaceMode::Writing), second_layout);
-            assert_eq!(shell.settings.layouts.writing, global_layout);
+            assert_eq!(shell.active_layout(WorkspaceMode::Build), second_layout);
+            assert_eq!(shell.settings.layouts.build, global_layout);
             assert_eq!(
                 shell.dock.read(cx).dock_size(DockPlacement::Left),
                 Some(px(190.))
             );
         });
         let (_, global, _) = PreferencesStore::load(global_path);
-        assert_eq!(global.layouts.writing, global_layout);
+        assert_eq!(global.layouts.build, global_layout);
     }
 
     #[gpui_kit::test]
@@ -6498,7 +6641,8 @@ mod tests {
         let first = project_fixture("pending-first");
         let second = project_fixture("pending-second");
         let (store, mut settings, _) = PreferencesStore::load(global_path);
-        settings.layouts.writing.sidebar_visible = true;
+        settings.default_mode = WorkspaceMode::Build;
+        settings.layouts.build.sidebar_visible = true;
         let (handle, view) = mount(cx, settings);
         view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
         let first_root = std::fs::canonicalize(first.path()).unwrap();
@@ -6556,7 +6700,7 @@ mod tests {
             std::fs::read(&path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| value["layout_overrides"]["writing"]["sidebar_width"].as_f64())
+                .and_then(|value| value["layout_overrides"]["build"]["sidebar_width"].as_f64())
                 .is_some_and(|width| width > 250.)
         })
         .await;
@@ -6659,15 +6803,16 @@ mod tests {
         cx.executor().allow_parking();
         let workspace = tempfile::tempdir().unwrap();
         let global_path = workspace.path().join("preferences/global.json");
-        let (store, mut settings, _) = PreferencesStore::load(global_path.clone());
-        settings.layouts.writing.sidebar_visible = true;
+        let (store, settings, _) = PreferencesStore::load(global_path.clone());
         let (handle, view) = mount(cx, settings);
         view.update(cx, |shell, _| shell.store = Some(Arc::new(store)));
 
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            let start = window.find("resize-handle-left").bounds().center();
-            window.drag(start, point(start.x + px(36.), start.y), cx);
+            view.update(cx, |shell, cx| {
+                shell.execute(CommandId::ToggleSidebar, window, cx)
+            });
+            assert!(view.read(cx).library_open);
         })
         .unwrap();
         cx.run_until_parked();
@@ -6676,16 +6821,31 @@ mod tests {
             let persisted = std::fs::read(&global_path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| value["layouts"]["writing"]["sidebar_width"].as_f64());
-            shell.settings.layouts.writing.sidebar_width > 250.
-                && persisted.is_some_and(|w| w > 250.)
+                .and_then(|value| value["layouts"]["writing"]["sidebar_visible"].as_bool());
+            shell.settings.layouts.writing.sidebar_visible && persisted == Some(true)
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| {
+                shell.execute(CommandId::ToggleSidebar, window, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.condition(&view, |shell, _| {
+            let persisted = std::fs::read(&global_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| value["layouts"]["writing"]["sidebar_visible"].as_bool());
+            !shell.settings.layouts.writing.sidebar_visible && persisted == Some(false)
         })
         .await;
         let (_, global, warning) = PreferencesStore::load(global_path);
         assert!(warning.is_none());
         assert!(
-            global.layouts.writing.sidebar_width > 250.,
-            "without a project the live layout keeps persisting globally"
+            !global.layouts.writing.sidebar_visible,
+            "without a project the library visibility keeps persisting globally"
         );
         assert!(!workspace.path().join("preferences/projects").exists());
     }
@@ -7512,7 +7672,7 @@ mod tests {
         cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
             .unwrap();
         assert!(view.read_with(cx, |shell, cx| {
-            shell.dock.read(cx).is_dock_open(DockPlacement::Left)
+            shell.library_open && !shell.dock.read(cx).is_dock_open(DockPlacement::Left)
         }));
 
         open_preferences_sheet(cx, handle, &view);
@@ -7755,6 +7915,10 @@ mod tests {
                 sheet.set_text_for_tests(FieldId::FontSize, "22", window, cx);
                 sheet.set_text_for_tests(FieldId::UiFontFamily, &interface_font, window, cx);
                 sheet.set_text_for_tests(FieldId::UiFontSize, "16", window, cx);
+                sheet.set_text_for_tests(FieldId::BuildFontFamily, &interface_font, window, cx);
+                sheet.set_text_for_tests(FieldId::BuildFontSize, "18", window, cx);
+                sheet.set_text_for_tests(FieldId::PreviewFontFamily, &interface_font, window, cx);
+                sheet.set_text_for_tests(FieldId::PreviewFontSize, "20", window, cx);
                 sheet.set_text_for_tests(FieldId::ProjectContent, "src/entries", window, cx);
             });
             window.render_frame(cx);
@@ -7768,6 +7932,10 @@ mod tests {
             shell.settings.editor_font_size == 22.
                 && shell.settings.ui_font_size == 16.
                 && shell.settings.ui_font_family == interface_font
+                && shell.settings.build_font_family == interface_font
+                && shell.settings.build_font_size == 18.
+                && shell.settings.preview_font_family == interface_font
+                && shell.settings.preview_font_size == 20.
         })
         .await;
         let written = global_path.clone();
@@ -7784,6 +7952,10 @@ mod tests {
         assert_eq!(global["editor_font_size"], 22.0);
         assert_eq!(global["ui_font_size"], 16.0);
         assert_eq!(global["ui_font_family"], interface_font);
+        assert_eq!(global["build_font_family"], interface_font);
+        assert_eq!(global["build_font_size"], 18.0);
+        assert_eq!(global["preview_font_family"], interface_font);
+        assert_eq!(global["preview_font_size"], 20.0);
         let project = project_file(&preferences_root, &id);
         assert_eq!(project["content_directory"], "src/entries");
 

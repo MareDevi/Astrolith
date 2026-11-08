@@ -101,7 +101,9 @@ impl ListDelegate for FileList {
                         .min_w_0()
                         .w_full()
                         .pl(rems(0.25 + row.depth as f32 * 0.75))
-                        .when(active, |row| row.bg(cx.theme().list_active).rounded_sm())
+                        .rounded_md()
+                        .hover(|row| row.bg(cx.theme().list_hover))
+                        .when(active, |row| row.bg(cx.theme().list_active))
                         .child(
                             div()
                                 .w(px(14.))

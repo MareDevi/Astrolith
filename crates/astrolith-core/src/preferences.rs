@@ -653,6 +653,14 @@ pub struct GlobalPreferencesV2 {
     pub prose_font_family: String,
     /// Document font size in logical pixels.
     pub editor_font_size: f32,
+    /// Build source editor family; empty keeps the platform monospace family.
+    pub build_font_family: String,
+    /// Build source editor font size in logical pixels.
+    pub build_font_size: f32,
+    /// Preview document family; empty uses the preferred sans family.
+    pub preview_font_family: String,
+    /// Preview document font size in logical pixels.
+    pub preview_font_size: f32,
     /// Document line height as a multiple of the font size.
     pub editor_line_height: f32,
     /// Page width as a percentage of the editor pane.
@@ -688,6 +696,10 @@ impl Default for GlobalPreferencesV2 {
             ui_font_size: 18.,
             prose_font_family: String::new(),
             editor_font_size: 16.,
+            build_font_family: String::new(),
+            build_font_size: 14.,
+            preview_font_family: String::new(),
+            preview_font_size: 16.,
             editor_line_height: 2.,
             page_width_percent: 64.,
             focus_mode: false,
@@ -842,6 +854,14 @@ pub struct ResolvedPreferences {
     pub prose_font_family: String,
     /// Document font size.
     pub editor_font_size: f32,
+    /// Build source editor family; empty keeps the platform monospace family.
+    pub build_font_family: String,
+    /// Build source editor font size.
+    pub build_font_size: f32,
+    /// Preview document family; empty uses the preferred sans family.
+    pub preview_font_family: String,
+    /// Preview document font size.
+    pub preview_font_size: f32,
     /// Document line height as a multiple of the font size.
     pub editor_line_height: f32,
     /// Page width as a percentage of the editor pane.
@@ -904,6 +924,10 @@ pub fn resolve(
         ui_font_size: global.ui_font_size,
         prose_font_family: global.prose_font_family.clone(),
         editor_font_size: global.editor_font_size,
+        build_font_family: global.build_font_family.clone(),
+        build_font_size: global.build_font_size,
+        preview_font_family: global.preview_font_family.clone(),
+        preview_font_size: global.preview_font_size,
         editor_line_height: global.editor_line_height,
         page_width_percent: global.page_width_percent,
         focus_mode: global.focus_mode,

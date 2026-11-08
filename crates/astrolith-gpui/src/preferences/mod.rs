@@ -197,6 +197,10 @@ pub(crate) enum FieldId {
     UiFontSize,
     ProseFontFamily,
     FontSize,
+    BuildFontFamily,
+    BuildFontSize,
+    PreviewFontFamily,
+    PreviewFontSize,
     LineHeight,
     PageWidth,
     ProjectContent,
@@ -234,6 +238,10 @@ struct Inputs {
     ui_font_size: Entity<InputState>,
     prose_font_family: Entity<InputState>,
     font_size: Entity<InputState>,
+    build_font_family: Entity<InputState>,
+    build_font_size: Entity<InputState>,
+    preview_font_family: Entity<InputState>,
+    preview_font_size: Entity<InputState>,
     line_height: Entity<InputState>,
     page_width_percent: Entity<InputState>,
     project_content: Entity<InputState>,
@@ -338,6 +346,10 @@ impl PreferencesSheet {
                 ui_font_size: input!(format_number(GlobalPreferencesV2::default().ui_font_size)),
                 prose_font_family: input!("Inter / system sans"),
                 font_size: input!("16"),
+                build_font_family: input!("System monospace font"),
+                build_font_size: input!("14"),
+                preview_font_family: input!("Inter / system sans"),
+                preview_font_size: input!("16"),
                 line_height: input!("2"),
                 page_width_percent: input!("64"),
                 project_content: input!("Inherit the Astro content directory"),
@@ -427,6 +439,30 @@ impl PreferencesSheet {
         self.set_text(
             FieldId::FontSize,
             &format_number(global.editor_font_size),
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::BuildFontFamily,
+            &global.build_font_family,
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::BuildFontSize,
+            &format_number(global.build_font_size),
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::PreviewFontFamily,
+            &global.preview_font_family,
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::PreviewFontSize,
+            &format_number(global.preview_font_size),
             window,
             cx,
         );
@@ -550,6 +586,12 @@ impl PreferencesSheet {
             .ok()
             .filter(|size| size.is_finite() && (1.0..=30.0).contains(size))
             .unwrap_or(global.editor_font_size);
+        global.build_font_family = self.text(FieldId::BuildFontFamily, cx).trim().to_owned();
+        global.build_font_size = font_size_value(&self.text(FieldId::BuildFontSize, cx))
+            .unwrap_or(global.build_font_size);
+        global.preview_font_family = self.text(FieldId::PreviewFontFamily, cx).trim().to_owned();
+        global.preview_font_size = font_size_value(&self.text(FieldId::PreviewFontSize, cx))
+            .unwrap_or(global.preview_font_size);
         global.editor_line_height = self
             .text(FieldId::LineHeight, cx)
             .trim()
@@ -636,6 +678,10 @@ impl PreferencesSheet {
                 window,
                 cx,
             ),
+            FieldId::BuildFontFamily => self.set_text(field, "", window, cx),
+            FieldId::BuildFontSize => self.set_text(field, "14", window, cx),
+            FieldId::PreviewFontFamily => self.set_text(field, "", window, cx),
+            FieldId::PreviewFontSize => self.set_text(field, "16", window, cx),
             FieldId::LineHeight => self.set_text(
                 field,
                 &format_number(GlobalPreferencesV2::default().editor_line_height),
@@ -910,6 +956,10 @@ impl PreferencesSheet {
             FieldId::UiFontSize => self.inputs.ui_font_size.read(cx).value(),
             FieldId::ProseFontFamily => self.inputs.prose_font_family.read(cx).value(),
             FieldId::FontSize => self.inputs.font_size.read(cx).value(),
+            FieldId::BuildFontFamily => self.inputs.build_font_family.read(cx).value(),
+            FieldId::BuildFontSize => self.inputs.build_font_size.read(cx).value(),
+            FieldId::PreviewFontFamily => self.inputs.preview_font_family.read(cx).value(),
+            FieldId::PreviewFontSize => self.inputs.preview_font_size.read(cx).value(),
             FieldId::LineHeight => self.inputs.line_height.read(cx).value(),
             FieldId::PageWidth => self.inputs.page_width_percent.read(cx).value(),
             FieldId::ProjectContent => self.inputs.project_content.read(cx).value(),
@@ -971,6 +1021,22 @@ impl PreferencesSheet {
             FieldId::FontSize => self
                 .inputs
                 .font_size
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::BuildFontFamily => self
+                .inputs
+                .build_font_family
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::BuildFontSize => self
+                .inputs
+                .build_font_size
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::PreviewFontFamily => self
+                .inputs
+                .preview_font_family
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::PreviewFontSize => self
+                .inputs
+                .preview_font_size
                 .update(cx, |input, cx| input.set_value(value, window, cx)),
             FieldId::LineHeight => self
                 .inputs
@@ -1120,8 +1186,28 @@ impl PreferencesSheet {
                 ),
             );
         }
+        for (field, label) in [
+            (FieldId::BuildFontFamily, "Build"),
+            (FieldId::PreviewFontFamily, "Preview"),
+        ] {
+            let family = self.text(field, cx);
+            if !theme::font_family_available(cx, &family) {
+                insert(
+                    field,
+                    format!(
+                        "“{}” is not an installed font family for {label}.",
+                        family.trim()
+                    ),
+                );
+            }
+        }
         if let Err(message) = font_size_value(&self.text(FieldId::FontSize, cx)) {
             insert(FieldId::FontSize, message);
+        }
+        for field in [FieldId::BuildFontSize, FieldId::PreviewFontSize] {
+            if let Err(message) = font_size_value(&self.text(field, cx)) {
+                insert(field, message);
+            }
         }
         if let Err(message) = line_height_value(&self.text(FieldId::LineHeight, cx)) {
             insert(FieldId::LineHeight, message);
@@ -1251,6 +1337,22 @@ impl PreferencesSheet {
             }
             FieldId::FontSize => {
                 gpui_kit::component::input::Input::new(&self.inputs.font_size).into_any_element()
+            }
+            FieldId::BuildFontFamily => {
+                gpui_kit::component::input::Input::new(&self.inputs.build_font_family)
+                    .into_any_element()
+            }
+            FieldId::BuildFontSize => {
+                gpui_kit::component::input::Input::new(&self.inputs.build_font_size)
+                    .into_any_element()
+            }
+            FieldId::PreviewFontFamily => {
+                gpui_kit::component::input::Input::new(&self.inputs.preview_font_family)
+                    .into_any_element()
+            }
+            FieldId::PreviewFontSize => {
+                gpui_kit::component::input::Input::new(&self.inputs.preview_font_size)
+                    .into_any_element()
             }
             FieldId::LineHeight => {
                 gpui_kit::component::input::Input::new(&self.inputs.line_height).into_any_element()

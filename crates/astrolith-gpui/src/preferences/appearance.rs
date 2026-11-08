@@ -56,11 +56,19 @@ impl PreferencesSheet {
                 FieldExtras {
                     field: Some(FieldId::UiFontFamily),
                     hint: Some("An installed font family. Empty uses the system UI font."),
-                    trailing: Some(self.reset_button(
-                        FieldId::UiFontFamily,
-                        "preferences-reset-ui-font-family",
-                        cx,
-                    )),
+                    trailing: Some(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.font_picker(FieldId::UiFontFamily, "ui-font-picker", cx))
+                            .child(self.reset_button(
+                                FieldId::UiFontFamily,
+                                "preferences-reset-ui-font-family",
+                                cx,
+                            ))
+                            .into_any_element(),
+                    ),
                 },
                 cx,
             ),
@@ -88,11 +96,19 @@ impl PreferencesSheet {
                 FieldExtras {
                     field: Some(FieldId::ProseFontFamily),
                     hint: Some("An installed font family. Empty uses the mock's sans face (Inter or the platform UI font)."),
-                    trailing: Some(self.reset_button(
-                        FieldId::ProseFontFamily,
-                        "preferences-reset-prose-font-family",
-                        cx,
-                    )),
+                    trailing: Some(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.font_picker(FieldId::ProseFontFamily, "prose-font-picker", cx))
+                            .child(self.reset_button(
+                                FieldId::ProseFontFamily,
+                                "preferences-reset-prose-font-family",
+                                cx,
+                            ))
+                            .into_any_element(),
+                    ),
                 },
                 cx,
             ),
@@ -138,6 +154,81 @@ impl PreferencesSheet {
                         "preferences-reset-editor-width",
                         cx,
                     )),
+                },
+                cx,
+            ),
+        ];
+        let build = vec![
+            self.field(
+                "preferences-field-build-font-family",
+                "Build font",
+                self.control(FieldId::BuildFontFamily),
+                FieldExtras {
+                    field: Some(FieldId::BuildFontFamily),
+                    hint: Some(
+                        "Installed family for source code. Empty uses the system monospace font.",
+                    ),
+                    trailing: Some(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.font_picker(
+                                FieldId::BuildFontFamily,
+                                "build-font-picker",
+                                cx,
+                            ))
+                            .child(self.reset_button(
+                                FieldId::BuildFontFamily,
+                                "preferences-reset-build-font-family",
+                                cx,
+                            ))
+                            .into_any_element(),
+                    ),
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-build-font-size",
+                "Build font size",
+                self.control(FieldId::BuildFontSize),
+                FieldExtras {
+                    field: Some(FieldId::BuildFontSize),
+                    hint: Some("1–30 logical pixels; default 14."),
+                    trailing: Some(self.reset_button(
+                        FieldId::BuildFontSize,
+                        "preferences-reset-build-font-size",
+                        cx,
+                    )),
+                },
+                cx,
+            ),
+        ];
+        let preview = vec![
+            self.field(
+                "preferences-field-preview-font-family",
+                "Preview font",
+                self.control(FieldId::PreviewFontFamily),
+                FieldExtras {
+                    field: Some(FieldId::PreviewFontFamily),
+                    hint: Some("Installed family for rendered documents. Empty uses the preferred sans font."),
+                    trailing: Some(
+                        div().h_flex().items_center().gap_1()
+                            .child(self.font_picker(FieldId::PreviewFontFamily, "preview-font-picker", cx))
+                            .child(self.reset_button(FieldId::PreviewFontFamily, "preferences-reset-preview-font-family", cx))
+                            .into_any_element(),
+                    ),
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-preview-font-size",
+                "Preview font size",
+                self.control(FieldId::PreviewFontSize),
+                FieldExtras {
+                    field: Some(FieldId::PreviewFontSize),
+                    hint: Some("1–30 logical pixels; default 16."),
+                    trailing: Some(self.reset_button(FieldId::PreviewFontSize, "preferences-reset-preview-font-size", cx)),
                 },
                 cx,
             ),
@@ -204,6 +295,51 @@ impl PreferencesSheet {
                 },
                 cx,
             ))
+            .child(self.section("Build", Some("Source editor typography."), build, cx))
+            .child(self.section(
+                "Preview",
+                Some("Rendered document typography."),
+                preview,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn font_picker(
+        &self,
+        field: FieldId,
+        id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let families = theme::installed_font_names(cx);
+        let owner = cx.weak_entity();
+        Button::new(id)
+            .small()
+            .outline()
+            .label("Browse")
+            .dropdown_menu(move |menu, _, _| {
+                let default_owner = owner.clone();
+                let mut menu = menu.item(PopupMenuItem::new("System default").on_click(
+                    move |_, window, cx| {
+                        let _ = default_owner.update(cx, |sheet, cx| {
+                            sheet.set_text(field, "", window, cx);
+                            sheet.refresh_errors(cx);
+                        });
+                    },
+                ));
+                for family in families {
+                    let owner = owner.clone();
+                    let family: &'static str = family;
+                    let label = family.to_owned();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        let _ = owner.update(cx, |sheet, cx| {
+                            sheet.set_text(field, family, window, cx);
+                            sheet.refresh_errors(cx);
+                        });
+                    }));
+                }
+                menu
+            })
             .into_any_element()
     }
 }
