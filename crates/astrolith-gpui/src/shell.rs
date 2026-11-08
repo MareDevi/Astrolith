@@ -17,7 +17,7 @@ use crate::{
         component_builder::{ComponentBuilder, ComponentBuilderEvent},
         content_finder::{self, FinderEntry},
         copyedit::CopyeditConfig,
-        header::DocumentHeader,
+        header::{DocumentHeader, LibraryRequested},
         rendered::RenderedDocument,
         session::SessionChanged,
         writer_chrome::{ChromeVisibility, TypedCharacters},
@@ -562,6 +562,13 @@ impl Shell {
             window,
             |this, _, _: &crate::editor::header::InspectorRequested, window, cx| {
                 this.toggle_panel(PanelKind::Inspector, window, cx);
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &header,
+            window,
+            |this, _, _: &LibraryRequested, window, cx| {
+                this.toggle_panel(PanelKind::Sidebar, window, cx);
             },
         ));
         subscriptions.push(cx.subscribe_in(
@@ -1824,6 +1831,9 @@ impl Shell {
         self.applying_layout = true;
         if self.mode == WorkspaceMode::Writing {
             self.library_open = layout.sidebar_visible;
+            self.document_header.update(cx, |header, cx| {
+                header.set_library_open(layout.sidebar_visible, cx)
+            });
         }
         self.dock.update(cx, |dock, cx| {
             let sidebar_visible = layout.sidebar_visible && self.mode != WorkspaceMode::Writing;
@@ -2191,6 +2201,8 @@ impl Shell {
             focus.focus(window, cx);
         }
         self.library_open = open;
+        self.document_header
+            .update(cx, |header, cx| header.set_library_open(open, cx));
         self.menus_dirty = true;
         self.capture_layout(cx);
         cx.notify();
@@ -2325,7 +2337,6 @@ impl Shell {
             .min((window.viewport_size().width - inset * 2.).max(px(0.)))
             .min(px(400.));
         let left = inset - (width + inset) * (1. - presence.progress);
-        let owner = cx.weak_entity();
         let surface = div()
             .id("writing-library-surface")
             .test_support()
@@ -2348,22 +2359,25 @@ impl Shell {
                     this.set_library_open(false, window, cx);
                 }),
             )
-            .child(self.navigator.clone())
-            .child(
-                div().absolute().top_2().right_2().child(
-                    Button::new("close-writing-library")
-                        .small()
-                        .ghost()
-                        .icon(IconName::X)
-                        .tooltip("Close library")
-                        .accessibility_label("Close library")
-                        .on_click(move |_, window, cx| {
-                            let _ = owner
-                                .update(cx, |this, cx| this.set_library_open(false, window, cx));
-                        }),
-                ),
+            .child(self.navigator.clone());
+        let mut layer = div().absolute().inset_0();
+        if self.library_open {
+            let owner = cx.weak_entity();
+            layer = layer.child(
+                div()
+                    .id("writing-library-dismiss")
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(rems(4.5))
+                    .bottom(inset)
+                    .on_mouse_down(gpui_kit::MouseButton::Left, move |_, window, cx| {
+                        let _ =
+                            owner.update(cx, |this, cx| this.set_library_open(false, window, cx));
+                    }),
             );
-        Some(surface.into_any_element())
+        }
+        Some(layer.child(surface).into_any_element())
     }
 }
 

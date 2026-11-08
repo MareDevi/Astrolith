@@ -58,7 +58,7 @@ use astrolith_workspace::{
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IndexPath, Sizable, StyledExt, WindowExt,
+    ActiveTheme, Disableable, Icon, IndexPath, Selectable, Sizable, StyledExt, WindowExt,
     button::{Button, ButtonVariants},
     input::{Input, InputState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
@@ -643,7 +643,7 @@ impl ListDelegate for EntryList {
             ListItem::new(row.id.clone())
                 .min_h(rems(3.25))
                 .selected(selected)
-                .when(active, |item| item.bg(cx.theme().selection).rounded_md())
+                .when(selected, |item| item.bg(cx.theme().selection).rounded_md())
                 .accessibility_label(row.search.clone())
                 .child(row_content),
         )
@@ -3907,7 +3907,6 @@ impl Render for ProjectWorkspace {
             if trail.is_empty() {
                 row = row.child(
                     div()
-                        .font_family(crate::theme::display_font(cx))
                         .text_base()
                         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .truncate()
@@ -3953,7 +3952,6 @@ impl Render for ProjectWorkspace {
                             };
                             row = row.child(
                                 div()
-                                    .font_family(crate::theme::display_font(cx))
                                     .text_base()
                                     .font_weight(weight)
                                     .truncate()
@@ -4232,6 +4230,9 @@ impl Render for ProjectWorkspace {
                                         .w_full()
                                         .h(px(56.))
                                         .justify_start()
+                                        .selected(
+                                            selected_collection.as_deref() == Some(name.as_str()),
+                                        )
                                         .child(
                                             div()
                                                 .h_flex()
@@ -4386,6 +4387,7 @@ impl Render for ProjectWorkspace {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .p_2()
                     .child(List::new(&self.list).search_placeholder("Filter by file or title")),
             );
         }

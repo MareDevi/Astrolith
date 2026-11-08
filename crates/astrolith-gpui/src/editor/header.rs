@@ -23,10 +23,12 @@ use gpui_kit::{
 };
 
 pub(crate) struct InspectorRequested;
+pub(crate) struct LibraryRequested;
 
 pub(crate) struct DocumentHeader {
     project: Entity<ProjectWorkspace>,
     inspector_open: bool,
+    library_open: bool,
     _subscription: Subscription,
 }
 
@@ -36,6 +38,7 @@ impl DocumentHeader {
         Self {
             project,
             inspector_open: false,
+            library_open: false,
             _subscription: subscription,
         }
     }
@@ -48,9 +51,18 @@ impl DocumentHeader {
         self.inspector_open = open;
         cx.notify();
     }
+
+    pub(crate) fn set_library_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.library_open == open {
+            return;
+        }
+        self.library_open = open;
+        cx.notify();
+    }
 }
 
 impl EventEmitter<InspectorRequested> for DocumentHeader {}
+impl EventEmitter<LibraryRequested> for DocumentHeader {}
 
 impl Render for DocumentHeader {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -139,13 +151,15 @@ impl Render for DocumentHeader {
                             .min_w_0()
                             .child(crate::ui::document_title(title, cx))
                             .when_some(collection.clone(), |row, collection| {
-                                row.child(crate::ui::v_divider(cx)).child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .truncate()
-                                        .child(collection),
-                                )
+                                row.child(crate::ui::v_divider(cx))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .truncate()
+                                            .child(collection),
+                                    )
+                                    .child(self.library_control(cx))
                             }),
                     )
                     .child(div().flex_1())
@@ -221,6 +235,17 @@ impl Render for DocumentHeader {
 }
 
 impl DocumentHeader {
+    fn library_control(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("toggle-library")
+            .small()
+            .ghost()
+            .icon(IconName::PanelLeft)
+            .tooltip("Toggle library")
+            .accessibility_label("Toggle library")
+            .selected(self.library_open)
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryRequested)))
+    }
+
     fn inspector_control(&self, cx: &mut Context<Self>) -> Button {
         let available = self.project.read(cx).active_frontmatter_key().is_some();
         Button::new("toggle-inspector")
