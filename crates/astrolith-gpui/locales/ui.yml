@@ -1,0 +1,19 @@
+_version: 2
+app:
+  language:
+    en: Language
+    zh-CN: 界面语言
+    ja: 言語
+  choose_language:
+    en: Choose the interface language.
+    zh-CN: 选择应用界面语言。
+    ja: アプリの表示言語を選択します。
+gpui_component:
+  Select:
+    placeholder:
+      zh-CN: 请选择
+      ja: 選択してください
+  DatePicker:
+    placeholder:
+      zh-CN: 选择日期
+      ja: 日付を選択

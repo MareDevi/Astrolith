@@ -392,6 +392,7 @@ dependencies = [
  "lb-wry",
  "lsp-types",
  "ring",
+ "rust-i18n",
  "serde",
  "serde_json",
  "tempfile",

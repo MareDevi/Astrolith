@@ -637,6 +637,8 @@ pub struct GlobalPreferencesV2 {
     pub version: u32,
     /// Light, dark or system appearance.
     pub theme: ThemePreference,
+    /// Interface language selected by the user (`en`, `zh-CN` or `ja`).
+    pub language: String,
     /// Mode restored when no project records a last mode.
     pub default_mode: WorkspaceMode,
     /// Global per-mode layout defaults; project overrides win per mode.
@@ -690,6 +692,7 @@ impl Default for GlobalPreferencesV2 {
         Self {
             version: GLOBAL_PREFERENCES_VERSION,
             theme: ThemePreference::System,
+            language: "en".to_owned(),
             default_mode: WorkspaceMode::default(),
             layouts: ModeLayouts::default(),
             window: None,

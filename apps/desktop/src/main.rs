@@ -58,6 +58,7 @@ fn main() {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
+            astrolith_gpui::extend_i18n();
             gpui_kit::init(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {

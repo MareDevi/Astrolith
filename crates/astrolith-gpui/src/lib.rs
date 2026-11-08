@@ -1,4 +1,12 @@
 //! Native application shell and its application-owned preferences.
+rust_i18n::i18n!("locales", fallback = "en");
+
+/// Register application translations with GPUI Kit before component startup.
+pub fn extend_i18n() {
+    use gpui_kit::component as gpui_component;
+    rust_i18n::extend!(gpui_component);
+}
+
 mod commands;
 mod desktop_actions;
 mod drag_drop;

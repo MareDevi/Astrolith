@@ -42,6 +42,14 @@ use gpui_kit::{
 
 use crate::theme;
 
+fn supported_language(language: &str) -> &'static str {
+    match language {
+        "zh-CN" => "zh-CN",
+        "ja" => "ja",
+        _ => "en",
+    }
+}
+
 /// One preferences pane; the set matches the upstream scopes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Pane {
@@ -268,6 +276,7 @@ pub(crate) struct PreferencesSheet {
     context: Option<PreferencesContext>,
     pane: Pane,
     theme: ThemePreference,
+    language: String,
     default_mode: WorkspaceMode,
     layout_resets: LayoutResets,
     global_extension: FileExtension,
@@ -316,6 +325,7 @@ impl PreferencesSheet {
             context: None,
             pane: Pane::Appearance,
             theme: ThemePreference::default(),
+            language: "en".to_owned(),
             default_mode: WorkspaceMode::default(),
             layout_resets: LayoutResets::default(),
             global_extension: FileExtension::default(),
@@ -388,6 +398,7 @@ impl PreferencesSheet {
         let project = context.project.clone();
         let global = context.global.clone();
         self.theme = global.theme;
+        self.language = supported_language(&global.language).to_owned();
         self.default_mode = global.default_mode;
         self.layout_resets = LayoutResets::default();
         self.global_extension = global.default_extension;
@@ -573,6 +584,7 @@ impl PreferencesSheet {
         let context = self.context.as_ref()?;
         let mut global = context.global.clone();
         global.theme = self.theme;
+        global.language = self.language.clone();
         global.default_mode = self.default_mode;
         global.default_extension = self.global_extension;
         global.autosave_delay = self.autosave;
@@ -1466,7 +1478,7 @@ impl PreferencesSheet {
     pub(super) fn field(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<SharedString>,
         control: AnyElement,
         extras: FieldExtras,
         cx: &App,
@@ -1495,7 +1507,7 @@ impl PreferencesSheet {
                             .min_w_0()
                             .text_base()
                             .font_weight(gpui_kit::FontWeight::MEDIUM)
-                            .child(label),
+                            .child(label.into()),
                     )
                     .children(trailing),
             )

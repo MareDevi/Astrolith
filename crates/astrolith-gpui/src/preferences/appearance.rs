@@ -48,7 +48,49 @@ impl PreferencesSheet {
             },
             cx,
         )];
-        let interface = vec![
+        let language_label = match self.language.as_str() {
+            "zh-CN" => "简体中文",
+            "ja" => "日本語",
+            _ => "English",
+        };
+        let selected_language = self.language.clone();
+        let language_weak = weak.clone();
+        let language_picker = Button::new("preferences-language")
+            .outline()
+            .label(language_label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for (label, language) in
+                    [("简体中文", "zh-CN"), ("English", "en"), ("日本語", "ja")]
+                {
+                    let weak = language_weak.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(label)
+                            .checked(language == selected_language)
+                            .on_click(move |_, _, cx| {
+                                let _ = weak.update(cx, |sheet, cx| {
+                                    sheet.language = language.to_owned();
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
+            .into_any_element();
+        let mut interface = vec![self.field(
+            "preferences-field-language",
+            rust_i18n::t!("app.language").to_string(),
+            language_picker,
+            FieldExtras {
+                field: None,
+                hint: Some("Choose the interface language."),
+                trailing: None,
+            },
+            cx,
+        )];
+        interface.extend([
             self.field(
                 "preferences-field-ui-font-family",
                 "Interface font",
@@ -87,7 +129,7 @@ impl PreferencesSheet {
                 },
                 cx,
             ),
-        ];
+        ]);
         let panel = vec![self.field(
             "preferences-field-panel-radius",
             "Panel and component corner radius",

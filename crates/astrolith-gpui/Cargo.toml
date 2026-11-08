@@ -20,6 +20,7 @@ embedded-webview = [
 ]
 
 [dependencies]
+rust-i18n = "=4.2.4"
 tracing.workspace = true
 astrolith-workspace = { path = "../astrolith-workspace" }
 astrolith-core = { path = "../astrolith-core" }

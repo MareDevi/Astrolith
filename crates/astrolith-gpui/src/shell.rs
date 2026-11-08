@@ -155,6 +155,11 @@ pub fn open(cx: &mut App) {
                     )
                 }
             };
+            gpui_kit::component::set_locale(match settings.language.as_str() {
+                "zh-CN" => "zh-CN",
+                "ja" => "ja",
+                _ => "en",
+            });
             commands::install_menus(
                 cx,
                 &settings.copyedit,
@@ -3649,6 +3654,15 @@ impl Shell {
             .clamp(f32::from(window.viewport_size().width));
         global.window = self.settings.window;
         self.settings = global;
+        let language = match self.settings.language.as_str() {
+            "zh-CN" => "zh-CN",
+            "ja" => "ja",
+            _ => "en",
+        };
+        if gpui_kit::component::locale().to_string() != language {
+            gpui_kit::component::set_locale(language);
+            cx.refresh_windows();
+        }
         if let Some(preferences) = edits.project
             && let Some(scope) = self.project_scope.as_mut()
         {
