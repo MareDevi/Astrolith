@@ -3012,8 +3012,10 @@ impl Shell {
         // The sheet scales with the window instead of staying at a small fixed
         // size; the minimum keeps the navigation and form columns readable.
         let viewport = window.viewport_size();
-        let dialog_width = px((f32::from(viewport.width) - 64.).clamp(720., 1040.));
-        let dialog_height = px((f32::from(viewport.height) - 64.).clamp(560., 1040.));
+        let dialog_height = px((f32::from(viewport.height) - 64.).min(920.));
+        let dialog_width = px((f32::from(viewport.width) - 48.)
+            .min(f32::from(dialog_height) * 1.65)
+            .min(1500.));
         window.open_dialog(cx, move |dialog, window, cx| {
             let close = close.clone();
             if initial_focus.replace(false) {
@@ -7798,6 +7800,11 @@ mod tests {
         open_preferences_sheet(cx, handle, &view);
         cx.update_window(handle.into(), |_, window, _cx| {
             let viewport = window.viewport_size();
+            let body = window.find("preferences-field-theme").bounds();
+            assert!(
+                body.size.width > body.size.height,
+                "preferences body should use a landscape layout: {body:?}"
+            );
             for id in ["preferences-apply", "preferences-cancel"] {
                 let bounds = window.find(id).bounds();
                 assert!(
