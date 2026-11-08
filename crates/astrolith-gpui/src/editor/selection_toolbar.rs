@@ -26,7 +26,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, App, Bounds, Entity, FocusHandle, IntoElement,
-    Pixels, SharedString, TestSupportExt, WeakEntity, anchored, div, point, prelude::*, px,
+    MouseButton, Pixels, SharedString, TestSupportExt, WeakEntity, anchored, div, point,
+    prelude::*, px,
 };
 
 use crate::editor::session::DocumentSession;
@@ -162,6 +163,7 @@ fn toolbar_body(
         .id("selection-toolbar")
         .test_support()
         .track_focus(toolbar_focus)
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .h_flex()
         .items_center()
         .gap_1()
