@@ -503,6 +503,8 @@ impl ListDelegate for EntryList {
                 ListItem::new(id)
                     .min_h(rems(3.25))
                     .selected(selected)
+                    .rounded_lg()
+                    .when(selected, |item| item.bg(cx.theme().selection))
                     .accessibility_label(label)
                     .child(
                         div()
@@ -643,7 +645,8 @@ impl ListDelegate for EntryList {
             ListItem::new(row.id.clone())
                 .min_h(rems(3.25))
                 .selected(selected)
-                .when(selected, |item| item.bg(cx.theme().selection).rounded_md())
+                .rounded_lg()
+                .when(selected, |item| item.bg(cx.theme().selection))
                 .accessibility_label(row.search.clone())
                 .child(row_content),
         )
@@ -3903,11 +3906,11 @@ impl Render for ProjectWorkspace {
             }
         }
         let title_row = {
-            let mut row = div().h_flex().items_center().gap_1().min_w_0();
+            let mut row = div().h_flex().items_center().gap_2().min_w_0();
             if trail.is_empty() {
                 row = row.child(
                     div()
-                        .text_base()
+                        .text_sm()
                         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .truncate()
                         .child(SharedString::from("Library")),
@@ -3952,7 +3955,7 @@ impl Render for ProjectWorkspace {
                             };
                             row = row.child(
                                 div()
-                                    .text_base()
+                                    .text_sm()
                                     .font_weight(weight)
                                     .truncate()
                                     .child(SharedString::from(label)),
@@ -3974,41 +3977,11 @@ impl Render for ProjectWorkspace {
                         .h_flex()
                         .items_center()
                         .gap_2()
-                        .px_4()
-                        .pt_4()
+                        .px_3()
+                        .pt_3()
                         .pb_2()
                         .when_some(back, |row, back| row.child(back))
-                        .child(
-                            div().v_flex().min_w_0().gap_0p5().child(title_row).child(
-                                div()
-                                    .h_flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(SharedString::from(if selected_collection.is_some() {
-                                        if filter_active {
-                                            format!("{visible} of {total} entries")
-                                        } else {
-                                            format!("{total} entries")
-                                        }
-                                    } else {
-                                        format!("{} collections", collections.len())
-                                    }))
-                                    .when(filter_active, |row| {
-                                        row.child(
-                                            div()
-                                                .id("filter-indicator")
-                                                .test_support()
-                                                .text_color(cx.theme().foreground)
-                                                .child(SharedString::from(filter_label(
-                                                    drafts_only,
-                                                    &query,
-                                                ))),
-                                        )
-                                    }),
-                            ),
-                        )
+                        .child(div().flex_1().min_w_0().child(title_row))
                         .child(div().flex_1())
                         .child(ui::icon_button(
                             "open-project",
@@ -4145,15 +4118,46 @@ impl Render for ProjectWorkspace {
                             )
                         }),
                 )
-                .when(selected_collection.is_some(), |view| {
-                    view.child(
-                        div()
-                            .h_flex()
-                            .items_center()
-                            .gap_2()
-                            .px_4()
-                            .pb_3()
-                            .child(
+                .child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_2()
+                        .px_4()
+                        .pb_3()
+                        .child(
+                            div()
+                                .h_flex()
+                                .items_center()
+                                .gap_2()
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(if selected_collection.is_some() {
+                                    if filter_active {
+                                        format!("{visible} of {total} entries")
+                                    } else {
+                                        format!("{total} entries")
+                                    }
+                                } else {
+                                    format!("{} collections", collections.len())
+                                }))
+                                .when(filter_active, |row| {
+                                    row.child(
+                                        div()
+                                            .id("filter-indicator")
+                                            .test_support()
+                                            .text_color(cx.theme().foreground)
+                                            .child(SharedString::from(filter_label(
+                                                drafts_only,
+                                                &query,
+                                            ))),
+                                    )
+                                }),
+                        )
+                        .child(div().flex_1())
+                        .when(selected_collection.is_some(), |row| {
+                            row.child(
                                 Button::new("entry-new")
                                     .small()
                                     .icon(IconName::PenLine)
@@ -4164,20 +4168,19 @@ impl Render for ProjectWorkspace {
                                         this.entry_command(CommandId::NewEntry, None, window, cx)
                                     })),
                             )
-                            .child(div().flex_1())
-                            .when(filter_active, |row| {
-                                row.child(
-                                    Button::new("clear-filter")
-                                        .small()
-                                        .ghost()
-                                        .label("Clear filter")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.clear_filter(window, cx)
-                                        })),
-                                )
-                            }),
-                    )
-                }),
+                        })
+                        .when(filter_active, |row| {
+                            row.child(
+                                Button::new("clear-filter")
+                                    .small()
+                                    .ghost()
+                                    .label("Clear filter")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.clear_filter(window, cx)
+                                    })),
+                            )
+                        }),
+                ),
         );
 
         if loading {
@@ -4230,6 +4233,7 @@ impl Render for ProjectWorkspace {
                                         .w_full()
                                         .h(px(56.))
                                         .justify_start()
+                                        .rounded_lg()
                                         .selected(
                                             selected_collection.as_deref() == Some(name.as_str()),
                                         )
