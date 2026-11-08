@@ -17,7 +17,7 @@ use crate::{
         component_builder::{ComponentBuilder, ComponentBuilderEvent},
         content_finder::{self, FinderEntry},
         copyedit::CopyeditConfig,
-        header::{DocumentHeader, LibraryRequested},
+        header::{DocumentHeader, LibraryRequested, WorkspaceCommandRequested},
         rendered::RenderedDocument,
         session::SessionChanged,
         writer_chrome::{ChromeVisibility, TypedCharacters},
@@ -63,7 +63,6 @@ use gpui_kit::component::{
     command::{Command, CommandGroup, CommandItem, CommandState},
     dock::{BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
     kbd::Kbd,
-    menu::{DropdownMenu, PopupMenuItem},
     scroll::ScrollableElement as _,
 };
 use gpui_kit::{
@@ -582,6 +581,13 @@ impl Shell {
             window,
             |this, _, _: &LibraryRequested, window, cx| {
                 this.toggle_panel(PanelKind::Sidebar, window, cx);
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &header,
+            window,
+            |this, _, event: &WorkspaceCommandRequested, window, cx| {
+                this.execute(event.0, window, cx);
             },
         ));
         subscriptions.push(cx.subscribe_in(
@@ -2999,11 +3005,12 @@ impl Shell {
         let view = self.preferences_sheet.clone();
         let close = self.preferences_sheet.downgrade();
         let initial_focus = std::cell::Cell::new(true);
-        // The sheet scales with the window instead of staying at a small fixed
-        // size; the minimum keeps the navigation and form columns readable.
+        // Keep a fixed 16:10 sheet inside the window; the pane body scrolls.
         let viewport = window.viewport_size();
-        let dialog_width = px((f32::from(viewport.width) - 64.).clamp(720., 1040.));
-        let dialog_height = px((f32::from(viewport.height) - 64.).clamp(560., 1040.));
+        let available_width = f32::from(viewport.width) - 48.;
+        let available_height = f32::from(viewport.height) - 64.;
+        let dialog_height = px(available_height.min(available_width * 10. / 16.).min(900.));
+        let dialog_width = px(f32::from(dialog_height) * 16. / 10.);
         window.open_dialog(cx, move |dialog, window, cx| {
             let close = close.clone();
             if initial_focus.replace(false) {
@@ -3011,7 +3018,9 @@ impl Shell {
             }
             dialog
                 .title("Preferences")
+                .centered()
                 .w(dialog_width)
+                .h(dialog_height)
                 .max_h(dialog_height)
                 .on_close(move |_, _, cx| {
                     let _ = close.update(cx, |sheet, cx| sheet.cancel(cx));
@@ -3870,72 +3879,6 @@ impl Render for Shell {
                                                         },
                                                     )),
                                             )
-                                            .child({
-                                                let owner = cx.weak_entity();
-                                                let sidebar = layout.sidebar_visible;
-                                                let preview = layout.preview_visible;
-                                                let inspector = self.inspector_open;
-                                                let modes = self.project.read(cx).writing_modes();
-                                                let writing = self.mode == WorkspaceMode::Writing;
-                                                let build = self.mode == WorkspaceMode::Build;
-                                                Button::new("view-menu")
-                                                    .small()
-                                                    .ghost()
-                                                    .icon(IconName::PanelsTopLeft)
-                                                    .tooltip("Panels")
-                                                    .accessibility_label("Panels and writing modes")
-                                                    .dropdown_menu(move |menu, _, _| {
-                                                        let item = |label: &'static str,
-                                                            kind: CommandId,
-                                                            checked: bool| {
-                                                    let owner = owner.clone();
-                                                    PopupMenuItem::new(label)
-                                                        .checked(checked)
-                                                        .on_click(move |_, window, cx| {
-                                                            let _ = owner.update(
-                                                                cx,
-                                                                |this, cx| {
-                                                                    this.execute(kind, window, cx)
-                                                                },
-                                                            );
-                                                        })
-                                                };
-                                                        let mut menu = menu
-                                                            .item(item(
-                                                                "Focus mode",
-                                                                CommandId::ToggleFocusMode,
-                                                                modes.focus,
-                                                            ))
-                                                            .item(item(
-                                                                "Typewriter mode",
-                                                                CommandId::ToggleTypewriterMode,
-                                                                modes.typewriter,
-                                                            ))
-                                                            .separator()
-                                                            .item(item(
-                                                                "Library",
-                                                                CommandId::ToggleSidebar,
-                                                                sidebar,
-                                                            ))
-                                                            .item(item(
-                                                                if build {
-                                                                    "Terminal"
-                                                                } else {
-                                                                    "Astro preview"
-                                                                },
-                                                                CommandId::TogglePreview,
-                                                                preview,
-                                                            ));
-                                                        if writing {
-                                                            menu = menu.item(item(
-                                                                "Details",
-                                                                CommandId::ToggleInspector,
-                                                                inspector,
-                                                            ));
-                                                        }
-                                                        menu
-                                                    })
-                                            })
                                             .child(
                                                 Button::new("open-preferences")
                                                     .small()
@@ -4900,9 +4843,22 @@ mod tests {
             assert!(window.find("document-panel").visible());
             assert!(window.find("document-header").visible());
             assert!(window.try_find("toggle-inspector").is_some());
+            let save = window.find("save-document").bounds();
+            let focus = window.find("toggle-focus-mode").bounds();
+            let typewriter = window.find("toggle-typewriter-mode").bounds();
+            let formatter = window.find("toggle-inspector").bounds();
+            assert!(save.right() < focus.origin.x);
+            assert!(focus.right() < typewriter.origin.x);
+            assert!(typewriter.right() < formatter.origin.x);
             assert!(window.try_find("rendered-preview-panel").is_none());
+            window.click("toggle-focus-mode", cx);
+            window.click("toggle-typewriter-mode", cx);
         })
         .unwrap();
+        assert!(project.read_with(cx, |project, _cx| {
+            let modes = project.writing_modes();
+            modes.focus && modes.typewriter
+        }));
 
         // Preview: the rendered body replaces the editor, and the frontmatter
         // inspector is unavailable outside Writing.
@@ -7845,10 +7801,6 @@ mod tests {
                 window.find("command-palette").label(),
                 Some(CommandId::OpenPalette.label())
             );
-            assert_eq!(
-                window.find("view-menu").label(),
-                Some("Panels and writing modes")
-            );
         })
         .unwrap();
         assert_eq!(
@@ -7858,6 +7810,19 @@ mod tests {
         open_preferences_sheet(cx, handle, &view);
         cx.update_window(handle.into(), |_, window, _cx| {
             let viewport = window.viewport_size();
+            let sheet = window.find("surface").bounds();
+            let aspect_ratio = f32::from(sheet.size.width) / f32::from(sheet.size.height);
+            let center_x = sheet.origin.x + sheet.size.width / 2.;
+            let center_y = sheet.origin.y + sheet.size.height / 2.;
+            assert!(
+                (1.5..1.9).contains(&aspect_ratio),
+                "preferences sheet should use a 16:10 landscape layout: {sheet:?}"
+            );
+            assert!(
+                (center_x - viewport.width / 2.).abs() < px(1.)
+                    && (center_y - viewport.height / 2.).abs() < px(1.),
+                "preferences sheet should be centered: {sheet:?} in {viewport:?}"
+            );
             for id in ["preferences-apply", "preferences-cancel"] {
                 let bounds = window.find(id).bounds();
                 assert!(

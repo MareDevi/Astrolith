@@ -1,5 +1,10 @@
 [tools]
-rust = { version = "1.99.1", mr_boxington = true, profile = "minimal", components = ["rust-analyzer", "rust-src", "clippy", "rustfmt"] }
+rust = { version = "1.99.1", mr_boxington = true, profile = "minimal", components = [
+  "rust-analyzer",
+  "rust-src",
+  "clippy",
+  "rustfmt",
+] }
 node = "26.12.1"
 bun = "1.4.4"
 
@@ -25,7 +30,15 @@ run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 
 [tasks.check]
 description = "Run the current milestone's automated checks"
-run = [{ task = "doctor" }, { task = "fmt" }, { task = "lint" }, { task = "build" }, { task = "test" }, { task = "test:perf-harness" }, { task = "test:fixtures" }]
+run = [
+  { task = "doctor" },
+  { task = "fmt" },
+  { task = "lint" },
+  { task = "build" },
+  { task = "test" },
+  { task = "test:perf-harness" },
+  { task = "test:fixtures" },
+]
 
 [tasks.ci]
 description = "Run the same checks in continuous integration"

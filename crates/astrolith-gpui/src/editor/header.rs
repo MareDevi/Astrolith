@@ -8,6 +8,7 @@
 //! the writer should see the page, not an editor window. Additional open
 //! documents stay one click away in the overflow menu.
 
+use crate::commands::CommandId;
 use crate::editor::save_coordinator::SaveStatus;
 use crate::project_discovery::ProjectWorkspace;
 use crate::ui;
@@ -24,6 +25,7 @@ use gpui_kit::{
 
 pub(crate) struct InspectorRequested;
 pub(crate) struct LibraryRequested;
+pub(crate) struct WorkspaceCommandRequested(pub(crate) CommandId);
 
 pub(crate) struct DocumentHeader {
     project: Entity<ProjectWorkspace>,
@@ -63,6 +65,7 @@ impl DocumentHeader {
 
 impl EventEmitter<InspectorRequested> for DocumentHeader {}
 impl EventEmitter<LibraryRequested> for DocumentHeader {}
+impl EventEmitter<WorkspaceCommandRequested> for DocumentHeader {}
 
 impl Render for DocumentHeader {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -127,7 +130,7 @@ impl Render for DocumentHeader {
             .map(|tab| (tab.label.clone(), tab.path.clone()))
             .collect();
         let menu_active = active_path.clone();
-
+        let writing_modes = self.project.read(cx).writing_modes();
         div()
             .id("document-header")
             .test_support()
@@ -190,6 +193,22 @@ impl Render for DocumentHeader {
                             }),
                         ),
                     )
+                    .child(self.writing_mode_control(
+                        "toggle-focus-mode",
+                        "Focus mode",
+                        IconName::Eye,
+                        CommandId::ToggleFocusMode,
+                        writing_modes.focus,
+                        cx,
+                    ))
+                    .child(self.writing_mode_control(
+                        "toggle-typewriter-mode",
+                        "Typewriter mode",
+                        IconName::Type,
+                        CommandId::ToggleTypewriterMode,
+                        writing_modes.typewriter,
+                        cx,
+                    ))
                     .child(self.inspector_control(cx))
                     .child(
                         Button::new("document-more")
@@ -235,6 +254,31 @@ impl Render for DocumentHeader {
 }
 
 impl DocumentHeader {
+    fn writing_mode_control(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        icon: IconName,
+        command: CommandId,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        Button::new(id)
+            .small()
+            .ghost()
+            .icon(icon)
+            .selected(active)
+            .tooltip(if active {
+                format!("Turn off {label}")
+            } else {
+                format!("Turn on {label}")
+            })
+            .accessibility_label(label)
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(WorkspaceCommandRequested(command));
+            }))
+    }
+
     fn library_control(&self, cx: &mut Context<Self>) -> Button {
         Button::new("toggle-library")
             .small()

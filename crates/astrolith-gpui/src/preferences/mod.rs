@@ -85,7 +85,7 @@ impl Pane {
     pub(crate) fn description(self) -> &'static str {
         match self {
             Self::Appearance => "Theme, interface type and document typography.",
-            Self::Workspace => "Startup mode, per-mode layouts and writing behaviour.",
+            Self::Workspace => "Startup behavior, panel layouts, saving and file defaults.",
             Self::Preview => "How the live site opens and which browser to use.",
             Self::Project => "Defaults for this project's content workflow.",
             Self::Collections => "Directories, field mappings and style per collection.",
@@ -1555,6 +1555,45 @@ impl Render for PreferencesSheet {
         // directly with the pane list so it cannot appear twice.
         let navigation_width =
             px((190. * (f32::from(cx.theme().font_size) / 14.)).clamp(180., 300.));
+        let mut navigation_items = Vec::new();
+        for pane in Pane::ALL
+            .into_iter()
+            .filter(|pane| pane.available(has_project))
+        {
+            let group = match pane {
+                Pane::Appearance => Some("GENERAL"),
+                Pane::Project => Some("PROJECT"),
+                Pane::Advanced => Some("ADVANCED"),
+                _ => None,
+            };
+            if let Some(group) = group {
+                navigation_items.push(
+                    div()
+                        .px_2()
+                        .pt_3()
+                        .pb_1()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(group)
+                        .into_any_element(),
+                );
+            }
+            let selected = self.pane == pane;
+            navigation_items.push(
+                Button::new(pane.element_id())
+                    .ghost()
+                    .w_full()
+                    .justify_start()
+                    .selected(selected)
+                    .label(pane.label())
+                    .tab_index(0)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_pane(pane, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
         let navigation = div()
             .v_flex()
             .w(navigation_width)
@@ -1564,24 +1603,7 @@ impl Render for PreferencesSheet {
             .pr_3()
             .border_r_1()
             .border_color(cx.theme().border.opacity(0.6))
-            .children(
-                Pane::ALL
-                    .into_iter()
-                    .filter(|pane| pane.available(has_project))
-                    .map(|pane| {
-                        let selected = self.pane == pane;
-                        Button::new(pane.element_id())
-                            .ghost()
-                            .w_full()
-                            .justify_start()
-                            .selected(selected)
-                            .label(pane.label())
-                            .tab_index(0)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_pane(pane, cx);
-                            }))
-                    }),
-            )
+            .children(navigation_items)
             .child(
                 div()
                     .v_flex()
