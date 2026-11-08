@@ -94,6 +94,7 @@ impl Render for DocumentHeader {
                 .bg(cx.theme().background)
                 .border_b_1()
                 .border_color(cx.theme().border.opacity(0.55))
+                .child(self.library_control(cx))
                 .child(
                     div()
                         .text_xs()
