@@ -109,7 +109,7 @@ impl LayoutStyle {
             muted_foreground: theme.muted_foreground,
             link: theme.link,
             code_background: theme.muted,
-            selection: theme.selection,
+            selection: theme.primary.opacity(0.18).blend(theme.background),
             caret: theme.caret,
             border: theme.border,
             background: theme.background,
@@ -2092,7 +2092,7 @@ fn paint_block_rows(
         for quad in quads.iter().filter(|quad| quad.intersects(&row_bounds)) {
             let clipped = quad.intersect(&row_bounds).intersect(visible);
             if clipped.size.width > px(0.) && clipped.size.height > px(0.) {
-                window.paint_quad(fill(clipped, selection_color.opacity(0.35)));
+                window.paint_quad(fill(clipped, selection_color));
             }
         }
         let _ = shaped.paint(
