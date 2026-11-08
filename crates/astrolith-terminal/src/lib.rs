@@ -6,11 +6,10 @@
 
 use std::{
     io::{self, Read, Write},
-    num::NonZeroU16,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -20,6 +19,14 @@ use std::{
 use nix::{
     sys::signal::{Signal, killpg},
     unistd::Pid,
+};
+
+use alacritty_terminal::{
+    event::{Event, EventListener, WindowSize},
+    grid::{Dimensions, Scroll},
+    index::{Column, Line, Point},
+    term::{Config, Term, TermMode, cell::Flags, color::Colors},
+    vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler},
 };
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -40,20 +47,103 @@ const REAP_TIMEOUT: Duration = Duration::from_millis(800);
 /// Upper bound for the reader to drain after the process tree is gone.
 const READER_TIMEOUT: Duration = Duration::from_millis(400);
 
+type SharedWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+
+#[derive(Clone)]
+struct TerminalEventProxy {
+    writer: SharedWriter,
+    revision: Arc<AtomicU64>,
+    title: Arc<Mutex<Option<String>>>,
+    cols: Arc<AtomicU16>,
+    rows: Arc<AtomicU16>,
+}
+
+impl TerminalEventProxy {
+    fn write_reply(&self, text: &str) {
+        let Ok(mut writer) = self.writer.lock() else {
+            return;
+        };
+        if let Some(writer) = writer.as_mut() {
+            let _ = writer.write_all(text.as_bytes());
+            let _ = writer.flush();
+        }
+    }
+}
+
+impl EventListener for TerminalEventProxy {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::PtyWrite(text) => self.write_reply(&text),
+            Event::Title(title) => {
+                if let Ok(mut current) = self.title.lock() {
+                    *current = Some(title);
+                }
+            }
+            Event::ResetTitle => {
+                if let Ok(mut current) = self.title.lock() {
+                    *current = None;
+                }
+            }
+            Event::TextAreaSizeRequest(formatter) => self.write_reply(&formatter(WindowSize {
+                num_lines: self.rows.load(Ordering::Acquire),
+                num_cols: self.cols.load(Ordering::Acquire),
+                cell_width: 0,
+                cell_height: 0,
+            })),
+            Event::ColorRequest(index, formatter) => {
+                self.write_reply(&formatter(xterm_rgb(index as u8)));
+            }
+            Event::Wakeup => {
+                self.revision.fetch_add(1, Ordering::Release);
+            }
+            Event::MouseCursorDirty
+            | Event::ClipboardStore(_, _)
+            | Event::ClipboardLoad(_, _)
+            | Event::CursorBlinkingChange
+            | Event::Bell
+            | Event::Exit
+            | Event::ChildExit(_) => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TerminalGridSize {
+    cols: usize,
+    rows: usize,
+}
+
+impl Dimensions for TerminalGridSize {
+    fn total_lines(&self) -> usize {
+        self.rows
+    }
+
+    fn screen_lines(&self) -> usize {
+        self.rows
+    }
+
+    fn columns(&self) -> usize {
+        self.cols
+    }
+}
+
 /// One terminal session bound to a project root.
 pub struct TerminalSession {
     root: PathBuf,
     /// Master side of the PTY; taken (and closed) before shutdown signals the
     /// child so no new input can reach a dying shell.
     master: Option<Box<dyn MasterPty + Send>>,
-    writer: Option<Box<dyn Write + Send>>,
+    writer: Option<SharedWriter>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
-    screen: Arc<Mutex<vt100::Parser>>,
+    screen: Arc<Mutex<Term<TerminalEventProxy>>>,
+    title: Arc<Mutex<Option<String>>>,
     revision: Arc<AtomicU64>,
     exited: Arc<AtomicBool>,
     exit: Arc<Mutex<Option<ExitInfo>>>,
     rows: u16,
     cols: u16,
+    event_cols: Arc<AtomicU16>,
+    event_rows: Arc<AtomicU16>,
     reader: Option<JoinHandle<()>>,
 }
 
@@ -115,6 +205,7 @@ pub struct TerminalCell {
     dim: bool,
     italic: bool,
     underline: bool,
+    strikethrough: bool,
     inverse: bool,
     wide: bool,
     wide_continuation: bool,
@@ -148,6 +239,10 @@ impl TerminalCell {
     /// Whether the cell is underlined.
     pub fn underline(&self) -> bool {
         self.underline
+    }
+    /// Whether the cell has a strike-through decoration.
+    pub fn strikethrough(&self) -> bool {
+        self.strikethrough
     }
     /// Whether foreground and background are inverted.
     pub fn inverse(&self) -> bool {
@@ -271,15 +366,35 @@ impl TerminalSession {
             .spawn_command(command)
             .map_err(io::Error::other)?;
         let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
-        let writer = pair.master.take_writer().map_err(io::Error::other)?;
-        let screen = Arc::new(Mutex::new(vt100::Parser::new(
-            nonzero(rows),
-            nonzero(cols),
-            SCROLLBACK_CAPACITY,
+        let writer = Arc::new(Mutex::new(Some(
+            pair.master.take_writer().map_err(io::Error::other)?,
         )));
         let revision = Arc::new(AtomicU64::new(0));
         let exited = Arc::new(AtomicBool::new(false));
         let exit = Arc::new(Mutex::new(None));
+        let title = Arc::new(Mutex::new(None));
+        let event_cols = Arc::new(AtomicU16::new(cols));
+        let event_rows = Arc::new(AtomicU16::new(rows));
+        let event_proxy = TerminalEventProxy {
+            writer: writer.clone(),
+            revision: revision.clone(),
+            title: title.clone(),
+            cols: event_cols.clone(),
+            rows: event_rows.clone(),
+        };
+        let grid_size = TerminalGridSize {
+            cols: usize::from(cols),
+            rows: usize::from(rows),
+        };
+        let screen = Arc::new(Mutex::new(Term::new(
+            Config {
+                scrolling_history: SCROLLBACK_CAPACITY,
+                osc52: alacritty_terminal::term::Osc52::Disabled,
+                ..Config::default()
+            },
+            &grid_size,
+            event_proxy,
+        )));
         let reader_screen = screen.clone();
         let reader_revision = revision.clone();
         let reader_exited = exited.clone();
@@ -287,13 +402,15 @@ impl TerminalSession {
             .name("astrolith-terminal-reader".into())
             .spawn(move || {
                 let mut buffer = [0u8; READ_BUFFER];
+                let mut parser = Processor::<StdSyncHandler>::new();
                 loop {
                     match reader.read(&mut buffer) {
                         Ok(0) => break,
                         Ok(read) => {
-                            if let Ok(mut screen) = reader_screen.lock() {
-                                screen.process(&buffer[..read]);
-                            }
+                            let mut screen = reader_screen
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            parser.advance(&mut *screen, &buffer[..read]);
                             reader_revision.fetch_add(1, Ordering::Release);
                         }
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -310,11 +427,14 @@ impl TerminalSession {
             writer: Some(writer),
             child: Arc::new(Mutex::new(child)),
             screen,
+            title,
             revision,
             exited,
             exit,
             rows,
             cols,
+            event_cols,
+            event_rows,
             reader: Some(reader),
         })
     }
@@ -339,83 +459,151 @@ impl TerminalSession {
         self.exited.load(Ordering::Acquire)
     }
 
-    /// Read the terminal screen under a short lock.
-    pub fn with_screen<T>(&self, read: impl FnOnce(&vt100::Screen) -> T) -> T {
-        match self.screen.lock() {
-            Ok(screen) => read(screen.screen()),
-            Err(poisoned) => read(poisoned.into_inner().screen()),
-        }
+    /// Current application title requested by the terminal child.
+    pub fn title(&self) -> Option<String> {
+        self.title.lock().ok().and_then(|title| title.clone())
+    }
+
+    /// Number of retained scrollback rows.
+    pub fn scrollback_len(&self) -> usize {
+        self.screen
+            .lock()
+            .map(|screen| screen.history_size())
+            .unwrap_or(0)
     }
 
     /// Copy the visible grid into backend-neutral renderer data.
     pub fn snapshot(&self) -> TerminalSnapshot {
-        self.with_screen(|screen| {
-            let (rows, cols) = screen.size();
-            let mut cells = Vec::with_capacity(usize::from(rows.get()) * usize::from(cols.get()));
-            for row in 0..rows.get() {
-                for col in 0..cols.get() {
-                    cells.push(screen.cell(row, col).map(|cell| TerminalCell {
-                        contents: cell.contents().to_owned(),
-                        foreground: terminal_color(cell.fgcolor()),
-                        background: terminal_color(cell.bgcolor()),
-                        bold: cell.bold(),
-                        dim: cell.dim(),
-                        italic: cell.italic(),
-                        underline: cell.underline(),
-                        inverse: cell.inverse(),
-                        wide: cell.is_wide(),
-                        wide_continuation: cell.is_wide_continuation(),
-                    }));
-                }
+        let screen = self
+            .screen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let content = screen.renderable_content();
+        let mut cells = vec![None; usize::from(self.rows) * usize::from(self.cols)];
+        let offset = screen.grid().display_offset();
+        for indexed in content.display_iter {
+            let row = indexed.point.line.0 + offset as i32;
+            let col = indexed.point.column.0;
+            if row < 0 || row >= i32::from(self.rows) || col >= usize::from(self.cols) {
+                continue;
             }
-            TerminalSnapshot {
-                cells,
-                cols: cols.get(),
-                rows: rows.get(),
-                cursor: screen.cursor_position(),
-                cursor_hidden: screen.hide_cursor(),
-                live: screen.scrollback() == 0,
+            let cell = indexed.cell;
+            let mut contents = if cell.c == ' ' {
+                String::new()
+            } else {
+                cell.c.to_string()
+            };
+            if let Some(chars) = cell.zerowidth() {
+                contents.extend(chars);
             }
-        })
+            if !contents.is_empty()
+                || cell.flags.intersects(
+                    Flags::BOLD
+                        | Flags::DIM
+                        | Flags::ITALIC
+                        | Flags::ALL_UNDERLINES
+                        | Flags::STRIKEOUT
+                        | Flags::INVERSE,
+                )
+                || cell.bg != Color::Named(NamedColor::Background)
+            {
+                cells[row as usize * usize::from(self.cols) + col] = Some(TerminalCell {
+                    contents,
+                    foreground: terminal_color(cell.fg, content.colors),
+                    background: terminal_color(cell.bg, content.colors),
+                    bold: cell.flags.contains(Flags::BOLD),
+                    dim: cell.flags.contains(Flags::DIM),
+                    italic: cell.flags.contains(Flags::ITALIC),
+                    underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+                    strikethrough: cell.flags.contains(Flags::STRIKEOUT),
+                    inverse: cell.flags.contains(Flags::INVERSE),
+                    wide: cell.flags.contains(Flags::WIDE_CHAR),
+                    wide_continuation: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
+                });
+            }
+        }
+        let point = content.cursor.point;
+        let cursor_row =
+            (point.line.0 + offset as i32).clamp(0, i32::from(self.rows.saturating_sub(1))) as u16;
+        TerminalSnapshot {
+            cells,
+            cols: self.cols,
+            rows: self.rows,
+            cursor: (
+                cursor_row,
+                point.column.0.min(usize::from(self.cols.saturating_sub(1))) as u16,
+            ),
+            cursor_hidden: content.cursor.shape == CursorShape::Hidden,
+            live: offset == 0,
+        }
     }
 
     /// Current screen text, excluding terminal styling.
     pub fn contents(&self) -> String {
-        self.with_screen(vt100::Screen::contents)
+        let snapshot = self.snapshot();
+        (0..snapshot.rows)
+            .map(|row| {
+                (0..snapshot.cols)
+                    .map(|col| snapshot.cell(row, col).map_or(" ", TerminalCell::contents))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Text between two visible grid points, inclusive.
     pub fn contents_between(&self, start: (u16, u16), end: (u16, u16)) -> String {
-        self.with_screen(|screen| screen.contents_between(start.0, start.1, end.0, end.1))
+        let screen = self
+            .screen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let offset = screen.grid().display_offset() as i32;
+        screen.bounds_to_string(
+            Point::new(Line(start.0 as i32 - offset), Column(start.1 as usize)),
+            Point::new(Line(end.0 as i32 - offset), Column(end.1 as usize)),
+        )
     }
 
     /// Whether application cursor key sequences are enabled.
     pub fn application_cursor(&self) -> bool {
-        self.with_screen(vt100::Screen::application_cursor)
+        self.screen
+            .lock()
+            .map(|screen| screen.mode().contains(TermMode::APP_CURSOR))
+            .unwrap_or(false)
     }
 
     /// Whether bracketed paste is enabled.
     pub fn bracketed_paste(&self) -> bool {
-        self.with_screen(vt100::Screen::bracketed_paste)
+        self.screen
+            .lock()
+            .map(|screen| screen.mode().contains(TermMode::BRACKETED_PASTE))
+            .unwrap_or(false)
     }
 
     /// Current mouse reporting mode and wire encoding.
     pub fn mouse_protocol(&self) -> (TerminalMouseMode, TerminalMouseEncoding) {
-        self.with_screen(|screen| {
-            let mode = match screen.mouse_protocol_mode() {
-                vt100::MouseProtocolMode::None => TerminalMouseMode::None,
-                vt100::MouseProtocolMode::Press => TerminalMouseMode::Press,
-                vt100::MouseProtocolMode::PressRelease => TerminalMouseMode::PressRelease,
-                vt100::MouseProtocolMode::ButtonMotion => TerminalMouseMode::ButtonMotion,
-                vt100::MouseProtocolMode::AnyMotion => TerminalMouseMode::AnyMotion,
-            };
-            let encoding = match screen.mouse_protocol_encoding() {
-                vt100::MouseProtocolEncoding::Default => TerminalMouseEncoding::Default,
-                vt100::MouseProtocolEncoding::Utf8 => TerminalMouseEncoding::Utf8,
-                vt100::MouseProtocolEncoding::Sgr => TerminalMouseEncoding::Sgr,
-            };
-            (mode, encoding)
-        })
+        let Ok(screen) = self.screen.lock() else {
+            return (TerminalMouseMode::None, TerminalMouseEncoding::Default);
+        };
+        let mode = if screen.mode().contains(TermMode::MOUSE_MOTION) {
+            TerminalMouseMode::AnyMotion
+        } else if screen.mode().contains(TermMode::MOUSE_DRAG) {
+            TerminalMouseMode::ButtonMotion
+        } else if screen.mode().contains(TermMode::MOUSE_REPORT_CLICK) {
+            TerminalMouseMode::PressRelease
+        } else {
+            TerminalMouseMode::None
+        };
+        let encoding = if screen.mode().contains(TermMode::SGR_MOUSE) {
+            TerminalMouseEncoding::Sgr
+        } else if screen.mode().contains(TermMode::UTF8_MOUSE) {
+            TerminalMouseEncoding::Utf8
+        } else {
+            TerminalMouseEncoding::Default
+        };
+        (mode, encoding)
     }
 
     /// Send bytes to the child.
@@ -426,6 +614,12 @@ impl TerminalSession {
                 "terminal session is shut down",
             ));
         };
+        let mut writer = writer
+            .lock()
+            .map_err(|_| io::Error::other("terminal writer lock poisoned"))?;
+        let writer = writer.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "terminal session is shut down")
+        })?;
         writer.write_all(bytes)?;
         writer.flush()
     }
@@ -444,9 +638,16 @@ impl TerminalSession {
             ));
         };
         master.resize(size(cols, rows)).map_err(io::Error::other)?;
-        if let Ok(mut screen) = self.screen.lock() {
-            screen.set_size(nonzero(rows), nonzero(cols));
-        }
+        let mut screen = self
+            .screen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        screen.resize(TerminalGridSize {
+            cols: usize::from(cols),
+            rows: usize::from(rows),
+        });
+        self.event_cols.store(cols, Ordering::Release);
+        self.event_rows.store(rows, Ordering::Release);
         self.cols = cols;
         self.rows = rows;
         self.revision.fetch_add(1, Ordering::Release);
@@ -458,13 +659,11 @@ impl TerminalSession {
         let Ok(mut screen) = self.screen.lock() else {
             return false;
         };
-        let current = screen.screen().scrollback();
-        let maximum = screen.screen().scrollback_len();
-        let target = (current as i64 + i64::from(delta)).clamp(0, maximum as i64) as usize;
-        if target == current {
+        let current = screen.grid().display_offset();
+        screen.scroll_display(Scroll::Delta(delta));
+        if screen.grid().display_offset() == current {
             return false;
         }
-        screen.screen_mut().set_scrollback(target);
         self.revision.fetch_add(1, Ordering::Release);
         true
     }
@@ -472,8 +671,7 @@ impl TerminalSession {
     /// Clear the visible screen and scrollback without touching the child.
     pub fn clear(&self) {
         if let Ok(mut screen) = self.screen.lock() {
-            screen.process(b"\x1b[2J\x1b[H\x1b[3J");
-            screen.screen_mut().set_scrollback(0);
+            screen.grid_mut().reset::<Color>();
         }
         self.revision.fetch_add(1, Ordering::Release);
     }
@@ -481,7 +679,7 @@ impl TerminalSession {
     /// Jump to the live output.
     pub fn scroll_to_bottom(&self) {
         if let Ok(mut screen) = self.screen.lock() {
-            screen.screen_mut().set_scrollback(0);
+            screen.scroll_display(Scroll::Bottom);
         }
     }
 
@@ -530,7 +728,11 @@ impl TerminalSession {
     pub fn kill(&mut self) {
         // Closing our handles first lets the child notice the terminal went
         // away and keeps new input from reaching a dying shell.
-        self.writer = None;
+        if let Some(writer) = self.writer.take()
+            && let Ok(mut writer) = writer.lock()
+        {
+            *writer = None;
+        }
         self.master = None;
         let child = self.child.clone();
         let fallback_child = child.clone();
@@ -609,22 +811,67 @@ impl TerminalSession {
     }
 }
 
-fn terminal_color(color: vt100::Color) -> TerminalColor {
-    match color {
-        vt100::Color::Default => TerminalColor::Default,
-        vt100::Color::Rgb(red, green, blue) => TerminalColor::Rgb(red, green, blue),
-        vt100::Color::Idx(index) => TerminalColor::Indexed(index),
+fn terminal_color(color: Color, colors: &Colors) -> TerminalColor {
+    let rgb = match color {
+        Color::Spec(rgb) => Some(rgb),
+        Color::Indexed(index) => colors[index as usize],
+        Color::Named(name) => colors[name],
+    };
+    if let Some(Rgb { r, g, b }) = rgb {
+        return TerminalColor::Rgb(r, g, b);
     }
+    match color {
+        Color::Indexed(index) => TerminalColor::Indexed(index),
+        Color::Named(
+            NamedColor::Foreground
+            | NamedColor::Background
+            | NamedColor::Cursor
+            | NamedColor::BrightForeground
+            | NamedColor::DimForeground,
+        ) => TerminalColor::Default,
+        Color::Named(name) => TerminalColor::Indexed(name as u8),
+        Color::Spec(Rgb { r, g, b }) => TerminalColor::Rgb(r, g, b),
+    }
+}
+
+fn xterm_rgb(index: u8) -> Rgb {
+    const BASE: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (205, 0, 0),
+        (0, 205, 0),
+        (205, 205, 0),
+        (0, 0, 238),
+        (205, 0, 205),
+        (0, 205, 205),
+        (229, 229, 229),
+        (127, 127, 127),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (92, 92, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    let (r, g, b) = match index {
+        0..=15 => BASE[index as usize],
+        16..=231 => {
+            let n = index - 16;
+            let f = |v: u8| if v == 0 { 0 } else { 55 + 40 * v };
+            (f(n / 36), f((n / 6) % 6), f(n % 6))
+        }
+        _ => {
+            let v = 8 + 10 * (index - 232);
+            (v, v, v)
+        }
+    };
+    Rgb { r, g, b }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         self.kill();
     }
-}
-
-fn nonzero(value: u16) -> NonZeroU16 {
-    NonZeroU16::new(value.max(2)).expect("clamped terminal dimension")
 }
 
 fn size(cols: u16, rows: u16) -> PtySize {
@@ -659,7 +906,7 @@ mod tests {
     fn wait_for_text(session: &TerminalSession, needle: &str) -> String {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let contents = session.with_screen(|screen| screen.contents());
+            let contents = session.contents();
             if contents.contains(needle) {
                 return contents;
             }
@@ -685,27 +932,18 @@ mod tests {
             &root,
             40,
             8,
-            command("printf '\\033[?1000h\\033[?1006h\\033[31;3mred\\033[0m\\n'; exit 7"),
+            command("printf '\\033]0;Terminal title\\007\\033[?1000h\\033[?1006h\\033[31;3;9mred\\033[0m\\n'; exit 7"),
         )
         .unwrap();
         wait_for_text(&session, "red");
-        let red = session.with_screen(|screen| {
-            let (row, _) = screen.cursor_position();
-            let cell = screen.cell(row.saturating_sub(1), 0).unwrap();
-            (cell.contents().to_owned(), format!("{:?}", cell.fgcolor()))
-        });
-        assert_eq!(red.0, "r");
-        assert!(
-            red.1.contains("Idx(1)") || red.1.contains("Rgb(205"),
-            "ANSI red must survive parsing, got {}",
-            red.1
-        );
         let snapshot = session.snapshot();
         assert_eq!(snapshot.size(), (40, 8));
         let cell = snapshot.cell(0, 0).expect("first output cell");
         assert_eq!(cell.contents(), "r");
         assert!(cell.italic());
+        assert!(cell.strikethrough());
         assert_eq!(cell.foreground(), TerminalColor::Indexed(1));
+        assert_eq!(session.title().as_deref(), Some("Terminal title"));
         assert_eq!(
             session.mouse_protocol(),
             (TerminalMouseMode::PressRelease, TerminalMouseEncoding::Sgr)
@@ -729,13 +967,7 @@ mod tests {
         wait_for_text(&session, "hello");
         session.resize(30, 4).unwrap();
         assert_eq!(session.size(), (30, 4));
-        assert_eq!(
-            session.with_screen(|screen| {
-                let (rows, cols) = screen.size();
-                (cols.get(), rows.get())
-            }),
-            (30, 4)
-        );
+        assert_eq!(session.snapshot().size(), (30, 4));
         session.write(b"\x04").unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let exit = loop {
@@ -746,7 +978,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         };
         assert_eq!(exit.code, Some(3));
-        assert!(session.with_screen(|screen| { screen.scrollback_len() <= SCROLLBACK_CAPACITY }));
+        assert!(session.scrollback_len() <= SCROLLBACK_CAPACITY);
     }
 
     #[test]

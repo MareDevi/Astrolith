@@ -106,6 +106,7 @@ struct RunStyle {
     bold: bool,
     italic: bool,
     underline: bool,
+    strikethrough: bool,
     /// Kept in the key so a wide glyph never shares a run with narrow ones.
     wide: bool,
     /// Selection and cursor cells split runs even if their colours coincide.
@@ -835,6 +836,7 @@ impl TerminalPanel {
                         bold: cell.bold(),
                         italic: cell.italic(),
                         underline: cell.underline(),
+                        strikethrough: cell.strikethrough(),
                         wide,
                         highlight: selected || is_cursor,
                     },
@@ -1129,6 +1131,7 @@ impl Render for TerminalPanel {
                                             })
                                             .when(run.style.italic, |run| run.italic())
                                             .when(run.style.underline, |run| run.underline())
+                                            .when(run.style.strikethrough, |run| run.line_through())
                                             .child(SharedString::from(run.text))
                                     }))
                             })),
@@ -1410,6 +1413,7 @@ mod tests {
             bold: false,
             italic: false,
             underline: false,
+            strikethrough: false,
             wide: false,
             highlight: false,
         }
