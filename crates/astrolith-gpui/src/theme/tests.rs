@@ -134,6 +134,8 @@ fn popular_schemes_keep_text_and_action_contrast_in_both_modes() {
     use astrolith_core::preferences::ColorScheme;
 
     for scheme in [
+        ColorScheme::AstrolithLight,
+        ColorScheme::AstrolithDark,
         ColorScheme::CatppuccinLatte,
         ColorScheme::CatppuccinFrappe,
         ColorScheme::CatppuccinMacchiato,
@@ -175,7 +177,11 @@ fn theme_adapter_projects_complete_semantic_roles_in_both_modes(cx: &mut TestApp
                 ..GlobalPreferences::default()
             };
             apply(&settings, WindowAppearance::Dark, cx);
-            let tokens = palette(mode, settings.color_scheme);
+            let scheme = match mode {
+                ThemeMode::Dark => settings.dark_color_scheme,
+                ThemeMode::Light | ThemeMode::System => settings.light_color_scheme,
+            };
+            let tokens = palette(mode, scheme);
             assert_eq!(cx.theme().background, tokens.background);
             assert_eq!(cx.theme().foreground, tokens.foreground);
             assert_eq!(cx.theme().sidebar, tokens.surface);

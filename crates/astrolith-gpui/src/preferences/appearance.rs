@@ -10,22 +10,60 @@ impl PreferencesSheet {
             ThemePreference::Dark => tr!("preferences.option.dark"),
             ThemePreference::System => tr!("preferences.option.follow_system"),
         };
-        let scheme_label = match self.color_scheme {
-            ColorScheme::CatppuccinLatte => "Catppuccin Latte",
-            ColorScheme::CatppuccinFrappe => "Catppuccin Frappé",
-            ColorScheme::CatppuccinMacchiato => "Catppuccin Macchiato",
-            ColorScheme::CatppuccinMocha => "Catppuccin Mocha",
-            ColorScheme::Nord => "Nord",
-            ColorScheme::NordLight => "Nord Light",
-            ColorScheme::TokyoNight => "Tokyo Night",
-            ColorScheme::TokyoNightStorm => "Tokyo Night Storm",
-            ColorScheme::TokyoNightMoon => "Tokyo Night Moon",
-            ColorScheme::TokyoDay => "Tokyo Day",
-            ColorScheme::GruvboxLight => "Gruvbox Light",
-            ColorScheme::GruvboxDark => "Gruvbox Dark",
+        let schemes = [
+            ("Astrolith Light", ColorScheme::AstrolithLight),
+            ("Astrolith Dark", ColorScheme::AstrolithDark),
+            ("Catppuccin Latte", ColorScheme::CatppuccinLatte),
+            ("Catppuccin Frappé", ColorScheme::CatppuccinFrappe),
+            ("Catppuccin Macchiato", ColorScheme::CatppuccinMacchiato),
+            ("Catppuccin Mocha", ColorScheme::CatppuccinMocha),
+            ("Nord", ColorScheme::Nord),
+            ("Nord Light", ColorScheme::NordLight),
+            ("Tokyo Night", ColorScheme::TokyoNight),
+            ("Tokyo Night Storm", ColorScheme::TokyoNightStorm),
+            ("Tokyo Night Moon", ColorScheme::TokyoNightMoon),
+            ("Tokyo Day", ColorScheme::TokyoDay),
+            ("Gruvbox Light", ColorScheme::GruvboxLight),
+            ("Gruvbox Dark", ColorScheme::GruvboxDark),
+        ];
+        let scheme_picker = |id: &'static str, light: bool, selected: ColorScheme| {
+            let owner = weak.clone();
+            let label = schemes
+                .iter()
+                .find(|(_, value)| *value == selected)
+                .unwrap()
+                .0;
+            Button::new(id)
+                .outline()
+                .label(label)
+                .dropdown_caret(true)
+                .dropdown_menu(move |menu, _, _| {
+                    let mut menu = menu;
+                    for (label, value) in schemes
+                        .into_iter()
+                        .filter(|(_, value)| value.is_dark() == !light)
+                    {
+                        let owner = owner.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(label)
+                                .checked(value == selected)
+                                .on_click(move |_, _, cx| {
+                                    let _ = owner.update(cx, |sheet, cx| {
+                                        if light {
+                                            sheet.light_color_scheme = value;
+                                        } else {
+                                            sheet.dark_color_scheme = value;
+                                        }
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                })
+                .into_any_element()
         };
-
-        let theme_weak = weak.clone();
+        let theme_owner = weak.clone();
         let theme = Button::new("preferences-theme")
             .outline()
             .label(theme_label)
@@ -40,9 +78,9 @@ impl PreferencesSheet {
                     (tr!("preferences.option.light"), ThemePreference::Light),
                     (tr!("preferences.option.dark"), ThemePreference::Dark),
                 ] {
-                    let weak = theme_weak.clone();
+                    let owner = theme_owner.clone();
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
+                        let _ = owner.update(cx, |sheet, cx| {
                             sheet.theme = preference;
                             cx.notify();
                         });
@@ -51,69 +89,49 @@ impl PreferencesSheet {
                 menu
             })
             .into_any_element();
-
-        let appearance = vec![self.field(
-            "preferences-field-theme",
-            tr!("preferences.appearance.theme"),
-            theme,
-            FieldExtras {
-                field: None,
-                hint: Some(tr!("preferences.appearance.theme_hint").into()),
-                trailing: None,
-            },
-            cx,
-        )];
-        let scheme_owner = weak.clone();
-        let selected_scheme = self.color_scheme;
-        let scheme = Button::new("preferences-color-scheme")
-            .outline()
-            .label(scheme_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (label, value) in [
-                    ("Catppuccin Latte", ColorScheme::CatppuccinLatte),
-                    ("Catppuccin Frappé", ColorScheme::CatppuccinFrappe),
-                    ("Catppuccin Macchiato", ColorScheme::CatppuccinMacchiato),
-                    ("Catppuccin Mocha", ColorScheme::CatppuccinMocha),
-                    ("Nord", ColorScheme::Nord),
-                    ("Nord Light", ColorScheme::NordLight),
-                    ("Tokyo Night", ColorScheme::TokyoNight),
-                    ("Tokyo Night Storm", ColorScheme::TokyoNightStorm),
-                    ("Tokyo Night Moon", ColorScheme::TokyoNightMoon),
-                    ("Tokyo Day", ColorScheme::TokyoDay),
-                    ("Gruvbox Light", ColorScheme::GruvboxLight),
-                    ("Gruvbox Dark", ColorScheme::GruvboxDark),
-                ] {
-                    let owner = scheme_owner.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(label)
-                            .checked(value == selected_scheme)
-                            .on_click(move |_, _, cx| {
-                                let _ = owner.update(cx, |sheet, cx| {
-                                    sheet.color_scheme = value;
-                                    cx.notify();
-                                });
-                            }),
-                    );
-                }
-                menu
-            })
-            .into_any_element();
-        let appearance = appearance
-            .into_iter()
-            .chain([self.field(
-                "preferences-field-color-scheme",
-                tr!("preferences.appearance.color_scheme"),
-                scheme,
+        let appearance = vec![
+            self.field(
+                "preferences-field-theme",
+                tr!("preferences.appearance.theme"),
+                theme,
+                FieldExtras {
+                    field: None,
+                    hint: Some(tr!("preferences.appearance.theme_hint").into()),
+                    trailing: None,
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-light-color-scheme",
+                tr!("preferences.appearance.light_color_scheme"),
+                scheme_picker(
+                    "preferences-light-color-scheme",
+                    true,
+                    self.light_color_scheme,
+                ),
+                FieldExtras {
+                    field: None,
+                    hint: None,
+                    trailing: None,
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-dark-color-scheme",
+                tr!("preferences.appearance.dark_color_scheme"),
+                scheme_picker(
+                    "preferences-dark-color-scheme",
+                    false,
+                    self.dark_color_scheme,
+                ),
                 FieldExtras {
                     field: None,
                     hint: Some(tr!("preferences.appearance.color_scheme_hint").into()),
                     trailing: None,
                 },
                 cx,
-            )])
-            .collect();
+            ),
+        ];
         let language_label = match self.language.as_str() {
             "zh-CN" => "简体中文",
             "ja" => "日本語",

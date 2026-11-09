@@ -17,6 +17,7 @@ macro_rules! tr {
     };
 }
 
+mod command_palette;
 mod commands;
 mod desktop_actions;
 mod drag_drop;

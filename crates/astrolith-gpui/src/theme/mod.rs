@@ -113,7 +113,11 @@ pub fn apply(settings: &GlobalPreferences, appearance: WindowAppearance, cx: &mu
         ThemeMode::Light | ThemeMode::System => gpui_kit::component::ThemeMode::Light,
     };
     Theme::change(kit_mode, None, cx);
-    let tokens = palette(mode, settings.color_scheme);
+    let scheme = match mode {
+        ThemeMode::Dark => settings.dark_color_scheme,
+        ThemeMode::Light | ThemeMode::System => settings.light_color_scheme,
+    };
+    let tokens = palette(mode, scheme);
     Theme::update(cx, |theme| {
         let colors = &mut theme.colors;
         colors.background = tokens.background;

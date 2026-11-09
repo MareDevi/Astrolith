@@ -13,6 +13,20 @@ use astrolith_core::preferences::ColorScheme;
 
 pub(super) fn named(scheme: ColorScheme) -> ThemeTokens {
     let (colors, dark) = match scheme {
+        ColorScheme::AstrolithLight => (
+            [
+                "f7f8fa", "252b3a", "ffffff", "dfe3ea", "5267d8", "c33f54", "a76812", "28794e",
+                "3272b8",
+            ],
+            false,
+        ),
+        ColorScheme::AstrolithDark => (
+            [
+                "090909", "e8e8e8", "151515", "292929", "c4c4c4", "cc7777", "bea978", "7fa38b",
+                "8996a1",
+            ],
+            true,
+        ),
         ColorScheme::CatppuccinLatte => (
             [
                 "eff1f5", "4c4f69", "e6e9ef", "ccd0da", "8839ef", "d20f39", "df8e1d", "40a02b",

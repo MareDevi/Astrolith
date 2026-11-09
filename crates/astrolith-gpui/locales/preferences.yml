@@ -212,14 +212,18 @@ preferences:
       en: "Choose light, dark or follow the desktop appearance."
       zh-CN: "选择浅色、深色，或跟随桌面外观。"
       ja: "ライト、ダーク、またはデスクトップの外観に従う設定を選びます。"
-    color_scheme:
-      en: "Colour scheme"
-      zh-CN: "配色方案"
-      ja: "カラースキーム"
+    light_color_scheme:
+      en: "Light colour scheme"
+      zh-CN: "浅色配色方案"
+      ja: "ライトの配色"
+    dark_color_scheme:
+      en: "Dark colour scheme"
+      zh-CN: "深色配色方案"
+      ja: "ダークの配色"
     color_scheme_hint:
-      en: "Choose a named palette shared by every project. Light and dark variants are separate choices."
-      zh-CN: "选择所有项目共用的配色；浅色与深色变体分别列出。"
-      ja: "すべてのプロジェクトで共通する配色を選びます。ライトとダークは別々に選択します。"
+      en: "Choose palettes independently for light and dark appearance."
+      zh-CN: "分别为浅色和深色外观选择配色。"
+      ja: "ライトとダークの配色を個別に選択します。"
     theme_section:
       en: "Theme"
       zh-CN: "主题"

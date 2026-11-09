@@ -11,6 +11,7 @@ use std::{
 mod perf;
 
 use crate::{
+    command_palette::{CommandPalette, PaletteAction, PaletteEntry, PaletteGroups},
     commands::{self, COMMANDS, CollectionItem, CommandAvailability, CommandId},
     drag_drop,
     editor::{
@@ -61,7 +62,7 @@ use gpui_kit::base::{Presence, Sheet, Transition};
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt, TitleBar, WindowExt,
     button::{Button, ButtonVariants},
-    command::{Command, CommandGroup, CommandItem, CommandState},
+    command::{Command, CommandItem, CommandState},
     dock::{BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
     input::{Input, InputState},
     kbd::Kbd,
@@ -218,22 +219,6 @@ fn restored_bounds(geometry: WindowGeometry) -> Option<WindowBounds> {
     })
 }
 
-/// One actionable palette row.
-#[derive(Clone, Debug)]
-enum PaletteAction {
-    Command(CommandId),
-    RecentProject(String),
-    Collection(String),
-}
-
-#[derive(Clone, Debug)]
-struct PaletteEntry {
-    label: SharedString,
-    shortcut: SharedString,
-    icon: IconName,
-    action: PaletteAction,
-}
-
 /// Identity of the document last installed in the reading pane.
 ///
 /// [`RenderedDocument::set_document`] already ignores identical text, but only
@@ -370,7 +355,7 @@ pub(crate) struct Shell {
     terminal_panel: Entity<WorkspacePanel>,
     /// Horizontal position of the Build buffer tabs.
     build_tabs: ScrollHandle,
-    palette: Entity<CommandState>,
+    palette: Entity<CommandPalette>,
     palette_focus: FocusHandle,
     finder: Entity<CommandState>,
     finder_hits: Arc<Mutex<Vec<FinderEntry>>>,
@@ -583,7 +568,7 @@ impl Shell {
                 );
             }
         });
-        let palette = cx.new(|cx| CommandState::new(window, cx));
+        let palette = cx.new(|cx| CommandPalette::new(window, cx));
         let finder = cx.new(|cx| CommandState::new(window, cx));
         let builder = cx.new(|cx| ComponentBuilder::new(window, cx));
         let preferences_sheet = cx.new(|cx| PreferencesSheet::new(window, cx));
@@ -3460,11 +3445,7 @@ impl Shell {
     }
 
     /// Build the grouped palette rows shared by the UI and its tests.
-    fn palette_groups(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<(String, Vec<PaletteEntry>)> {
+    fn palette_groups(&mut self, window: &mut Window, cx: &mut Context<Self>) -> PaletteGroups {
         let copyedit = self.settings.copyedit.clone();
         let availability = self.availability(window, cx);
         let mut groups: Vec<(String, Vec<PaletteEntry>)> = commands::command_group_names()
@@ -3491,6 +3472,7 @@ impl Shell {
                 shortcut,
                 icon: command_icon(command),
                 action: PaletteAction::Command(command),
+                disabled: false,
             };
             let title = commands::command_group(command);
             if let Some((_, entries)) = groups.iter_mut().find(|(name, _)| *name == title) {
@@ -3506,6 +3488,7 @@ impl Shell {
                     shortcut: SharedString::default(),
                     icon: IconName::FolderOpen,
                     action: PaletteAction::RecentProject(entry.id.clone()),
+                    disabled: false,
                 })
                 .collect();
             groups.push((tr!("shell.palette.group.recent"), entries));
@@ -3524,6 +3507,7 @@ impl Shell {
                     shortcut: SharedString::default(),
                     icon: IconName::Folder,
                     action: PaletteAction::Collection(collection.name.clone()),
+                    disabled: false,
                 })
                 .collect();
             groups.push((tr!("shell.palette.group.collections"), entries));
@@ -3536,92 +3520,43 @@ impl Shell {
         if window.has_active_dialog(cx) {
             return;
         }
-        self.palette
-            .update(cx, |state, cx| state.set_query("", window, cx));
-        let palette = self.palette.clone();
-        let owner = cx.weak_entity();
         let groups = self.palette_groups(window, cx);
         let opening = self.opening;
-        window.open_dialog(cx, move |dialog, _, _| {
+        let owner = cx.weak_entity();
+        let palette = self.palette.clone();
+        palette.update(cx, |palette, cx| {
+            palette.set_groups(groups, opening, window, cx);
             let owner = owner.clone();
-            let groups_for_confirm = groups.clone();
-            let mut palette_command = Command::new(&palette)
-                .bordered(false)
-                .placeholder(tr!("shell.palette.search"));
-            for (title, entries) in &groups {
-                let items = entries.iter().map(|entry| {
-                    let entry = entry.clone();
-                    let label = entry.label.clone();
-                    let shortcut = entry.shortcut.clone();
-                    let icon = entry.icon;
-                    CommandItem::new()
-                        .label(label.clone())
-                        .icon(icon)
-                        .child(move |_, cx| {
-                            div()
-                                .h_flex()
-                                .w_full()
-                                .items_center()
-                                .justify_between()
-                                .gap_4()
-                                .child(
-                                    div()
-                                        .h_flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            Icon::new(icon)
-                                                .small()
-                                                .text_color(cx.theme().muted_foreground),
-                                        )
-                                        .child(label.clone()),
-                                )
-                                .when(!shortcut.is_empty(), |row| {
-                                    row.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(shortcut.clone()),
-                                    )
-                                })
-                        })
-                        .disabled(
-                            matches!(entry.action, PaletteAction::Command(CommandId::OpenFile))
-                                && opening,
-                        )
+            palette.set_on_confirm(std::rc::Rc::new(move |action, window, cx| {
+                window.close_dialog(cx);
+                let _ = owner.update(cx, |this, cx| match action {
+                    PaletteAction::Command(command) => this.execute(command, window, cx),
+                    PaletteAction::RecentProject(id) => this.open_recent(&id, window, cx),
+                    PaletteAction::Collection(id) => this.open_collection(&id, window, cx),
                 });
-                palette_command =
-                    palette_command.group(CommandGroup::new().label(title.clone()).items(items));
-            }
-            let palette_command = palette_command
-                .empty(|_, _, cx| {
-                    div()
-                        .p_4()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("shell.palette.empty"))
-                })
-                .on_confirm(move |index, window, cx| {
-                    let Some(entry) = groups_for_confirm
-                        .get(index.section)
-                        .and_then(|(_, entries)| entries.get(index.row))
-                    else {
-                        return;
-                    };
-                    let action = entry.action.clone();
-                    window.close_dialog(cx);
-                    let _ = owner.update(cx, |this, cx| match action {
-                        PaletteAction::Command(command) => this.execute(command, window, cx),
-                        PaletteAction::RecentProject(id) => this.open_recent(&id, window, cx),
-                        PaletteAction::Collection(id) => this.open_collection(&id, window, cx),
-                    });
-                });
+            }));
+        });
+        let palette_view = self.palette.clone();
+        let viewport = window.viewport_size();
+        let available_width = (f32::from(viewport.width) - 48.).max(0.);
+        let available_height = (f32::from(viewport.height) - 64.).max(0.);
+        let dialog_width = px(available_width.min(available_height * 16. / 10.).min(720.));
+        let dialog_height = px(f32::from(dialog_width) * 10. / 16.);
+        let return_focus = window
+            .focused(cx)
+            .unwrap_or_else(|| self.palette_focus.clone());
+        window.open_dialog(cx, move |dialog, _, _| {
+            let return_focus = return_focus.clone();
             dialog
                 .title(tr!("shell.palette.title"))
-                .w_128()
-                .child(palette_command)
+                .w(dialog_width)
+                .h(dialog_height)
+                .max_h(dialog_height)
+                .child(palette_view.clone())
+                .on_close(move |_, window, cx| return_focus.focus(window, cx))
         });
-        self.palette.update(cx, |state, cx| state.focus(window, cx));
+        self.palette
+            .update(cx, |palette, cx| palette.focus(window, cx));
     }
 
     /// Open the single preferences sheet with the current snapshots.
@@ -3871,6 +3806,7 @@ impl Shell {
         let insert_owner = owner.clone();
         let insert_hits = self.finder_hits.clone();
         let insert_palette = self.finder.clone();
+        let radius = cx.theme().radius_lg;
         window.open_dialog(cx, move |dialog, _, _| {
             let rows = hits.lock().map(|hits| hits.clone()).unwrap_or_default();
             let confirm_rows = rows.clone();
@@ -3900,6 +3836,9 @@ impl Shell {
                     .child(
                         Command::new(&palette)
                             .bordered(false)
+                            .rounded(radius)
+                            .w_full()
+                            .min_w_0()
                             .placeholder(tr!("shell.finder.search"))
                             .filterable(false)
                             .on_query(move |query, window, _| {
@@ -3916,8 +3855,10 @@ impl Shell {
                                     .child(move |_, _| {
                                         div()
                                             .h_flex()
-                                            .w_full()
+                                            .flex_1()
+                                            .min_w_0()
                                             .items_center()
+                                            .pr_3()
                                             .gap_2()
                                             .child(title.clone())
                                     })
@@ -8810,7 +8751,10 @@ mod tests {
             let (settings_theme, scheme, resolved) = view.read_with(cx, |shell, cx| {
                 (
                     shell.settings.theme,
-                    shell.settings.color_scheme,
+                    match mode.resolve(cx.window_appearance()) {
+                        ThemeMode::Dark => shell.settings.dark_color_scheme,
+                        ThemeMode::Light | ThemeMode::System => shell.settings.light_color_scheme,
+                    },
                     mode.resolve(cx.window_appearance()),
                 )
             });

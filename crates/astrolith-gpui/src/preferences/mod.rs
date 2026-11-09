@@ -276,7 +276,8 @@ pub(crate) struct PreferencesSheet {
     context: Option<PreferencesContext>,
     pane: Pane,
     theme: ThemePreference,
-    color_scheme: ColorScheme,
+    light_color_scheme: ColorScheme,
+    dark_color_scheme: ColorScheme,
     language: String,
     default_mode: WorkspaceMode,
     layout_resets: LayoutResets,
@@ -326,7 +327,8 @@ impl PreferencesSheet {
             context: None,
             pane: Pane::Appearance,
             theme: ThemePreference::default(),
-            color_scheme: ColorScheme::default(),
+            light_color_scheme: ColorScheme::default(),
+            dark_color_scheme: ColorScheme::AstrolithDark,
             language: "en".to_owned(),
             default_mode: WorkspaceMode::default(),
             layout_resets: LayoutResets::default(),
@@ -402,7 +404,16 @@ impl PreferencesSheet {
         let project = context.project.clone();
         let global = context.global.clone();
         self.theme = global.theme;
-        self.color_scheme = global.color_scheme;
+        self.light_color_scheme = if global.light_color_scheme.is_dark() {
+            ColorScheme::AstrolithLight
+        } else {
+            global.light_color_scheme
+        };
+        self.dark_color_scheme = if global.dark_color_scheme.is_dark() {
+            global.dark_color_scheme
+        } else {
+            ColorScheme::AstrolithDark
+        };
         self.language = supported_language(&global.language).to_owned();
         self.default_mode = global.default_mode;
         self.layout_resets = LayoutResets::default();
@@ -589,7 +600,8 @@ impl PreferencesSheet {
         let context = self.context.as_ref()?;
         let mut global = context.global.clone();
         global.theme = self.theme;
-        global.color_scheme = self.color_scheme;
+        global.light_color_scheme = self.light_color_scheme;
+        global.dark_color_scheme = self.dark_color_scheme;
         global.language = self.language.clone();
         global.default_mode = self.default_mode;
         global.default_extension = self.global_extension;

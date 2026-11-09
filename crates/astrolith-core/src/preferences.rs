@@ -38,8 +38,12 @@ pub enum ThemePreference {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ColorScheme {
-    /// Catppuccin Latte.
+    /// Astrolith Light.
     #[default]
+    AstrolithLight,
+    /// Astrolith Dark.
+    AstrolithDark,
+    /// Catppuccin Latte.
     CatppuccinLatte,
     /// Catppuccin Frappé.
     CatppuccinFrappe,
@@ -63,6 +67,24 @@ pub enum ColorScheme {
     GruvboxLight,
     /// Gruvbox Dark.
     GruvboxDark,
+}
+
+impl ColorScheme {
+    /// Whether this scheme belongs in the dark appearance picker.
+    pub fn is_dark(self) -> bool {
+        matches!(
+            self,
+            Self::AstrolithDark
+                | Self::CatppuccinFrappe
+                | Self::CatppuccinMacchiato
+                | Self::CatppuccinMocha
+                | Self::Nord
+                | Self::TokyoNight
+                | Self::TokyoNightStorm
+                | Self::TokyoNightMoon
+                | Self::GruvboxDark
+        )
+    }
 }
 
 /// Workspace presentation mode.
@@ -631,8 +653,10 @@ pub struct GlobalPreferences {
     pub version: u32,
     /// Light, dark or system appearance.
     pub theme: ThemePreference,
-    /// Named colour palette.
-    pub color_scheme: ColorScheme,
+    /// Palette used for light appearance.
+    pub light_color_scheme: ColorScheme,
+    /// Dark appearance palette.
+    pub dark_color_scheme: ColorScheme,
     /// Interface language selected by the user (`en`, `zh-CN` or `ja`).
     pub language: String,
     /// Mode restored when no project records a last mode.
@@ -688,7 +712,8 @@ impl Default for GlobalPreferences {
         Self {
             version: GLOBAL_PREFERENCES_VERSION,
             theme: ThemePreference::System,
-            color_scheme: ColorScheme::default(),
+            light_color_scheme: ColorScheme::default(),
+            dark_color_scheme: ColorScheme::AstrolithDark,
             language: "en".to_owned(),
             default_mode: WorkspaceMode::default(),
             layouts: ModeLayouts::default(),
