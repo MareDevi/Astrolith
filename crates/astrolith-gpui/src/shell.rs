@@ -82,6 +82,8 @@ struct LatestPreferences {
 }
 type LatestSettings = Arc<Mutex<LatestPreferences>>;
 
+const WRITING_LIBRARY_MIN_WIDTH: f32 = 320.;
+
 /// Preference scope of the project open in the shell.
 ///
 /// The registry identity is the stable preferences key; the runtime
@@ -3024,9 +3026,12 @@ impl Shell {
             return None;
         }
         let inset = window.rem_size();
-        let width = px(self.active_layout(self.mode).sidebar_width)
-            .min((window.viewport_size().width - inset * 2.).max(px(0.)))
-            .min(px(400.));
+        let width = px(self
+            .active_layout(self.mode)
+            .sidebar_width
+            .max(WRITING_LIBRARY_MIN_WIDTH))
+        .min((window.viewport_size().width - inset * 2.).max(px(0.)))
+        .min(px(400.));
         let left = inset - (width + inset) * (1. - presence.progress);
         let surface = div()
             .id("writing-library-surface")
@@ -6860,7 +6865,7 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(
                 window.find("writing-library-surface").bounds().size.width,
-                px(200.)
+                px(WRITING_LIBRARY_MIN_WIDTH)
             );
             assert!(
                 window
