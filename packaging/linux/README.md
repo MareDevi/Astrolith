@@ -44,6 +44,36 @@ The AppImage recipe stages the same files into an AppDir and delegates to
 Arch recipe generates a PKGBUILD for the staged files, builds it with
 `makepkg`, and runs the guarded cache updates from its install script.
 
+## Release on GitHub and AUR
+
+The Release packages workflow runs on `v*` tags and can also be dispatched
+manually. It uploads the AppImage, `.deb`, `.rpm`, and any signed update
+manifest as Actions artifacts. After testing the artifacts, create a GitHub
+Release for that tag and attach the individual files. Keep their filenames so
+the signed manifest's AppImage URL resolves.
+
+The AUR job publishes the `astrolith` source package for Arch Linux x86_64.
+The tag must match the Cargo workspace version (for example, `v0.1.0` for
+`0.1.0`). The AUR action fills in the source checksum, generates `.SRCINFO`,
+and pushes the recipe after the Linux packaging jobs and manifest job succeed.
+Users build from the tagged source with the project's pinned mise toolchain.
+
+1. Register an AUR account and add the public half of a dedicated SSH key. The
+   action needs a private key without a passphrase. If `astrolith` already
+   exists, the account needs maintainer or co-maintainer access.
+2. In GitHub **Settings → Environments**, create `aur`. Under **Deployment
+   branches and tags**, select **Selected branches and tags** and add a **Tag**
+   rule for `v*`. Add `AUR_SSH_PRIVATE_KEY` as an environment secret and add
+   `AUR_COMMIT_USERNAME` and `AUR_COMMIT_EMAIL` as environment variables. The
+   latter two appear in the public AUR Git history.
+3. In **Settings → Secrets and variables → Actions → Variables**, create the
+   repository variable `AUR_PUBLISH` with value `true` to enable the job.
+4. Push the release commit, then push the matching tag. Check the workflow and
+   verify the package on [AUR](https://aur.archlinux.org/packages/astrolith).
+
+See the [AUR submission guidelines](https://wiki.archlinux.org/title/AUR_submission_guidelines)
+and [GitHub environment documentation](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
+
 ## Update manifest
 
 The application checks for updates only when the build injected both
@@ -97,8 +127,3 @@ Test keys are generated inside the Rust tests and are never persisted.
   on Arch.
 - No clean-environment install, launch, file-association, protocol or uninstall
   run has happened for any artifact.
-- The repository declares no license. The RPM spec uses `License: UNLICENSED`
-  and the AppStream file omits `project_license` until a license is chosen.
-- AppStream requires a homepage URL, so the metadata currently points at the
-  reserved `https://astrolith.invalid/` placeholder; replace it when a public
-  project URL exists.

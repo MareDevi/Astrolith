@@ -80,6 +80,14 @@ install_metadata() {
     "$root/usr/share/icons/hicolor/scalable/apps/$BINARY_NAME.svg"
 }
 
+# Keep the project license and the notice for the vendored slugger with the binary.
+install_licenses() {
+  local dir="$1" project_license="${2:-LICENSE}"
+  install -Dm644 "$REPO_ROOT/LICENSE" "$dir/$project_license"
+  install -Dm644 "$REPO_ROOT/crates/astrolith-workspace/LICENSE.github-slugger" \
+    "$dir/LICENSE.github-slugger"
+}
+
 # run update-desktop-database and update-mime-database only when installed.
 guarded_cache_update_script() {
   cat <<'SCRIPT'

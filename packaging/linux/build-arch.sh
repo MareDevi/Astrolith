@@ -22,6 +22,7 @@ ROOT="$WORK/root"
 mkdir -p "$ROOT"
 
 install_metadata "$ROOT" "$BINARY"
+install_licenses "$ROOT/usr/share/licenses/$BINARY_NAME"
 
 cat >"$WORK/astrolith.install" <<'INSTALL'
 post_install() {
@@ -48,8 +49,8 @@ pkgver=$VERSION
 pkgrel=1
 pkgdesc='Local-first editor for Astro Markdown and MDX content'
 arch=('$ARCH')
-url='https://astrolith.invalid/'
-license=('unknown')
+url='https://github.com/MareDevi/Astrolith'
+license=('AGPL-3.0-only')
 depends=('hicolor-icon-theme')
 install=astrolith.install
 

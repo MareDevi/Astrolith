@@ -126,3 +126,29 @@ jobs:
           name: astrolith-update-manifest
           path: dist/astrolith-update-manifest.json
           if-no-files-found: error
+
+  aur:
+    name: Publish AUR package
+    needs: manifest
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && vars.AUR_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: aur
+    concurrency:
+      group: aur-astrolith
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Prepare AUR recipe
+        run: python3 packaging/linux/prepare-aur.py "$GITHUB_REF_NAME"
+      - name: Push astrolith to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
+        with:
+          pkgname: astrolith
+          pkgbuild: dist/aur/PKGBUILD
+          updpkgsums: 'true'
+          commit_username: ${{ vars.AUR_COMMIT_USERNAME }}
+          commit_email: ${{ vars.AUR_COMMIT_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: Update astrolith to ${{ github.ref_name }}

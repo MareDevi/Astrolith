@@ -25,6 +25,7 @@ PKG="$STAGE/pkg"
 mkdir -p "$ROOT" "$CONTROL" "$PKG"
 
 install_metadata "$ROOT" "$BINARY"
+install_licenses "$ROOT/usr/share/doc/$BINARY_NAME" copyright
 
 INSTALLED_SIZE="$(du -sk "$ROOT" | cut -f1)"
 {
@@ -33,6 +34,7 @@ INSTALLED_SIZE="$(du -sk "$ROOT" | cut -f1)"
   printf 'Architecture: %s\n' "$DEB_ARCH"
   printf 'Maintainer: Astrolith Contributors <maintainers@astrolith.invalid>\n'
   printf 'Section: editors\n'
+  printf 'Homepage: https://github.com/MareDevi/Astrolith\n'
   printf 'Priority: optional\n'
   printf 'Installed-Size: %s\n' "$INSTALLED_SIZE"
   printf 'Description: Local-first editor for Astro Markdown and MDX content\n'

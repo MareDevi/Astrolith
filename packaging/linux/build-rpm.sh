@@ -22,8 +22,8 @@ Name: astrolith
 Version: $VERSION
 Release: 1%{?dist}
 Summary: Local-first editor for Astro Markdown and MDX content
-License: UNLICENSED
-URL: https://astrolith.invalid/
+License: AGPL-3.0-only
+URL: https://github.com/MareDevi/Astrolith
 BuildArch: x86_64
 Requires: hicolor-icon-theme
 
@@ -38,6 +38,8 @@ imports without sending content anywhere.
 
 %install
 install -Dm755 "$BINARY" %{buildroot}/usr/bin/$BINARY_NAME
+install -Dm644 "$REPO_ROOT/LICENSE" %{buildroot}%{_licensedir}/$BINARY_NAME/LICENSE
+install -Dm644 "$REPO_ROOT/crates/astrolith-workspace/LICENSE.github-slugger" %{buildroot}%{_licensedir}/$BINARY_NAME/LICENSE.github-slugger
 install -Dm644 "$GENERATED_DIR/astrolith.desktop" %{buildroot}/usr/share/applications/$DESKTOP_ID.desktop
 install -Dm644 "$GENERATED_DIR/astrolith.metainfo.xml" %{buildroot}/usr/share/metainfo/$DESKTOP_ID.metainfo.xml
 install -Dm644 "$GENERATED_DIR/astrolith.xml" %{buildroot}/usr/share/mime/packages/$DESKTOP_ID.xml
@@ -51,6 +53,7 @@ SPEC
   cat <<SPEC
 
 %files
+%license %{_licensedir}/$BINARY_NAME/LICENSE*
 /usr/bin/$BINARY_NAME
 /usr/share/applications/$DESKTOP_ID.desktop
 /usr/share/metainfo/$DESKTOP_ID.metainfo.xml

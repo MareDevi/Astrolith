@@ -19,6 +19,7 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
   "$APPDIR/usr/share/metainfo" "$APPDIR/usr/share/mime/packages" \
   "$APPDIR/usr/share/icons/hicolor"
 install_metadata "$APPDIR" "$BINARY"
+install_licenses "$APPDIR/usr/share/licenses/$BINARY_NAME"
 install -Dm644 "$GENERATED_DIR/astrolith.desktop" "$APPDIR/$DESKTOP_ID.desktop"
 install -Dm644 "$PACKAGING_DIR/icons/astrolith-512.png" "$APPDIR/astrolith.png"
 ln -s "usr/bin/$BINARY_NAME" "$APPDIR/AppRun"

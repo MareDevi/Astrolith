@@ -129,4 +129,5 @@ lint, build, and headless tests. See the
 
 ## License
 
-The repository does not currently declare a project license.
+Astrolith is licensed under the [GNU Affero General Public License, version 3](LICENSE).
+Third-party code and assets retain their respective licenses.
