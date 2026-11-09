@@ -8,6 +8,8 @@ rust = { version = "1.99.1", mr_boxington = true, profile = "minimal", component
 node = "26.12.1"
 bun = "1.4.4"
 
+# Setup and application
+
 [tasks.doctor]
 description = "Check the selected tools and native build prerequisites"
 run = "node scripts/doctor.mjs"
@@ -16,13 +18,23 @@ run = "node scripts/doctor.mjs"
 description = "Build the native desktop binary"
 run = "cargo build --workspace --locked"
 
-[tasks.test]
-description = "Run workspace tests without opening a native window"
-run = "cargo test --workspace --locked"
+[tasks.dev]
+description = "Open the native desktop window"
+run = "cargo run --locked --package astrolith-desktop"
+
+[tasks."dev:release"]
+description = "Open the native desktop window with release optimizations"
+run = "cargo run --release --locked --package astrolith-desktop"
+
+# Quality gates
 
 [tasks.fmt]
 description = "Check Rust formatting"
 run = "cargo fmt --all -- --check"
+
+[tasks."fmt:write"]
+description = "Format workspace Rust sources"
+run = "cargo fmt --all"
 
 [tasks.lint]
 description = "Lint every workspace target"
@@ -44,13 +56,21 @@ run = [
 description = "Run the same checks in continuous integration"
 run = [{ task = "check" }]
 
-[tasks.dev]
-description = "Open the native desktop window"
-run = "cargo run --locked --package astrolith-desktop"
+# Tests
 
-[tasks."dev:release"]
-description = "Open the native desktop window with release optimizations"
-run = "cargo run --release --locked --package astrolith-desktop"
+[tasks.test]
+description = "Run workspace tests without opening a native window"
+run = "cargo test --workspace --locked"
+
+[tasks."test:fixtures"]
+description = "Verify frozen Astro fixtures with the actual project-local loaders"
+run = "node --test fixtures/test-astro-fixtures.test.mjs && node scripts/test-astro-fixtures.mjs"
+
+[tasks."test:perf-harness"]
+description = "Test editor performance run validation and process lifetime"
+run = "node --test scripts/editor-perf.test.mjs"
+
+# Performance measurements
 
 [tasks."test:resize-perf"]
 description = "Measure native window resize frames in the development profile"
@@ -59,10 +79,6 @@ run = "cargo test -p astrolith-gpui --locked window_resize_workload -- --ignored
 [tasks."test:resize-perf:release"]
 description = "Measure native window resize frames in release"
 run = "cargo test -p astrolith-gpui --release --locked window_resize_workload -- --ignored --nocapture"
-
-[tasks."dev:editor"]
-description = "Open the disposable M00.2 Markdown editor spike"
-run = "cargo run --locked --package astrolith-desktop -- --spike=editor"
 
 [tasks."test:projection-perf"]
 description = "Measure the projected writer diff and typing cost in the development profile"
@@ -76,10 +92,6 @@ run = "cargo test -p astrolith-document --release --locked projection_diff_workl
 description = "Measure bounded editor workloads on the headless test platform (development profile; the editor spike is development-only)"
 run = "cargo test --locked --package astrolith-desktop large_document_workload -- --ignored --nocapture"
 
-[tasks."dev:layout"]
-description = "Open the disposable M00.3 theme and dock spike"
-run = "cargo run --locked --package astrolith-desktop -- --spike=layout"
-
 [tasks."test:shell-perf"]
 description = "Measure bounded readonly file-to-frame CPU work in the development profile"
 run = "cargo test --workspace --locked readonly_file_open_workload -- --ignored --nocapture"
@@ -88,37 +100,7 @@ run = "cargo test --workspace --locked readonly_file_open_workload -- --ignored 
 description = "Measure the same readonly file-to-frame CPU workload in release"
 run = "cargo test --workspace --release --locked readonly_file_open_workload -- --ignored --nocapture"
 
-[tasks."test:editor-perf:dev"]
-description = "Measure the editor workloads with the same dependency optimizations as dev"
-run = "cargo test --workspace --locked large_document_workload -- --ignored --nocapture"
-
-[tasks."test:astro"]
-description = "Test static Astro discovery"
-run = "cargo test -p astrolith-astro --locked"
-
-[tasks."fmt:write"]
-description = "Format workspace Rust sources"
-run = "cargo fmt --all"
-
-[tasks."lock:update"]
-description = "Resolve declared Rust dependencies into the committed lockfile"
-run = "cargo metadata --format-version 1"
-
-[tasks."test:document"]
-description = "Test retained document buffers"
-run = "cargo test -p astrolith-document --locked"
-
-[tasks."test:gpui"]
-description = "Test native workspace interactions headlessly"
-run = "cargo test -p astrolith-gpui --locked"
-
-[tasks."test:fixtures"]
-description = "Verify frozen Astro fixtures with the actual project-local loaders"
-run = "node --test fixtures/test-astro-fixtures.test.mjs && node scripts/test-astro-fixtures.mjs"
-
-[tasks."test:workspace"]
-description = "Test collection index and bounded watcher"
-run = "cargo test -p astrolith-workspace --locked"
+# Linux packaging
 
 [tasks."package:metadata"]
 description = "Generate Linux desktop, AppStream and MIME metadata from the workspace version"
@@ -144,7 +126,3 @@ run = "packaging/linux/build-appimage.sh"
 [tasks."package:rpm"]
 description = "Build the RPM into dist/ (requires rpmbuild)"
 run = "packaging/linux/build-rpm.sh"
-
-[tasks."test:perf-harness"]
-description = "Test editor performance run validation and process lifetime"
-run = "node --test scripts/editor-perf.test.mjs"
