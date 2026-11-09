@@ -11,9 +11,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Version stored in `global.json`.
-pub const GLOBAL_PREFERENCES_VERSION: u32 = 3;
+pub const GLOBAL_PREFERENCES_VERSION: u32 = 1;
 /// Version stored in every per-project preferences file.
-pub const PROJECT_PREFERENCES_VERSION: u32 = 2;
+pub const PROJECT_PREFERENCES_VERSION: u32 = 1;
 /// Version stored in `projects.json`.
 pub const PROJECT_REGISTRY_VERSION: u32 = 1;
 
@@ -626,7 +626,7 @@ impl Default for WindowGeometry {
 /// Application-wide preference scope. Persisted as `global.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GlobalPreferencesV2 {
+pub struct GlobalPreferences {
     /// Envelope version; always [`GLOBAL_PREFERENCES_VERSION`] when written.
     pub version: u32,
     /// Light, dark or system appearance.
@@ -683,7 +683,7 @@ pub struct GlobalPreferencesV2 {
     pub skipped_update_version: Option<String>,
 }
 
-impl Default for GlobalPreferencesV2 {
+impl Default for GlobalPreferences {
     fn default() -> Self {
         Self {
             version: GLOBAL_PREFERENCES_VERSION,
@@ -734,7 +734,7 @@ pub struct FieldMappings {
 /// Project-scope preferences. Persisted as `projects/<project-id>.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ProjectPreferencesV1 {
+pub struct ProjectPreferences {
     /// Envelope version; always [`PROJECT_PREFERENCES_VERSION`] when written.
     pub version: u32,
     /// Registry identity of the owning project.
@@ -765,7 +765,7 @@ pub struct ProjectPreferencesV1 {
     pub collections: BTreeMap<String, CollectionPreferencesV1>,
 }
 
-impl Default for ProjectPreferencesV1 {
+impl Default for ProjectPreferences {
     fn default() -> Self {
         Self {
             version: PROJECT_PREFERENCES_VERSION,
@@ -786,7 +786,7 @@ impl Default for ProjectPreferencesV1 {
     }
 }
 
-impl ProjectPreferencesV1 {
+impl ProjectPreferences {
     /// Create the empty preferences for a newly registered project.
     pub fn for_project(project_id: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
@@ -903,8 +903,8 @@ pub struct ResolvedPreferences {
 
 /// Resolve collection over project over global, once.
 pub fn resolve(
-    global: &GlobalPreferencesV2,
-    project: Option<&ProjectPreferencesV1>,
+    global: &GlobalPreferences,
+    project: Option<&ProjectPreferences>,
     collection: Option<&CollectionPreferencesV1>,
 ) -> ResolvedPreferences {
     let project_field = |pick: fn(&FieldMappings) -> &Option<String>| {
@@ -1263,7 +1263,7 @@ mod tests {
     #[test]
     fn skipped_update_version_is_optional_and_survives_round_trips() {
         let mut stored =
-            serde_json::to_value(GlobalPreferencesV2::default()).expect("serialize preferences");
+            serde_json::to_value(GlobalPreferences::default()).expect("serialize preferences");
         assert!(
             stored.get("skipped_update_version").is_some(),
             "the field must be written"
@@ -1272,15 +1272,15 @@ mod tests {
             .as_object_mut()
             .expect("preferences object")
             .remove("skipped_update_version");
-        let loaded: GlobalPreferencesV2 =
+        let loaded: GlobalPreferences =
             serde_json::from_value(stored).expect("older files omit the field");
         assert_eq!(loaded.skipped_update_version, None);
 
-        let chosen = GlobalPreferencesV2 {
+        let chosen = GlobalPreferences {
             skipped_update_version: Some("1.2.3".into()),
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
-        let reloaded: GlobalPreferencesV2 =
+        let reloaded: GlobalPreferences =
             serde_json::from_value(serde_json::to_value(chosen).expect("serialize"))
                 .expect("deserialize");
         assert_eq!(reloaded.skipped_update_version.as_deref(), Some("1.2.3"));
@@ -1288,8 +1288,8 @@ mod tests {
 
     #[test]
     fn explicit_false_and_zero_survive_inheritance() {
-        let global = GlobalPreferencesV2::default();
-        let project = ProjectPreferencesV1 {
+        let global = GlobalPreferences::default();
+        let project = ProjectPreferences {
             insert_mdx_imports: Some(false),
             last_entry: Some("blog/first.md".into()),
             layout_overrides: ModeLayoutOverrides {
@@ -1300,7 +1300,7 @@ mod tests {
                 }),
                 ..ModeLayoutOverrides::default()
             },
-            ..ProjectPreferencesV1::default()
+            ..ProjectPreferences::default()
         };
         let resolved = resolve(&global, Some(&project), None);
         assert_eq!(resolved.insert_mdx_imports, Some(false));
@@ -1312,7 +1312,7 @@ mod tests {
 
     #[test]
     fn workspace_modes_default_to_a_blank_page_and_resolve_one_mode_at_a_time() {
-        let defaults = GlobalPreferencesV2::default();
+        let defaults = GlobalPreferences::default();
         assert_eq!(defaults.default_mode, WorkspaceMode::Writing);
         assert!(!defaults.layouts.writing.sidebar_visible);
         assert!(!defaults.layouts.writing.preview_visible);
@@ -1322,11 +1322,11 @@ mod tests {
             "Preview opens on the rendered document, not the Astro preview dock"
         );
 
-        let global = GlobalPreferencesV2 {
+        let global = GlobalPreferences {
             default_mode: WorkspaceMode::Preview,
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
-        let project = ProjectPreferencesV1 {
+        let project = ProjectPreferences {
             last_mode: Some(WorkspaceMode::Build),
             layout_overrides: ModeLayoutOverrides {
                 build: Some(PanelLayout {
@@ -1336,7 +1336,7 @@ mod tests {
                 }),
                 ..ModeLayoutOverrides::default()
             },
-            ..ProjectPreferencesV1::default()
+            ..ProjectPreferences::default()
         };
         let resolved = resolve(&global, Some(&project), None);
         assert_eq!(resolved.default_mode, WorkspaceMode::Preview);
@@ -1352,11 +1352,11 @@ mod tests {
 
     #[test]
     fn collection_mappings_and_directories_override_project_per_field() {
-        let global = GlobalPreferencesV2 {
+        let global = GlobalPreferences {
             default_extension: FileExtension::Md,
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
-        let project = ProjectPreferencesV1 {
+        let project = ProjectPreferences {
             content_directory: Some("src/project".into()),
             assets_directory: Some("src/assets".into()),
             image_path_mode: Some(ImagePathMode::Absolute),
@@ -1367,7 +1367,7 @@ mod tests {
                 description: Some("summary".into()),
                 draft: Some("draft".into()),
             },
-            ..ProjectPreferencesV1::default()
+            ..ProjectPreferences::default()
         };
         let collection = CollectionPreferencesV1 {
             content_directory: Some("src/collection".into()),
@@ -1402,11 +1402,11 @@ mod tests {
 
     #[test]
     fn copyedit_preferences_round_trip_through_json() {
-        let mut global = GlobalPreferencesV2::default();
+        let mut global = GlobalPreferences::default();
         global.copyedit.set_enabled(CopyeditCategory::Verb, true);
         global.copyedit.colors.verb = "#123456".into();
         let encoded = serde_json::to_string(&global).unwrap();
-        let decoded: GlobalPreferencesV2 = serde_json::from_str(&encoded).unwrap();
+        let decoded: GlobalPreferences = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, global);
         assert!(decoded.copyedit.enabled(CopyeditCategory::Verb));
         assert!(!decoded.copyedit.all_enabled());
@@ -1423,7 +1423,7 @@ mod tests {
         assert!(!defaults.browser.is_configured());
         assert!(!defaults.open_on_enter);
 
-        let mut global = GlobalPreferencesV2::default();
+        let mut global = GlobalPreferences::default();
         global.preview.presentation = PreviewPresentation::Embedded;
         global.preview.browser = BrowserCommand {
             executable: "firefox".into(),
@@ -1431,7 +1431,7 @@ mod tests {
         };
         global.preview.open_on_enter = true;
         let encoded = serde_json::to_string(&global).unwrap();
-        let decoded: GlobalPreferencesV2 = serde_json::from_str(&encoded).unwrap();
+        let decoded: GlobalPreferences = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.preview, global.preview);
 
         let resolved = resolve(&decoded, None, None);
@@ -1515,16 +1515,16 @@ mod tests {
 
     #[test]
     fn theme_round_trips_and_retired_palette_fields_are_ignored() {
-        let global = GlobalPreferencesV2 {
+        let global = GlobalPreferences {
             theme: ThemePreference::Dark,
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         let encoded = serde_json::to_value(&global).unwrap();
-        let decoded: GlobalPreferencesV2 = serde_json::from_value(encoded).unwrap();
+        let decoded: GlobalPreferences = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.theme, ThemePreference::Dark);
 
-        let retired: GlobalPreferencesV2 =
-            serde_json::from_str(r#"{"version":2,"light_theme":"nord_light","dark_theme":"ink"}"#)
+        let retired: GlobalPreferences =
+            serde_json::from_str(r#"{"version":1,"light_theme":"nord_light","dark_theme":"ink"}"#)
                 .unwrap();
         assert_eq!(retired.theme, ThemePreference::System);
         assert_eq!(retired.ui_font_family, "");
@@ -1539,14 +1539,14 @@ mod tests {
 
     #[test]
     fn writing_typography_and_modes_resolve_from_the_global_scope() {
-        let global = GlobalPreferencesV2 {
+        let global = GlobalPreferences {
             prose_font_family: "Inter Display".into(),
             editor_font_size: 19.,
             editor_line_height: 1.75,
             page_width_percent: 70.,
             focus_mode: true,
             typewriter_mode: true,
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         let resolved = resolve(&global, None, None);
         assert_eq!(resolved.prose_font_family, "Inter Display");
@@ -1556,7 +1556,7 @@ mod tests {
         assert!(resolved.focus_mode);
         assert!(resolved.typewriter_mode);
 
-        let decoded: GlobalPreferencesV2 =
+        let decoded: GlobalPreferences =
             serde_json::from_str(&serde_json::to_string(&global).unwrap()).unwrap();
         assert_eq!(decoded.prose_font_family, "Inter Display");
         assert_eq!(decoded.editor_line_height, 1.75);
@@ -1566,7 +1566,7 @@ mod tests {
 
     #[test]
     fn window_geometry_round_trips_through_the_global_envelope() {
-        let global = GlobalPreferencesV2 {
+        let global = GlobalPreferences {
             window: Some(WindowGeometry {
                 x: 120.,
                 y: 80.,
@@ -1574,12 +1574,12 @@ mod tests {
                 height: 800.,
                 maximized: true,
             }),
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
-        let decoded: GlobalPreferencesV2 =
+        let decoded: GlobalPreferences =
             serde_json::from_str(&serde_json::to_string(&global).unwrap()).unwrap();
         assert_eq!(decoded.window, global.window);
-        let bare: GlobalPreferencesV2 = serde_json::from_str("{\"version\":2}").unwrap();
+        let bare: GlobalPreferences = serde_json::from_str("{\"version\":2}").unwrap();
         assert_eq!(bare.window, None);
     }
 

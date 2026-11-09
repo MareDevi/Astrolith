@@ -1094,7 +1094,7 @@ mod tests {
         let dir = fixture();
         let (handle, view) = mount(cx);
         view.update(cx, |view, cx| {
-            let mut project = ProjectPreferencesV1::default();
+            let mut project = ProjectPreferences::default();
             project.collections.insert(
                 "blog".to_owned(),
                 CollectionPreferencesV1 {
@@ -1102,7 +1102,7 @@ mod tests {
                     ..CollectionPreferencesV1::default()
                 },
             );
-            view.set_preferences(GlobalPreferencesV2::default(), Some(project), cx);
+            view.set_preferences(GlobalPreferences::default(), Some(project), cx);
         });
         open_project_and_wait(cx, handle, &view, dir.path()).await;
         view.update(cx, |view, cx| {

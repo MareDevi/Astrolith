@@ -1118,9 +1118,9 @@ mod tests {
     ) {
         let dir = fixture();
         let (handle, view) = mount(cx);
-        let global = GlobalPreferencesV2 {
+        let global = GlobalPreferences {
             autosave_delay: astrolith_core::preferences::AutosaveDelay::One,
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         view.update(cx, |view, cx| view.set_preferences(global, None, cx));
         assert_eq!(
@@ -1153,9 +1153,9 @@ mod tests {
     async fn autosave_conflict_is_visible_and_never_overwrites(cx: &mut TestAppContext) {
         let dir = fixture();
         let (handle, view) = mount(cx);
-        let global = GlobalPreferencesV2 {
+        let global = GlobalPreferences {
             autosave_delay: astrolith_core::preferences::AutosaveDelay::One,
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         view.update(cx, |view, cx| view.set_preferences(global, None, cx));
         let path = open_fixture_entry(cx, handle, &view, &dir).await;
@@ -1385,9 +1385,9 @@ mod tests {
     ) {
         let dir = fixture();
         let (handle, view) = mount(cx);
-        let global = GlobalPreferencesV2 {
+        let global = GlobalPreferences {
             autosave_delay: astrolith_core::preferences::AutosaveDelay::One,
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         view.update(cx, |view, cx| view.set_preferences(global, None, cx));
         let path = open_fixture_entry(cx, handle, &view, &dir).await;
@@ -1892,9 +1892,9 @@ mod tests {
     async fn a_renamed_document_keeps_autosaving_at_its_new_path(cx: &mut TestAppContext) {
         let dir = fixture();
         let (handle, view) = mount(cx);
-        let global = GlobalPreferencesV2 {
+        let global = GlobalPreferences {
             autosave_delay: astrolith_core::preferences::AutosaveDelay::One,
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         view.update(cx, |view, cx| view.set_preferences(global, None, cx));
         open_project_and_wait(cx, handle, &view, dir.path()).await;

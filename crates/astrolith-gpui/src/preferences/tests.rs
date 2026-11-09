@@ -4,8 +4,8 @@ use astrolith_astro::schema::{
     CollectionSchema, Field, FieldConstraints, FieldKind, SchemaDialect,
 };
 use astrolith_core::preferences::{
-    AutosaveDelay, CollectionPreferencesV1, FieldMappings, FileExtension, GlobalPreferencesV2,
-    ImagePathMode, ProjectPreferencesV1, resolve,
+    AutosaveDelay, CollectionPreferencesV1, FieldMappings, FileExtension, GlobalPreferences,
+    ImagePathMode, ProjectPreferences, resolve,
 };
 
 use super::*;
@@ -243,11 +243,11 @@ fn heading_colours_accept_hex_and_nothing_else() {
 
 #[test]
 fn edited_scopes_resolve_collection_over_project_over_global() {
-    let global = GlobalPreferencesV2 {
+    let global = GlobalPreferences {
         default_extension: FileExtension::Mdx,
-        ..GlobalPreferencesV2::default()
+        ..GlobalPreferences::default()
     };
-    let project = ProjectPreferencesV1 {
+    let project = ProjectPreferences {
         content_directory: directory("src/posts"),
         default_extension: Some(FileExtension::Md),
         image_path_mode: Some(ImagePathMode::Absolute),
@@ -256,7 +256,7 @@ fn edited_scopes_resolve_collection_over_project_over_global() {
             title: mapping("headline"),
             ..FieldMappings::default()
         },
-        ..ProjectPreferencesV1::default()
+        ..ProjectPreferences::default()
     };
     let collection = CollectionPreferencesV1 {
         content_directory: directory("src/blog"),
@@ -331,7 +331,6 @@ fn reset_all_removes_only_preferences_and_the_registry() {
         preferences.join("global.json"),
         preferences.join("projects.json"),
         preferences.join("projects/site.json"),
-        preferences.join("preferences.v1.migrated.json"),
         directory.path().join("recovery/pending.json"),
         directory.path().join("logs/astrolith.log"),
         directory.path().join("save-failures/failed.json"),
@@ -344,7 +343,6 @@ fn reset_all_removes_only_preferences_and_the_registry() {
     assert!(!preferences.join("global.json").exists());
     assert!(!preferences.join("projects.json").exists());
     assert!(!preferences.join("projects").exists());
-    assert!(!preferences.join("preferences.v1.migrated.json").exists());
     assert!(directory.path().join("recovery/pending.json").exists());
     assert!(directory.path().join("logs/astrolith.log").exists());
     assert!(directory.path().join("save-failures/failed.json").exists());

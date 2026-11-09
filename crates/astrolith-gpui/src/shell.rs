@@ -43,7 +43,7 @@ use crate::{
     recent_projects::{self, RecentEntry},
     runtime,
     settings::{
-        GlobalPreferencesV2, PreferencesStore, ProjectPreferencesV1, ProjectRecord, WindowGeometry,
+        GlobalPreferences, PreferencesStore, ProjectPreferences, ProjectRecord, WindowGeometry,
         resolve, settings_path,
     },
     single_instance,
@@ -77,8 +77,8 @@ use gpui_kit::{
 /// Latest global and project snapshots, flushed by the quit observer.
 #[derive(Clone)]
 struct LatestPreferences {
-    global: (u64, GlobalPreferencesV2),
-    project: Option<(u64, ProjectPreferencesV1)>,
+    global: (u64, GlobalPreferences),
+    project: Option<(u64, ProjectPreferences)>,
 }
 type LatestSettings = Arc<Mutex<LatestPreferences>>;
 
@@ -91,7 +91,7 @@ const WRITING_LIBRARY_MIN_WIDTH: f32 = 320.;
 struct ProjectScope {
     /// Canonical project root this scope was loaded for.
     root: PathBuf,
-    preferences: ProjectPreferencesV1,
+    preferences: ProjectPreferences,
     /// Last revision accepted by the store for this project's file.
     revision: u64,
 }
@@ -152,7 +152,7 @@ pub fn open(cx: &mut App) {
                     tracing::warn!(%error, "preferences unavailable; using defaults");
                     (
                         None,
-                        GlobalPreferencesV2::default(),
+                        GlobalPreferences::default(),
                         Some(tr!("shell.warning.preferences_unavailable", error = error)),
                     )
                 }
@@ -387,7 +387,7 @@ pub(crate) struct Shell {
     _skin: Rc<DockSkin>,
     /// Global preferences; `settings.layouts` is the global layout authority and
     /// the only layout source when no project is open.
-    settings: GlobalPreferencesV2,
+    settings: GlobalPreferences,
     /// Active workspace mode; state and services are independent of it.
     mode: WorkspaceMode,
     /// Project scope currently open, if any; absorbs layout and last-entry writes.
@@ -457,7 +457,7 @@ pub(crate) struct Shell {
 
 impl Shell {
     fn new(
-        mut settings: GlobalPreferencesV2,
+        mut settings: GlobalPreferences,
         store: Option<Arc<PreferencesStore>>,
         warning: Option<String>,
         window: &mut Window,
@@ -1796,7 +1796,7 @@ impl Shell {
 
     /// Take the pending project snapshot so a scope switch can flush it before
     /// the registry revision moves.
-    fn take_pending_project(&self) -> Option<(u64, ProjectPreferencesV1)> {
+    fn take_pending_project(&self) -> Option<(u64, ProjectPreferences)> {
         self.latest
             .lock()
             .ok()
@@ -1858,7 +1858,7 @@ impl Shell {
     fn install_project_scope(
         &mut self,
         root: PathBuf,
-        loaded: Result<(ProjectPreferencesV1, u64, Option<String>), String>,
+        loaded: Result<(ProjectPreferences, u64, Option<String>), String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4777,14 +4777,14 @@ mod tests {
 
     fn mount(
         cx: &mut TestAppContext,
-        settings: GlobalPreferencesV2,
+        settings: GlobalPreferences,
     ) -> (WindowHandle<Root>, Entity<Shell>) {
         mount_sized(cx, settings, 1100., 720.)
     }
 
     fn mount_sized(
         cx: &mut TestAppContext,
-        settings: GlobalPreferencesV2,
+        settings: GlobalPreferences,
         width: f32,
         height: f32,
     ) -> (WindowHandle<Root>, Entity<Shell>) {
@@ -4811,7 +4811,7 @@ mod tests {
 
     #[gpui_kit::test]
     async fn copyedit_commands_toggle_each_category_and_the_all_switch(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         assert!(!view.read_with(cx, |view, _| view.settings.copyedit.all_enabled()));
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
@@ -4849,7 +4849,7 @@ mod tests {
 
     #[gpui_kit::test]
     async fn prose_typography_resolves_once_per_settings_change(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             let resolved = view.read(cx).prose_style_resolutions;
@@ -4886,7 +4886,7 @@ mod tests {
 
     #[gpui_kit::test]
     async fn unrelated_frames_do_not_rebuild_menus_but_changes_do(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
         })
@@ -4951,7 +4951,7 @@ mod tests {
             "---\ntitle: First\n---\n# First\n\nA body that the reading pane shows.\n",
         )
         .unwrap();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         let (project, _) =
             open_first_entry(cx, handle, &view, directory.path().to_path_buf()).await;
         let editor = project
@@ -5082,7 +5082,7 @@ mod tests {
             "# A rendered heading\n\nA paragraph with enough words to click into the middle of the rendered page and keep typing.\n\n- one item\n- two items\n",
         )
         .unwrap();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         let (project, _) =
             open_first_entry(cx, handle, &view, directory.path().to_path_buf()).await;
         let editor = project
@@ -5128,7 +5128,7 @@ mod tests {
             "---\ntitle: First\n---\n# First\n",
         )
         .unwrap();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         let (project, _) =
             open_first_entry(cx, handle, &view, directory.path().to_path_buf()).await;
         assert!(view.read_with(cx, |shell, cx| {
@@ -5192,7 +5192,7 @@ mod tests {
 
     #[gpui_kit::test]
     async fn build_git_panel_uses_the_floating_inspector_surface(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             cx.set_reduce_motion(true);
             view.update(cx, |shell, cx| {
@@ -5227,7 +5227,7 @@ mod tests {
             "---\ntitle: First\n---\n# First\n",
         )
         .unwrap();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         let (project, _) =
             open_first_entry(cx, handle, &view, directory.path().to_path_buf()).await;
         let editor = project
@@ -5272,7 +5272,7 @@ mod tests {
     async fn content_finder_opens_entries_and_inserts_links_with_undo(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let directory = project_fixture("site");
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         open_project(cx, handle, &view, directory.path().to_path_buf());
         let project = view.read_with(cx, |view, _| view.project.clone());
         cx.condition(&project, |project, _| !project.is_loading())
@@ -5366,7 +5366,7 @@ mod tests {
 
     #[gpui_kit::test]
     async fn opening_project_reveals_hidden_navigator(cx: &mut TestAppContext) {
-        let settings = GlobalPreferencesV2 {
+        let settings = GlobalPreferences {
             layouts: ModeLayouts {
                 writing: LayoutState {
                     sidebar_visible: false,
@@ -5374,7 +5374,7 @@ mod tests {
                 },
                 ..ModeLayouts::default()
             },
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         let (handle, view) = mount(cx, settings);
         cx.update_window(handle.into(), |_, window, cx| {
@@ -5542,7 +5542,7 @@ mod tests {
             "---\ntitle: First\n---\n# First body\n\nText *here*.\n",
         )
         .unwrap();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         let (project, _) =
             open_first_entry(cx, handle, &view, directory.path().to_path_buf()).await;
         let (session, projection) = project.read_with(cx, |project, cx| {
@@ -6044,7 +6044,7 @@ mod tests {
     /// Build through `ToggleTerminal` must still show it.
     #[gpui_kit::test]
     async fn toggle_terminal_enters_build_and_shows_the_dock(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |shell, cx| {
                 shell.set_mode(WorkspaceMode::Build, window, cx);
@@ -6087,7 +6087,7 @@ mod tests {
     /// target the terminal instead of silently toggling a preview panel.
     #[gpui_kit::test]
     async fn toggle_preview_in_build_targets_the_terminal(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |shell, cx| {
                 shell.set_mode(WorkspaceMode::Build, window, cx);
@@ -6208,14 +6208,14 @@ mod tests {
     fn toolbar_and_native_collapse_share_live_visibility_and_restore_document_space(
         cx: &mut TestAppContext,
     ) {
-        let settings = GlobalPreferencesV2 {
+        let settings = GlobalPreferences {
             layouts: ModeLayouts {
                 writing: LayoutState {
                     ..LayoutState::default()
                 },
                 ..ModeLayouts::default()
             },
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         let (handle, view) = mount(cx, settings);
         let initial = cx
@@ -6333,7 +6333,7 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("src/content/intro.md"), "# Intro\n").unwrap();
 
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.execute(CommandId::OpenProject, window, cx)
@@ -6365,7 +6365,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn preview_commands_are_wired_and_report_without_a_project(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.execute(CommandId::StartPreview, window, cx)
@@ -6425,9 +6425,9 @@ mod tests {
     #[gpui_kit::test]
     fn splitter_drag_updates_geometry_without_repainting_the_shell(cx: &mut TestAppContext) {
         use std::rc::Rc;
-        let settings = GlobalPreferencesV2 {
+        let settings = GlobalPreferences {
             default_mode: WorkspaceMode::Build,
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         let (handle, view) = mount(cx, settings);
         let notifications = Rc::new(std::cell::Cell::new(0usize));
@@ -6467,7 +6467,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn native_drag_is_captured_and_preferences_restore_in_a_new_window(cx: &mut TestAppContext) {
-        let settings = GlobalPreferencesV2 {
+        let settings = GlobalPreferences {
             default_mode: WorkspaceMode::Build,
             layouts: ModeLayouts {
                 build: LayoutState {
@@ -6475,7 +6475,7 @@ mod tests {
                 },
                 ..ModeLayouts::default()
             },
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         let (handle, view) = mount(cx, settings);
         cx.update_window(handle.into(), |_, window, cx| {
@@ -6505,7 +6505,7 @@ mod tests {
     fn shrinking_after_expanded_docks_preserves_document_and_panel_geometry(
         cx: &mut TestAppContext,
     ) {
-        let settings = GlobalPreferencesV2 {
+        let settings = GlobalPreferences {
             default_mode: WorkspaceMode::Build,
             layouts: ModeLayouts {
                 build: LayoutState {
@@ -6513,7 +6513,7 @@ mod tests {
                 },
                 ..ModeLayouts::default()
             },
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         let (handle, view) = mount(cx, settings);
         cx.simulate_window_resize(handle.into(), size(px(1800.), px(1100.)));
@@ -6547,7 +6547,7 @@ mod tests {
     #[gpui_kit::test]
     fn shell_panels_stay_inside_minimum_viewport_in_both_themes(cx: &mut TestAppContext) {
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
-            let settings = GlobalPreferencesV2 {
+            let settings = GlobalPreferences {
                 theme: mode,
                 default_mode: WorkspaceMode::Build,
                 layouts: ModeLayouts {
@@ -6556,7 +6556,7 @@ mod tests {
                     },
                     ..ModeLayouts::default()
                 },
-                ..GlobalPreferencesV2::default()
+                ..GlobalPreferences::default()
             };
             let (handle, _) = mount(cx, settings);
             cx.simulate_window_resize(handle.into(), size(px(800.), px(600.)));
@@ -6583,7 +6583,7 @@ mod tests {
     fn palette_filters_confirms_original_command_and_restores_trigger_focus(
         cx: &mut TestAppContext,
     ) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click("command-palette", cx);
@@ -6618,7 +6618,7 @@ mod tests {
     fn shortcuts_work_from_document_focus_and_palette_cancel_returns_there(
         cx: &mut TestAppContext,
     ) {
-        let mut settings = GlobalPreferencesV2::default();
+        let mut settings = GlobalPreferences::default();
         settings.layouts.writing.sidebar_visible = false;
         let (handle, view) = mount(cx, settings);
         cx.update_window(handle.into(), |_, window, cx| {
@@ -6670,7 +6670,7 @@ mod tests {
         let path = directory.path().join("中文.mdx");
         let source = "# 日本語\n<Example>{42}</Example> 🦀\n";
         std::fs::write(&path, source).unwrap();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.press(crate::commands::CommandId::OpenFile.shortcut().unwrap(), cx);
@@ -6782,7 +6782,7 @@ mod tests {
     fn seed_project(
         store: &PreferencesStore,
         root: &std::path::Path,
-        preferences: impl FnOnce(&mut ProjectPreferencesV1),
+        preferences: impl FnOnce(&mut ProjectPreferences),
     ) -> String {
         let open = store.record_project_open(root, Some("site"), 1).unwrap();
         let (mut stored, revision, _) = store.project(&open.id).unwrap();
@@ -7223,7 +7223,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn active_layout_prefers_the_project_override(cx: &mut TestAppContext) {
-        let mut settings = GlobalPreferencesV2::default();
+        let mut settings = GlobalPreferences::default();
         settings.layouts.writing = LayoutState {
             sidebar_visible: true,
             preview_visible: false,
@@ -7245,7 +7245,7 @@ mod tests {
             );
             shell.project_scope = Some(ProjectScope {
                 root: PathBuf::from("/layout-lookup"),
-                preferences: ProjectPreferencesV1::default(),
+                preferences: ProjectPreferences::default(),
                 revision: 0,
             });
             assert_eq!(
@@ -7564,7 +7564,7 @@ mod tests {
     async fn entry_commands_share_availability_across_toolbar_and_palette(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let project = project_fixture("availability-site");
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(
@@ -7677,7 +7677,7 @@ mod tests {
         let paragraph = "# 中文 🦀\nA multilingual paragraph with **emphasis**, `inline code`, 日本語, and enough ordinary words to represent a real article.\n";
         std::fs::write(root.join("src/content/intro.md"), paragraph.repeat(8000)).unwrap();
 
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| {
                 view.execute(CommandId::OpenProject, window, cx)
@@ -7758,7 +7758,7 @@ mod tests {
     fn readonly_file_open_workload(cx: &mut TestAppContext) {
         use std::time::Instant;
         let directory = tempfile::tempdir().unwrap();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         for (bytes, long_line) in [
             (1024, false),
             (100 * 1024, false),
@@ -7889,7 +7889,7 @@ mod tests {
     ) {
         cx.executor().allow_parking();
         let directory = component_shell_fixture(false);
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         open_project(cx, handle, &view, directory.path().to_path_buf());
         let project = view.read_with(cx, |view, _| view.project.clone());
         cx.condition(&project, |project, _| !project.is_loading())
@@ -7959,7 +7959,7 @@ mod tests {
     ) {
         cx.executor().allow_parking();
         let directory = component_shell_fixture(true);
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         open_project(cx, handle, &view, directory.path().to_path_buf());
         let project = view.read_with(cx, |view, _| view.project.clone());
         cx.condition(&project, |project, _| !project.is_loading())
@@ -8024,7 +8024,7 @@ mod tests {
     async fn the_format_menu_command_cannot_open_the_builder_for_markdown(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let directory = component_shell_fixture(false);
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         open_project(cx, handle, &view, directory.path().to_path_buf());
         let project = view.read_with(cx, |view, _| view.project.clone());
         cx.condition(&project, |project, _| !project.is_loading())
@@ -8064,7 +8064,7 @@ mod tests {
     ) {
         cx.executor().allow_parking();
         let directory = component_shell_fixture(false);
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         open_project(cx, handle, &view, directory.path().to_path_buf());
         let project = view.read_with(cx, |view, _| view.project.clone());
         cx.condition(&project, |project, _| !project.is_loading())
@@ -8109,7 +8109,7 @@ mod tests {
     async fn builder_escape_returns_to_the_palette_and_ctrl_enter_inserts(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let directory = component_shell_fixture(false);
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         open_project(cx, handle, &view, directory.path().to_path_buf());
         let project = view.read_with(cx, |view, _| view.project.clone());
         cx.condition(&project, |project, _| !project.is_loading())
@@ -8303,7 +8303,7 @@ mod tests {
         std::fs::write(
             &global_path,
             r#"{
-                "version": 2,
+                "version": 1,
                 "theme": "dark",
                 "default_mode": "build",
                 "layouts": {
@@ -8508,9 +8508,9 @@ mod tests {
     #[gpui_kit::test]
     async fn preferences_sheet_names_controls_and_fits_the_minimum_window(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let settings = GlobalPreferencesV2 {
+        let settings = GlobalPreferences {
             ui_font_size: 28.,
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         let (handle, view) = mount_sized(cx, settings, 1000., 700.);
         let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
@@ -8797,7 +8797,7 @@ mod tests {
     fn appearance_commands_persist_mode_and_keep_the_selected_scheme(cx: &mut TestAppContext) {
         use crate::theme::ResolveTheme;
 
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         for (command, mode) in [
             (CommandId::LightTheme, ThemeMode::Light),
             (CommandId::DarkTheme, ThemeMode::Dark),
@@ -8829,7 +8829,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.executor().allow_parking();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |shell, cx| {
                 shell.execute(CommandId::LightTheme, window, cx)
@@ -8893,7 +8893,7 @@ mod tests {
             .record_project_open(newer.path(), Some("newer-site"), 20)
             .unwrap();
         let expected = newer.path().canonicalize().unwrap();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         view.update(cx, |shell, _| shell.store = Some(store));
         let project = view.read_with(cx, |shell, _| shell.project.clone());
         cx.update_window(handle.into(), |_, window, cx| {
@@ -8924,7 +8924,7 @@ mod tests {
             .unwrap();
         let entry = newer.path().join("src/content/second.md");
         let entry = entry.canonicalize().unwrap();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         view.update(cx, |shell, _| shell.store = Some(store));
         let project = view.read_with(cx, |shell, _| shell.project.clone());
         cx.update_window(handle.into(), |_, window, cx| {
@@ -8954,7 +8954,7 @@ mod tests {
     #[gpui_kit::test]
     async fn a_protected_startup_root_is_refused_before_it_opens(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         let project = view.read_with(cx, |shell, _| shell.project.clone());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |shell, cx| {
@@ -8992,7 +8992,7 @@ mod tests {
             .record_project_open(fixture.path(), Some("action-site"), 10)
             .unwrap();
         let records = store.recent_projects().0;
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         view.update(cx, |shell, _| {
             shell.store = Some(store.clone());
             shell.set_registry(records);
@@ -9028,7 +9028,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn about_is_reachable_from_its_command_id(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |shell, cx| shell.execute(CommandId::About, window, cx));
             assert!(window.has_active_dialog(cx));
@@ -9038,7 +9038,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn help_surfaces_open_from_their_command_ids(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             for command in [
                 CommandId::OpenUserGuide,
@@ -9060,7 +9060,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn preferences_documentation_links_open_help(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |shell, cx| shell.open_preferences(window, cx));
@@ -9079,7 +9079,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn shell_drop_rejects_multiple_and_mixed_drops_visibly(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("note.md");
         std::fs::write(&file, "# note\n").unwrap();
@@ -9117,7 +9117,7 @@ mod tests {
     ) {
         cx.executor().allow_parking();
         let fixture = project_fixture("palette-site");
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         let record = ProjectRecord {
             id: "recent-one".into(),
             path: fixture.path().display().to_string(),
@@ -9166,7 +9166,7 @@ mod tests {
     #[gpui_kit::test]
     async fn file_status_surfaces_a_failure_in_the_window(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
-        let (handle, view) = mount(cx, GlobalPreferencesV2::default());
+        let (handle, view) = mount(cx, GlobalPreferences::default());
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert!(

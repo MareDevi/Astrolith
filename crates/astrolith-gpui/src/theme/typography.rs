@@ -8,15 +8,15 @@
 
 use std::sync::OnceLock;
 
-use astrolith_core::preferences::GlobalPreferencesV2;
+use astrolith_core::preferences::GlobalPreferences;
 use gpui_kit::{App, SharedString, component::ActiveTheme};
 
 /// Prose column width for a surface created before preferences are resolved.
 ///
 /// This is the only fallback: everything else derives the width from the
-/// resolved [`GlobalPreferencesV2::page_width_percent`].
+/// resolved [`GlobalPreferences::page_width_percent`].
 pub(crate) fn default_prose_page_width_percent() -> f32 {
-    GlobalPreferencesV2::default().page_width_percent
+    GlobalPreferences::default().page_width_percent
 }
 
 /// Horizontal inset inside the prose column.

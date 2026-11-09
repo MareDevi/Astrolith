@@ -5,7 +5,7 @@
 //! presentation code on one import surface.
 
 pub(crate) use astrolith_core::preferences::{
-    GLOBAL_PREFERENCES_VERSION, GlobalPreferencesV2, PROJECT_PREFERENCES_VERSION,
-    PROJECT_REGISTRY_VERSION, ProjectOpen, ProjectPreferencesV1, ProjectRecord, ProjectRegistry,
+    GLOBAL_PREFERENCES_VERSION, GlobalPreferences, PROJECT_PREFERENCES_VERSION,
+    PROJECT_REGISTRY_VERSION, ProjectOpen, ProjectPreferences, ProjectRecord, ProjectRegistry,
     WindowGeometry,
 };

@@ -10,7 +10,7 @@ pub(crate) use typography::{
     font_family_available, installed_font_names, preferred_ui_font, prose_font, system_ui_font,
 };
 
-use astrolith_core::preferences::{ColorScheme, GlobalPreferencesV2};
+use astrolith_core::preferences::{ColorScheme, GlobalPreferences};
 use gpui_kit::{
     App, Global, Hsla, WindowAppearance,
     component::{ActiveTheme, Theme},
@@ -79,7 +79,7 @@ pub fn palette(_mode: ThemeMode, scheme: ColorScheme) -> ThemeTokens {
 ///
 /// Heading colours belong to the resolved theme, so the published prose
 /// heading is refreshed in the same pass that refreshes every window.
-pub fn apply(settings: &GlobalPreferencesV2, appearance: WindowAppearance, cx: &mut App) {
+pub fn apply(settings: &GlobalPreferences, appearance: WindowAppearance, cx: &mut App) {
     let mode = settings.theme.resolve(appearance);
     let fallback_font = system_ui_font(cx);
     let requested_font = settings.ui_font_family.trim();

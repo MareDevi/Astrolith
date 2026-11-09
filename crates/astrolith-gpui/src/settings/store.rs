@@ -16,11 +16,9 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 
 use super::model::{
-    GLOBAL_PREFERENCES_VERSION, GlobalPreferencesV2, PROJECT_PREFERENCES_VERSION,
-    PROJECT_REGISTRY_VERSION, ProjectOpen, ProjectPreferencesV1, ProjectRecord, ProjectRegistry,
+    GLOBAL_PREFERENCES_VERSION, GlobalPreferences, PROJECT_PREFERENCES_VERSION,
+    PROJECT_REGISTRY_VERSION, ProjectOpen, ProjectPreferences, ProjectRecord, ProjectRegistry,
 };
-use super::upgrade;
-
 const MAX_PREFERENCE_BYTES: u64 = 1024 * 1024;
 
 pub(super) struct Stored<T> {
@@ -81,9 +79,7 @@ where
         let expected = u64::from(version);
         match map.get("version") {
             Some(Value::Number(number)) if number.as_u64() == Some(expected) => {}
-            // An older numeric version is upgraded once by `upgrade`.
-            Some(Value::Number(number)) if number.as_u64().is_some_and(|old| old < expected) => {}
-            // A newer version is preserved read-only rather than overwritten.
+            // A different numeric version is preserved read-only.
             Some(Value::Number(number)) if number.as_u64().is_some() => {
                 stored.writable = false;
                 stored.warning = Some(tr!(
@@ -184,36 +180,25 @@ where
 /// Project scopes and the open-project registry share one store so a project
 /// open updates both files under one lock and one atomic write.
 pub(crate) struct PreferencesStore {
-    global: Mutex<Stored<GlobalPreferencesV2>>,
+    global: Mutex<Stored<GlobalPreferences>>,
     registry: Mutex<Stored<ProjectRegistry>>,
-    projects: Mutex<BTreeMap<String, Stored<ProjectPreferencesV1>>>,
+    projects: Mutex<BTreeMap<String, Stored<ProjectPreferences>>>,
     projects_dir: PathBuf,
 }
 
 impl PreferencesStore {
-    /// Load every scope root and import the legacy single file once.
-    pub fn load(global_path: PathBuf) -> (Self, GlobalPreferencesV2, Option<String>) {
+    /// Load every scope root.
+    pub fn load(global_path: PathBuf) -> (Self, GlobalPreferences, Option<String>) {
         tracing::debug!(path = %global_path.display(), "loading preferences");
-        let legacy_warning = upgrade::import_legacy(
-            &global_path,
-            upgrade::legacy_settings_path(&global_path).as_deref(),
-        );
         let root = global_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        let mut global =
-            Stored::<GlobalPreferencesV2>::load(global_path, GLOBAL_PREFERENCES_VERSION);
-        let upgrade_warning = upgrade::upgrade_global(&mut global);
+        let global = Stored::<GlobalPreferences>::load(global_path, GLOBAL_PREFERENCES_VERSION);
         let registry =
             Stored::<ProjectRegistry>::load(root.join("projects.json"), PROJECT_REGISTRY_VERSION);
-        let warning = combine_warnings([
-            legacy_warning,
-            upgrade_warning,
-            global.warning.clone(),
-            registry.warning.clone(),
-        ]);
+        let warning = combine_warnings([global.warning.clone(), registry.warning.clone()]);
         let preferences = global.value.clone();
         (
             Self {
@@ -227,11 +212,7 @@ impl PreferencesStore {
         )
     }
 
-    pub fn save_global(
-        &self,
-        revision: u64,
-        preferences: &GlobalPreferencesV2,
-    ) -> io::Result<bool> {
+    pub fn save_global(&self, revision: u64, preferences: &GlobalPreferences) -> io::Result<bool> {
         lock(&self.global)?.save(revision, preferences)
     }
 
@@ -277,7 +258,7 @@ impl PreferencesStore {
     ///
     /// The returned revision is the last accepted revision; pass a greater
     /// value to [`Self::save_project`].
-    pub fn project(&self, id: &str) -> io::Result<(ProjectPreferencesV1, u64, Option<String>)> {
+    pub fn project(&self, id: &str) -> io::Result<(ProjectPreferences, u64, Option<String>)> {
         let path = self.project_path(id)?;
         let mut projects = self
             .projects
@@ -303,7 +284,7 @@ impl PreferencesStore {
     pub fn save_project(
         &self,
         revision: u64,
-        preferences: &ProjectPreferencesV1,
+        preferences: &ProjectPreferences,
     ) -> io::Result<bool> {
         let id = preferences.project_id.as_str();
         let path = self.project_path(id)?;
@@ -359,7 +340,7 @@ impl PreferencesStore {
             .entry(open.id.clone())
             .or_insert_with(|| self.load_project(project_path));
         let mut preferences = if stored.value.project_id.is_empty() {
-            ProjectPreferencesV1::for_project(open.id.clone(), open.path.clone())
+            ProjectPreferences::for_project(open.id.clone(), open.path.clone())
         } else {
             stored.value.clone()
         };
@@ -370,16 +351,9 @@ impl PreferencesStore {
         Ok(open)
     }
 
-    /// Load one project file and apply the one-time version upgrade.
-    fn load_project(&self, path: PathBuf) -> Stored<ProjectPreferencesV1> {
-        let mut stored = Stored::load(path, PROJECT_PREFERENCES_VERSION);
-        if let Some(warning) = upgrade::upgrade_project(&mut stored) {
-            stored.warning = Some(match stored.warning.take() {
-                Some(existing) => format!("{existing} {warning}"),
-                None => warning,
-            });
-        }
-        stored
+    /// Load one project file.
+    fn load_project(&self, path: PathBuf) -> Stored<ProjectPreferences> {
+        Stored::load(path, PROJECT_PREFERENCES_VERSION)
     }
 
     fn project_path(&self, id: &str) -> io::Result<PathBuf> {
@@ -549,7 +523,7 @@ pub(crate) fn recovery_dir() -> io::Result<PathBuf> {
 mod tests {
     use super::*;
     use astrolith_core::preferences::{
-        ModeLayoutOverrides, ModeLayouts, PanelLayout, ThemePreference, WorkspaceMode,
+        ModeLayoutOverrides, PanelLayout, ThemePreference, WorkspaceMode,
     };
     use std::fs;
 
@@ -564,7 +538,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"{"version":2,"theme":"system","layout":{"sidebar_visible":true,"inspector_visible":true,"preview_visible":false,"sidebar_width":240.0,"inspector_width":260.0},"future_field":{"keep":true}}"#,
+            r#"{"version":1,"theme":"system","layouts":{"writing":{"sidebar_visible":true,"inspector_visible":true,"preview_visible":false,"sidebar_width":240.0,"inspector_width":260.0}},"future_field":{"keep":true}}"#,
         )
         .unwrap();
         let (store, mut preferences, warning) = PreferencesStore::load(path.clone());
@@ -584,11 +558,8 @@ mod tests {
 
         let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(envelope["future_field"]["keep"], true);
-        assert!(envelope.get("layout").is_none());
-        assert!(envelope.get("mode_layouts").is_none());
         assert!(envelope.get("layouts").is_some());
-        assert_eq!(envelope["version"], 3);
-        assert!(path.with_file_name("global.json.v2.bak").exists());
+        assert_eq!(envelope["version"], 1);
     }
 
     #[test]
@@ -766,7 +737,7 @@ mod tests {
         let path = global_path(directory.path());
         let (store, preferences, warning) = PreferencesStore::load(path.clone());
         assert!(warning.is_none());
-        assert_eq!(preferences, GlobalPreferencesV2::default());
+        assert_eq!(preferences, GlobalPreferences::default());
         assert!(!path.exists(), "a clean install writes no global file");
         assert!(
             !folder.exists(),
@@ -782,147 +753,6 @@ mod tests {
     }
 
     #[test]
-    fn version_two_upgrades_once_with_one_backup() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let original = r#"{"version":2,"theme":"dark","ui_font_size":14.0,"editor_font_size":18.0,"editor_width":720.0,"layout":{"sidebar_visible":true,"inspector_visible":true,"preview_visible":false,"sidebar_width":240.0,"inspector_width":260.0},"interface_scale":1,"light_theme":"nord_light","dark_theme":"ink","future_field":{"keep":true}}"#;
-        fs::write(&path, original).unwrap();
-
-        let (_, preferences, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(preferences.theme, ThemePreference::Dark);
-        assert_eq!(preferences.ui_font_size, 18.);
-        assert_eq!(preferences.editor_font_size, 16.);
-        assert_eq!(preferences.editor_line_height, 2.);
-        assert_eq!(
-            preferences.page_width_percent, 60.,
-            "720 px keeps its meaning"
-        );
-        assert_eq!(preferences.default_mode, WorkspaceMode::Writing);
-        assert_eq!(preferences.layouts, ModeLayouts::default());
-
-        let backup = path.with_file_name("global.json.v2.bak");
-        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
-        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(envelope["version"], 3);
-        for retired in [
-            "light_theme",
-            "dark_theme",
-            "editor_width",
-            "interface_scale",
-            "layout",
-        ] {
-            assert!(envelope.get(retired).is_none(), "{retired} was retired");
-        }
-        assert_eq!(envelope["ui_font_size"], 18.0);
-        assert_eq!(envelope["editor_font_size"], 16.0);
-        assert_eq!(envelope["page_width_percent"], 60.0);
-        assert_eq!(envelope["editor_line_height"], 2.0);
-        assert_eq!(envelope["future_field"]["keep"], true);
-        assert!(envelope.get("layouts").is_some());
-
-        // A later launch neither upgrades nor writes again.
-        let before = fs::read(&path).unwrap();
-        let (_, restored, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(restored.ui_font_size, 18.);
-        assert_eq!(fs::read(&path).unwrap(), before);
-        assert!(!path.with_file_name("global.json.v2-2.bak").exists());
-    }
-
-    #[test]
-    fn upgrade_preserves_explicit_non_default_values_and_the_envelope_key() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            r#"{"version":2,"ui_font_size":22.0,"editor_font_size":20.0,"editor_line_height":1.75,"page_width_percent":55.0,"future":{"x":1}}"#,
-        )
-        .unwrap();
-        let (store, mut preferences, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(preferences.ui_font_size, 22.);
-        assert_eq!(preferences.editor_font_size, 20.);
-        assert_eq!(preferences.editor_line_height, 1.75);
-        assert_eq!(preferences.page_width_percent, 55.);
-
-        preferences.theme = ThemePreference::Light;
-        store.save_global(1, &preferences).unwrap();
-        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(envelope["ui_font_size"], 22.0);
-        assert_eq!(envelope["editor_font_size"], 20.0);
-        assert_eq!(envelope["page_width_percent"], 55.0);
-        assert_eq!(envelope["editor_line_height"], 1.75);
-        assert_eq!(envelope["future"]["x"], 1);
-        assert_eq!(envelope["version"], 3);
-    }
-
-    #[test]
-    fn absent_values_get_the_current_defaults_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{"version":2,"future_field":true}"#).unwrap();
-        let (_, preferences, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(preferences.page_width_percent, 64.);
-        assert_eq!(preferences.editor_line_height, 2.);
-        let envelope: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(envelope["page_width_percent"], 64.0);
-        assert_eq!(envelope["editor_line_height"], 2.0);
-        assert_eq!(envelope["future_field"], true);
-    }
-
-    #[test]
-    fn legacy_imports_once_and_never_repeats_its_warning() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        let legacy = directory.path().join("preferences.json");
-        fs::write(&legacy, r#"{"version":1,"theme":"dark"}"#).unwrap();
-        let (_, preferences, warning) = PreferencesStore::load(path.clone());
-        assert!(warning.is_none());
-        assert_eq!(preferences.theme, ThemePreference::Dark);
-        assert_eq!(preferences.version, 3);
-        assert!(path.exists());
-        assert!(!legacy.exists());
-        assert!(
-            directory
-                .path()
-                .join("preferences.v1.migrated.json")
-                .exists()
-        );
-
-        let (_, _, warning) = PreferencesStore::load(path);
-        assert!(warning.is_none(), "the legacy file is gone");
-    }
-
-    #[test]
-    fn legacy_file_is_ignored_once_when_global_preferences_exist() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{"version":3,"theme":"light"}"#).unwrap();
-        let legacy = directory.path().join("preferences.json");
-        fs::write(&legacy, r#"{"version":1,"theme":"dark"}"#).unwrap();
-
-        let (_, preferences, warning) = PreferencesStore::load(path.clone());
-        assert_eq!(preferences.theme, ThemePreference::Light);
-        assert!(warning.is_some(), "the ignored file is reported once");
-        assert!(!legacy.exists());
-        assert!(
-            directory
-                .path()
-                .join("preferences.v1.ignored.json")
-                .exists()
-        );
-
-        let (_, _, warning) = PreferencesStore::load(path);
-        assert!(warning.is_none(), "the warning is not repeated");
-    }
-
-    #[test]
     fn oversized_files_are_quarantined_and_persistence_stays_writable() {
         let directory = tempfile::tempdir().unwrap();
         let path = global_path(directory.path());
@@ -930,7 +760,7 @@ mod tests {
         let padding = "x".repeat(1024 * 1024 + 1024);
         fs::write(
             &path,
-            format!(r#"{{"version":3,"theme":"dark","padding":"{padding}"}}"#),
+            format!(r#"{{"version":1,"theme":"dark","padding":"{padding}"}}"#),
         )
         .unwrap();
         let (store, defaults, warning) = PreferencesStore::load(path.clone());
@@ -940,32 +770,5 @@ mod tests {
         assert!(path.with_file_name("global.json.corrupt").exists());
         store.save_global(1, &defaults).unwrap();
         assert!(path.exists());
-    }
-
-    #[test]
-    fn project_versions_upgrade_once_and_drop_the_old_layout() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = global_path(directory.path());
-        let projects = path.parent().unwrap().join("projects");
-        fs::create_dir_all(&projects).unwrap();
-        let original = r#"{"version":1,"project_id":"site","path":"/tmp/site","layout":{"sidebar_visible":false,"inspector_visible":true,"preview_visible":true,"sidebar_width":200.0,"inspector_width":300.0},"future_field":{"keep":true}}"#;
-        fs::write(projects.join("site.json"), original).unwrap();
-
-        let (store, _, warning) = PreferencesStore::load(path);
-        assert!(warning.is_none());
-        let (preferences, _, warning) = store.project("site").unwrap();
-        assert!(warning.is_none());
-        assert_eq!(preferences.layout_overrides, ModeLayoutOverrides::default());
-        let backup = projects.join("site.json.v1.bak");
-        assert_eq!(fs::read_to_string(&backup).unwrap(), original);
-        let envelope: Value =
-            serde_json::from_slice(&fs::read(projects.join("site.json")).unwrap()).unwrap();
-        assert_eq!(envelope["version"], 2);
-        assert!(envelope.get("layout").is_none());
-        assert_eq!(envelope["future_field"]["keep"], true);
-
-        let (_, _, warning) = store.project("site").unwrap();
-        assert!(warning.is_none());
-        assert!(!projects.join("site.json.v1-2.bak").exists());
     }
 }

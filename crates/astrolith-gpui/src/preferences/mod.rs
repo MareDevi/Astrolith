@@ -24,8 +24,8 @@ use std::{
 use astrolith_astro::schema::{CollectionSchema, FieldKind};
 use astrolith_core::preferences::{
     AutosaveDelay, BrowserCommand, CollectionPreferencesV1, ColorScheme, FieldMappings,
-    FileExtension, GlobalPreferencesV2, HeadingColors, IdeCommand, ImagePathMode,
-    PreviewPreferences, PreviewPresentation, ProjectPreferencesV1, ThemePreference, WorkspaceMode,
+    FileExtension, GlobalPreferences, HeadingColors, IdeCommand, ImagePathMode, PreviewPreferences,
+    PreviewPresentation, ProjectPreferences, ThemePreference, WorkspaceMode,
 };
 use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt, WindowExt,
@@ -138,9 +138,9 @@ pub(crate) struct CollectionEntry {
 pub(crate) struct PreferencesContext {
     /// Global scope as persisted; `global.layouts` is the global layout
     /// authority, including changes made while the sheet is open.
-    pub global: GlobalPreferencesV2,
+    pub global: GlobalPreferences,
     /// Open project scope; `None` hides the project and collection panes.
-    pub project: Option<ProjectPreferencesV1>,
+    pub project: Option<ProjectPreferences>,
     /// Project collections with their schemas.
     pub collections: Vec<CollectionEntry>,
     /// The project declares `astro-auto-import`.
@@ -170,9 +170,9 @@ pub(crate) struct LayoutResets {
 #[derive(Clone)]
 pub(crate) struct PreferenceEdits {
     /// Global scope with every General change applied.
-    pub global: GlobalPreferencesV2,
+    pub global: GlobalPreferences,
     /// Project scope and its collection overrides, when a project is open.
-    pub project: Option<ProjectPreferencesV1>,
+    pub project: Option<ProjectPreferences>,
     /// Layout resets the draft recorded.
     pub layout_resets: LayoutResets,
 }
@@ -360,8 +360,8 @@ impl PreferencesSheet {
                 heading_light: input!("#1f2328"),
                 heading_dark: input!("#e6edf3"),
                 ui_font_family: input!(tr!("preferences.placeholder.ui_font_family")),
-                ui_font_size: input!(format_number(GlobalPreferencesV2::default().ui_font_size)),
-                panel_radius: input!(format_number(GlobalPreferencesV2::default().panel_radius)),
+                ui_font_size: input!(format_number(GlobalPreferences::default().ui_font_size)),
+                panel_radius: input!(format_number(GlobalPreferences::default().panel_radius)),
                 prose_font_family: input!("Inter / system sans"),
                 font_size: input!("16"),
                 build_font_family: input!(tr!("preferences.placeholder.build_font_family")),
@@ -697,20 +697,20 @@ impl PreferencesSheet {
             FieldId::UiFontFamily => self.set_text(field, "", window, cx),
             FieldId::UiFontSize => self.set_text(
                 field,
-                &format_number(GlobalPreferencesV2::default().ui_font_size),
+                &format_number(GlobalPreferences::default().ui_font_size),
                 window,
                 cx,
             ),
             FieldId::PanelRadius => self.set_text(
                 field,
-                &format_number(GlobalPreferencesV2::default().panel_radius),
+                &format_number(GlobalPreferences::default().panel_radius),
                 window,
                 cx,
             ),
             FieldId::ProseFontFamily => self.set_text(field, "", window, cx),
             FieldId::FontSize => self.set_text(
                 field,
-                &format_number(GlobalPreferencesV2::default().editor_font_size),
+                &format_number(GlobalPreferences::default().editor_font_size),
                 window,
                 cx,
             ),
@@ -720,13 +720,13 @@ impl PreferencesSheet {
             FieldId::PreviewFontSize => self.set_text(field, "16", window, cx),
             FieldId::LineHeight => self.set_text(
                 field,
-                &format_number(GlobalPreferencesV2::default().editor_line_height),
+                &format_number(GlobalPreferences::default().editor_line_height),
                 window,
                 cx,
             ),
             FieldId::PageWidth => self.set_text(
                 field,
-                &format_number(GlobalPreferencesV2::default().page_width_percent),
+                &format_number(GlobalPreferences::default().page_width_percent),
                 window,
                 cx,
             ),

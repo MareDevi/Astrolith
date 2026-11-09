@@ -39,11 +39,11 @@ fn explicit_interface_typography_overrides_the_theme_face_and_scale(cx: &mut Tes
             .into_iter()
             .find(|family| family.as_str() != system.as_ref())
             .unwrap_or_else(|| "Example Sans".to_owned());
-        let mut settings = GlobalPreferencesV2 {
+        let mut settings = GlobalPreferences {
             theme: ThemeMode::Light,
             ui_font_family: custom.clone(),
             ui_font_size: 17.,
-            ..GlobalPreferencesV2::default()
+            ..GlobalPreferences::default()
         };
         assert_eq!(
             configured_prose_font(cx, ""),
@@ -170,9 +170,9 @@ fn theme_adapter_projects_complete_semantic_roles_in_both_modes(cx: &mut TestApp
     cx.update(|cx| {
         gpui_kit::init(cx);
         for mode in [ThemeMode::Dark, ThemeMode::Light] {
-            let settings = GlobalPreferencesV2 {
+            let settings = GlobalPreferences {
                 theme: mode,
-                ..GlobalPreferencesV2::default()
+                ..GlobalPreferences::default()
             };
             apply(&settings, WindowAppearance::Dark, cx);
             let tokens = palette(mode, settings.color_scheme);

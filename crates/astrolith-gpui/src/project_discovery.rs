@@ -35,8 +35,7 @@ use astrolith_astro::{
 use astrolith_core::{
     CollectionId, ProjectId, SourcePath,
     preferences::{
-        FieldMappings, FileExtension, GlobalPreferencesV2, ImagePathMode, ProjectPreferencesV1,
-        resolve,
+        FieldMappings, FileExtension, GlobalPreferences, ImagePathMode, ProjectPreferences, resolve,
     },
 };
 use astrolith_document::{
@@ -845,9 +844,9 @@ pub(crate) struct ProjectWorkspace {
     /// Diagnostics from the last content-directory resolution.
     override_problems: Vec<String>,
     /// Resolved global preferences snapshot used by the file list and creation.
-    global_preferences: GlobalPreferencesV2,
+    global_preferences: GlobalPreferences,
     /// Open project preferences snapshot; `None` inherits the global scope.
-    project_preferences: Option<ProjectPreferencesV1>,
+    project_preferences: Option<ProjectPreferences>,
     /// Active file-list filter (the query lives in the list delegate).
     list_filter: EntryFilter,
     /// Active file-list ordering.
@@ -1102,7 +1101,7 @@ impl ProjectWorkspace {
             recovery_task: None,
             recovery_load_task: None,
             save_tasks: HashMap::new(),
-            save_coordinator: SaveCoordinator::new(GlobalPreferencesV2::default().autosave_delay),
+            save_coordinator: SaveCoordinator::new(GlobalPreferences::default().autosave_delay),
             autosave_task: None,
             window_handle: Some(window.window_handle()),
             restore_task: None,
@@ -1113,7 +1112,7 @@ impl ProjectWorkspace {
             collection_bases: BTreeMap::new(),
             config_bases: BTreeMap::new(),
             override_problems: Vec::new(),
-            global_preferences: GlobalPreferencesV2::default(),
+            global_preferences: GlobalPreferences::default(),
             project_preferences: None,
             list_filter: EntryFilter::default(),
             list_sort: EntrySort::default(),
@@ -3095,8 +3094,8 @@ impl ProjectWorkspace {
     /// entry creation. The shell calls this whenever the project scope changes.
     pub(crate) fn set_preferences(
         &mut self,
-        global: GlobalPreferencesV2,
-        project: Option<ProjectPreferencesV1>,
+        global: GlobalPreferences,
+        project: Option<ProjectPreferences>,
         cx: &mut Context<Self>,
     ) {
         self.global_preferences = global;
@@ -5032,7 +5031,7 @@ mod tests {
 
         cx.update(|cx| {
             view.update(cx, |view, cx| {
-                let mut preferences = ProjectPreferencesV1::default();
+                let mut preferences = ProjectPreferences::default();
                 preferences.collections.insert(
                     "blog".into(),
                     astrolith_core::preferences::CollectionPreferencesV1 {
@@ -5040,7 +5039,7 @@ mod tests {
                         ..Default::default()
                     },
                 );
-                view.set_preferences(GlobalPreferencesV2::default(), Some(preferences), cx);
+                view.set_preferences(GlobalPreferences::default(), Some(preferences), cx);
             });
         });
 
@@ -5169,12 +5168,12 @@ mod tests {
         let (handle, view) = mount(cx);
         view.update(cx, |project, cx| {
             project.set_preferences(
-                GlobalPreferencesV2 {
+                GlobalPreferences {
                     ide: astrolith_core::preferences::IdeCommand {
                         executable: "code".into(),
                         arguments: vec!["{project}".into()],
                     },
-                    ..GlobalPreferencesV2::default()
+                    ..GlobalPreferences::default()
                 },
                 None,
                 cx,
@@ -7112,11 +7111,11 @@ export const collections = {blog, dataAuthors};
         mappings: FieldMappings,
     ) {
         view.update(cx, |view, cx| {
-            let project = ProjectPreferencesV1 {
+            let project = ProjectPreferences {
                 field_mappings: mappings,
-                ..ProjectPreferencesV1::default()
+                ..ProjectPreferences::default()
             };
-            view.set_preferences(GlobalPreferencesV2::default(), Some(project), cx);
+            view.set_preferences(GlobalPreferences::default(), Some(project), cx);
         });
     }
 
@@ -8335,7 +8334,7 @@ export const collections = {blog, dataAuthors};
         );
 
         view.update(cx, |view, cx| {
-            let mut project = ProjectPreferencesV1::default();
+            let mut project = ProjectPreferences::default();
             project.collections.insert(
                 "blog".to_owned(),
                 CollectionPreferencesV1 {
@@ -8343,7 +8342,7 @@ export const collections = {blog, dataAuthors};
                     ..CollectionPreferencesV1::default()
                 },
             );
-            view.set_preferences(GlobalPreferencesV2::default(), Some(project), cx);
+            view.set_preferences(GlobalPreferences::default(), Some(project), cx);
         });
         for _ in 0..300 {
             cx.run_until_parked();
@@ -8450,7 +8449,7 @@ export const collections = {blog, dataAuthors};
 
         // An escaping override is reported instead of silently ignored.
         view.update(cx, |view, cx| {
-            let mut project = ProjectPreferencesV1::default();
+            let mut project = ProjectPreferences::default();
             project.collections.insert(
                 "blog".to_owned(),
                 CollectionPreferencesV1 {
@@ -8458,7 +8457,7 @@ export const collections = {blog, dataAuthors};
                     ..CollectionPreferencesV1::default()
                 },
             );
-            view.set_preferences(GlobalPreferencesV2::default(), Some(project), cx);
+            view.set_preferences(GlobalPreferences::default(), Some(project), cx);
         });
         for _ in 0..300 {
             cx.run_until_parked();
@@ -8518,11 +8517,11 @@ export const collections = {blog, dataAuthors};
         open_project_and_wait(cx, handle, &view, dir.path()).await;
 
         view.update(cx, |view, cx| {
-            let project = ProjectPreferencesV1 {
+            let project = ProjectPreferences {
                 content_directory: Some("src/content".into()),
-                ..ProjectPreferencesV1::default()
+                ..ProjectPreferences::default()
             };
-            view.set_preferences(GlobalPreferencesV2::default(), Some(project), cx);
+            view.set_preferences(GlobalPreferences::default(), Some(project), cx);
         });
         for _ in 0..300 {
             cx.run_until_parked();
@@ -8568,11 +8567,11 @@ export const collections = {blog, dataAuthors};
         // Re-applying the same scope must resolve from the pristine configuration
         // bases, never nest the project root inside an already-rebased base.
         view.update(cx, |view, cx| {
-            let project = ProjectPreferencesV1 {
+            let project = ProjectPreferences {
                 content_directory: Some("src/content".into()),
-                ..ProjectPreferencesV1::default()
+                ..ProjectPreferences::default()
             };
-            view.set_preferences(GlobalPreferencesV2::default(), Some(project), cx);
+            view.set_preferences(GlobalPreferences::default(), Some(project), cx);
         });
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
@@ -8594,9 +8593,9 @@ export const collections = {blog, dataAuthors};
         // A collection-scope value is that collection's exact base, while the
         // project scope still rebases the others.
         view.update(cx, |view, cx| {
-            let mut project = ProjectPreferencesV1 {
+            let mut project = ProjectPreferences {
                 content_directory: Some("src/content".into()),
-                ..ProjectPreferencesV1::default()
+                ..ProjectPreferences::default()
             };
             project.collections.insert(
                 "notes".to_owned(),
@@ -8605,7 +8604,7 @@ export const collections = {blog, dataAuthors};
                     ..CollectionPreferencesV1::default()
                 },
             );
-            view.set_preferences(GlobalPreferencesV2::default(), Some(project), cx);
+            view.set_preferences(GlobalPreferences::default(), Some(project), cx);
         });
         for _ in 0..300 {
             cx.run_until_parked();
