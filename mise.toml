@@ -5,6 +5,7 @@ rust = { version = "1.99.1", mr_boxington = true, profile = "minimal", component
   "clippy",
   "rustfmt",
 ] }
+mr-boxington = "1.29.1"
 node = "26.12.1"
 
 # Setup and application
