@@ -124,8 +124,8 @@ mise run check
 
 Run `mise run check` before committing. It covers the toolchain, formatting,
 lint, build, headless tests, and Astro compatibility fixtures. See the
-[development and packaging guide](docs/technical/development.md) and the
-[repository guidelines](AGENTS.md).
+[repository guidelines](AGENTS.md) and the
+[Linux packaging notes](packaging/linux/README.md).
 
 ## License
 

@@ -405,7 +405,6 @@ mod tests {
             "docs/user/guide.md",
             "docs/user/keyboard-shortcuts.md",
             "docs/user/privacy.md",
-            "docs/technical/development.md",
         ];
         let mut checked = 0;
         for document in documents {

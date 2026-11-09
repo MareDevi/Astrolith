@@ -62,8 +62,7 @@ runs:
 - `ASTROLITH_SAVE_FAILURE_DIR` — absolute save-failure directory.
 - `ASTROLITH_LOG_DIR` — absolute log directory.
 - `ASTROLITH_LOG`, `ASTROLITH_LOG_FILE`, `ASTROLITH_LOG_FORMAT`,
-  `ASTROLITH_LOG_FILE_FORMAT`, `ASTROLITH_LOG_MAX_FILES` — logging behavior;
-  see [logging](../technical/logging.md).
+  `ASTROLITH_LOG_FILE_FORMAT`, `ASTROLITH_LOG_MAX_FILES` — logging behavior.
 
 Every override must be an absolute path; an invalid value is ignored and the
 default is used.

@@ -14,7 +14,7 @@ Other pages:
 
 - [Keyboard shortcuts](keyboard-shortcuts.md)
 - [Privacy and local data](privacy.md)
-- [Development and packaging](../technical/development.md)
+- [Development and packaging](../../AGENTS.md)
 - [Project README](../../README.md)
 
 ## 1. Install and first launch
@@ -519,7 +519,5 @@ Help opens an external website.
 Start with the in-app Help menu, then the
 [keyboard reference](keyboard-shortcuts.md) and
 [privacy and local data](privacy.md). Developer setup, test strategy,
-architecture boundaries and packaging commands are documented in
-[Development and packaging](../technical/development.md). The frozen parity
-ledger and per-row final audit are in
-[Astro Editor parity](../technical/astro-editor-parity.md).
+architecture boundaries and packaging commands are documented in the
+[repository guidelines](../../AGENTS.md).
