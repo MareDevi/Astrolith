@@ -1,1 +1,0 @@
-/home/maredevi/Projects/Astrolith/target/editor-perf/fast/debug/astrolith-desktop /home/maredevi/Projects/Astrolith/artifacts/e2e/editor-m0-fast-history-multiblock-1112000-2026-11-06T05-30-38-955Z/run/project/src/content/fixture.md

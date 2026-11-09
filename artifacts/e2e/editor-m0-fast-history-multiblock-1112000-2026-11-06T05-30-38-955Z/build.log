@@ -1,3 +1,0 @@
-$ cargo build -p astrolith-desktop --locked --features gpui-fast
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.20s
-
