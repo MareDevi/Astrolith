@@ -1,89 +1,67 @@
-# Astrolith
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="apps/desktop/assets/astrolith-dark.svg">
+    <img src="apps/desktop/assets/astrolith-light.svg" alt="" width="88" height="88">
+  </picture>
+</p>
 
-Astrolith is a native Rust/GPUI Kit editor for [Astro](https://astro.build)
-content collections on Linux. It opens an Astro project, lists its collections
-and entries, edits Markdown, MDX and YAML sources, renders schema-driven
-frontmatter forms, builds MDX component tags from static prop metadata, and
-saves with conflict detection and durable recovery.
+<h1 align="center">Astrolith</h1>
 
-**Status: Linux alpha.** The feature-parity implementation is complete with
-headless evidence. Native Wayland evidence for some interactions, packaged
-artifact checks and release signing are still outstanding; see
-[Linux limits and known gaps](docs/user/guide.md#14-linux-limits-and-known-gaps)
-before relying on a feature for production work. macOS and Windows code paths
-exist but are neither delivered nor supported.
+<p align="center"><strong>A native desktop editor for Astro sites.</strong></p>
 
-## Features
+<p align="center">
+  <a href="#build-from-source">Get started</a> ·
+  <a href="docs/user/guide.md">User guide</a> ·
+  <a href="docs/user/keyboard-shortcuts.md">Keyboard shortcuts</a> ·
+  <a href="#development">Development</a>
+</p>
 
-- **Projects and collections** — recent-project registry and reopen, Astro 5/6/7
-  discovery for Markdown, MDX and YAML collections, generated-schema
-  integration, nested collections, diagnostics for configuration it cannot
-  prove statically, and a bounded filesystem watcher.
-- **Entries** — create with schema-required frontmatter, duplicate byte-exact,
-  rename/move with retargeting, move to the desktop trash, reveal the containing
-  directory, and copy absolute or project-relative paths.
-- **Navigation** — collection counts, breadcrumbs, draft filter, case-insensitive
-  title/filename filter, schema-aware sort modes, and a Content Finder that can
-  open entries or insert links.
-- **Writer** — lossless frontmatter/MDX-import projection over complete source,
-  native find/replace, go-to-line, focus and typewriter modes, Markdown
-  presentation, Copyedit highlighting, formatting commands, and word/character
-  counts.
-- **Frontmatter** — schema-driven typed controls, references, images, validated
-  raw-YAML fallback, lossless edits that preserve comments, unknown fields,
-  quoting and CRLF, and refresh when the schema changes.
-- **MDX components** — static discovery of Astro/React/Vue/Svelte components,
-  typed prop forms, tracked placeholders, Starlight scaffolds, and opt-in
-  import insertion with collision-safe planning.
-- **Safe persistence** — atomic conflict-aware saves, autosave (1/2/5/10 s,
-  default 2 s) with a 10 s continuous-typing checkpoint, dirty close/switch/quit
-  prompts, and in-app recovery of unsaved edits.
-- **Preview** — project-local Astro dev server with start/stop/restart/retry
-  and route tracking; the supported Linux presentation is your external
-  browser. An optional `embedded-webview` feature adds a native WebKitGTK
-  surface for X11/XWayland windows only; it is developer-only, needs the
-  WebKitGTK development packages, and no released package builds it.
-- **Preferences** — global/project/collection overrides with one resolver, one
-  neutral light and dark palette, advanced versions and scoped Reset All.
-- **Desktop integration** — application menus (macOS and Windows) and the
-  toolbar **Panels** dropdown from one command registry, keyboard shortcuts,
-  command palette, IDE argv launch, `astrolith://open?path=` scheme handling,
-  MIME associations in packages, and single-instance launch.
-- **Privacy** — no telemetry. Astrolith makes two kinds of network request: the
-  signed update manifest, only in builds configured with a manifest URL and
-  public key, and absolute `http`/`https` document images when Preview or the
-  image hover previews load them. Both paths are listed in
-  [privacy and local data](docs/user/privacy.md).
+Open an existing [Astro](https://astro.build/) project and write directly in
+its content collections. Edit frontmatter in a form built from the collection
+schema, switch to source when you need to change the site, and check the result
+in your browser. Your edits live in the project's own files.
 
-## Documentation
+**Linux alpha.** Build from source to try it on Wayland or X11. See the
+[known limits](docs/user/guide.md#14-linux-limits-and-known-gaps) for the current
+platform and packaging status.
 
-The user guide, a shortcut reference generated from the live command registry,
-and the local-paths inventory are also available in the application's **Help**
-menu.
+![Astrolith's Writing mode with a Markdown article open on a centered page](docs/media/writing.webp)
+
+## One project, three modes
+
+| Mode | What you can do |
+| --- | --- |
+| **Writing** | Draft Markdown and MDX on a centered page. Browse collections in the Library, edit frontmatter in Details, and turn on Focus or Typewriter mode. |
+| **Build** | Browse the project tree, edit `.astro` and other source files in tabs, and run project commands in an integrated terminal. Installed language servers add diagnostics, completions, and navigation to definitions. |
+| **Preview** | Read the current Markdown or MDX draft in a rendered view. To see the page with your site's layout and styles, use the separate Astro preview panel to start the project's dev server and open the route in your browser. |
+
+Switching modes keeps the current document and its unsaved edits.
+
+## Built for Astro content
+
+- **Browse your collections.** Open supported local collections in Astro 5, 6,
+  and 7. Filter entries by title or draft status, and use Content Finder to
+  open an entry or insert a link to it. Edit Markdown, MDX, and YAML sources.
+- **Edit metadata from the schema.** Use fields for dates, references, and
+  images, or edit the YAML directly. Form edits preserve surrounding comments,
+  quoting, and unknown fields.
+- **Insert MDX components.** Build component tags from props Astrolith can
+  discover in your project.
+- **Keep your drafts.** Autosave detects conflicts with external changes, and
+  local recovery snapshots help restore unsaved edits after an interruption.
+
+See the [project compatibility guide](docs/user/guide.md#2-projects-and-collections)
+for supported collection configurations.
 
 ## Build from source
 
-Mise owns the toolchain and task entry points.
+You need [mise](https://mise.jdx.dev/), the native build dependencies below, and
+a graphical Wayland or X11 session with a working Vulkan driver.
 
-```sh
-mise install
-mise run doctor
-mise run build
-mise run dev
-```
+<details>
+<summary>Linux build dependencies</summary>
 
-If Mise requests trust, review `mise.toml` and run `mise trust` in this
-directory. Installation needs network access. Pinned versions: Rust 1.99.1
-(with rust-analyzer, rust-src, clippy and rustfmt), Node.js 26.12.1 and Bun
-1.4.4. `Cargo.lock` is committed; Cargo tasks use `--locked`.
-
-### Linux prerequisites
-
-Mise does not install system development packages or GPU drivers. GPUI Kit
-needs a C/C++ linker, clang, cmake, pkg-config, fontconfig, Wayland/X11
-headers, OpenSSL, zstd and a Vulkan loader.
-
-Ubuntu 24.04:
+**Ubuntu 24.04**
 
 ```sh
 sudo apt-get update
@@ -92,7 +70,7 @@ sudo apt-get install -y gcc g++ clang cmake pkg-config libfontconfig-dev \
   libvulkan-dev mesa-vulkan-drivers
 ```
 
-Arch/CachyOS:
+**Arch Linux and CachyOS**
 
 ```sh
 sudo pacman -S --needed base-devel clang cmake pkgconf fontconfig wayland \
@@ -100,42 +78,55 @@ sudo pacman -S --needed base-devel clang cmake pkgconf fontconfig wayland \
   vulkan-icd-loader
 ```
 
-Install the Vulkan driver for your GPU (for example `vulkan-radeon`,
-`vulkan-intel`, or the distribution's NVIDIA driver) and launch from a
-graphical Wayland or X11 session. The default build needs no WebKitGTK or ALSA
-development packages; preview uses your external browser. Only the optional,
-developer-only `embedded-webview` build links WebKitGTK and needs its
-development packages.
+Install the Vulkan driver for your GPU, such as `vulkan-radeon`, `vulkan-intel`,
+or the distribution's NVIDIA driver.
 
-### Packages
+</details>
 
-AppImage, `.deb` and `.rpm` recipes exist:
+From the repository root, run:
 
 ```sh
-mise run package:metadata
-mise run package:validate
-mise run package:deb       # or package:appimage / package:rpm
+mise install
+mise run doctor
+mise run dev
 ```
 
-Artifacts land in `dist/`. No artifact has completed a clean-environment
-install, launch, association, protocol and uninstall run yet, and no signed
-release manifest exists. See [packaging notes](packaging/linux/README.md) and
-[development and packaging](docs/technical/development.md#5-packaging-and-update-signing).
+If mise asks you to trust the configuration, review [mise.toml](mise.toml) and
+run `mise trust` in the repository root.
+
+In Astrolith, choose **Open project…** (`Ctrl+Shift+O`) and select the root of
+an Astro project with its dependencies installed. Choose a collection in the
+Library, then open an entry.
+
+AppImage, `.deb`, and `.rpm` recipes are available for local builds. See the
+[Linux packaging notes](packaging/linux/README.md) for commands and verification
+status.
+
+## Documentation
+
+- [User guide](docs/user/guide.md)
+- [Keyboard shortcuts](docs/user/keyboard-shortcuts.md)
+- [Privacy and local data](docs/user/privacy.md)
+
+Astrolith has no account system or telemetry. The privacy guide lists where
+preferences and recovery snapshots are stored and when the app makes network
+requests.
 
 ## Development
 
-`mise run check` composes doctor, formatting, lint, build, headless tests and
-Astro fixture verification; it is the commit gate. `mise run ci` runs the same
-composition in CI. Architecture boundaries, focused tasks, performance workloads,
-test strategy and the real-platform gate list are in
-[development and packaging](docs/technical/development.md).
+Astrolith is written in Rust with GPUI Kit. [mise.toml](mise.toml) pins the
+toolchain, and Cargo build and test tasks use the committed lockfile.
 
-Headless checks do not establish native IME, focus, display scaling, rendering,
-drag-and-drop, browser-launch or packaging behavior. Those remain explicit
-real-platform evidence and are tracked in the parity audit.
+```sh
+mise run build
+mise run check
+```
+
+Run `mise run check` before committing. It covers the toolchain, formatting,
+lint, build, headless tests, and Astro compatibility fixtures. See the
+[development and packaging guide](docs/technical/development.md) and the
+[repository guidelines](AGENTS.md).
 
 ## License
 
-This repository declares no license yet. The RPM metadata therefore says
-`UNLICENSED`, and the AppStream metadata omits a project license until one is
-chosen.
+The repository does not currently declare a project license.
