@@ -10,13 +10,18 @@ use gpui_kit::component::{
     ActiveTheme, Icon, Sizable, StyledExt,
     button::{Button, ButtonVariants},
 };
-use gpui_kit::{App, ElementId, IntoElement, SharedString, TestSupportExt, div, prelude::*, px};
+use gpui_kit::{
+    App, ElementId, IntoElement, SharedString, TestSupportExt, div, img, prelude::*, px,
+};
 
-/// The application mark, set in the neutral foreground.
+/// The application mark for the active appearance.
 pub(crate) fn mark(cx: &App) -> impl IntoElement {
-    Icon::new(IconName::Feather)
-        .small()
-        .text_color(cx.theme().foreground)
+    let path = if cx.theme().mode.is_dark() {
+        "astrolith-dark.svg"
+    } else {
+        "astrolith-light.svg"
+    };
+    img(path).size_5()
 }
 
 /// The wordmark shown in the window chrome.

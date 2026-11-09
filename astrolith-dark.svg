@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="608.5 345.75 320 320" role="img" aria-labelledby="title">
+  <title id="title">Cream folded ribbon logo</title>
+  <defs>
+    <clipPath id="ribbon-outline">
+      <path d="M718.2 409.9
+               C729.3 391.4 749.3 380.35 770 380.35
+               C792.2 380.35 811.1 391.6 822.5 411
+               L924.6 603.25
+               C931.7 616.6 925.65 631.2 910.1 631.2
+               H839.1
+               C816.8 631.2 798.2 619.3 787.2 598.65
+               L759.45 546.35 728.25 598.65
+               C716.2 618.85 697.3 631.2 673.25 631.2
+               H652.35
+               C623.8 631.2 599.8 608.9 613.55 584.7 Z"/>
+    </clipPath>
+    <linearGradient id="cream-face" gradientUnits="userSpaceOnUse" x1="676" y1="396" x2="767" y2="604">
+      <stop stop-color="#f8efed"/>
+      <stop offset=".55" stop-color="#f8f1ef"/>
+      <stop offset="1" stop-color="#f8f0ed"/>
+    </linearGradient>
+    <linearGradient id="fold-shadow" gradientUnits="userSpaceOnUse" x1="785" y1="500" x2="917.5" y2="632.5">
+      <stop stop-color="#696563"/>
+      <stop offset=".057" stop-color="#7c7775"/>
+      <stop offset=".132" stop-color="#999492"/>
+      <stop offset=".208" stop-color="#b0aaa8"/>
+      <stop offset=".283" stop-color="#c2bcb9"/>
+      <stop offset=".358" stop-color="#cec8c5"/>
+      <stop offset=".434" stop-color="#d8d2cf"/>
+      <stop offset=".509" stop-color="#ded8d5"/>
+      <stop offset=".585" stop-color="#e3ddda"/>
+      <stop offset=".66" stop-color="#e7e1de"/>
+      <stop offset=".811" stop-color="#ede7e4"/>
+      <stop offset="1" stop-color="#f4eeeb"/>
+    </linearGradient>
+  </defs>
+  <g clip-path="url(#ribbon-outline)">
+    <path fill="url(#cream-face)" d="M609 380 H929 V632 H609 Z"/>
+    <path fill="url(#fold-shadow)" d="M756.9 550.62 L787.05 499.95
+             C796.1 484.75 811 476.85 826.85 476.85
+             C844.3 476.85 860.05 486.5 872.4 503.1
+             L950 595 V640 H790 Z"/>
+  </g>
+</svg>

@@ -7,6 +7,34 @@ mod spikes {
 #[cfg(debug_assertions)]
 use gpui_kit::{AppContext, WindowOptions};
 
+struct AstrolithAssets;
+
+impl gpui_kit::AssetSource for AstrolithAssets {
+    fn load(&self, path: &str) -> gpui_kit::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        let logo = match path {
+            "astrolith-dark.svg" => Some(include_bytes!("../../../astrolith-dark.svg").as_slice()),
+            "astrolith-light.svg" => {
+                Some(include_bytes!("../../../astrolith-light.svg").as_slice())
+            }
+            _ => None,
+        };
+        match logo {
+            Some(bytes) => Ok(Some(std::borrow::Cow::Borrowed(bytes))),
+            None => gpui_kit::assets::AllAssets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> gpui_kit::Result<Vec<gpui_kit::SharedString>> {
+        let mut assets = gpui_kit::assets::AllAssets.list(path)?;
+        for logo in ["astrolith-dark.svg", "astrolith-light.svg"] {
+            if logo.starts_with(path) {
+                assets.push(logo.into());
+            }
+        }
+        Ok(assets)
+    }
+}
+
 /// The M00 spikes are development-only windows. A release binary that is asked
 /// for one must say so instead of falling through to the application window.
 #[cfg(not(debug_assertions))]
@@ -56,7 +84,7 @@ fn main() {
     refuse_spike_request();
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
+        .with_assets(AstrolithAssets)
         .run(move |cx| {
             astrolith_gpui::extend_i18n();
             gpui_kit::init(cx);
