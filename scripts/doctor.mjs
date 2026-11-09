@@ -27,7 +27,6 @@ try {
   }
   console.log("rust-src: standard-library source found");
   console.log(`node: ${process.version}`);
-  check(executable("bun"), ["--version"]);
   const metadata = JSON.parse(check(executable("cargo"), ["metadata", "--locked", "--no-deps", "--format-version", "1"], true));
   console.log(`cargo metadata: ${metadata.workspace_members.length} workspace package(s), lockfile accepted`);
 
