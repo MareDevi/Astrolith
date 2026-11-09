@@ -3,24 +3,28 @@
 ## Toolchain and architecture
 
 - `mise.toml` owns project tool versions and task entry points. Use `mise install` and `mise run …`; never install project tool versions globally or add competing version files.
-- Use `--locked` for Cargo builds and tests. Track `Cargo.lock` and commit its changes with the dependency changes that require them. Commit Bun lockfiles with Astro fixtures.
-- Depend on the pinned `gpui-kit` facade and verify APIs against the matching registry source. Read the GPUI Kit design and coding guides before changing the UI, using their reading scope for the size of the change.
+- Use `--locked` for Cargo builds, tests, and other commit checks that accept it. Track `Cargo.lock` and commit its changes with the dependency changes that require them. Commit Bun lockfiles with Astro fixtures.
+- Depend on the pinned `gpui-kit` facade. Verify API signatures in the matching registry source. Read the GPUI Kit design and coding guides before changing the UI. Read the full design guide for a new screen or redesign. For a narrow UI change, read the required sections and the sections relevant to the change.
 - Keep domain logic and services out of the desktop bootstrap. Keep filesystem operations and blocking I/O out of GUI rendering.
 - Keep external browser preview as the normal Wayland path and embedded preview optional.
 
-## Implementation and tests
+## Implementation
 
 - Write only the code the task requires. Do not add speculative abstractions, unused helpers, dead branches, defensive checks with no failure mode, or duplicated logic; delete code made obsolete by the change.
-- Write unit tests only for important logic, such as domain rules, parser boundaries, persistence invariants, and consequential error paths. Reuse existing tests where they catch the regression. Add only the few cases needed to prove the behavior. Do not pursue coverage targets, add tests in bulk, or test trivial glue, configuration, getters, setters, or internal details with no observable effect.
-- Use TDD for changes to behavior in domain logic, parsers, persistence, and services. Start with a focused failing test at the layer that owns the behavior. Reuse an existing test when it can demonstrate the failure. Use smoke runs for supplemental verification without turning every manual check into a permanent test.
+
+## Tests
+
+- Limit unit tests to important logic: domain rules, parser boundaries, persistence invariants, and error paths with observable consequences. Add only a few cases for gaps that matter. Do not add unit tests in bulk, chase coverage targets, or test trivial glue, configuration, getters, setters, and implementation details.
+- Use TDD for behavior changes in domain logic, parsers, persistence, and services. Reuse a focused test that demonstrates the failure, or add one at the layer that owns the behavior. Use a smoke run for supplemental checks that do not warrant a permanent test.
 
 ## Verification and acceptance
 
-- Bootstrap and spike work requires a real build and a bounded window smoke run. Native IME, focus, scaling, and rendering acceptance requires evidence from the relevant platform.
-- Preserve the GPUI Coding Guides' human review and testing requirement. Report automated checks, native evidence, and pending human review separately. Continue any independent verification permitted by the applicable gates.
+- Treat focused regression checks as evidence for the fix, then complete the required project checks and delivery steps.
+- For bootstrap or spike work, build the app and run a bounded window smoke test. Verify native IME, focus, scaling, and rendering on the relevant platform when the task requires acceptance of those behaviors.
+- GPUI code covered by the Coding Guides' human review and testing requirement needs both. Complete independent verification allowed by the applicable gates and report automated checks, native evidence, and human review separately. Mark any unverified acceptance criterion as pending.
 
 ## Commits
 
-- Run `mise run check` before committing each independently buildable change. Focused verification is one step in this workflow. Report the actual result and any outstanding acceptance checks. `mise run ci` uses the same checks on Linux, macOS, and Windows.
-- Commit each verified logical change promptly and end every completed implementation task with at least one commit. Keep unrelated changes out of each commit and preserve existing review documents. Do not stage unrelated files, generated artifacts, or secrets.
+- Require `mise run check` to pass before committing each independently buildable change. Report the actual result. If a failure remains after investigation, name the failing check and the blocker. `mise run ci` runs the same checks on Linux, macOS, and Windows.
+- Commit each verified logical change promptly. Deliver each completed implementation task with at least one commit. Preserve existing review documents and unrelated changes. Keep unrelated files, generated artifacts, and secrets out of the commit.
 - Use Conventional Commits in the form `<type>(<scope>): <description>`. Allowed types are `feat`, `fix`, `refactor`, `test`, `docs`, `build`, `ci`, and `chore`. Use an imperative, lowercase description. Add a body when the change needs rationale.
