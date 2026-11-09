@@ -684,8 +684,6 @@ impl ListDelegate for EntryList {
                         .w_full()
                         .h(rems(2.75))
                         .flex_shrink_0()
-                        .rounded(cx.theme().radius)
-                        .when(selected, |surface| surface.bg(cx.theme().selection))
                         .child(row_content),
                 ),
         )
