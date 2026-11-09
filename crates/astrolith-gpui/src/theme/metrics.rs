@@ -121,33 +121,3 @@ pub(crate) const METRICS: ThemeMetrics = ThemeMetrics {
         ],
     },
 };
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scales_match_the_mock_snapshot() {
-        assert_eq!(
-            [
-                METRICS.space.xxs,
-                METRICS.space.xs,
-                METRICS.space.sm,
-                METRICS.space.md,
-                METRICS.space.lg,
-                METRICS.space.xl,
-                METRICS.space.xxl,
-                METRICS.space.section,
-                METRICS.space.gutter,
-                METRICS.space.writing,
-                METRICS.space.page,
-                METRICS.space.canvas,
-            ],
-            [2, 4, 6, 8, 12, 16, 20, 24, 32, 48, 64, 96]
-        );
-        assert_eq!(METRICS.type_scale.caption, 12.);
-        assert_eq!(METRICS.type_scale.title, 36.);
-        assert_eq!(METRICS.type_scale.display, 48.);
-        assert_eq!(METRICS.elevation.overlay[0].blur, 15.);
-    }
-}

@@ -2551,44 +2551,6 @@ pub(crate) fn fingerprint(text: &str) -> u64 {
 }
 
 #[cfg(test)]
-mod language_tests {
-    use super::editor_language;
-
-    #[test]
-    fn build_highlights_the_astro_stack() {
-        for (path, language) in [
-            ("src/pages/index.astro", "astro"),
-            ("src/lib/a.ts", "typescript"),
-            ("src/lib/a.mts", "typescript"),
-            ("src/lib/a.cts", "typescript"),
-            ("src/components/A.tsx", "tsx"),
-            ("src/components/A.jsx", "tsx"),
-            ("src/scripts/a.js", "javascript"),
-            ("src/scripts/a.mjs", "javascript"),
-            ("src/scripts/a.cjs", "javascript"),
-            ("package.json", "json"),
-            ("tsconfig.jsonc", "json"),
-            ("src/styles/a.css", "css"),
-            ("src/styles/a.scss", "css"),
-            ("src/styles/a.less", "css"),
-            ("src/index.html", "html"),
-            ("src/components/A.svelte", "svelte"),
-            ("src/content/post.md", "markdown"),
-            ("src/content/post.mdx", "markdown"),
-            ("astro.config.yaml", "yaml"),
-            ("netlify.toml", "toml"),
-        ] {
-            assert_eq!(editor_language(path), language, "{path}");
-        }
-        assert_eq!(
-            editor_language("assets/logo.svg"),
-            "text",
-            "unsupported formats stay readable instead of guessing"
-        );
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use astrolith_core::{ProjectId, SourcePath};

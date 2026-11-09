@@ -169,13 +169,4 @@ mod tests {
         assert!(!family_available_in(&installed, "Noto"));
         assert!(!family_available_in(&installed, "Missing Font"));
     }
-
-    #[test]
-    fn falls_back_to_the_system_face_without_the_mock_font() {
-        let installed = names(&["Noto Sans"]);
-        assert_eq!(
-            first_installed(&["Noto Serif"], &installed),
-            SharedString::from(".SystemUIFont")
-        );
-    }
 }

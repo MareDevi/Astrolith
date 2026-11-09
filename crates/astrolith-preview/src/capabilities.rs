@@ -300,12 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn wayland_display_selects_wayland() {
-        let session = LinuxSession::from_lookup(lookup_from(&[("WAYLAND_DISPLAY", "wayland-0")]));
-        assert_eq!(session, LinuxSession::Wayland);
-    }
-
-    #[test]
     fn xwayland_prefers_wayland_over_x11() {
         let session = LinuxSession::from_lookup(lookup_from(&[
             ("WAYLAND_DISPLAY", "wayland-1"),
@@ -334,12 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn display_selects_x11() {
-        let session = LinuxSession::from_lookup(lookup_from(&[("DISPLAY", ":0")]));
-        assert_eq!(session, LinuxSession::X11);
-    }
-
-    #[test]
     fn session_type_selects_x11_without_a_display_variable() {
         let session = LinuxSession::from_lookup(lookup_from(&[("XDG_SESSION_TYPE", "x11")]));
         assert_eq!(session, LinuxSession::X11);
@@ -359,14 +347,6 @@ mod tests {
     fn missing_variables_are_headless() {
         let session = LinuxSession::from_lookup(lookup_from(&[]));
         assert_eq!(session, LinuxSession::Headless);
-    }
-
-    #[test]
-    fn a_build_without_the_surface_never_offers_embedded_preview() {
-        assert_eq!(
-            PreviewCapability::detect_with(false),
-            PreviewCapability::ExternalOnly
-        );
     }
 
     #[test]

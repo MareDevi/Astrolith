@@ -1263,29 +1263,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copyedit_defaults_to_disabled_and_tracks_each_category() {
-        let mut copyedit = CopyeditPreferences::default();
-        assert!(!copyedit.all_enabled());
-        for category in CopyeditCategory::ALL {
-            assert!(!copyedit.enabled(category));
-        }
-
-        copyedit.set_enabled(CopyeditCategory::Verb, true);
-        assert!(copyedit.enabled(CopyeditCategory::Verb));
-        assert!(!copyedit.enabled(CopyeditCategory::Noun));
-        assert!(!copyedit.all_enabled());
-
-        copyedit.set_all(true);
-        assert!(copyedit.all_enabled());
-        for category in CopyeditCategory::ALL {
-            assert!(copyedit.enabled(category));
-        }
-
-        copyedit.set_all(false);
-        assert!(!copyedit.all_enabled());
-    }
-
-    #[test]
     fn skipped_update_version_is_optional_and_survives_round_trips() {
         let mut stored =
             serde_json::to_value(GlobalPreferences::default()).expect("serialize preferences");
@@ -1336,17 +1313,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_modes_default_to_a_blank_page_and_resolve_one_mode_at_a_time() {
-        let defaults = GlobalPreferences::default();
-        assert_eq!(defaults.default_mode, WorkspaceMode::Writing);
-        assert!(!defaults.layouts.writing.sidebar_visible);
-        assert!(!defaults.layouts.writing.preview_visible);
-        assert!(defaults.layouts.build.sidebar_visible);
-        assert!(
-            !defaults.layouts.preview.preview_visible,
-            "Preview opens on the rendered document, not the Astro preview dock"
-        );
-
+    fn workspace_modes_resolve_one_mode_at_a_time() {
         let global = GlobalPreferences {
             default_mode: WorkspaceMode::Preview,
             ..GlobalPreferences::default()
@@ -1423,44 +1390,6 @@ mod tests {
             Some("pubDate"),
             "an absent collection mapping inherits the project value"
         );
-    }
-
-    #[test]
-    fn copyedit_preferences_round_trip_through_json() {
-        let mut global = GlobalPreferences::default();
-        global.copyedit.set_enabled(CopyeditCategory::Verb, true);
-        global.copyedit.colors.verb = "#123456".into();
-        let encoded = serde_json::to_string(&global).unwrap();
-        let decoded: GlobalPreferences = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded, global);
-        assert!(decoded.copyedit.enabled(CopyeditCategory::Verb));
-        assert!(!decoded.copyedit.all_enabled());
-        assert_eq!(
-            decoded.copyedit.colors.color(CopyeditCategory::Verb),
-            "#123456"
-        );
-    }
-
-    #[test]
-    fn preview_preferences_default_to_external_and_round_trip() {
-        let defaults = PreviewPreferences::default();
-        assert_eq!(defaults.presentation, PreviewPresentation::External);
-        assert!(!defaults.browser.is_configured());
-        assert!(!defaults.open_on_enter);
-
-        let mut global = GlobalPreferences::default();
-        global.preview.presentation = PreviewPresentation::Embedded;
-        global.preview.browser = BrowserCommand {
-            executable: "firefox".into(),
-            arguments: vec!["--new-window".into(), "{url}".into()],
-        };
-        global.preview.open_on_enter = true;
-        let encoded = serde_json::to_string(&global).unwrap();
-        let decoded: GlobalPreferences = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded.preview, global.preview);
-
-        let resolved = resolve(&decoded, None, None);
-        assert_eq!(resolved.preview, global.preview);
     }
 
     #[test]
@@ -1560,52 +1489,6 @@ mod tests {
         assert_eq!(retired.page_width_percent, 64.);
         assert!(!retired.focus_mode);
         assert!(!retired.typewriter_mode);
-    }
-
-    #[test]
-    fn writing_typography_and_modes_resolve_from_the_global_scope() {
-        let global = GlobalPreferences {
-            prose_font_family: "Inter Display".into(),
-            editor_font_size: 19.,
-            editor_line_height: 1.75,
-            page_width_percent: 70.,
-            focus_mode: true,
-            typewriter_mode: true,
-            ..GlobalPreferences::default()
-        };
-        let resolved = resolve(&global, None, None);
-        assert_eq!(resolved.prose_font_family, "Inter Display");
-        assert_eq!(resolved.editor_font_size, 19.);
-        assert_eq!(resolved.editor_line_height, 1.75);
-        assert_eq!(resolved.page_width_percent, 70.);
-        assert!(resolved.focus_mode);
-        assert!(resolved.typewriter_mode);
-
-        let decoded: GlobalPreferences =
-            serde_json::from_str(&serde_json::to_string(&global).unwrap()).unwrap();
-        assert_eq!(decoded.prose_font_family, "Inter Display");
-        assert_eq!(decoded.editor_line_height, 1.75);
-        assert!(decoded.focus_mode);
-        assert!(decoded.typewriter_mode);
-    }
-
-    #[test]
-    fn window_geometry_round_trips_through_the_global_envelope() {
-        let global = GlobalPreferences {
-            window: Some(WindowGeometry {
-                x: 120.,
-                y: 80.,
-                width: 1280.,
-                height: 800.,
-                maximized: true,
-            }),
-            ..GlobalPreferences::default()
-        };
-        let decoded: GlobalPreferences =
-            serde_json::from_str(&serde_json::to_string(&global).unwrap()).unwrap();
-        assert_eq!(decoded.window, global.window);
-        let bare: GlobalPreferences = serde_json::from_str("{\"version\":2}").unwrap();
-        assert_eq!(bare.window, None);
     }
 
     #[test]

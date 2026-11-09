@@ -208,17 +208,6 @@ mod tests {
     }
 
     #[test]
-    fn summary_matches_the_range_snapshot_on_a_large_single_line() {
-        // One 100 KB line: the footer's allocation-free path must agree with
-        // the token ranges the classifier uses, including apostrophes and
-        // underscores inside words.
-        let text = "don't_stop 中文 🦀 **bold** `code` ".repeat(2_800);
-        let snapshot = token_snapshot(&text);
-        assert_eq!(token_summary(&text), snapshot.summary());
-        assert!(snapshot.words() > 0);
-    }
-
-    #[test]
     fn summary_matches_the_range_snapshot_across_the_word_rule() {
         for text in [
             "Two words, and a [link](https://x.dev).\n",

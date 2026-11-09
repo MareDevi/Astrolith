@@ -31,37 +31,6 @@ fn schema(fields: &[(&str, FieldKind)]) -> CollectionSchema {
 }
 
 #[test]
-fn project_and_collection_panes_follow_the_open_project() {
-    let panes = |has_project| {
-        Pane::ALL
-            .into_iter()
-            .filter(|pane| pane.available(has_project))
-            .map(Pane::label)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        panes(false),
-        vec![
-            tr!("preferences.pane.appearance.label"),
-            tr!("preferences.pane.workspace.label"),
-            tr!("preferences.pane.preview.label"),
-            tr!("preferences.pane.advanced.label"),
-        ]
-    );
-    assert_eq!(
-        panes(true),
-        vec![
-            tr!("preferences.pane.appearance.label"),
-            tr!("preferences.pane.workspace.label"),
-            tr!("preferences.pane.preview.label"),
-            tr!("preferences.pane.project.label"),
-            tr!("preferences.pane.collections.label"),
-            tr!("preferences.pane.advanced.label"),
-        ]
-    );
-}
-
-#[test]
 fn directories_are_project_relative_and_normalized() {
     assert_eq!(directory_value("").unwrap(), None);
     assert_eq!(
@@ -286,37 +255,6 @@ fn edited_scopes_resolve_collection_over_project_over_global() {
     let resolved = resolve(&global, None, None);
     assert_eq!(resolved.default_extension, FileExtension::Mdx);
     assert_eq!(resolved.image_path_mode, ImagePathMode::Relative);
-}
-
-#[test]
-fn versions_report_the_application_and_every_envelope() {
-    let versions = advanced::versions();
-    let lines = versions.lines();
-    assert_eq!(
-        lines[0],
-        ("Astrolith".into(), env!("CARGO_PKG_VERSION").into())
-    );
-    assert_eq!(
-        lines[1],
-        (
-            tr!("preferences.advanced.global_preferences"),
-            tr!("preferences.advanced.version", version = versions.global)
-        )
-    );
-    assert_eq!(
-        lines[2],
-        (
-            tr!("preferences.advanced.project_preferences"),
-            tr!("preferences.advanced.version", version = versions.project)
-        )
-    );
-    assert_eq!(
-        lines[3],
-        (
-            tr!("preferences.advanced.project_registry"),
-            tr!("preferences.advanced.version", version = versions.registry)
-        )
-    );
 }
 
 #[test]

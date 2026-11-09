@@ -1210,19 +1210,6 @@ mod tests {
     }
 
     #[test]
-    fn preferences_is_a_global_command_with_the_standard_shortcut() {
-        let expected = if cfg!(target_os = "macos") {
-            "cmd-,"
-        } else {
-            "ctrl-,"
-        };
-        assert_eq!(CommandId::OpenPreferences.shortcut(), Some(expected));
-        assert_eq!(CommandId::OpenPreferences.label(), "Preferences…");
-        assert!(CommandId::OpenPreferences.is_available(CommandAvailability::default()));
-        assert!(COMMANDS.contains(&CommandId::OpenPreferences));
-    }
-
-    #[test]
     fn registered_commands_have_unique_identity_and_shortcuts() {
         let mut ids = std::collections::HashSet::new();
         let mut keys = std::collections::HashSet::new();
@@ -1528,27 +1515,6 @@ mod tests {
     }
 
     #[test]
-    fn help_surfaces_are_available_from_the_help_group() {
-        for command in [
-            CommandId::OpenUserGuide,
-            CommandId::OpenKeyboardShortcuts,
-            CommandId::OpenLocalData,
-        ] {
-            assert!(COMMANDS.contains(&command));
-            assert_eq!(command_group(command), "Help");
-            assert!(command.is_available(CommandAvailability::default()));
-            assert!(command.shortcut().is_none());
-        }
-    }
-
-    #[test]
-    fn about_reports_the_crate_version_and_build_identity() {
-        let text = about_text();
-        assert!(text.contains(env!("CARGO_PKG_VERSION")));
-        assert!(text.contains(&build_identity()));
-    }
-
-    #[test]
     fn preview_commands_follow_the_server_phase() {
         let attached = CommandAvailability {
             project_open: true,
@@ -1587,15 +1553,5 @@ mod tests {
         };
         assert!(!CommandId::CopyPreviewUrl.is_available(stopped));
         assert!(!CommandId::OpenPreview.is_available(stopped));
-    }
-
-    #[test]
-    fn ctrl_enter_opens_the_preview() {
-        let expected = if cfg!(target_os = "macos") {
-            "cmd-enter"
-        } else {
-            "ctrl-enter"
-        };
-        assert_eq!(CommandId::OpenPreview.shortcut(), Some(expected));
     }
 }

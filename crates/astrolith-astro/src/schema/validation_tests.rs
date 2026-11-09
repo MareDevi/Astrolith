@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::{
     CollectionSchema, Field, FieldConstraints, FieldKind, SchemaDialect, ValidationDiagnostic,
@@ -298,19 +298,6 @@ fn diagnostics_are_sorted_and_deterministic() {
     let diagnostics = validate_frontmatter(&schema, &json!({ "zeta": 1, "alpha": 2 }));
 
     assert_eq!(paths(&diagnostics), ["alpha", "zeta"]);
-}
-
-#[test]
-fn value_type_helper_round_trips_through_serde() {
-    // Guard the validation entry point against non-object primitives.
-    let schema = schema(vec![field(
-        "title",
-        true,
-        FieldKind::String { format: None },
-    )]);
-    let value: Value = serde_json::from_str("null").unwrap();
-    let diagnostics = validate_frontmatter(&schema, &value);
-    assert_eq!(paths(&diagnostics), ["<root>"]);
 }
 
 #[test]

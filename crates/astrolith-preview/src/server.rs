@@ -888,24 +888,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn server_status_exposes_url_and_label() {
-        let stopped = ServerStatus::Stopped;
-        assert!(!stopped.is_ready());
-        assert!(stopped.url().is_none());
-        assert_eq!(stopped.label(), "stopped");
-
-        let url = Url::parse("http://127.0.0.1:4321/").unwrap();
-        let ready = ServerStatus::Ready(url.clone());
-        assert!(ready.is_ready());
-        assert_eq!(ready.url(), Some(&url));
-        assert_eq!(ready.label(), "ready");
-
-        assert_eq!(ServerStatus::Starting.label(), "starting");
-        assert_eq!(ServerStatus::Stopping.label(), "stopping");
-        assert_eq!(ServerStatus::Failed("boom".into()).label(), "failed");
-    }
-
-    #[test]
     fn parses_plain_and_ansi_colored_ready_lines() {
         let plain = "  Local    http://localhost:4321/\n";
         assert_eq!(

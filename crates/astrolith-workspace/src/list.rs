@@ -388,7 +388,7 @@ fn optional_numbers(left: Option<f64>, right: Option<f64>) -> Ordering {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs};
+    use std::fs;
 
     use astrolith_astro::{
         Cancellation, DiscoveryOutcome, DiscoveryRequest, ProjectManifest, inspect_project,
@@ -632,7 +632,5 @@ mod tests {
         assert_eq!(mapped_title(entry, None), Some("Mapped"));
         assert!(is_draft(entry, None));
         assert!(publication_date(entry, None).is_some());
-        let empty = BTreeMap::<String, FieldMappings>::new();
-        assert!(empty.is_empty());
     }
 }

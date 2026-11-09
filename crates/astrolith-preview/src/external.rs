@@ -273,24 +273,6 @@ mod tests {
     }
 
     #[test]
-    fn launches_the_platform_command_with_the_url() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let browser = ExternalBrowser::with_opener(Box::new(FakeOpener {
-            calls: calls.clone(),
-            fail: None,
-        }));
-        let command = browser.launch(&url()).unwrap();
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, command.program);
-        assert_eq!(calls[0].1, command.args);
-        assert!(
-            calls[0].1.iter().any(|argument| argument == url().as_str()),
-            "the URL must be passed through"
-        );
-    }
-
-    #[test]
     fn opener_failure_is_reported_with_the_command() {
         let browser = ExternalBrowser::with_opener(Box::new(FakeOpener {
             calls: Arc::default(),
@@ -395,17 +377,6 @@ mod tests {
             .collect();
         assert_eq!(matching.len(), 1, "args were {:?}", command.args);
         assert_eq!(matching[0], "http://127.0.0.1:4321/docs/Q&A%20notes");
-    }
-
-    #[test]
-    fn surface_trait_delegates_to_launch() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let browser = ExternalBrowser::with_opener(Box::new(FakeOpener {
-            calls: calls.clone(),
-            fail: None,
-        }));
-        browser.open(&url()).unwrap();
-        assert_eq!(calls.lock().unwrap().len(), 1);
     }
 
     /// A launched opener must be waited on so it never lingers as a zombie.

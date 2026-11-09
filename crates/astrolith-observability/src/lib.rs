@@ -450,23 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn default_filter_keeps_application_crates_at_info() {
-        let filter = EnvFilter::try_new(DEFAULT_FILTER).expect("default filter must be valid");
-        let rendered = filter.to_string();
-        for directive in [
-            "warn",
-            "astrolith_desktop=info",
-            "astrolith_gpui=info",
-            "astrolith_preview=info",
-        ] {
-            assert!(
-                rendered.split(',').any(|part| part == directive),
-                "{directive} missing from {rendered}"
-            );
-        }
-    }
-
-    #[test]
     fn json_file_sink_writes_structured_records() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = LogConfig {

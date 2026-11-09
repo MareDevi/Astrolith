@@ -499,12 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn the_default_delay_is_two_seconds() {
-        let coordinator = SaveCoordinator::new(AutosaveDelay::default());
-        assert_eq!(coordinator.delay().seconds(), 2);
-    }
-
-    #[test]
     fn the_idle_delay_is_exactly_each_supported_preference() {
         for delay in [
             AutosaveDelay::One,

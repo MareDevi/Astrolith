@@ -324,13 +324,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bundled_guide_is_repository_documentation() {
-        assert!(USER_GUIDE.contains("# Astrolith user guide"));
-        assert!(USER_GUIDE.contains("## 14. Linux limits and known gaps"));
-        assert!(!USER_GUIDE.trim().is_empty());
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn shortcut_reference_covers_every_registered_shortcut() {

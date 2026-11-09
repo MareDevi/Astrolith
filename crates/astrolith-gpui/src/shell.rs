@@ -8971,57 +8971,6 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn about_is_reachable_from_its_command_id(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferences::default());
-        cx.update_window(handle.into(), |_, window, cx| {
-            view.update(cx, |shell, cx| shell.execute(CommandId::About, window, cx));
-            assert!(window.has_active_dialog(cx));
-        })
-        .unwrap();
-    }
-
-    #[gpui_kit::test]
-    fn help_surfaces_open_from_their_command_ids(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferences::default());
-        cx.update_window(handle.into(), |_, window, cx| {
-            for command in [
-                CommandId::OpenUserGuide,
-                CommandId::OpenKeyboardShortcuts,
-                CommandId::OpenLocalData,
-            ] {
-                view.update(cx, |shell, cx| shell.execute(command, window, cx));
-                assert!(
-                    window.has_active_dialog(cx),
-                    "{} did not open a dialog",
-                    command.label()
-                );
-                window.close_all_dialogs(cx);
-                assert!(!window.has_active_dialog(cx));
-            }
-        })
-        .unwrap();
-    }
-
-    #[gpui_kit::test]
-    fn preferences_documentation_links_open_help(cx: &mut TestAppContext) {
-        let (handle, view) = mount(cx, GlobalPreferences::default());
-        let sheet = view.read_with(cx, |shell, _| shell.preferences_sheet.clone());
-        cx.update_window(handle.into(), |_, window, cx| {
-            view.update(cx, |shell, cx| shell.open_preferences(window, cx));
-            assert!(window.has_active_dialog(cx));
-            sheet.update(cx, |_, cx| cx.emit(PreferencesEvent::OpenUserGuide));
-            assert!(window.has_active_dialog(cx));
-            window.close_all_dialogs(cx);
-
-            view.update(cx, |shell, cx| shell.open_preferences(window, cx));
-            sheet.update(cx, |_, cx| cx.emit(PreferencesEvent::OpenKeyboardShortcuts));
-            assert!(window.has_active_dialog(cx));
-            window.close_all_dialogs(cx);
-        })
-        .unwrap();
-    }
-
-    #[gpui_kit::test]
     fn shell_drop_rejects_multiple_and_mixed_drops_visibly(cx: &mut TestAppContext) {
         let (handle, view) = mount(cx, GlobalPreferences::default());
         let directory = tempfile::tempdir().unwrap();

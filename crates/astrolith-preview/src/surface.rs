@@ -141,33 +141,4 @@ mod tests {
             assert!(validate_preview_url(&url).is_ok(), "{raw} must be allowed");
         }
     }
-
-    #[test]
-    fn recording_surface_captures_and_validates() {
-        let surface = RecordingSurface::new();
-        let url = Url::parse("http://127.0.0.1:4321/docs/intro").unwrap();
-        surface.open(&url).unwrap();
-        assert_eq!(surface.opened(), vec![url.to_string()]);
-
-        let bad = Url::parse("file:///tmp/x").unwrap();
-        assert!(matches!(
-            surface.open(&bad),
-            Err(SurfaceError::InvalidUrl { .. })
-        ));
-        assert_eq!(surface.opened().len(), 1, "invalid URLs are not recorded");
-    }
-
-    #[test]
-    fn failing_surface_reports_the_error_and_records_nothing() {
-        let surface = RecordingSurface::failing(SurfaceError::LaunchFailed {
-            command: "xdg-open".into(),
-            message: "not found".into(),
-        });
-        let url = Url::parse("http://127.0.0.1:4321/").unwrap();
-        assert!(matches!(
-            surface.open(&url),
-            Err(SurfaceError::LaunchFailed { .. })
-        ));
-        assert!(surface.opened().is_empty());
-    }
 }

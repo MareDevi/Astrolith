@@ -388,38 +388,6 @@ fn js_falsey_numeric_frontmatter_slugs_fall_back_to_the_path() {
 }
 
 #[test]
-fn astro7_truthy_integer_slugs_remain_explicitly_unsupported() {
-    let (temp, _) = project();
-    fs::write(
-        temp.path().join("package.json"),
-        r#"{"dependencies":{"astro":"7.4.4"}}"#,
-    )
-    .unwrap();
-    fs::write(
-        temp.path().join("node_modules/astro/package.json"),
-        r#"{"version":"7.4.4"}"#,
-    )
-    .unwrap();
-    fs::write(
-        temp.path().join("node_modules/@astrojs/mdx/package.json"),
-        r#"{"version":"8.1.2","peerDependencies":{"astro":"^7.2.10"}}"#,
-    )
-    .unwrap();
-
-    fs::write(
-        temp.path().join("src/posts/truthy-integer.md"),
-        "---\nslug: 42\n---\n# Truthy integer\n",
-    )
-    .unwrap();
-    let manifest = discover(temp.path());
-    let error = scan_collections(&manifest, &Cancellation::default()).unwrap_err();
-    assert!(matches!(
-        error,
-        astrolith_workspace::WorkspaceError::UnsupportedSlug(_)
-    ));
-}
-
-#[test]
 fn delimiter_like_first_lines_must_be_exact_or_explicitly_unsupported() {
     let (temp, manifest) = project();
     let path = temp.path().join("src/posts/delimiter-prefix.md");

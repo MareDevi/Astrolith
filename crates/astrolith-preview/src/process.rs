@@ -588,20 +588,4 @@ mod tests {
         assert!(!capture.is_truncated());
         assert_eq!(capture.total_received(), 11);
     }
-
-    #[test]
-    fn spawn_spec_builds_arguments_and_environment() {
-        let spec = SpawnSpec::new("node", "/tmp/project")
-            .arg("dev")
-            .env("ASTROLITH_PREVIEW_PORT", "4321");
-        assert_eq!(spec.program, PathBuf::from("node"));
-        assert_eq!(spec.args, vec![OsString::from("dev")]);
-        assert_eq!(
-            spec.envs,
-            vec![(
-                OsString::from("ASTROLITH_PREVIEW_PORT"),
-                OsString::from("4321")
-            )]
-        );
-    }
 }

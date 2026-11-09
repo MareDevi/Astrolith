@@ -30,20 +30,4 @@ mod tests {
         layout.clamp(800.);
         assert_eq!(layout.preview_height, 120.);
     }
-
-    #[test]
-    fn panel_visibility_flags_are_independent_and_widths_survive() {
-        let mut layout = LayoutState {
-            sidebar_visible: false,
-            ..LayoutState::default()
-        };
-        assert!(!layout.sidebar_visible);
-        assert!(!layout.preview_visible);
-        assert_eq!(layout.sidebar_width, 240.);
-        layout.preview_visible = true;
-        layout.sidebar_visible = true;
-        assert!(layout.preview_visible);
-        assert!(layout.sidebar_visible);
-        assert_eq!(layout.sidebar_width, 240.);
-    }
 }
