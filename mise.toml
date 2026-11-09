@@ -120,3 +120,7 @@ run = "packaging/linux/build-appimage.sh"
 [tasks."package:rpm"]
 description = "Build the RPM into dist/ (requires rpmbuild)"
 run = "packaging/linux/build-rpm.sh"
+
+[tasks."package:arch"]
+description = "Build an Arch Linux package into dist/ (requires makepkg)"
+run = "packaging/linux/build-arch.sh"

@@ -10,6 +10,7 @@ mise run package:validate   # desktop-file-validate + appstreamcli validate
 mise run package:deb        # dist/astrolith_<version>_<arch>.deb
 mise run package:appimage   # dist/Astrolith-<version>-x86_64.AppImage
 mise run package:rpm        # dist/astrolith-<version>-1.x86_64.rpm
+mise run package:arch       # dist/astrolith-<version>-1-<arch>.pkg.tar.zst
 ```
 
 Every build script rebuilds the release binary and refuses to package when
@@ -39,7 +40,9 @@ all icons. Its `postinst` and `prerm` run `update-desktop-database` and
 
 The AppImage recipe stages the same files into an AppDir and delegates to
 `linuxdeploy` and `appimagetool`. The RPM recipe generates a spec, builds with
-`rpmbuild`, and runs the same guarded cache updates in `%post`/`%preun`.
+`rpmbuild`, and runs the same guarded cache updates in `%post`/`%preun`. The
+Arch recipe generates a PKGBUILD for the staged files, builds it with
+`makepkg`, and runs the guarded cache updates from its install script.
 
 ## Update manifest
 
@@ -90,6 +93,8 @@ Test keys are generated inside the Rust tests and are never persisted.
   published or checked by a packaged build.
 - `.deb` assembly is exercised locally; AppImage and RPM builds require
   `linuxdeploy`/`appimagetool`/`rpmbuild` and have only been scripted for CI.
+  The Arch package requires `makepkg` and has no CI job; it has only been built
+  on Arch.
 - No clean-environment install, launch, file-association, protocol or uninstall
   run has happened for any artifact.
 - The repository declares no license. The RPM spec uses `License: UNLICENSED`
