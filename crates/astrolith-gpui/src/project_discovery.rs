@@ -4128,7 +4128,6 @@ impl Render for ProjectWorkspace {
                         .pb_2()
                         .when_some(back, |row, back| row.child(back))
                         .child(div().flex_1().min_w_0().child(title_row))
-                        .child(div().flex_1())
                         .child(
                             ui::icon_button(
                                 "open-project",

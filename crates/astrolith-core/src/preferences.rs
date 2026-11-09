@@ -247,7 +247,7 @@ impl PanelLayout {
         Self {
             sidebar_visible: false,
             preview_visible: false,
-            sidebar_width: 224.,
+            sidebar_width: 320.,
             preview_height: 160.,
         }
     }

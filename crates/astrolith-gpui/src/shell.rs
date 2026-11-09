@@ -8417,7 +8417,7 @@ mod tests {
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
                 .is_some_and(|value| {
                     value["default_mode"] == "build"
-                        && value["layouts"]["writing"]["sidebar_width"] == 224.0
+                        && value["layouts"]["writing"]["sidebar_width"] == 320.0
                 })
         })
         .await;
