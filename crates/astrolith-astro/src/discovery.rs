@@ -164,6 +164,8 @@ pub struct ProjectManifest {
     collections: Vec<CollectionDescriptor>,
     data_collections: Vec<DataCollectionDescriptor>,
     diagnostics: Vec<String>,
+    default_locale: Option<String>,
+    prefix_default_locale: bool,
 }
 impl ProjectManifest {
     pub fn root(&self) -> &Path {
@@ -189,6 +191,12 @@ impl ProjectManifest {
     /// Non-fatal data-collection problems found during discovery.
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
+    }
+    pub fn default_locale(&self) -> Option<&str> {
+        self.default_locale.as_deref()
+    }
+    pub fn prefix_default_locale(&self) -> bool {
+        self.prefix_default_locale
     }
 }
 #[derive(Clone, Debug)]
@@ -356,14 +364,16 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
             return Ok(unsupported(error.to_string()));
         }
     };
-    let (src_dir, mdx_integration) = if let Some(path) = astro_config {
+    let project_config = if let Some(path) = astro_config {
         match parse_project_config(&read_bounded(&path, 1024 * 1024)?) {
-            Ok(config) => (config.src_dir, config.mdx),
+            Ok(config) => config,
             Err(error) => return Ok(unsupported(error)),
         }
     } else {
-        ("src".into(), false)
+        parse_project_config("").expect("default project config")
     };
+    let src_dir = project_config.src_dir.clone();
+    let mdx_integration = project_config.mdx;
     cancellation.check()?;
     let src = match contained_path(&root, Path::new(&src_dir)) {
         Ok(path) if path.is_dir() => path,
@@ -509,6 +519,8 @@ pub fn inspect_project(request: &DiscoveryRequest) -> Result<DiscoveryOutcome, A
         collections,
         data_collections,
         diagnostics,
+        default_locale: project_config.default_locale,
+        prefix_default_locale: project_config.prefix_default_locale,
     }))
 }
 

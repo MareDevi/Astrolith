@@ -472,6 +472,19 @@ fn project_config_reports_src_dir_and_verified_mdx_default_imports() {
 }
 
 #[test]
+fn project_config_parses_static_default_locale_routing() {
+    let source = r#"
+        import { defineConfig } from "astro/config";
+        export default defineConfig({
+            i18n: { defaultLocale: "zh-cn", routing: { prefixDefaultLocale: false } },
+        });
+    "#;
+    let config = parse_project_config(source).unwrap();
+    assert_eq!(config.default_locale.as_deref(), Some("zh-cn"));
+    assert!(!config.prefix_default_locale);
+}
+
+#[test]
 fn rejects_mdx_options_and_spreads_but_ignores_unverified_integrations() {
     let options = r#"
         import mdx from "@astrojs/mdx";

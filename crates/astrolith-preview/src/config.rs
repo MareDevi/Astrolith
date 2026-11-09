@@ -111,6 +111,8 @@ fn normalize_prefix(prefix: &str) -> String {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RouteMapping {
     rules: BTreeMap<String, RouteRule>,
+    default_locale: Option<String>,
+    prefix_default_locale: bool,
 }
 
 impl RouteMapping {
@@ -187,9 +189,59 @@ impl RouteMapping {
 
     /// Resolve the raw route for `(collection, id)`, if mapped.
     pub fn route_for(&self, collection: &str, id: &str) -> Option<String> {
-        self.rules
-            .get(collection)
-            .and_then(|rule| rule.route_for(id))
+        let mut route = self.rules.get(collection)?.route_for(id)?;
+        if let Some(locale) = self.default_locale.as_deref() {
+            let collection_prefix = self
+                .rules
+                .get(collection)?
+                .default_prefix
+                .as_deref()
+                .unwrap_or("");
+            let locale_prefix = if collection_prefix.is_empty() {
+                format!("{locale}/")
+            } else {
+                format!("{collection_prefix}/{locale}/")
+            };
+            if self.prefix_default_locale {
+                let existing = if collection_prefix.is_empty() {
+                    format!("{locale}/")
+                } else {
+                    format!("{collection_prefix}/{locale}/")
+                };
+                if !route.starts_with(&existing) {
+                    route = if collection_prefix.is_empty() {
+                        format!("{locale}/{route}")
+                    } else {
+                        format!(
+                            "{collection_prefix}/{locale}/{}",
+                            route
+                                .strip_prefix(&format!("{collection_prefix}/"))
+                                .unwrap_or(&route)
+                        )
+                    };
+                }
+            } else if route == collection_prefix && collection_prefix == locale {
+                route.clear();
+            } else if let Some(stripped) = route.strip_prefix(&locale_prefix) {
+                if collection_prefix.is_empty() {
+                    route = stripped.to_owned();
+                } else {
+                    route = format!("{collection_prefix}/{stripped}");
+                }
+            }
+        }
+        Some(route)
+    }
+
+    /// Apply Astro's default-locale URL prefix policy.
+    pub fn with_i18n(
+        mut self,
+        default_locale: Option<String>,
+        prefix_default_locale: bool,
+    ) -> Self {
+        self.default_locale = default_locale;
+        self.prefix_default_locale = prefix_default_locale;
+        self
     }
 
     /// Build the default mapping from an Astro content-config **source string**.
@@ -242,6 +294,31 @@ mod tests {
         let error = RouteMapping::from_content_config("export const collections = {")
             .expect_err("malformed config must fail");
         assert!(matches!(error, ConfigError::Parse(_)));
+    }
+
+    #[test]
+    fn applies_astro_default_locale_prefix_policy() {
+        let mapping = RouteMapping::from_collections([("note", "note")])
+            .with_i18n(Some("zh-cn".into()), false);
+        assert_eq!(
+            mapping.route_for("note", "zh-cn/rust").as_deref(),
+            Some("note/rust")
+        );
+        assert_eq!(
+            mapping.route_for("note", "en/rust").as_deref(),
+            Some("note/en/rust")
+        );
+
+        let prefixed = RouteMapping::from_collections([("note", "note")])
+            .with_i18n(Some("zh-cn".into()), true);
+        assert_eq!(
+            prefixed.route_for("note", "zh-cn/rust").as_deref(),
+            Some("note/zh-cn/rust")
+        );
+        assert_eq!(
+            prefixed.route_for("note", "rust").as_deref(),
+            Some("note/zh-cn/rust")
+        );
     }
 
     #[test]

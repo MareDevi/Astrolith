@@ -1582,7 +1582,11 @@ impl ProjectWorkspace {
             RouteMapping::from_collections(manifest.collections().iter().map(|collection| {
                 let name = collection.id().as_str().to_owned();
                 (name.clone(), name)
-            }));
+            }))
+            .with_i18n(
+                manifest.default_locale().map(str::to_owned),
+                manifest.prefix_default_locale(),
+            );
         Some((project, manifest.root().to_owned(), mapping))
     }
 

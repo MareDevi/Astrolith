@@ -12,6 +12,8 @@ const MAX_AST_DEPTH: usize = 128;
 pub struct ProjectConfig {
     pub src_dir: String,
     pub mdx: bool,
+    pub default_locale: Option<String>,
+    pub prefix_default_locale: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -194,6 +196,8 @@ pub fn parse_project_config(source: &str) -> Result<ProjectConfig, String> {
         return Ok(ProjectConfig {
             src_dir: DEFAULT_SRC_DIR.to_owned(),
             mdx: false,
+            default_locale: None,
+            prefix_default_locale: false,
         });
     };
     let define_config_alias = required_alias(
@@ -206,6 +210,8 @@ pub fn parse_project_config(source: &str) -> Result<ProjectConfig, String> {
     let pairs = strict_object_pairs(config_object, source, "Astro config")?;
     let mut src_dir = None;
     let mut mdx = false;
+    let mut default_locale = None;
+    let mut prefix_default_locale = false;
 
     for (key, value) in pairs {
         match key.as_str() {
@@ -225,6 +231,9 @@ pub fn parse_project_config(source: &str) -> Result<ProjectConfig, String> {
             "integrations" => {
                 mdx = validate_integrations(value, source, &imports.mdx_default_aliases)?;
             }
+            "i18n" => {
+                (default_locale, prefix_default_locale) = parse_i18n_config(value, source)?;
+            }
             // Other Astro settings (adapter, site, markdown, vite, fonts, ...)
             // cannot change which files a `glob()` collection selects, so their
             // values are intentionally not inspected or evaluated.
@@ -235,7 +244,76 @@ pub fn parse_project_config(source: &str) -> Result<ProjectConfig, String> {
     Ok(ProjectConfig {
         src_dir: src_dir.unwrap_or_else(|| DEFAULT_SRC_DIR.to_owned()),
         mdx,
+        default_locale,
+        prefix_default_locale,
     })
+}
+
+fn parse_i18n_config(value: Node<'_>, source: &str) -> Result<(Option<String>, bool), String> {
+    let object = value;
+    if object.kind() != "object" {
+        return Err("`i18n` in Astro config must be a static object".into());
+    }
+    let mut default_locale = None;
+    let mut prefix_default_locale = false;
+    for (key, value) in static_pairs_with_spreads(object, source, "i18n")? {
+        match key.as_str() {
+            "defaultLocale" => {
+                default_locale = Some(literal_string(value, source, "defaultLocale")?)
+            }
+            "routing" => {
+                let routing = value;
+                if routing.kind() != "object" {
+                    return Err("`i18n.routing` must be a static object".into());
+                }
+                for (routing_key, routing_value) in
+                    static_pairs_with_spreads(routing, source, "i18n.routing")?
+                {
+                    if routing_key == "prefixDefaultLocale" {
+                        let text = node_text(routing_value, source, "prefixDefaultLocale")?;
+                        prefix_default_locale = match text {
+                            "true" => true,
+                            "false" => false,
+                            _ => {
+                                return Err(
+                                    "`prefixDefaultLocale` must be a boolean literal".into()
+                                );
+                            }
+                        };
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((default_locale, prefix_default_locale))
+}
+
+fn static_pairs_with_spreads<'tree>(
+    object: Node<'tree>,
+    source: &str,
+    context: &str,
+) -> Result<Vec<(String, Node<'tree>)>, String> {
+    let mut pairs = Vec::new();
+    for item in named_children(object) {
+        if is_comment(item) || item.kind() == "spread_element" {
+            continue;
+        }
+        if item.kind() != "pair" {
+            return Err(format!(
+                "{context} contains unsupported member `{}`",
+                item.kind()
+            ));
+        }
+        let key = item
+            .child_by_field_name("key")
+            .ok_or_else(|| format!("{context} member has no key"))?;
+        let value = item
+            .child_by_field_name("value")
+            .ok_or_else(|| format!("{context} member has no value"))?;
+        pairs.push((property_name(key, source, context)?, value));
+    }
+    Ok(pairs)
 }
 
 pub fn parse_src_dir(source: &str) -> Result<String, String> {
