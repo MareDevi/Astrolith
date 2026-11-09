@@ -678,6 +678,16 @@ mod tests {
     use gpui_kit::{TestAppContext, WindowHandle, base::Root};
     use std::sync::Mutex;
 
+    async fn wait_for_saved(cx: &mut TestAppContext, view: &Entity<ProjectWorkspace>, path: &Path) {
+        // Disk writes finish on the service runtime before GPUI applies the result.
+        wait_for(cx, |cx| {
+            view.read_with(cx, |view, _| {
+                view.save_coordinator.status(path) == Some(SaveStatus::Saved)
+            })
+        })
+        .await;
+    }
+
     #[test]
     fn an_oversized_save_reports_a_stable_failure_class() {
         let error = astrolith_document::DocumentError::TooLarge {
@@ -712,17 +722,7 @@ mod tests {
             view.update(cx, |view, cx| view.save_active(window, cx))
         })
         .unwrap();
-        for _ in 0..300 {
-            cx.run_until_parked();
-            if std::fs::read_to_string(&path).unwrap() == "# Saved\n" {
-                break;
-            }
-            runtime::blocking(cx, || {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            })
-            .await
-            .unwrap();
-        }
+        wait_for_saved(cx, &view, &path).await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Saved\n");
         view.read_with(cx, |view, cx| {
             let session = view.sessions.get(&path).unwrap().read(cx);
@@ -749,17 +749,7 @@ mod tests {
             view.update(cx, |view, cx| view.save_active(window, cx))
         })
         .unwrap();
-        for _ in 0..300 {
-            cx.run_until_parked();
-            if std::fs::read_to_string(&path).unwrap() == "# Saved\n" {
-                break;
-            }
-            runtime::blocking(cx, || {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            })
-            .await
-            .unwrap();
-        }
+        wait_for_saved(cx, &view, &path).await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Saved\n");
 
         // The watcher batch our own rename triggers must not flag the document.
@@ -1054,17 +1044,10 @@ mod tests {
         })
         .unwrap();
         let copy = dir.path().join("src/posts/a.local.md");
-        for _ in 0..300 {
-            cx.run_until_parked();
-            if copy.exists() {
-                break;
-            }
-            runtime::blocking(cx, || {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            })
-            .await
-            .unwrap();
-        }
+        wait_for(cx, |cx| {
+            view.read_with(cx, |view, _| view.status != tr!("browser.save.saving_copy"))
+        })
+        .await;
         assert_eq!(std::fs::read_to_string(&copy).unwrap(), "# Mine\n");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -1134,10 +1117,8 @@ mod tests {
             view.read_with(cx, |view, _| view.save_coordinator.status(&path)),
             Some(SaveStatus::Unsaved)
         );
-        wait_for(cx, |_| {
-            std::fs::read_to_string(&path).ok().as_deref() == Some("# Autosaved\n")
-        })
-        .await;
+        wait_for_saved(cx, &view, &path).await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Autosaved\n");
         view.read_with(cx, |view, cx| {
             let session = view.sessions.get(&path).unwrap().read(cx);
             assert!(!session.is_dirty());
@@ -1300,10 +1281,8 @@ mod tests {
             });
         })
         .unwrap();
-        wait_for(cx, |_| {
-            std::fs::read_to_string(&path).ok().as_deref() == Some("# Outgoing\n")
-        })
-        .await;
+        wait_for_saved(cx, &view, &path).await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Outgoing\n");
         view.read_with(cx, |view, cx| {
             assert!(!view.sessions.get(&path).unwrap().read(cx).is_dirty());
             assert_eq!(
@@ -1365,6 +1344,16 @@ mod tests {
             assert!(view.status.starts_with("Save failed"));
             assert!(view.sessions.get(&path).unwrap().read(cx).is_dirty());
         });
+        wait_for(cx, |_| {
+            std::fs::read_dir(artifacts.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "json")
+            })
+        })
+        .await;
         let names: Vec<PathBuf> = std::fs::read_dir(artifacts.path())
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -1444,10 +1433,8 @@ mod tests {
             );
         });
 
-        wait_for(cx, |_| {
-            std::fs::read_to_string(&path).ok().as_deref() == Some("# Second\n")
-        })
-        .await;
+        wait_for_saved(cx, &view, &path).await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Second\n");
         view.read_with(cx, |view, cx| {
             assert!(!view.sessions.get(&path).unwrap().read(cx).is_dirty());
             assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Saved));
@@ -1505,10 +1492,8 @@ mod tests {
                 "a blur during a save becomes its follow-up instead of being dropped"
             );
         });
-        wait_for(cx, |_| {
-            std::fs::read_to_string(&path).ok().as_deref() == Some("# Second\n")
-        })
-        .await;
+        wait_for_saved(cx, &view, &path).await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Second\n");
         view.read_with(cx, |view, cx| {
             assert!(!view.sessions.get(&path).unwrap().read(cx).is_dirty());
             assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Saved));
@@ -1577,10 +1562,8 @@ mod tests {
                 "the outgoing switch save waits as the in-flight save's follow-up"
             );
         });
-        wait_for(cx, |_| {
-            std::fs::read_to_string(&path).ok().as_deref() == Some("# Second\n")
-        })
-        .await;
+        wait_for_saved(cx, &view, &path).await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Second\n");
         view.read_with(cx, |view, cx| {
             assert!(!view.sessions.get(&path).unwrap().read(cx).is_dirty());
             assert_eq!(view.save_coordinator.status(&path), Some(SaveStatus::Saved));
@@ -1938,10 +1921,11 @@ mod tests {
 
         // Autosave must still see edits after the retarget.
         edit_active(cx, handle, &view, "# Renamed edit\n").await;
-        wait_for(cx, |_| {
-            std::fs::read_to_string(&renamed).ok().as_deref() == Some("# Renamed edit\n")
-        })
-        .await;
+        wait_for_saved(cx, &view, &renamed).await;
+        assert_eq!(
+            std::fs::read_to_string(&renamed).unwrap(),
+            "# Renamed edit\n"
+        );
         view.read_with(cx, |view, cx| {
             assert!(!view.sessions.get(&renamed).unwrap().read(cx).is_dirty());
             assert_eq!(
