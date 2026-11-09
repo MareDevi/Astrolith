@@ -678,16 +678,6 @@ mod tests {
     use gpui_kit::{TestAppContext, WindowHandle, base::Root};
     use std::sync::Mutex;
 
-    async fn wait_for_saved(cx: &mut TestAppContext, view: &Entity<ProjectWorkspace>, path: &Path) {
-        // Disk writes finish on the service runtime before GPUI applies the result.
-        wait_for(cx, |cx| {
-            view.read_with(cx, |view, _| {
-                view.save_coordinator.status(path) == Some(SaveStatus::Saved)
-            })
-        })
-        .await;
-    }
-
     #[test]
     fn an_oversized_save_reports_a_stable_failure_class() {
         let error = astrolith_document::DocumentError::TooLarge {

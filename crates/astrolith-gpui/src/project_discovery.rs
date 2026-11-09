@@ -5639,6 +5639,20 @@ mod tests {
         panic!("condition did not become true");
     }
 
+    pub(super) async fn wait_for_saved(
+        cx: &mut TestAppContext,
+        view: &Entity<ProjectWorkspace>,
+        path: &Path,
+    ) {
+        // Disk writes finish on the service runtime before GPUI applies the result.
+        wait_for(cx, |cx| {
+            view.read_with(cx, |view, _| {
+                view.save_coordinator.status(path) == Some(SaveStatus::Saved)
+            })
+        })
+        .await;
+    }
+
     #[gpui_kit::test]
     async fn yaml_data_entries_open_without_the_frontmatter_form(cx: &mut TestAppContext) {
         use astrolith_astro::schema::{CollectionSchema, Field, FieldKind, SchemaDialect};
@@ -6009,17 +6023,7 @@ export const collections = {blog, dataAuthors};
             view.update(cx, |view, cx| view.save_active(window, cx))
         })
         .unwrap();
-        for _ in 0..300 {
-            cx.run_until_parked();
-            if std::fs::read_to_string(&path).unwrap() == expected {
-                break;
-            }
-            runtime::blocking(cx, || {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            })
-            .await
-            .unwrap();
-        }
+        wait_for_saved(cx, &view, &path).await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
     }
 
@@ -6145,17 +6149,7 @@ export const collections = {blog, dataAuthors};
         })
         .unwrap();
         let expected = format!("{frontmatter}\n{edited}");
-        for _ in 0..300 {
-            cx.run_until_parked();
-            if std::fs::read_to_string(&path).unwrap() == expected {
-                break;
-            }
-            runtime::blocking(cx, || {
-                std::thread::sleep(std::time::Duration::from_millis(10))
-            })
-            .await
-            .unwrap();
-        }
+        wait_for_saved(cx, &view, &path).await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
         view.read_with(cx, |view, cx| {
             let session = view.sessions.get(&path).unwrap().read(cx);
