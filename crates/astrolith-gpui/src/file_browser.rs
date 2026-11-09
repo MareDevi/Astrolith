@@ -91,6 +91,7 @@ impl ListDelegate for FileList {
         };
         Some(
             ListItem::new(row.id.clone())
+                .selected(active)
                 .h(rems(1.6))
                 .px_1()
                 .py_0()
@@ -103,9 +104,6 @@ impl ListDelegate for FileList {
                         .min_w_0()
                         .w_full()
                         .pl(rems(0.25 + row.depth as f32 * 0.75))
-                        .rounded(cx.theme().radius)
-                        .hover(|row| row.bg(cx.theme().list_hover))
-                        .when(active, |row| row.bg(cx.theme().list_active))
                         .child(
                             div()
                                 .w(px(14.))
