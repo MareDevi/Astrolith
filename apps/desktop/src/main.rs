@@ -12,9 +12,9 @@ struct AstrolithAssets;
 impl gpui_kit::AssetSource for AstrolithAssets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         let logo = match path {
-            "astrolith-dark.svg" => Some(include_bytes!("../../../astrolith-dark.svg").as_slice()),
+            "astrolith-dark.svg" => Some(include_bytes!("../assets/astrolith-dark.svg").as_slice()),
             "astrolith-light.svg" => {
-                Some(include_bytes!("../../../astrolith-light.svg").as_slice())
+                Some(include_bytes!("../assets/astrolith-light.svg").as_slice())
             }
             _ => None,
         };
