@@ -142,8 +142,16 @@ fn build_url(base_url: &Url, segments: &[String]) -> Result<Url, RouteError> {
 mod tests {
     use super::*;
 
-    const FIXTURE_CONFIG: &str =
-        include_str!("../../../fixtures/astro5/workspace/content.config.mjs");
+    const CONTENT_CONFIG: &str = r#"
+        import { defineCollection } from "astro:content";
+        import { glob } from "astro/loaders";
+
+        const docs = defineCollection({
+            loader: glob({ base: "./content/docs", pattern: "**/*.{md,mdx}" }),
+        });
+
+        export const collections = { docs };
+    "#;
 
     fn entry(collection: &str, id: &str) -> EntryId {
         EntryId::new(collection, id).expect("valid entry id")
@@ -284,8 +292,8 @@ mod tests {
     }
 
     #[test]
-    fn resolves_fixture_cjk_id_through_parsed_content_config() {
-        let mapping = RouteMapping::from_content_config(FIXTURE_CONFIG).unwrap();
+    fn resolves_cjk_id_through_parsed_content_config() {
+        let mapping = RouteMapping::from_content_config(CONTENT_CONFIG).unwrap();
         let url = resolve_entry_url(&entry("docs", "深い/日本語"), &mapping, &base()).unwrap();
         assert_eq!(
             url.path(),

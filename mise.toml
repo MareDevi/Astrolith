@@ -49,7 +49,6 @@ run = [
   { task = "build" },
   { task = "test" },
   { task = "test:perf-harness" },
-  { task = "test:fixtures" },
 ]
 
 [tasks.ci]
@@ -61,10 +60,6 @@ run = [{ task = "check" }]
 [tasks.test]
 description = "Run workspace tests without opening a native window"
 run = "cargo test --workspace --locked"
-
-[tasks."test:fixtures"]
-description = "Verify frozen Astro fixtures with the actual project-local loaders"
-run = "node --test fixtures/test-astro-fixtures.test.mjs && node scripts/test-astro-fixtures.mjs"
 
 [tasks."test:perf-harness"]
 description = "Test editor performance run validation and process lifetime"

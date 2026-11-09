@@ -270,12 +270,26 @@ impl RouteMapping {
 mod tests {
     use super::*;
 
-    const FIXTURE_CONFIG: &str =
-        include_str!("../../../fixtures/astro5/workspace/content.config.mjs");
+    const CONTENT_CONFIG: &str = r#"
+        import { defineCollection } from "astro:content";
+        import { glob } from "astro/loaders";
+
+        const docs = defineCollection({
+            loader: glob({ base: "./content/docs", pattern: "**/*.{md,mdx}" }),
+        });
+        const markdownDocs = defineCollection({
+            loader: glob({ base: "./content/docs", pattern: "**/*.md" }),
+        });
+        const archivedDocs = defineCollection({
+            loader: glob({ base: "./content/docs", pattern: "**/*.{md,mdx}" }),
+        });
+
+        export const collections = { docs, markdownDocs, archive: archivedDocs };
+    "#;
 
     #[test]
-    fn parses_fixture_content_config_into_collection_routes() {
-        let mapping = RouteMapping::from_content_config(FIXTURE_CONFIG).expect("fixture parses");
+    fn parses_content_config_into_collection_routes() {
+        let mapping = RouteMapping::from_content_config(CONTENT_CONFIG).expect("config parses");
         let mut collections: Vec<&str> = mapping.collections().collect();
         collections.sort_unstable();
         assert_eq!(collections, vec!["archive", "docs", "markdownDocs"]);

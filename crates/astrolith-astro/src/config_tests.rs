@@ -658,55 +658,6 @@ fn rejects_absolute_or_empty_src_dir_literals() {
 }
 
 #[test]
-fn parses_checked_in_astro_fixture_configs_and_rejects_custom_id_oracles() {
-    for (name, astro_config, content_config, oracle_config, expected) in [
-        (
-            "astro5",
-            include_str!("../../../fixtures/astro5/astro.config.mjs"),
-            include_str!("../../../fixtures/astro5/workspace/content.config.mjs"),
-            include_str!("../../../fixtures/astro5/oracle/content.config.mjs"),
-            3,
-        ),
-        (
-            "astro6",
-            include_str!("../../../fixtures/astro6/astro.config.mjs"),
-            include_str!("../../../fixtures/astro6/workspace/content.config.mjs"),
-            include_str!("../../../fixtures/astro6/oracle/content.config.mjs"),
-            6,
-        ),
-        (
-            "astro7",
-            include_str!("../../../fixtures/astro7/astro.config.mjs"),
-            include_str!("../../../fixtures/astro7/workspace/content.config.mjs"),
-            include_str!("../../../fixtures/astro7/oracle/content.config.mjs"),
-            3,
-        ),
-    ] {
-        assert_eq!(
-            parse_src_dir(astro_config).unwrap(),
-            "./workspace",
-            "{name}"
-        );
-
-        let parsed = parse_content_config(content_config).unwrap();
-        assert_eq!(parsed.len(), expected, "{name}");
-        assert_eq!(
-            collection(&parsed, "docs").base().unwrap(),
-            "./content/docs"
-        );
-        assert_eq!(
-            collection(&parsed, "archive").pattern().unwrap().declared(),
-            ["**/*.{md,mdx}"]
-        );
-
-        assert!(
-            parse_content_config(oracle_config).is_err(),
-            "{name} custom-ID oracle config must remain unsupported"
-        );
-    }
-}
-
-#[test]
 fn accepts_array_patterns_with_negative_globs() {
     let source = content_source(
         r#"

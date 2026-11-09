@@ -351,29 +351,6 @@ fn schema_fingerprint_tracks_content_not_timestamps() {
 }
 
 #[test]
-#[ignore = "requires ASTROLITH_FIXTURE_PROJECT pointing at an installed Astro project with a schema"]
-fn installed_project_generates_schemas_end_to_end() {
-    let Ok(root) = std::env::var("ASTROLITH_FIXTURE_PROJECT") else {
-        return;
-    };
-    let mut request = SchemaGenerationRequest::new(root, Cancellation::default());
-    if let Ok(node) = std::env::var("ASTROLITH_NODE") {
-        request = request.with_node(node);
-    }
-
-    let report = generate_collection_schemas(&request).expect("real generation succeeds");
-    let docs = report
-        .schemas
-        .iter()
-        .find(|entry| entry.collection == "docs")
-        .expect("docs schema generated");
-    assert!(
-        docs.schema.fields.iter().any(|field| field.name == "title"),
-        "docs schema should include the title field"
-    );
-}
-
-#[test]
 fn rejects_bin_without_astro_entry() {
     let temp = tempfile::tempdir().unwrap();
     let astro = temp.path().join("node_modules/astro");

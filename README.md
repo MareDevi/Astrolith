@@ -123,7 +123,7 @@ mise run check
 ```
 
 Run `mise run check` before committing. It covers the toolchain, formatting,
-lint, build, headless tests, and Astro compatibility fixtures. See the
+lint, build, and headless tests. See the
 [repository guidelines](AGENTS.md) and the
 [Linux packaging notes](packaging/linux/README.md).
 

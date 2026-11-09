@@ -3,7 +3,7 @@
 ## Toolchain and architecture
 
 - `mise.toml` owns project tool versions and task entry points. Use `mise install` and `mise run …`; never install project tool versions globally or add competing version files.
-- Use `--locked` for Cargo builds, tests, and other commit checks that accept it. Track `Cargo.lock` and commit its changes with the dependency changes that require them. Commit Bun lockfiles with Astro fixtures.
+- Use `--locked` for Cargo builds, tests, and other commit checks that accept it. Track `Cargo.lock` and commit its changes with the dependency changes that require them.
 - Depend on the pinned `gpui-kit` facade. Verify API signatures in the matching registry source. Read the GPUI Kit design and coding guides before changing the UI. Read the full design guide for a new screen or redesign. For a narrow UI change, read the required sections and the sections relevant to the change.
 - Keep domain logic and services out of the desktop bootstrap. Keep filesystem operations and blocking I/O out of GUI rendering.
 - Keep external browser preview as the normal Wayland path and embedded preview optional.

@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 96" role="img" aria-labelledby="title desc">
-  <title id="title">Astrolith parity fixture banner</title>
-  <desc id="desc">A static banner asset served from the public directory.</desc>
-  <rect width="320" height="96" fill="#111827" />
-  <circle cx="48" cy="48" r="28" fill="#f59e0b" />
-  <path d="M140 66 170 26l30 40" fill="none" stroke="#e5e7eb" stroke-width="6" stroke-linecap="round" />
-  <text x="220" y="56" fill="#e5e7eb" font-family="sans-serif" font-size="18">Parity</text>
-</svg>
