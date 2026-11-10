@@ -290,7 +290,8 @@ the writer; `Tab` and `Shift+Tab` navigate component-builder placeholders.
 
 ## 7. Assets, images and links
 
-Drop files onto the writer. Astrolith copies them into the resolved assets
+Drop files onto the writer or paste an image or copied files into a Markdown
+document in an open project. Astrolith copies them into the resolved assets
 directory, sanitises the name to lower-case kebab case, strips unsafe
 characters, prefixes the local date as `YYYY-MM-DD`, lower-cases the extension
 and finds an atomic `-N` suffix when the name is taken. Traversal, symlink
@@ -299,8 +300,32 @@ escapes and files outside the project are refused.
 Raster and SVG extensions insert image Markdown (`![name](path)`); PDFs and
 other files insert a normal link (`[name](path)`). Paths are document-relative
 by default or project-root absolute when that preference is enabled, so nested
-documents survive save and reload. A failed copy is reported; Astrolith never
-silently inserts a host path.
+documents survive save and reload. Astrolith reports failed copies and inserts
+links for the files it imported.
+
+### Upload pasted images to a picture host
+
+In **Preferences → Workspace → Clipboard image hosting**, enable **Upload
+pasted images** and enter the S3 API endpoint, bucket, region and public bucket
+URL. Set `ASTROLITH_S3_ACCESS_KEY_ID` and `ASTROLITH_S3_SECRET_ACCESS_KEY` in
+Astrolith's launch environment using credentials with permission to write objects
+to the chosen bucket. Astrolith stores the destination in preferences and reads
+the credentials from the process environment when it uploads.
+
+- **Amazon S3** uses its regional API origin, for example
+  `https://s3.us-east-1.amazonaws.com`, and the bucket's region. Use a public
+  bucket or CDN URL that serves the bucket's objects.
+- **Cloudflare R2** uses `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` and the
+  region `auto`. Set the public URL to the bucket's custom domain or enabled
+  `r2.dev` URL.
+- **S3-compatible storage** uses a path-style API endpoint. The public URL can
+  include a path prefix, such as `https://cdn.example.com/photos`.
+
+Astrolith inserts the local link first, then uploads images up to 32 MiB under
+`images/` in the bucket. After success, it replaces the unchanged local link
+with the public URL. The local file remains in the project. Upload failures
+leave the local link usable. Undo the link replacement to return to the local
+link.
 
 Paste a valid URL over selected text to wrap the selection as
 `[selection](url)` in one undo step. `Alt`-click a validated `http` or `https`
@@ -488,10 +513,9 @@ Help opens an external website.
   shipped.
 - **Reveal:** opens the containing directory only; the file itself is not
   selected.
-- **Clipboard assets:** the editor does not turn clipboard images or
-  file-manager file lists into assets. Drop the file onto the writer, or use the
-  frontmatter image picker. Pasting a URL over a selection still wraps the
-  selection as a link.
+- **File-manager clipboard:** Linux file lists use X11 clipboard support or
+  a Wayland compositor with clipboard data control. Use file drop if your
+  compositor cannot provide the file list.
 - **Multicursor:** `Ctrl`-click cursor placement, selecting the next occurrence
   for every user cursor, and applying distinct text per range in one undo step
   are blocked by the pinned editor API. The `Alt`-click and line-end forms that

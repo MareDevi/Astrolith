@@ -516,7 +516,8 @@ impl Render for WorkspacePanel {
                 }
                 if let Some(wiring) = wiring.as_ref() {
                     let paste = wiring.hooks.paste.clone();
-                    element = element.on_paste(move |item, window, cx| (paste)(item, window, cx));
+                    element =
+                        element.on_paste(move |item, window, cx| (paste)(Some(item), window, cx));
                 }
                 let writer = (!code)
                     .then(|| wiring.as_ref().and_then(|wiring| wiring.session.upgrade()))

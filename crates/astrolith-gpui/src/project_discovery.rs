@@ -76,6 +76,7 @@ use std::{
     sync::Arc,
 };
 
+mod clipboard_assets;
 mod entry_operations;
 mod load;
 mod lsp;
@@ -4926,6 +4927,81 @@ mod tests {
         )
         .unwrap();
         dir
+    }
+
+    #[gpui_kit::test]
+    async fn clipboard_paste_imports_images_and_file_lists_in_writing(cx: &mut TestAppContext) {
+        use gpui_kit::component::input::Paste;
+        use gpui_kit::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat};
+        use std::io::Cursor;
+
+        let dir = content_finder_fixture();
+        let external = tempfile::tempdir().unwrap();
+        let pdf = external.path().join("Paper.pdf");
+        std::fs::write(&pdf, b"%PDF-1.7").unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        let (_, session) = open_entry_for(cx, handle, &view, "src/posts/alpha.md").await;
+        let mut encoded = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1, 1)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = encoded.into_inner();
+        let image = Image::from_bytes(ImageFormat::Png, bytes.clone());
+        let clipboard = ClipboardItem {
+            entries: vec![ClipboardEntry::Image(image)],
+        };
+        let path = format!("{}-clipboard-image.png", asset_insertion::asset_date());
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            let editor = session.read(cx).editor.clone();
+            editor.read(cx).focus_handle(cx).focus(window, cx);
+            cx.write_to_clipboard(clipboard);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.dispatch_action(handle.into(), Paste);
+        wait_for(cx, |cx| {
+            session.read_with(cx, |session, _| {
+                session.buffer.current_text().contains(&path)
+            })
+        })
+        .await;
+        assert_eq!(
+            std::fs::read(dir.path().join("src/assets").join(&path)).unwrap(),
+            bytes
+        );
+
+        cx.update(|cx| {
+            cx.write_to_clipboard(
+                ClipboardEntry::ExternalPaths(ExternalPaths([pdf].into_iter().collect())).into(),
+            );
+        });
+        cx.dispatch_action(handle.into(), Paste);
+        wait_for(cx, |cx| {
+            session.read_with(cx, |session, _| {
+                session.buffer.current_text().contains("paper.pdf)")
+            })
+        })
+        .await;
+
+        cx.update_window(handle.into(), |_, _, cx| {
+            let editor = session.read(cx).editor.clone();
+            let source = editor.read(cx).text().to_string();
+            let start = source.find("Alpha").unwrap();
+            editor.update(cx, |editor, cx| {
+                editor.set_selected_range(start..start + 5, cx)
+            });
+            cx.write_to_clipboard(ClipboardItem::new_string("https://example.test/".into()));
+        })
+        .unwrap();
+        cx.dispatch_action(handle.into(), Paste);
+        assert!(session.read_with(cx, |session, _| {
+            session
+                .buffer
+                .current_text()
+                .contains("[Alpha](https://example.test/)")
+        }));
     }
 
     #[gpui_kit::test]

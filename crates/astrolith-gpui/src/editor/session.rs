@@ -46,6 +46,7 @@ pub(crate) struct DocumentSession {
     absorbed_writer_text: Rope,
     /// Rendered writing surface; the editor remains its input model.
     pub(crate) writer: Entity<WriterSurface>,
+    pub(crate) asset_paste: Option<super::formatting::PasteHook>,
     /// Authoritative complete source: frontmatter and MDX imports included.
     pub buffer: DocumentBuffer,
     /// The projection that produced the editor's text and its byte mapping.
@@ -137,6 +138,13 @@ pub(crate) struct DocumentSession {
     _history_keys: Subscription,
     _writer_keys: Subscription,
 }
+/// The editor and selection captured before a clipboard asset is copied.
+pub(crate) struct PasteLocation {
+    editor: gpui_kit::EntityId,
+    text: Rope,
+    selection: Range<usize>,
+}
+
 pub(crate) struct SessionChanged;
 impl EventEmitter<SessionChanged> for DocumentSession {}
 
@@ -195,6 +203,23 @@ struct BuildState {
     revision: DocumentRevision,
     disk_fingerprint: u64,
     externally_changed: bool,
+}
+
+fn selection_after_replace(
+    selection: Range<usize>,
+    replaced: &Range<usize>,
+    replacement_len: usize,
+) -> Range<usize> {
+    let adjust = |offset| {
+        if offset >= replaced.end {
+            replaced.start + replacement_len + offset - replaced.end
+        } else if offset > replaced.start {
+            replaced.start + replacement_len
+        } else {
+            offset
+        }
+    };
+    adjust(selection.start)..adjust(selection.end)
 }
 
 impl DocumentSession {
@@ -476,6 +501,7 @@ impl DocumentSession {
             absorbed_writer_text,
             editor,
             writer,
+            asset_paste: None,
             buffer,
             projection,
             origin: false,
@@ -714,6 +740,9 @@ impl DocumentSession {
         let Some(url) = external_url(url) else {
             return false;
         };
+        if self.source_view || self.kind == DocumentKind::Plain {
+            return false;
+        }
         let visible = &self.projection.visible;
         let selection = self.editor.read(cx).selected_range();
         if selection.is_empty() {
@@ -1203,6 +1232,56 @@ impl DocumentSession {
         self.placeholder_text_len = 0;
     }
 
+    pub(crate) fn paste_location(&self, cx: &App) -> PasteLocation {
+        let editor = self.editor.read(cx);
+        PasteLocation {
+            editor: self.editor.entity_id(),
+            text: editor.text().clone(),
+            selection: editor.selected_range(),
+        }
+    }
+
+    pub(crate) fn insert_at_paste_location(
+        &mut self,
+        snippet: String,
+        location: PasteLocation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.editor.entity_id() != location.editor || self.writer_preedit_active() {
+            return false;
+        }
+        let editor = self.editor.read(cx);
+        let current = editor.selected_range();
+        let mut range = location.selection;
+        // Typing at an empty paste point stays after the asset. Changes
+        // elsewhere may shift the point, but edits across it invalidate it.
+        if let Some(change) = TextChange::between(&location.text, editor.text())
+            && change.old.start < range.end
+        {
+            if change.old.end > range.start {
+                return false;
+            }
+            let start = change.new.end + range.start - change.old.end;
+            range = start..start + range.len();
+        }
+        let selection = if current == range {
+            let caret = range.start + snippet.len();
+            caret..caret
+        } else {
+            selection_after_replace(current, &range, snippet.len())
+        };
+        self.insert_snippet_outcome(
+            FormatOutcome {
+                replacement: snippet,
+                range,
+                selection,
+            },
+            window,
+            cx,
+        )
+    }
+
     /// Insert literal text at the selection as one undo step.
     ///
     /// Drops use this for the complete image/link Markdown, so a multi-file
@@ -1213,15 +1292,27 @@ impl DocumentSession {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.absorb(cx);
         let selection = self.editor.read(cx).selected_range();
         let caret = selection.start + snippet.len();
-        let outcome = FormatOutcome {
-            replacement: snippet,
-            range: selection,
-            selection: caret..caret,
-        };
-        if self.mapped_source(&outcome).is_err() {
+        self.insert_snippet_outcome(
+            FormatOutcome {
+                replacement: snippet,
+                range: selection,
+                selection: caret..caret,
+            },
+            window,
+            cx,
+        )
+    }
+
+    fn insert_snippet_outcome(
+        &mut self,
+        outcome: FormatOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.absorb(cx);
+        if !self.source_view && self.mapped_source(&outcome).is_err() {
             cx.emit(SessionChanged);
             cx.notify();
             return false;
@@ -1654,14 +1745,71 @@ impl DocumentSession {
         cx: &mut Context<Self>,
         patch: impl FnOnce(&str) -> Result<String, String>,
     ) -> Result<(), String> {
+        self.patch_complete_with_selection(window, cx, |before, _| {
+            patch(before).map(|text| (text, None))
+        })
+    }
+
+    /// Replace only the unique, unchanged Markdown inserted by a clipboard paste.
+    pub(crate) fn replace_pasted_links(
+        &mut self,
+        replacements: &[(String, String)],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        if replacements.is_empty() || self.writer_preedit_active() {
+            return 0;
+        }
+        let mut count = 0;
+        let result = self.patch_complete_with_selection(window, cx, |before, selection| {
+            let mut edits = Vec::new();
+            for (local, remote) in replacements {
+                let mut matches = before.match_indices(local);
+                if let Some((offset, _)) = matches.next()
+                    && matches.next().is_none()
+                {
+                    edits.push((offset..offset + local.len(), remote));
+                }
+            }
+            count = edits.len();
+            if edits.is_empty() {
+                return Err(String::new());
+            }
+            edits.sort_unstable_by_key(|(range, _)| range.start);
+            let mut text = before.to_owned();
+            let mut selection = selection;
+            for (range, remote) in edits.into_iter().rev() {
+                selection = selection_after_replace(selection, &range, remote.len());
+                text.replace_range(range, remote);
+            }
+            Ok((text, Some(selection)))
+        });
+        if result.is_ok() { count } else { 0 }
+    }
+
+    fn patch_complete_with_selection(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        patch: impl FnOnce(&str, Range<usize>) -> Result<(String, Option<Range<usize>>), String>,
+    ) -> Result<(), String> {
         self.absorb(cx);
         let before = self.buffer.current_text().to_owned();
         let selection_before = self.current_source_selection(cx);
-        let patched = patch(&before)?;
+        let (patched, selection) = patch(&before, selection_before.clone())?;
         self.buffer
             .apply_text(patched)
             .map_err(|error| error.to_string())?;
         self.rebuild_projection(window, cx);
+        if let Some(selection) = selection {
+            let visible = if self.source_view {
+                selection
+            } else {
+                self.source_range_to_projection(&selection)
+            };
+            self.editor
+                .update(cx, |editor, cx| editor.set_selected_range(visible, cx));
+        }
         let after = self.buffer.current_text().to_owned();
         let selection_after = self.current_source_selection(cx);
         self.history.record(

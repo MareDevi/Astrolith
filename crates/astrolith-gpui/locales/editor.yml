@@ -1,5 +1,26 @@
 _version: 2
 editor:
+  clipboard:
+    paste_moved:
+      en: "Assets copied. The original paste location changed before insertion."
+      zh-CN: "资源已复制，原粘贴位置发生变化，未插入链接。"
+      ja: "アセットをコピーしました。貼り付け先が変わったため、リンクは挿入されませんでした。"
+    uploading:
+      en: "Uploading pasted images…"
+      zh-CN: "正在上传粘贴的图片…"
+      ja: "貼り付けた画像をアップロード中…"
+    uploaded:
+      en: "Uploaded and linked %{count} images."
+      zh-CN: "已上传并替换 %{count} 张图片的链接。"
+      ja: "%{count} 枚の画像をアップロードし、リンクを置き換えました。"
+    upload_failed:
+      en: "Some images could not be uploaded. Their local links are intact. Check the image hosting settings and credentials."
+      zh-CN: "部分图片上传失败，本地链接已保留。请检查图床设置和凭据。"
+      ja: "一部の画像をアップロードできませんでした。ローカルリンクは保持されています。ホスティングの設定と認証情報を確認してください。"
+    upload_link_changed:
+      en: "Some uploaded images were not relinked because the document or its links changed."
+      zh-CN: "部分图片已上传，但文档或链接发生变化，未替换对应链接。"
+      ja: "ドキュメントやリンクが変わったため、一部のアップロード済み画像のリンクは置き換えられませんでした。"
   header:
     no_document:
       en: "No document open"

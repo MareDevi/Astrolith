@@ -645,6 +645,34 @@ impl Default for WindowGeometry {
     }
 }
 
+/// Destination for clipboard image uploads. Credentials come from the process environment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImageUploadPreferences {
+    /// Upload pasted images after importing them.
+    pub enabled: bool,
+    /// S3 API origin, without the bucket path.
+    pub endpoint: String,
+    /// Bucket receiving the image objects.
+    pub bucket: String,
+    /// SigV4 region, such as `auto` for R2.
+    pub region: String,
+    /// Public URL corresponding to the bucket root.
+    pub public_url: String,
+}
+
+impl Default for ImageUploadPreferences {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: String::new(),
+            bucket: String::new(),
+            region: "auto".to_owned(),
+            public_url: String::new(),
+        }
+    }
+}
+
 /// Application-wide preference scope. Persisted as `global.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -691,6 +719,8 @@ pub struct GlobalPreferences {
     pub page_width_percent: f32,
     /// Render Markdown in Writing mode while editing.
     pub writing_wysiwyg: bool,
+    /// Upload settings for images pasted into Markdown.
+    pub image_upload: ImageUploadPreferences,
     /// Dim every sentence except the cursor sentence.
     pub focus_mode: bool,
     /// Keep the cursor line vertically centred.
@@ -733,6 +763,7 @@ impl Default for GlobalPreferences {
             editor_line_height: 2.,
             page_width_percent: 64.,
             writing_wysiwyg: true,
+            image_upload: ImageUploadPreferences::default(),
             focus_mode: false,
             typewriter_mode: false,
             autosave_delay: AutosaveDelay::default(),

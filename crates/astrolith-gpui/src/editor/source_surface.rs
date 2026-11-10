@@ -172,6 +172,15 @@ impl Drop for SourceSurface {
 }
 
 impl SourceSurface {
+    fn paste_item(
+        &mut self,
+        item: Option<ClipboardItem>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        super::formatting::paste_from_surface(self.session.clone(), item, window, cx);
+    }
+
     pub(crate) fn enabled() -> bool {
         enabled()
     }
@@ -813,10 +822,8 @@ impl SourceSurface {
             }
         }))
         .on_action(cx.listener(|this, _: &input::Paste, window, cx| {
-            if let Some(item) = cx.read_from_clipboard() {
-                this.editor
-                    .update(cx, |editor, cx| editor.paste(item, window, cx));
-            }
+            let item = cx.read_from_clipboard();
+            this.paste_item(item, window, cx);
         }))
         .on_action(cx.listener(|this, _: &input::Undo, window, cx| {
             if let Some(session) = this.session.upgrade() {
@@ -2417,8 +2424,7 @@ impl EntityInputHandler for SourceSurface {
     }
 
     fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
-        self.editor
-            .update(cx, |editor, cx| editor.paste(item, window, cx));
+        self.paste_item(Some(item), window, cx);
     }
 
     fn replace_text_in_range(

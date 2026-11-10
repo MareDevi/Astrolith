@@ -25,7 +25,8 @@ use std::sync::Arc;
 
 use astrolith_document::inline_links;
 use gpui_kit::{
-    App, ClipboardItem, ExternalPaths, MouseButton, MouseDownEvent, WeakEntity, Window,
+    App, ClipboardItem, EntityInputHandler, ExternalPaths, MouseButton, MouseDownEvent, WeakEntity,
+    Window,
 };
 
 use crate::editor::session::DocumentSession;
@@ -69,7 +70,54 @@ impl EditorWiring {
 }
 
 /// Paste interceptor: returns `true` when the payload was consumed.
-type PasteHook = Rc<dyn Fn(&ClipboardItem, &mut Window, &mut App) -> bool>;
+pub(crate) type PasteHook = Rc<dyn Fn(Option<&ClipboardItem>, &mut Window, &mut App) -> bool>;
+
+/// Intercept asset or URL paste before any editor surface inserts text.
+pub(crate) fn handle_paste(
+    session: &WeakEntity<DocumentSession>,
+    item: Option<&ClipboardItem>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let Some(session) = session.upgrade() else {
+        return false;
+    };
+    let document = session.read(cx);
+    if !document.editor.read(cx).is_editable() {
+        return false;
+    }
+    if let Some(hook) = document.asset_paste.clone()
+        && hook(item, window, cx)
+    {
+        return true;
+    }
+    let Some(url) = item
+        .and_then(ClipboardItem::text)
+        .and_then(|text| external_url(&text))
+    else {
+        return false;
+    };
+    session.update(cx, |session, cx| {
+        session.wrap_selection_as_link(&url, window, cx)
+    })
+}
+/// Custom surfaces must release their entity update before a paste refreshes them.
+pub(super) fn paste_from_surface(
+    session: WeakEntity<DocumentSession>,
+    item: Option<ClipboardItem>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.defer(cx, move |window, cx| {
+        if !handle_paste(&session, item.as_ref(), window, cx)
+            && let (Some(session), Some(item)) = (session.upgrade(), item)
+        {
+            let editor = session.read(cx).editor.clone();
+            editor.update(cx, |editor, cx| editor.paste(item, window, cx));
+        }
+    });
+}
+
 /// Bubble-phase mouse-down handler.
 type MouseDownHook = Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
 
@@ -90,21 +138,8 @@ pub(crate) struct DocumentHooks {
 /// Build the editor hooks for one session.
 pub(crate) fn document_hooks(session: WeakEntity<DocumentSession>) -> DocumentHooks {
     let paste_session = session.clone();
-    let paste = Rc::new(
-        move |item: &ClipboardItem, window: &mut Window, cx: &mut App| {
-            let Some(text) = item.text() else {
-                return false;
-            };
-            let Some(url) = external_url(&text) else {
-                return false;
-            };
-            paste_session
-                .update(cx, |session, cx| {
-                    session.wrap_selection_as_link(&url, window, cx)
-                })
-                .unwrap_or(false)
-        },
-    );
+    let paste: PasteHook =
+        Rc::new(move |item, window, cx| handle_paste(&paste_session, item, window, cx));
     let mouse_down = Rc::new(
         move |event: &MouseDownEvent, _: &mut Window, cx: &mut App| {
             if !activates_link(event) {

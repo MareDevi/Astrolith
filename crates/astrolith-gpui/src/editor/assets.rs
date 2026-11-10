@@ -4,7 +4,105 @@
 //! batches one drop, formats the resulting Markdown and keeps user-facing
 //! failures separate from copied files.
 
-use astrolith_workspace::assets::{AssetCopyRequest, AssetLocation, CopiedAsset, copy_asset};
+use std::path::PathBuf;
+
+use astrolith_workspace::assets::{
+    AssetCopyRequest, AssetLocation, CopiedAsset, copy_asset, write_clipboard_image,
+};
+use gpui_kit::{ClipboardEntry, ClipboardItem, Image};
+
+pub(crate) enum ClipboardAssets {
+    Files(Vec<PathBuf>),
+    Images(Vec<Image>),
+    #[cfg(target_os = "linux")]
+    LinuxFiles,
+}
+
+impl ClipboardAssets {
+    pub(crate) fn from_item(item: Option<&ClipboardItem>) -> Option<Self> {
+        #[cfg(target_os = "linux")]
+        if item.is_none() {
+            return Some(Self::LinuxFiles);
+        }
+        let item = item?;
+        let paths: Vec<_> = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::ExternalPaths(paths) => Some(paths.paths()),
+                _ => None,
+            })
+            .flatten()
+            .cloned()
+            .collect();
+        if !paths.is_empty() {
+            return Some(Self::Files(paths));
+        }
+        let images: Vec<_> = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::Image(image) => Some(image.clone()),
+                _ => None,
+            })
+            .collect();
+        if !images.is_empty() {
+            return Some(Self::Images(images));
+        }
+        // Some file managers also expose their file URI list as clipboard text.
+        let text = item.text()?;
+        let text = text
+            .strip_prefix("copy\n")
+            .or_else(|| text.strip_prefix("cut\n"))
+            .unwrap_or(&text);
+        let paths: Option<Vec<_>> = text
+            .lines()
+            .map(|line| url::Url::parse(line).ok()?.to_file_path().ok())
+            .collect();
+        paths.filter(|paths| !paths.is_empty()).map(Self::Files)
+    }
+
+    pub(crate) fn copy(
+        self,
+        location: &AssetLocation,
+        date: &str,
+        document: &str,
+        mode: astrolith_core::preferences::ImagePathMode,
+    ) -> DropOutcome {
+        match self {
+            Self::Files(paths) => copy_dropped(location, &paths, date, document, mode),
+            Self::Images(images) => {
+                let mut assets = Vec::new();
+                let mut failures = Vec::new();
+                for image in images {
+                    let extension = image.format.extension();
+                    if !image.bytes.is_empty()
+                        && let Ok(asset) = write_clipboard_image(
+                            location,
+                            extension,
+                            &image.bytes,
+                            date,
+                            document,
+                            mode,
+                        )
+                    {
+                        assets.push(asset);
+                    } else {
+                        failures.push(format!("clipboard-image.{extension}"));
+                    }
+                }
+                (assets, failures)
+            }
+            #[cfg(target_os = "linux")]
+            Self::LinuxFiles => {
+                let paths = arboard::Clipboard::new()
+                    .and_then(|mut clipboard| clipboard.get().file_list())
+                    .unwrap_or_default();
+                copy_dropped(location, &paths, date, document, mode)
+            }
+        }
+    }
+}
 
 /// One copied asset or the failure of one source file.
 pub(crate) type DropOutcome = (Vec<CopiedAsset>, Vec<String>);

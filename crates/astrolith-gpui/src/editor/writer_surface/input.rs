@@ -30,6 +30,14 @@ impl WriterSurface {
         let focus = editor.read(cx).focus_handle(cx);
         window.handle_input(&focus, ElementInputHandler::new(bounds, cx.entity()), cx);
     }
+    pub(super) fn paste_item(
+        &mut self,
+        item: Option<ClipboardItem>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        super::super::formatting::paste_from_surface(self.session.clone(), item, window, cx);
+    }
 }
 
 impl EntityInputHandler for WriterSurface {
@@ -83,9 +91,7 @@ impl EntityInputHandler for WriterSurface {
     }
 
     fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(editor) = self.input_model(cx) {
-            editor.update(cx, |editor, cx| editor.paste(item, window, cx));
-        }
+        self.paste_item(Some(item), window, cx);
     }
 
     fn replace_text_in_range(

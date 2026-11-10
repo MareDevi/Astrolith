@@ -196,6 +196,10 @@ impl EventEmitter<PreferencesEvent> for PreferencesSheet {}
 /// Every field that can carry an inline error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum FieldId {
+    ImageUploadEndpoint,
+    ImageUploadBucket,
+    ImageUploadRegion,
+    ImageUploadPublicUrl,
     IdeExecutable,
     IdeArguments,
     PreviewBrowserExecutable,
@@ -238,6 +242,10 @@ pub(crate) struct FieldExtras {
 
 /// Text controls the sheet keeps alive across pane switches and dialog rebuilds.
 struct Inputs {
+    image_upload_endpoint: Entity<InputState>,
+    image_upload_bucket: Entity<InputState>,
+    image_upload_region: Entity<InputState>,
+    image_upload_public_url: Entity<InputState>,
     ide_executable: Entity<InputState>,
     ide_arguments: Entity<TextareaState>,
     preview_browser_executable: Entity<InputState>,
@@ -284,6 +292,7 @@ pub(crate) struct PreferencesSheet {
     global_extension: FileExtension,
     autosave: AutosaveDelay,
     writing_wysiwyg: bool,
+    image_upload_enabled: bool,
     focus_mode: bool,
     typewriter_mode: bool,
     preview_presentation: PreviewPresentation,
@@ -336,6 +345,7 @@ impl PreferencesSheet {
             global_extension: FileExtension::default(),
             autosave: AutosaveDelay::default(),
             writing_wysiwyg: true,
+            image_upload_enabled: false,
             focus_mode: false,
             typewriter_mode: false,
             preview_presentation: PreviewPresentation::default(),
@@ -347,6 +357,10 @@ impl PreferencesSheet {
             collection_image_mode: None,
             collection_extension: None,
             inputs: Inputs {
+                image_upload_endpoint: input!("https://"),
+                image_upload_bucket: input!("my-images"),
+                image_upload_region: input!("auto / us-east-1"),
+                image_upload_public_url: input!("https://"),
                 ide_executable: input!("hx or code"),
                 ide_arguments,
                 preview_browser_executable: input!(tr!(
@@ -422,6 +436,31 @@ impl PreferencesSheet {
         self.global_extension = global.default_extension;
         self.autosave = global.autosave_delay;
         self.writing_wysiwyg = global.writing_wysiwyg;
+        self.image_upload_enabled = global.image_upload.enabled;
+        self.set_text(
+            FieldId::ImageUploadEndpoint,
+            &global.image_upload.endpoint,
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::ImageUploadBucket,
+            &global.image_upload.bucket,
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::ImageUploadRegion,
+            &global.image_upload.region,
+            window,
+            cx,
+        );
+        self.set_text(
+            FieldId::ImageUploadPublicUrl,
+            &global.image_upload.public_url,
+            window,
+            cx,
+        );
         self.focus_mode = global.focus_mode;
         self.typewriter_mode = global.typewriter_mode;
         self.preview_presentation = global.preview.presentation;
@@ -645,6 +684,17 @@ impl PreferencesSheet {
             .filter(|height| height.is_finite() && (1.2..=3.0).contains(height))
             .unwrap_or(global.editor_line_height);
         global.writing_wysiwyg = self.writing_wysiwyg;
+        global.image_upload.enabled = self.image_upload_enabled;
+        global.image_upload.endpoint = self
+            .text(FieldId::ImageUploadEndpoint, cx)
+            .trim()
+            .to_owned();
+        global.image_upload.bucket = self.text(FieldId::ImageUploadBucket, cx).trim().to_owned();
+        global.image_upload.region = self.text(FieldId::ImageUploadRegion, cx).trim().to_owned();
+        global.image_upload.public_url = self
+            .text(FieldId::ImageUploadPublicUrl, cx)
+            .trim()
+            .to_owned();
         global.focus_mode = self.focus_mode;
         global.typewriter_mode = self.typewriter_mode;
         global.preview = PreviewPreferences {
@@ -749,7 +799,11 @@ impl PreferencesSheet {
             FieldId::PreviewBrowserExecutable | FieldId::PreviewBrowserArguments => {
                 self.set_text(field, "", window, cx)
             }
-            FieldId::CollectionUrlPattern
+            FieldId::ImageUploadRegion => self.set_text(field, "auto", window, cx),
+            FieldId::ImageUploadEndpoint
+            | FieldId::ImageUploadBucket
+            | FieldId::ImageUploadPublicUrl
+            | FieldId::CollectionUrlPattern
             | FieldId::HeadingLight
             | FieldId::HeadingDark
             | FieldId::IdeExecutable
@@ -994,6 +1048,10 @@ impl PreferencesSheet {
 
     fn text(&self, field: FieldId, cx: &App) -> String {
         let value = match field {
+            FieldId::ImageUploadEndpoint => self.inputs.image_upload_endpoint.read(cx).value(),
+            FieldId::ImageUploadBucket => self.inputs.image_upload_bucket.read(cx).value(),
+            FieldId::ImageUploadRegion => self.inputs.image_upload_region.read(cx).value(),
+            FieldId::ImageUploadPublicUrl => self.inputs.image_upload_public_url.read(cx).value(),
             FieldId::IdeExecutable => self.inputs.ide_executable.read(cx).value(),
             FieldId::IdeArguments => self.inputs.ide_arguments.read(cx).value(),
             FieldId::PreviewBrowserExecutable => {
@@ -1035,6 +1093,22 @@ impl PreferencesSheet {
 
     fn set_text(&self, field: FieldId, value: &str, window: &mut Window, cx: &mut Context<Self>) {
         match field {
+            FieldId::ImageUploadEndpoint => self
+                .inputs
+                .image_upload_endpoint
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::ImageUploadBucket => self
+                .inputs
+                .image_upload_bucket
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::ImageUploadRegion => self
+                .inputs
+                .image_upload_region
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::ImageUploadPublicUrl => self
+                .inputs
+                .image_upload_public_url
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
             FieldId::IdeExecutable => self
                 .inputs
                 .ide_executable
@@ -1214,6 +1288,37 @@ impl PreferencesSheet {
         let mut insert = |field: FieldId, message: String| {
             errors.insert(field, SharedString::from(message));
         };
+        if self.image_upload_enabled {
+            use crate::editor::image_upload;
+            for (field, valid, error) in [
+                (
+                    FieldId::ImageUploadEndpoint,
+                    image_upload::endpoint_url(self.text(FieldId::ImageUploadEndpoint, cx).trim())
+                        .is_some(),
+                    "preferences.upload.invalid_endpoint",
+                ),
+                (
+                    FieldId::ImageUploadBucket,
+                    image_upload::valid_bucket(self.text(FieldId::ImageUploadBucket, cx).trim()),
+                    "preferences.upload.invalid_bucket",
+                ),
+                (
+                    FieldId::ImageUploadRegion,
+                    image_upload::valid_region(self.text(FieldId::ImageUploadRegion, cx).trim()),
+                    "preferences.upload.invalid_region",
+                ),
+                (
+                    FieldId::ImageUploadPublicUrl,
+                    image_upload::web_url(self.text(FieldId::ImageUploadPublicUrl, cx).trim())
+                        .is_some(),
+                    "preferences.upload.invalid_public_url",
+                ),
+            ] {
+                if !valid {
+                    insert(field, tr!(error));
+                }
+            }
+        }
         if let Err(message) = heading_color_value(&self.text(FieldId::HeadingLight, cx)) {
             insert(FieldId::HeadingLight, message);
         }
@@ -1360,6 +1465,26 @@ impl PreferencesSheet {
     /// The text control for one field, ready to render.
     pub(super) fn control(&self, field: FieldId) -> AnyElement {
         match field {
+            FieldId::ImageUploadEndpoint => {
+                gpui_kit::component::input::Input::new(&self.inputs.image_upload_endpoint)
+                    .aria_label(tr!("preferences.upload.endpoint"))
+                    .into_any_element()
+            }
+            FieldId::ImageUploadBucket => {
+                gpui_kit::component::input::Input::new(&self.inputs.image_upload_bucket)
+                    .aria_label(tr!("preferences.upload.bucket"))
+                    .into_any_element()
+            }
+            FieldId::ImageUploadRegion => {
+                gpui_kit::component::input::Input::new(&self.inputs.image_upload_region)
+                    .aria_label(tr!("preferences.upload.region"))
+                    .into_any_element()
+            }
+            FieldId::ImageUploadPublicUrl => {
+                gpui_kit::component::input::Input::new(&self.inputs.image_upload_public_url)
+                    .aria_label(tr!("preferences.upload.public_url"))
+                    .into_any_element()
+            }
             FieldId::IdeArguments => {
                 gpui_kit::component::input::Textarea::new(&self.inputs.ide_arguments)
                     .h(px(72.))

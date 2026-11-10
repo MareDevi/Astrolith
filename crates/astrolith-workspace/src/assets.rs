@@ -24,7 +24,7 @@ pub const MAX_ASSET_ATTEMPTS: usize = 1000;
 /// enables `bmp`, `gif`, `jpeg`, `png` and `webp`, so their preview fails
 /// silently.
 pub const IMAGE_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "tif", "tiff", "svg",
+    "png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "ico", "tif", "tiff", "svg", "pnm",
 ];
 
 /// A refused or failed asset operation.
@@ -154,6 +154,7 @@ pub struct CopiedAsset {
     path: String,
     markdown: String,
     image: bool,
+    alt: String,
 }
 
 impl CopiedAsset {
@@ -170,6 +171,11 @@ impl CopiedAsset {
     /// Image or link Markdown, already escaped and ready to insert.
     pub fn markdown(&self) -> &str {
         &self.markdown
+    }
+
+    /// Markdown referencing a different destination with the same link text.
+    pub fn markdown_at(&self, destination: &str) -> String {
+        markdown_for_asset(&self.alt, destination, self.image)
     }
 
     /// Whether the extension selected image Markdown.
@@ -191,9 +197,6 @@ fn copy_asset_bounded(
     request: &AssetCopyRequest,
     attempts: usize,
 ) -> Result<CopiedAsset, AssetError> {
-    if crate::list::parse_date(&request.date).is_none() || request.date.len() != 10 {
-        return Err(AssetError::InvalidDate(request.date.clone()));
-    }
     let metadata = fs::symlink_metadata(&request.source).map_err(|error| match error.kind() {
         io::ErrorKind::NotFound => AssetError::Missing(request.source.clone()),
         _ => io_error(&request.source, error),
@@ -203,6 +206,42 @@ fn copy_asset_bounded(
     }
     if !metadata.is_file() {
         return Err(AssetError::NotAFile(request.source.clone()));
+    }
+    write_asset(location, request, attempts, |target| {
+        let input = fs::File::open(&request.source)
+            .map_err(|error| CopyAttempt::Failed(io_error(&request.source, error)))?;
+        write_new_file(input, target, metadata.len())
+    })
+}
+
+/// Save encoded clipboard image bytes using the regular asset naming rules.
+pub fn write_clipboard_image(
+    location: &AssetLocation,
+    extension: &str,
+    bytes: &[u8],
+    date: &str,
+    document: &str,
+    path_mode: ImagePathMode,
+) -> Result<CopiedAsset, AssetError> {
+    let request = AssetCopyRequest {
+        source: PathBuf::from(format!("clipboard-image.{}", sanitize_extension(extension))),
+        date: date.to_owned(),
+        document: document.to_owned(),
+        path_mode,
+    };
+    write_asset(location, &request, MAX_ASSET_ATTEMPTS, |target| {
+        write_new_file(bytes, target, bytes.len() as u64)
+    })
+}
+
+fn write_asset(
+    location: &AssetLocation,
+    request: &AssetCopyRequest,
+    attempts: usize,
+    mut write: impl FnMut(&Path) -> Result<(), CopyAttempt>,
+) -> Result<CopiedAsset, AssetError> {
+    if crate::list::parse_date(&request.date).is_none() || request.date.len() != 10 {
+        return Err(AssetError::InvalidDate(request.date.clone()));
     }
     let stem = request
         .source
@@ -237,7 +276,7 @@ fn copy_asset_bounded(
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(io_error(&candidate, error)),
         }
-        match copy_new_file(&request.source, &candidate) {
+        match write(&candidate) {
             Ok(()) => {
                 target = Some(candidate);
                 break;
@@ -249,13 +288,6 @@ fn copy_asset_bounded(
         }
     }
     let target = target.ok_or(AssetError::NameAttemptsExhausted)?;
-    let original =
-        fs::metadata(&request.source).map_err(|error| io_error(&request.source, error))?;
-    let copied = fs::metadata(&target).map_err(|error| io_error(&target, error))?;
-    if original.len() != copied.len() {
-        let _ = fs::remove_file(&target);
-        return Err(AssetError::CopyMismatch(target));
-    }
     let source = project_relative_path(location.root(), &target)?;
     let path = asset_path(request.path_mode, &request.document, &source);
     let image = extension.as_deref().is_some_and(is_image_extension);
@@ -271,6 +303,7 @@ fn copy_asset_bounded(
         path,
         markdown,
         image,
+        alt: stem,
     })
 }
 
@@ -586,13 +619,15 @@ enum CopyAttempt {
     Failed(AssetError),
 }
 
-/// Copy `source` to a destination that must not already exist.
+/// Write an asset to a destination that must not already exist.
 ///
 /// `create_new` makes the name atomic, so a concurrent process cannot be
 /// overwritten between the collision search and the write.
-fn copy_new_file(source: &Path, destination: &Path) -> Result<(), CopyAttempt> {
-    let mut input =
-        fs::File::open(source).map_err(|error| CopyAttempt::Failed(io_error(source, error)))?;
+fn write_new_file(
+    mut input: impl io::Read,
+    destination: &Path,
+    expected_len: u64,
+) -> Result<(), CopyAttempt> {
     let mut output = match OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -604,13 +639,18 @@ fn copy_new_file(source: &Path, destination: &Path) -> Result<(), CopyAttempt> {
         }
         Err(error) => return Err(CopyAttempt::Failed(io_error(destination, error))),
     };
-    let copied = io::copy(&mut input, &mut output).and_then(|_| output.sync_all());
+    let copied = io::copy(&mut input, &mut output).and_then(|length| {
+        output.sync_all()?;
+        Ok(length)
+    });
     drop(output);
-    if let Err(error) = copied {
-        let _ = fs::remove_file(destination);
-        return Err(CopyAttempt::Failed(io_error(destination, error)));
-    }
-    Ok(())
+    let failure = match copied {
+        Ok(length) if length == expected_len => return Ok(()),
+        Ok(_) => AssetError::CopyMismatch(destination.to_path_buf()),
+        Err(error) => io_error(destination, error),
+    };
+    let _ = fs::remove_file(destination);
+    Err(CopyAttempt::Failed(failure))
 }
 
 fn io_error(path: &Path, error: io::Error) -> AssetError {

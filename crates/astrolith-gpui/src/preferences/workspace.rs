@@ -269,6 +269,7 @@ impl PreferencesSheet {
                 writing,
                 cx,
             ))
+            .child(self.image_upload_section(cx))
             .child(self.section(
                 tr!("preferences.workspace.external_editor"),
                 Some(tr!("preferences.workspace.external_editor_hint").into()),
@@ -276,6 +277,77 @@ impl PreferencesSheet {
                 cx,
             ))
             .into_any_element()
+    }
+
+    fn image_upload_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let label = tr!("preferences.upload.enable");
+        let enabled = self.field(
+            "preferences-field-image-upload",
+            label.clone(),
+            div().into_any_element(),
+            FieldExtras {
+                field: None,
+                hint: None,
+                trailing: Some(
+                    Switch::new("preferences-image-upload")
+                        .accessibility_label(label)
+                        .checked(self.image_upload_enabled)
+                        .on_change(cx.listener(|this, checked, _, cx| {
+                            this.image_upload_enabled = *checked;
+                            this.refresh_errors(cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ),
+            },
+            cx,
+        );
+        let mut fields = vec![enabled];
+        if self.image_upload_enabled {
+            fields.extend(
+                [
+                    (
+                        "preferences-field-image-upload-endpoint",
+                        FieldId::ImageUploadEndpoint,
+                        "preferences.upload.endpoint",
+                    ),
+                    (
+                        "preferences-field-image-upload-bucket",
+                        FieldId::ImageUploadBucket,
+                        "preferences.upload.bucket",
+                    ),
+                    (
+                        "preferences-field-image-upload-region",
+                        FieldId::ImageUploadRegion,
+                        "preferences.upload.region",
+                    ),
+                    (
+                        "preferences-field-image-upload-public-url",
+                        FieldId::ImageUploadPublicUrl,
+                        "preferences.upload.public_url",
+                    ),
+                ]
+                .map(|(id, field, label)| {
+                    self.field(
+                        id,
+                        tr!(label),
+                        self.control(field),
+                        FieldExtras {
+                            field: Some(field),
+                            hint: None,
+                            trailing: None,
+                        },
+                        cx,
+                    )
+                }),
+            );
+        }
+        self.section(
+            tr!("preferences.upload.title"),
+            Some(tr!("preferences.upload.description").into()),
+            fields,
+            cx,
+        )
     }
 
     fn reset_layout_button(

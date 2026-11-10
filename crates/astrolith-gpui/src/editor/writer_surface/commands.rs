@@ -144,9 +144,8 @@ impl WriterSurface {
             }
         }))
         .on_action(cx.listener(|this, _: &input::Paste, window, cx| {
-            if let Some(item) = cx.read_from_clipboard() {
-                this.paste(item, window, cx);
-            }
+            let item = cx.read_from_clipboard();
+            this.paste_item(item, window, cx);
         }))
         .on_action(cx.listener(|this, _: &input::Undo, window, cx| {
             if let Some(session) = this.session.upgrade() {

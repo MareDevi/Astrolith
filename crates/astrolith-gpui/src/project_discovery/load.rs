@@ -306,6 +306,17 @@ impl ProjectWorkspace {
             .into_owned();
         let editor = session.read(cx).editor.clone();
         let owner = cx.weak_entity();
+        session.update(cx, |session, _| {
+            let owner = owner.clone();
+            session.asset_paste = Some(Rc::new(move |item, window, cx| {
+                let Some(assets) = asset_insertion::ClipboardAssets::from_item(item) else {
+                    return false;
+                };
+                owner
+                    .update(cx, |project, cx| project.paste_assets(assets, window, cx))
+                    .unwrap_or(false)
+            }));
+        });
         let wiring = EditorWiring::new(session.downgrade())
             .with_preview_root(self.project_root().unwrap_or_default())
             .with_drop(Rc::new(

@@ -64,6 +64,9 @@ unicode-segmentation = "=1.13.3"
 # and this package is already in the dependency graph (cosmic-text, gpui-base).
 unicode-linebreak = "=0.1.5"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "=3.7.0", default-features = false, features = ["wayland-data-control"] }
+
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 
