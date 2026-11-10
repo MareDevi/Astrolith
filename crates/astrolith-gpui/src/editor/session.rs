@@ -1242,6 +1242,13 @@ impl DocumentSession {
             .update(cx, |writer, cx| writer.set_style(style, cx));
     }
 
+    pub(crate) fn set_writer_image_root(&self, root: std::path::PathBuf, cx: &mut Context<Self>) {
+        let document = std::path::Path::new(self.canonical_source());
+        self.writer.update(cx, |writer, cx| {
+            writer.set_image_location(root, document, cx)
+        });
+    }
+
     pub(super) fn retain_writer_preedit(&mut self, before: Rope, selection: Range<usize>) {
         self.writer_preedit.get_or_insert((before, selection));
     }

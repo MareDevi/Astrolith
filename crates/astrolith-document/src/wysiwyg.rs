@@ -668,7 +668,7 @@ fn parse_block_range(
             }
         }
         let (block, next) = paragraph(source, lines, index, indent, definitions);
-        blocks.push(standalone_image(block));
+        blocks.push(block);
         index = next;
     }
     Some(blocks)
@@ -967,13 +967,32 @@ fn paragraph(
         }
         let start = line.start;
         let end = trim_end(source, start, line.content_end);
+        let line_text = inline(source, start..end, definitions);
+        if let Some(url) = standalone_image(&line_text) {
+            if !first {
+                break;
+            }
+            return (
+                RichBlock {
+                    kind: BlockKind::Image {
+                        url: url.to_owned(),
+                    },
+                    source: start..line.end,
+                    content: start + indent..end,
+                    text: line_text,
+                    cells: Vec::new(),
+                    depth: 0,
+                },
+                next + 1,
+            );
+        }
         if first {
             content_start = start;
             first = false;
         } else {
             text.push_newline(previous_end..line.start);
         }
-        text.append(inline(source, start..end, definitions));
+        text.append(line_text);
         content_end = end;
         previous_end = line.end;
         next += 1;
@@ -1016,26 +1035,17 @@ fn starts_block(source: &str, line: &Line) -> bool {
 /// normalized label.
 type Definitions = std::collections::HashMap<String, String>;
 
-/// A paragraph that contains nothing but one image becomes a picture block.
-fn standalone_image(mut block: RichBlock) -> RichBlock {
-    if block.kind != BlockKind::Paragraph {
-        return block;
-    }
-    let text = &block.text.text;
+/// An image on its own line becomes a picture block, even without blank lines.
+fn standalone_image(rich: &RichText) -> Option<&str> {
+    let text = &rich.text;
     let start = text.len() - text.trim_start().len();
     let end = text.trim_end().len();
-    let mut images = block.text.marks.iter().filter_map(|mark| match &mark.kind {
+    let mut images = rich.marks.iter().filter_map(|mark| match &mark.kind {
         InlineMarkKind::Image(url) => Some((&mark.range, url)),
         _ => None,
     });
-    let Some((range, url)) = images.next() else {
-        return block;
-    };
-    if images.next().is_some() || range.start > start || range.end < end {
-        return block;
-    }
-    block.kind = BlockKind::Image { url: url.clone() };
-    block
+    let (range, url) = images.next()?;
+    (images.next().is_none() && range.start <= start && range.end >= end).then_some(url)
 }
 
 /// Whether `offset` sits after an odd number of backslashes.
@@ -2070,6 +2080,19 @@ Second paragraph.
             }
         );
         assert!(image.text.text.is_empty(), "empty alt text remains empty");
+    }
+
+    #[test]
+    fn image_only_lines_remain_pictures_next_to_text_and_other_images() {
+        let source = "Before\n![](./one.png)\n![](./two.png)\nAfter";
+        let document = WysiwygDocument::parse(source);
+        assert_eq!(document.blocks.len(), 4);
+        assert_eq!(
+            &source[document.blocks[1].content.clone()],
+            "![](./one.png)"
+        );
+        assert!(matches!(document.blocks[1].kind, BlockKind::Image { .. }));
+        assert!(matches!(document.blocks[2].kind, BlockKind::Image { .. }));
     }
 
     #[test]

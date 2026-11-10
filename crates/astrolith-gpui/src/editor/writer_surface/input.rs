@@ -142,9 +142,9 @@ impl EntityInputHandler for WriterSurface {
     ) -> Option<Bounds<Pixels>> {
         let editor = self.input_model(cx)?;
         let source = editor.read(cx).text().offset_utf16_to_offset(range.start);
-        let (block, rendered) = self.document.caret_location(self.parsed_offset(source))?;
+        let hit = self.hit_for_source(self.parsed_offset(source))?;
         let layout = self.layout.borrow();
-        let caret = layout.as_ref()?.caret(super::Hit { block, rendered })?;
+        let caret = layout.as_ref()?.caret(hit)?;
         let geometry = *self.geometry.borrow();
         Some(Bounds::new(
             point(

@@ -171,6 +171,15 @@ pub(crate) fn normalize_lexical(path: &Path) -> Option<PathBuf> {
 
 /// Read and decode one local preview on the blocking lane.
 pub(crate) fn load_local(root: &Path, path: &Path) -> Result<Arc<RenderImage>, PreviewError> {
+    let canonical = validated_local_image(root, path)?;
+    let bytes = fs::read(&canonical).map_err(|error| PreviewError::Io(error.to_string()))?;
+    if bytes.len() as u64 > MAX_PREVIEW_BYTES {
+        return Err(PreviewError::TooLarge);
+    }
+    decode_preview(&bytes)
+}
+
+pub(super) fn validated_local_image(root: &Path, path: &Path) -> Result<PathBuf, PreviewError> {
     let canonical_root =
         fs::canonicalize(root).map_err(|error| PreviewError::Io(error.to_string()))?;
     let relative = path
@@ -205,11 +214,7 @@ pub(crate) fn load_local(root: &Path, path: &Path) -> Result<Arc<RenderImage>, P
     if !canonical.starts_with(&canonical_root) {
         return Err(PreviewError::OutsideProject);
     }
-    let bytes = fs::read(&canonical).map_err(|error| PreviewError::Io(error.to_string()))?;
-    if bytes.len() as u64 > MAX_PREVIEW_BYTES {
-        return Err(PreviewError::TooLarge);
-    }
-    decode_preview(&bytes)
+    Ok(canonical)
 }
 
 /// Decode bounded image bytes into a renderable BGRA frame.

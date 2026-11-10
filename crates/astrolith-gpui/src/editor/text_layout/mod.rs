@@ -91,9 +91,9 @@ pub(crate) struct LayoutStyle {
     pub(crate) border: Hsla,
     pub(crate) background: Hsla,
     pub(crate) heading: Hsla,
-    /// Paint standalone images instead of their alt text. Writing keeps the
-    /// alt text so the source stays editable; the reading pane shows pictures.
+    /// Paint standalone images instead of their alt text.
     pub(crate) render_images: bool,
+    pub(crate) edit_images: bool,
 }
 
 impl LayoutStyle {
@@ -115,12 +115,19 @@ impl LayoutStyle {
             background: theme.background,
             heading: crate::theme::prose_heading_color(cx),
             render_images: false,
+            edit_images: false,
         }
     }
 
     /// Paint standalone images, for the read-only preview.
     pub(crate) fn with_images(mut self, render_images: bool) -> Self {
         self.render_images = render_images;
+        self
+    }
+
+    pub(crate) fn with_editable_images(mut self) -> Self {
+        self.render_images = true;
+        self.edit_images = true;
         self
     }
 
@@ -131,6 +138,7 @@ impl LayoutStyle {
             && self.font_size == other.font_size
             && self.line_height == other.line_height
             && self.render_images == other.render_images
+            && self.edit_images == other.edit_images
     }
 
     /// Font size used by a heading level, matching the current block chrome.
@@ -357,6 +365,7 @@ struct ImageSpec {
     url: String,
     width: f32,
     height: f32,
+    editable: bool,
 }
 
 impl BlockLayout {
@@ -424,6 +433,7 @@ impl BlockLayout {
                 url: url.clone(),
                 width: image_width,
                 height: image_height,
+                editable: style.edit_images,
             });
             // The picture replaces its alt text; no glyph row is prepared.
             this.rows.clear();
@@ -774,6 +784,10 @@ impl BlockLayout {
     /// Caret point and height for a rendered offset inside this block, with
     /// `top` as the block's content top in document coordinates.
     fn caret_at(&self, top: f32, rendered: usize) -> Option<(Point<Pixels>, Pixels)> {
+        if let Some(image) = self.image.as_ref().filter(|image| image.editable) {
+            let x = if rendered == 0 { 0. } else { image.width };
+            return Some((point(px(x), px(top)), px(self.row_height.min(image.height))));
+        }
         if self.is_table() {
             let (cell, local) = self.cell_offset(rendered);
             let cell = self.cells.get(cell)?;
@@ -796,6 +810,13 @@ impl BlockLayout {
 
     /// Rendered offset under a point relative to the block's content top.
     fn hit_test_at(&self, x: f32, local_y: f32) -> Option<usize> {
+        if let Some(image) = self.image.as_ref().filter(|image| image.editable) {
+            return Some(if x < image.width / 2. {
+                0
+            } else {
+                self.text_len.max(1)
+            });
+        }
         if self.is_table() {
             let cell_index = self
                 .cells
@@ -817,6 +838,12 @@ impl BlockLayout {
 
     /// Selection rectangles covering `range` inside this block.
     fn range_quads(&self, top: f32, range: Range<usize>) -> Vec<Bounds<Pixels>> {
+        if let Some(image) = self.image.as_ref().filter(|image| image.editable) {
+            return vec![Bounds::new(
+                point(px(0.), px(top)),
+                size(px(image.width), px(image.height)),
+            )];
+        }
         if self.is_table() {
             let mut quads = Vec::new();
             for (cell_index, cell) in self.cells.iter().enumerate() {
@@ -1166,6 +1193,7 @@ pub(crate) struct TextLayout {
     heights: HeightIndex,
     stats: LayoutStats,
     images: ImageMetrics,
+    source_image: Option<usize>,
 }
 
 impl TextLayout {
@@ -1194,7 +1222,43 @@ impl TextLayout {
             heights,
             stats: LayoutStats::default(),
             images: images.clone(),
+            source_image: None,
         }
+    }
+
+    /// Reveal one image's Markdown without invalidating any other block's rows.
+    pub(crate) fn set_image_source(&mut self, source: Option<(usize, &str)>) {
+        let next = source.map(|(index, _)| index);
+        if self.source_image == next {
+            return;
+        }
+        if let Some(index) = self.source_image {
+            let block = &self.document.blocks[index];
+            self.blocks[index] = BlockLayout::new(block, &self.style, self.width, &self.images);
+            self.heights
+                .set(index, f64::from(self.blocks[index].height()));
+        }
+        if let Some((index, text)) = source {
+            let depth = self.document.blocks[index].depth;
+            let text = RichText {
+                text: text.to_owned(),
+                ..RichText::default()
+            };
+            self.blocks[index] =
+                BlockLayout::build(BlockKind::Paragraph, depth, &text, &self.style, self.width);
+            self.heights
+                .set(index, f64::from(self.blocks[index].height()));
+        }
+        self.source_image = next;
+    }
+
+    /// The painted picture rectangle, in content coordinates.
+    pub(crate) fn image_bounds(&self, index: usize) -> Option<Bounds<Pixels>> {
+        let image = self.blocks.get(index)?.image.as_ref()?;
+        Some(Bounds::new(
+            point(px(0.), px(self.block_top(index))),
+            size(px(image.width), px(image.height)),
+        ))
     }
 
     /// Adopt newly loaded intrinsic image sizes. Only picture blocks change
@@ -1320,7 +1384,10 @@ impl TextLayout {
             let end_offset = if index == end.block {
                 end.rendered
             } else {
-                self.blocks[index].text_len
+                let block = &self.blocks[index];
+                block.text_len.max(usize::from(
+                    block.image.as_ref().is_some_and(|image| image.editable),
+                ))
             };
             if start_offset >= end_offset {
                 continue;
@@ -1368,6 +1435,7 @@ impl TextLayout {
     /// before a safe edit prefix, so a local edit does not re-wrap the whole
     /// document.
     pub(crate) fn update(&mut self, document: Arc<WysiwygDocument>) -> UpdateOutcome {
+        self.set_image_source(None);
         let width = self.width;
         let style = &self.style;
         let mut old: Vec<Option<BlockLayout>> = std::mem::take(&mut self.blocks)
@@ -1525,7 +1593,6 @@ impl TextLayout {
         deadline: Instant,
     ) -> bool {
         let width = self.width;
-        let document = &self.document;
         let block = &mut self.blocks[index];
         let before_rows = block.rows.len();
         let mut examined = 0usize;
@@ -1551,8 +1618,8 @@ impl TextLayout {
             }
             return met;
         }
-        let text = &document.blocks[index].text.text;
-        let met = block.advance(text, width, target, text_system, deadline, &mut examined);
+        let text = block.text.clone();
+        let met = block.advance(&text, width, target, text_system, deadline, &mut examined);
         self.stats.wrapped_rows += block.rows.len() - before_rows;
         self.stats.wrapped_bytes += examined;
         if block.rows.len() != before_rows || block.complete {
@@ -1577,6 +1644,9 @@ impl TextLayout {
             *pending = true;
             return;
         };
+        if block.image.is_some() {
+            return;
+        }
         if block.is_table() {
             let (cell_index, local) = block.cell_offset(hit.rendered);
             let Some(cell) = block.cells.get_mut(cell_index) else {
@@ -1611,8 +1681,8 @@ impl TextLayout {
             *pending = true;
             return;
         }
-        let text = &self.document.blocks[hit.block].text.text;
-        let (did_shape, bytes) = shape_row_in(block, text, row_index, text_system);
+        let text = block.text.clone();
+        let (did_shape, bytes) = shape_row_in(block, &text, row_index, text_system);
         if did_shape {
             self.stats.shaped_rows += 1;
             self.stats.shaped_bytes += bytes;
@@ -1649,12 +1719,12 @@ impl TextLayout {
             self.stats.shaped_bytes += bytes;
             return;
         }
-        let text = &self.document.blocks[index].text.text;
         let (rows, shaped, bytes) = {
             let block = &mut self.blocks[index];
+            let text = block.text.clone();
             shape_rows_in(
                 block,
-                text,
+                &text,
                 block_top,
                 content_top,
                 content_bottom,
@@ -1786,6 +1856,11 @@ impl TextLayout {
                             cx,
                         );
                     }
+                }
+                if spec.editable
+                    && quads.contains(&Bounds::new(point(px(0.), px(block_top)), bounds.size))
+                {
+                    window.paint_quad(fill(bounds, self.style.selection.opacity(0.45)));
                 }
             }
             let chrome_top = self.blocks[index].chrome_top;

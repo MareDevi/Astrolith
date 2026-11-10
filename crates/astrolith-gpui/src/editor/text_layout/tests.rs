@@ -18,6 +18,7 @@ fn test_style() -> Arc<LayoutStyle> {
         background: gpui_kit::black(),
         heading: gpui_kit::black(),
         render_images: false,
+        edit_images: false,
     })
 }
 

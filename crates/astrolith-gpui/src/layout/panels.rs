@@ -130,6 +130,13 @@ impl WorkspacePanel {
         self.editor = Some(editor);
         self.readonly = false;
         self.wiring = wiring;
+        if let Some(wiring) = &self.wiring
+            && let (Some(root), Some(session)) = (&wiring.preview_root, wiring.session.upgrade())
+        {
+            session.update(cx, |session, cx| {
+                session.set_writer_image_root(root.as_ref().clone(), cx)
+            });
+        }
         if let (Some(style), Some(session)) = (
             self.prose.clone(),
             self.wiring

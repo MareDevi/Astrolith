@@ -16,14 +16,18 @@
 mod commands;
 mod input;
 
+use super::image_preview::{self, PreviewSource};
 use super::perf;
 use super::text_change::TextChange;
 use super::text_layout::{
-    Caret, Decoration, FocusSentence, Hit, LayoutStyle, Selection, TextLayout, Viewport,
+    Caret, Decoration, FocusSentence, Hit, ImageMetrics, LayoutImagePainter, LayoutStyle,
+    Selection, TextLayout, Viewport,
 };
 use gpui_kit::component::input::Rope;
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{
     Arc,
@@ -31,13 +35,14 @@ use std::sync::{
 };
 use std::time::Instant;
 
-use astrolith_document::{WysiwygDocument, sentences};
+use astrolith_document::{BlockKind, WysiwygDocument, sentences};
 use gpui_kit::base::AutoScroll;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{
-    App, Bounds, Context, Element, ElementId, Focusable, GlobalElementId, Hsla, IntoElement,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, ScrollHandle,
-    TestSupportExt, Window, div, fill, point, prelude::*, px, relative, size,
+    App, Asset, Bounds, Context, Corners, Element, ElementId, Focusable, GlobalElementId, Hsla,
+    ImageAssetLoader, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
+    Point, Render, RenderImage, Resource, ScrollHandle, Task, TestSupportExt, Window, div, fill,
+    point, prelude::*, px, relative, size,
 };
 
 use crate::editor::session::DocumentSession;
@@ -76,6 +81,10 @@ pub(crate) struct WriterSurface {
     /// only when the width or font metrics change.
     layout: Rc<RefCell<Option<TextLayout>>>,
     layout_style: Option<Arc<LayoutStyle>>,
+    images: Rc<RefCell<HashMap<String, Picture>>>,
+    image_sizes: ImageMetrics,
+    image_location: Option<(PathBuf, PathBuf)>,
+    editing_image: Option<usize>,
     /// Content width the current layout was built for.
     laid_out_width: Option<f32>,
     /// Last frame's measured writer work, for the opt-in counters.
@@ -121,6 +130,94 @@ impl Drop for WriterSurface {
     }
 }
 
+enum Picture {
+    Loading { _task: Task<()> },
+    Loaded(Option<Arc<RenderImage>>),
+}
+
+fn load_picture(
+    destination: &str,
+    location: Option<&(PathBuf, PathBuf)>,
+    cx: &mut Context<WriterSurface>,
+) -> Picture {
+    let mut candidates = Vec::new();
+    if let Some(url) = image_preview::preview_destination(destination)
+        .and_then(|destination| super::formatting::external_url(&destination))
+    {
+        candidates.push((None, Resource::Uri(url.into())));
+    } else if let Some((root, document)) = location
+        && let Some(PreviewSource::Local(path)) =
+            image_preview::resolve_preview(root, document, destination)
+    {
+        candidates.push((Some(root.clone()), Resource::Path(path.clone().into())));
+        if destination.starts_with('/')
+            && let Ok(relative) = path.strip_prefix(root)
+        {
+            // Astro also serves URLs rooted at the project's public directory.
+            candidates.push((
+                Some(root.clone()),
+                Resource::Path(root.join("public").join(relative).into()),
+            ));
+        }
+    }
+    if candidates.is_empty() {
+        return Picture::Loaded(None);
+    }
+    let loads: Vec<_> = candidates
+        .into_iter()
+        .map(|(root, resource)| {
+            let source = resource.clone();
+            let load: futures::future::BoxFuture<'static, _> =
+                Box::pin(ImageAssetLoader::load(resource, cx));
+            async move {
+                if let (Some(root), Resource::Path(path)) = (root, source) {
+                    image_preview::validated_local_image(&root, &path).ok()?;
+                }
+                load.await.ok()
+            }
+        })
+        .collect();
+    let load = cx.background_spawn(async move {
+        for load in loads {
+            if let Some(image) = load.await {
+                return Some(image);
+            }
+        }
+        None
+    });
+    let destination = destination.to_owned();
+    Picture::Loading {
+        _task: cx.spawn(async move |writer, cx| {
+            let image = load.await;
+            let dimensions = image.as_ref().map_or((0., 0.), |image| {
+                let size = image.size(0);
+                (size.width.0 as f32, size.height.0 as f32)
+            });
+            let _ = writer.update(cx, |writer, cx| {
+                writer
+                    .images
+                    .borrow_mut()
+                    .insert(destination.clone(), Picture::Loaded(image));
+                writer.image_sizes.insert(destination, dimensions);
+                cx.notify();
+            });
+        }),
+    }
+}
+
+struct PicturePainter<'a>(&'a HashMap<String, Picture>);
+
+impl LayoutImagePainter for PicturePainter<'_> {
+    fn paint(&self, url: &str, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
+        let Some(Picture::Loaded(Some(image))) = self.0.get(url) else {
+            return false;
+        };
+        window
+            .paint_image(bounds, bounds, Corners::default(), image.clone(), 0, false)
+            .is_ok()
+    }
+}
+
 impl WriterSurface {
     pub(crate) fn new(
         session: gpui_kit::WeakEntity<DocumentSession>,
@@ -130,12 +227,17 @@ impl WriterSurface {
         let geometry = Rc::new(RefCell::new(FrameGeometry::default()));
         let layout = Rc::new(RefCell::new(None));
         let caret = cx.new(|cx| CaretOverlay::new(layout.clone(), geometry.clone(), cx));
+        cx.on_release(|writer, cx| writer.clear_images(cx)).detach();
         Self {
             session,
             caret_state: None,
             caret,
             layout,
             layout_style: None,
+            images: Rc::new(RefCell::new(HashMap::new())),
+            image_sizes: ImageMetrics::new(),
+            image_location: None,
+            editing_image: None,
             laid_out_width: None,
             frame_stats: perf::Frame::default(),
             document: Arc::new(WysiwygDocument::default()),
@@ -288,6 +390,8 @@ impl WriterSurface {
         self.parsed_text = Arc::new(text);
         self.pending_edit = None;
         self.document = Arc::new(document);
+        self.editing_image = None;
+        self.sync_images(cx);
         self.focus_sentences = None;
         // Unchanged blocks keep their rows and shaped lines across the edit;
         // the edited block keeps the safe row prefix.
@@ -309,12 +413,70 @@ impl WriterSurface {
         self.caret.update(cx, |caret, cx| caret.clear(cx));
     }
 
+    pub(super) fn set_image_location(
+        &mut self,
+        root: PathBuf,
+        document: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        let location = (root.clone(), root.join(document));
+        if self.image_location.as_ref() != Some(&location) {
+            self.image_location = Some(location);
+            self.clear_images(cx);
+            self.sync_images(cx);
+            cx.notify();
+        }
+    }
+
+    fn clear_images(&mut self, cx: &mut App) {
+        for (_, item) in self.images.borrow_mut().drain() {
+            if let Picture::Loaded(Some(image)) = item {
+                cx.drop_image(image, None);
+            }
+        }
+        self.image_sizes.clear();
+    }
+
+    fn sync_images(&mut self, cx: &mut Context<Self>) {
+        let destinations: HashSet<_> = self
+            .document
+            .blocks
+            .iter()
+            .filter_map(|block| match &block.kind {
+                BlockKind::Image { url } => Some(url.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut images = self.images.borrow_mut();
+        images.retain(|url, item| {
+            if destinations.contains(url.as_str()) {
+                return true;
+            }
+            if let Picture::Loaded(Some(image)) = item {
+                cx.drop_image(image.clone(), None);
+            }
+            false
+        });
+        self.image_sizes
+            .retain(|url, _| destinations.contains(url.as_str()));
+        for destination in destinations {
+            if images.contains_key(destination) {
+                continue;
+            }
+            let item = load_picture(destination, self.image_location.as_ref(), cx);
+            if matches!(item, Picture::Loaded(None)) {
+                self.image_sizes.insert(destination.to_owned(), (0., 0.));
+            }
+            images.insert(destination.to_owned(), item);
+        }
+    }
+
     /// Reuse the current layout for one accepted document revision.
     ///
     /// The layout is rebuilt only when the column width or the shaping font
     /// metrics change. Colour-only changes restyle the resolved runs.
     fn sync_layout(&mut self, width: f32, cx: &App) {
-        let style = Arc::new(LayoutStyle::from_app(&self.style, cx));
+        let style = Arc::new(LayoutStyle::from_app(&self.style, cx).with_editable_images());
         let width = width.max(1.);
         let mut slot = self.layout.borrow_mut();
         let rebuild = match slot.as_ref() {
@@ -331,7 +493,7 @@ impl WriterSurface {
                 self.document.clone(),
                 style.clone(),
                 px(width),
-                &super::text_layout::ImageMetrics::default(),
+                &self.image_sizes,
             ));
             self.laid_out_width = Some(width);
             self.layout_style = Some(style);
@@ -352,14 +514,55 @@ impl WriterSurface {
 
     /// The parsed hit for a source offset in the accepted document.
     fn hit_for_source(&self, source: usize) -> Option<Hit> {
-        let (block, rendered) = self.document.caret_location(source)?;
+        let block = self.document.block_index(source)?;
+        let rich = &self.document.blocks[block];
+        let rendered = if self.editing_image == Some(block) {
+            source
+                .saturating_sub(rich.content.start)
+                .min(rich.content.len())
+        } else if matches!(rich.kind, BlockKind::Image { .. }) {
+            if source >= rich.content.end {
+                self.rendered_len(block)
+            } else {
+                0
+            }
+        } else {
+            rich.text.nearest_rendered_offset(source)
+        };
         Some(Hit { block, rendered })
+    }
+
+    fn rendered_len(&self, block: usize) -> usize {
+        let rich = &self.document.blocks[block];
+        if self.editing_image == Some(block) {
+            rich.content.len()
+        } else {
+            rich.text
+                .text
+                .len()
+                .max(usize::from(matches!(rich.kind, BlockKind::Image { .. })))
+        }
+    }
+
+    fn source_for_hit(&self, block: usize, rendered: usize) -> Option<usize> {
+        let rich = self.document.blocks.get(block)?;
+        if self.editing_image == Some(block) {
+            Some(rich.content.start + rendered.min(rich.content.len()))
+        } else if matches!(rich.kind, BlockKind::Image { .. }) {
+            Some(if rendered == 0 {
+                rich.content.start
+            } else {
+                rich.content.end
+            })
+        } else {
+            self.document.source_at(block, rendered)
+        }
     }
 
     /// Source offset under a window position.
     pub(crate) fn source_at(&self, position: Point<Pixels>) -> Option<usize> {
         let (block, rendered) = self.location_at(position)?;
-        let source = self.document.source_at(block, rendered)?;
+        let source = self.source_for_hit(block, rendered)?;
         self.pending_edit
             .as_ref()
             .map_or(Some(source), |edit| edit.to_current(source))
@@ -392,6 +595,11 @@ impl WriterSurface {
     pub(crate) fn image_at(&self, position: Point<Pixels>) -> Option<String> {
         if self.pending_edit.is_some() {
             return None;
+        }
+        if let Some(block) = self.picture_at(position)
+            && let BlockKind::Image { url } = &self.document.blocks[block].kind
+        {
+            return Some(url.clone());
         }
         let (block, rendered) = self.location_at(position)?;
         self.document.image_at(block, rendered).map(str::to_owned)
@@ -450,10 +658,18 @@ impl WriterSurface {
         {
             return false;
         }
-        let document = self.document.clone();
-        let Some((block, rendered)) = document.caret_location(self.parsed_offset(focus)) else {
+        let Some(Hit { block, rendered }) = self.hit_for_source(self.parsed_offset(focus)) else {
             return false;
         };
+        if matches!(self.document.blocks[block].kind, BlockKind::Image { .. })
+            && matches!(key, "left" | "right")
+            && (self.editing_image == Some(block)
+                || (key == "right" && rendered == 0)
+                || (key == "left" && rendered != 0))
+        {
+            // Let the editor move by source graphemes into and through the Markdown.
+            return false;
+        }
         let anchor = if shift {
             if focus == selection.start {
                 selection.end
@@ -464,14 +680,10 @@ impl WriterSurface {
             focus
         };
         let destination = match key {
-            "left" => previous_rendered(&document, block, rendered),
-            "right" => following_rendered(&document, block, rendered),
+            "left" => self.previous_rendered(block, rendered),
+            "right" => self.following_rendered(block, rendered),
             "home" => Some((block, 0)),
-            "end" => document
-                .blocks
-                .get(block)
-                .map(|block| (block, block.text.text.len()))
-                .map(|(_, len)| (block, len)),
+            "end" => Some((block, self.rendered_len(block))),
             "up" | "down" => {
                 let hit = Hit { block, rendered };
                 let layout = self.layout.borrow();
@@ -485,7 +697,7 @@ impl WriterSurface {
         let Some((next_block, next_rendered)) = destination else {
             return false;
         };
-        let Some(source) = document.source_at(next_block, next_rendered) else {
+        let Some(source) = self.source_for_hit(next_block, next_rendered) else {
             return false;
         };
         let Some(source) = self
@@ -504,15 +716,30 @@ impl WriterSurface {
     }
 
     fn location_at(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
-        let geometry = *self.geometry.borrow();
         let layout = self.layout.borrow();
         let layout = layout.as_ref()?;
-        let hit = layout.hit_test(point(
+        let hit = layout.hit_test(self.content_position(position))?;
+        Some((hit.block, hit.rendered))
+    }
+
+    fn content_position(&self, position: Point<Pixels>) -> Point<Pixels> {
+        let geometry = *self.geometry.borrow();
+        point(
             position.x - geometry.origin.x,
             position.y - geometry.origin.y
                 + px((-f32::from(self.scroll.offset().y)).max(0.) - geometry.scroll_y),
-        ))?;
-        Some((hit.block, hit.rendered))
+        )
+    }
+
+    fn picture_at(&self, position: Point<Pixels>) -> Option<usize> {
+        let position = self.content_position(position);
+        let slot = self.layout.borrow();
+        let layout = slot.as_ref()?;
+        let block = layout.block_at_y(f32::from(position.y))?;
+        layout
+            .image_bounds(block)?
+            .contains(&position)
+            .then_some(block)
     }
 
     /// The viewport height the visible window is derived from.
@@ -537,7 +764,16 @@ impl WriterSurface {
         let Some(session) = self.session.upgrade() else {
             return;
         };
-        let offset = match self.source_at(position) {
+        let image_source = if !extend && self.pending_edit.is_none() {
+            self.picture_at(position).map(|block| {
+                let content = &self.document.blocks[block].content;
+                let source = &self.parsed_text[content.clone()];
+                content.start + if source.starts_with("![") { 2 } else { 1 }
+            })
+        } else {
+            None
+        };
+        let offset = match image_source.or_else(|| self.source_at(position)) {
             Some(offset) => offset,
             None => {
                 // An unshaped row or a pointer outside the layout is not EOF.
@@ -656,63 +892,76 @@ fn clamp_scroll_offset(target: f32, max: f32) -> f32 {
     target.clamp(-max.max(0.), 0.)
 }
 
-/// The previous rendered character, crossing block boundaries.
-fn previous_rendered(
-    document: &WysiwygDocument,
-    block: usize,
-    rendered: usize,
-) -> Option<(usize, usize)> {
-    if rendered > 0 {
-        let text = &document.blocks.get(block)?.text.text;
-        let previous = text[..rendered]
-            .char_indices()
-            .next_back()
-            .map_or(0, |(index, _)| index);
-        return Some((block, previous));
-    }
-    for index in (0..block).rev() {
-        let text = &document.blocks.get(index)?.text.text;
-        if !text.is_empty() {
-            return Some((index, text.len()));
-        }
-    }
-    None
-}
-
-/// The next rendered character, crossing block boundaries.
-fn following_rendered(
-    document: &WysiwygDocument,
-    block: usize,
-    rendered: usize,
-) -> Option<(usize, usize)> {
-    let text = &document.blocks.get(block)?.text.text;
-    if rendered < text.len() {
-        let next = text[rendered..]
-            .chars()
-            .next()
-            .map_or(rendered, |character| rendered + character.len_utf8());
-        return Some((block, next));
-    }
-    for index in block + 1..document.blocks.len() {
-        let text = &document.blocks[index].text.text;
-        if !text.is_empty() {
-            return Some((index, 0));
-        }
-    }
-    None
-}
-
 impl WriterSurface {
+    /// The previous rendered character, crossing block boundaries.
+    fn previous_rendered(&self, block: usize, rendered: usize) -> Option<(usize, usize)> {
+        if rendered > 0 {
+            let text = &self.document.blocks.get(block)?.text.text;
+            let previous = text[..rendered]
+                .char_indices()
+                .next_back()
+                .map_or(0, |(index, _)| index);
+            return Some((block, previous));
+        }
+        (0..block).rev().find_map(|index| {
+            let len = self.rendered_len(index);
+            (len != 0).then_some((index, len))
+        })
+    }
+
+    /// The next rendered character, crossing block boundaries.
+    fn following_rendered(&self, block: usize, rendered: usize) -> Option<(usize, usize)> {
+        let text = &self.document.blocks.get(block)?.text.text;
+        if rendered < text.len() {
+            let next = text[rendered..]
+                .chars()
+                .next()
+                .map_or(rendered, |character| rendered + character.len_utf8());
+            return Some((block, next));
+        }
+        (block + 1..self.document.blocks.len())
+            .find(|index| self.rendered_len(*index) != 0)
+            .map(|index| (index, 0))
+    }
+
+    fn sync_image_source(&mut self, cursor: usize, focused: bool) {
+        let active = (focused && !self.images.borrow().is_empty())
+            .then(|| self.document.block_index(cursor))
+            .flatten()
+            .filter(|&index| {
+                let block = &self.document.blocks[index];
+                matches!(block.kind, BlockKind::Image { .. })
+                    && block.content.start < cursor
+                    && cursor < block.content.end
+            });
+        if self.editing_image != active {
+            self.focus_sentences = None;
+        }
+        self.editing_image = active;
+        let source = active.map(|index| {
+            (
+                index,
+                &self.parsed_text[self.document.blocks[index].content.clone()],
+            )
+        });
+        if let Some(layout) = self.layout.borrow_mut().as_mut() {
+            layout.set_image_source(source);
+        }
+    }
+
     fn focused_sentence(&mut self, hit: Hit) -> FocusSentence {
         if self
             .focus_sentences
             .as_ref()
             .is_none_or(|(block, _)| *block != hit.block)
         {
-            self.focus_sentences = Some((
-                hit.block,
-                sentences(&self.document.blocks[hit.block].text.text),
-            ));
+            let block = &self.document.blocks[hit.block];
+            let text = if self.editing_image == Some(hit.block) {
+                &self.parsed_text[block.content.clone()]
+            } else {
+                &block.text.text
+            };
+            self.focus_sentences = Some((hit.block, sentences(text)));
         }
         let (_, ranges) = self
             .focus_sentences
@@ -769,10 +1018,9 @@ impl Render for WriterSurface {
             (f32::from(window.viewport_size().width) * 0.7).max(240.)
         };
         self.sync_layout(width, cx);
+        self.sync_image_source(cursor, focused);
         let scroll = (-f32::from(self.scroll.offset().y)).max(0.);
-        let caret_hit = document
-            .caret_location(cursor)
-            .map(|(block, rendered)| Hit { block, rendered });
+        let caret_hit = self.hit_for_source(cursor);
         let selection_hits = if selection.is_empty() {
             None
         } else {
@@ -786,6 +1034,7 @@ impl Render for WriterSurface {
             let layout = slot
                 .as_mut()
                 .expect("the layout is created before it is read");
+            layout.set_image_metrics(&self.image_sizes);
             let prepared = layout.prepare(
                 window,
                 Viewport {
@@ -885,6 +1134,7 @@ impl Render for WriterSurface {
         };
         let canvas = LayoutCanvas {
             layout: self.layout.clone(),
+            images: self.images.clone(),
             geometry: self.geometry.clone(),
             scroll_y: scroll,
             selection: selection_hits,
@@ -984,6 +1234,7 @@ fn push_source_decoration(
 /// The viewport-height canvas that paints the prepared rows.
 struct LayoutCanvas {
     layout: Rc<RefCell<Option<TextLayout>>>,
+    images: Rc<RefCell<HashMap<String, Picture>>>,
     geometry: Rc<RefCell<FrameGeometry>>,
     scroll_y: f32,
     selection: Option<Selection>,
@@ -1082,7 +1333,7 @@ impl Element for LayoutCanvas {
                 self.caret,
                 &self.decorations,
                 self.focus_sentence.as_ref(),
-                None,
+                Some(&PicturePainter(&self.images.borrow())),
             )
         });
         if std::mem::replace(&mut self.painted, true) {
@@ -1392,6 +1643,75 @@ mod tests {
             assert!(writer.parse_task.is_none() && writer.pending_snapshot.is_none());
         });
         assert_eq!(*seen.borrow(), [Some(102)]);
+    }
+
+    #[gpui_kit::test]
+    fn writing_renders_empty_alt_images_and_edits_their_markdown(cx: &mut TestAppContext) {
+        let source = "![](./cover.png)\nNext paragraph.";
+        let project = tempfile::tempdir().unwrap();
+        let directory = project.path().join("src/posts");
+        std::fs::create_dir_all(&directory).unwrap();
+        image::RgbaImage::from_pixel(96, 64, image::Rgba([180, 120, 30, 255]))
+            .save(directory.join("cover.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(64, 48, image::Rgba([30, 120, 180, 255]))
+            .save(directory.join("cover2.png"))
+            .unwrap();
+        let (handle, session) = mount_writer(cx, source);
+        session.update(cx, |session, cx| {
+            session.set_writer_image_root(project.path().to_path_buf(), cx);
+        });
+        cx.run_until_parked();
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            {
+                let layout = writer.read(cx).layout.borrow();
+                let layout = layout.as_ref().unwrap();
+                assert_eq!(
+                    layout.image_bounds(0).unwrap().size,
+                    size(px(96.), px(64.)),
+                    "the local image decodes and uses its intrinsic size"
+                );
+            }
+            window.click_at("writer-wysiwyg-content", point(px(10.), px(50.)), cx);
+            assert_eq!(writer.read(cx).editing_image, Some(0));
+            window.input("封面", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let editor = session.read_with(cx, |session, _| session.editor.clone());
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.value().to_string()),
+            "![封面](./cover.png)\nNext paragraph."
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("home", cx);
+            assert_eq!(writer.read(cx).editing_image, None);
+            window.press("right", cx);
+            assert_eq!(writer.read(cx).editing_image, Some(0));
+            window.press("end", cx);
+            for _ in 0..5 {
+                window.press("left", cx);
+            }
+            window.input("2", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("end", cx);
+            let layout = writer.read(cx).layout.borrow();
+            assert_eq!(
+                layout.as_ref().unwrap().image_bounds(0).unwrap().size,
+                size(px(64.), px(48.)),
+                "leaving the Markdown displays the new destination"
+            );
+        })
+        .unwrap();
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.value().to_string()),
+            "![封面](./cover2.png)\nNext paragraph."
+        );
     }
 
     #[gpui_kit::test]
