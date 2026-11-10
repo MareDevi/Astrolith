@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "astrolith-astro"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "astrolith-core",
  "regex",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "astrolith-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "astrolith-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "astrolith-gpui",
  "astrolith-observability",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "astrolith-document"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "astrolith-core",
  "markdown",
@@ -382,14 +382,14 @@ dependencies = [
 
 [[package]]
 name = "astrolith-git"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "astrolith-gpui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "astrolith-lsp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "lsp-types",
  "serde_json",
@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "astrolith-observability"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tempfile",
  "tracing",
@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "astrolith-preview"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "astrolith-astro",
  "astrolith-core",
@@ -462,7 +462,7 @@ dependencies = [
 
 [[package]]
 name = "astrolith-terminal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "nix 0.31.3",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "astrolith-workspace"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "astrolith-astro",
  "astrolith-core",
