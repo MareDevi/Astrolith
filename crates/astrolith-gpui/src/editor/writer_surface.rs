@@ -84,7 +84,7 @@ pub(crate) struct WriterSurface {
     images: Rc<RefCell<HashMap<String, Picture>>>,
     image_sizes: ImageMetrics,
     image_location: Option<(PathBuf, PathBuf)>,
-    editing_image: Option<usize>,
+    active_source: Option<(usize, Range<usize>)>,
     wysiwyg: bool,
     parsed_wysiwyg: bool,
     /// Content width the current layout was built for.
@@ -239,7 +239,7 @@ impl WriterSurface {
             images: Rc::new(RefCell::new(HashMap::new())),
             image_sizes: ImageMetrics::new(),
             image_location: None,
-            editing_image: None,
+            active_source: None,
             wysiwyg: true,
             parsed_wysiwyg: true,
             laid_out_width: None,
@@ -417,7 +417,7 @@ impl WriterSurface {
         self.parsed_text = Arc::new(text);
         self.pending_edit = None;
         self.document = Arc::new(document);
-        self.editing_image = None;
+        self.active_source = None;
         self.sync_images(cx);
         self.focus_sentences = None;
         // Unchanged blocks keep their rows and shaped lines across the edit;
@@ -549,10 +549,8 @@ impl WriterSurface {
     fn hit_for_source(&self, source: usize) -> Option<Hit> {
         let block = self.document.block_index(source)?;
         let rich = &self.document.blocks[block];
-        let rendered = if self.editing_image == Some(block) {
-            source
-                .saturating_sub(rich.content.start)
-                .min(rich.content.len())
+        let rendered = if let Some(range) = self.active_source_range(block) {
+            source.saturating_sub(range.start).min(range.len())
         } else if matches!(rich.kind, BlockKind::Image { .. }) {
             if source >= rich.content.end {
                 self.rendered_len(block)
@@ -567,8 +565,8 @@ impl WriterSurface {
 
     fn rendered_len(&self, block: usize) -> usize {
         let rich = &self.document.blocks[block];
-        if self.editing_image == Some(block) {
-            rich.content.len()
+        if let Some(range) = self.active_source_range(block) {
+            range.len()
         } else {
             rich.text
                 .text
@@ -579,7 +577,9 @@ impl WriterSurface {
 
     fn source_for_hit(&self, block: usize, rendered: usize) -> Option<usize> {
         let rich = self.document.blocks.get(block)?;
-        if !self.parsed_wysiwyg || self.editing_image == Some(block) {
+        if let Some(range) = self.active_source_range(block) {
+            Some(range.start + rendered.min(range.len()))
+        } else if !self.parsed_wysiwyg {
             Some(rich.content.start + rendered.min(rich.content.len()))
         } else if matches!(rich.kind, BlockKind::Image { .. }) {
             Some(if rendered == 0 {
@@ -588,8 +588,17 @@ impl WriterSurface {
                 rich.content.end
             })
         } else {
-            self.document.source_at(block, rendered)
+            self.document
+                .source_at(block, rendered)
+                .or_else(|| rich.text.text.is_empty().then_some(rich.content.start))
         }
+    }
+
+    fn active_source_range(&self, block: usize) -> Option<&Range<usize>> {
+        self.active_source
+            .as_ref()
+            .filter(|(index, _)| *index == block)
+            .map(|(_, range)| range)
     }
 
     /// Source offset under a window position.
@@ -622,6 +631,9 @@ impl WriterSurface {
             return None;
         }
         let (block, rendered) = self.location_at(position)?;
+        if self.active_source_range(block).is_some() {
+            return None;
+        }
         self.document.link_at(block, rendered).map(str::to_owned)
     }
 
@@ -636,6 +648,9 @@ impl WriterSurface {
             return Some(url.clone());
         }
         let (block, rendered) = self.location_at(position)?;
+        if self.active_source_range(block).is_some() {
+            return None;
+        }
         self.document.image_at(block, rendered).map(str::to_owned)
     }
 
@@ -698,11 +713,10 @@ impl WriterSurface {
         let Some(Hit { block, rendered }) = self.hit_for_source(self.parsed_offset(focus)) else {
             return false;
         };
-        if matches!(self.document.blocks[block].kind, BlockKind::Image { .. })
-            && matches!(key, "left" | "right")
-            && (self.editing_image == Some(block)
-                || (key == "right" && rendered == 0)
-                || (key == "left" && rendered != 0))
+        if matches!(key, "left" | "right")
+            && (self.active_source_range(block).is_some()
+                || (matches!(self.document.blocks[block].kind, BlockKind::Image { .. })
+                    && ((key == "right" && rendered == 0) || (key == "left" && rendered != 0))))
         {
             // Let the editor move by source graphemes into and through the Markdown.
             return false;
@@ -961,28 +975,40 @@ impl WriterSurface {
             .map(|index| (index, 0))
     }
 
-    fn sync_image_source(&mut self, cursor: usize, focused: bool) {
-        let active = (focused && !self.images.borrow().is_empty())
+    fn sync_active_source(&mut self, cursor: usize, focused: bool) {
+        let active = (focused && self.parsed_wysiwyg)
             .then(|| self.document.block_index(cursor))
             .flatten()
-            .filter(|&index| {
+            .and_then(|index| {
                 let block = &self.document.blocks[index];
-                matches!(block.kind, BlockKind::Image { .. })
-                    && block.content.start < cursor
-                    && cursor < block.content.end
+                if matches!(block.kind, BlockKind::Image { .. }) {
+                    // Keep the picture visible at its two navigation boundaries.
+                    return (block.content.start < cursor && cursor < block.content.end)
+                        .then(|| (index, block.content.clone()));
+                }
+                let source = &self.parsed_text[block.source.clone()];
+                let source = source
+                    .strip_suffix("\r\n")
+                    .or_else(|| source.strip_suffix('\n'))
+                    .unwrap_or(source);
+                let range = block.source.start..block.source.start + source.len();
+                let literal = matches!(block.text.segments.as_slice(), [segment] if segment.linear && segment.source == range);
+                (range.start <= cursor
+                    && cursor <= range.end
+                    && !literal
+                    && source != block.text.text)
+                    .then_some((index, range))
             });
-        if self.editing_image != active {
+        if self.active_source != active {
             self.focus_sentences = None;
         }
-        self.editing_image = active;
-        let source = active.map(|index| {
-            (
-                index,
-                &self.parsed_text[self.document.blocks[index].content.clone()],
-            )
-        });
+        self.active_source = active;
+        let source = self
+            .active_source
+            .as_ref()
+            .map(|(index, range)| (*index, &self.parsed_text[range.clone()]));
         if let Some(layout) = self.layout.borrow_mut().as_mut() {
-            layout.set_image_source(source);
+            layout.set_active_source(source);
         }
     }
 
@@ -993,8 +1019,8 @@ impl WriterSurface {
             .is_none_or(|(block, _)| *block != hit.block)
         {
             let block = &self.document.blocks[hit.block];
-            let text = if self.editing_image == Some(hit.block) {
-                &self.parsed_text[block.content.clone()]
+            let text = if let Some(range) = self.active_source_range(hit.block) {
+                &self.parsed_text[range.clone()]
             } else {
                 &block.text.text
             };
@@ -1055,7 +1081,7 @@ impl Render for WriterSurface {
             (f32::from(window.viewport_size().width) * 0.7).max(240.)
         };
         self.sync_layout(width, cx);
-        self.sync_image_source(cursor, focused);
+        self.sync_active_source(cursor, focused);
         let scroll = (-f32::from(self.scroll.offset().y)).max(0.);
         let caret_hit = self.hit_for_source(cursor);
         let selection_hits = if selection.is_empty() {
@@ -1128,12 +1154,11 @@ impl Render for WriterSurface {
         if self.pending_edit.is_none() {
             let placeholder_color = cx.theme().primary.opacity(0.18);
             for (range, color) in &copyedit {
-                push_source_decoration(&mut decorations, &document, range.clone(), *color, false);
+                self.push_source_decoration(&mut decorations, range.clone(), *color, false);
             }
             for range in &placeholders {
-                push_source_decoration(
+                self.push_source_decoration(
                     &mut decorations,
-                    &document,
                     range.clone(),
                     placeholder_color,
                     true,
@@ -1230,41 +1255,46 @@ impl Render for WriterSurface {
     }
 }
 
-/// Clip a source range to every block it covers and record the rendered
-/// range as a paint decoration.
-fn push_source_decoration(
-    decorations: &mut Vec<Decoration>,
-    document: &WysiwygDocument,
-    source: Range<usize>,
-    color: Hsla,
-    anchor_empty: bool,
-) {
-    for (index, block) in document.blocks.iter().enumerate() {
-        if source.end < block.source.start || source.start > block.source.end {
-            continue;
+impl WriterSurface {
+    /// Clip a source range to every block it covers and record the rendered
+    /// range as a paint decoration.
+    fn push_source_decoration(
+        &self,
+        decorations: &mut Vec<Decoration>,
+        source: Range<usize>,
+        color: Hsla,
+        anchor_empty: bool,
+    ) {
+        for (index, block) in self.document.blocks.iter().enumerate() {
+            if source.end < block.source.start || source.start > block.source.end {
+                continue;
+            }
+            let (start, end, len) = if let Some(range) = self.active_source_range(index) {
+                (
+                    source.start.saturating_sub(range.start).min(range.len()),
+                    source.end.saturating_sub(range.start).min(range.len()),
+                    range.len(),
+                )
+            } else {
+                (
+                    block.text.nearest_rendered_offset(source.start),
+                    block.text.nearest_rendered_offset(source.end),
+                    block.text.text.len(),
+                )
+            };
+            let range = if start < end {
+                start..end
+            } else if anchor_empty && start < len {
+                start..(start + 1)
+            } else {
+                continue;
+            };
+            decorations.push(Decoration {
+                block: index,
+                range,
+                color,
+            });
         }
-        let start = if source.start <= block.content.start {
-            0
-        } else {
-            block.text.nearest_rendered_offset(source.start)
-        };
-        let end = if source.end >= block.content.end {
-            block.text.text.len()
-        } else {
-            block.text.nearest_rendered_offset(source.end)
-        };
-        let range = if start < end {
-            start..end
-        } else if anchor_empty && start < block.text.text.len() {
-            start..(start + 1)
-        } else {
-            continue;
-        };
-        decorations.push(Decoration {
-            block: index,
-            range,
-            color,
-        });
     }
 }
 
@@ -1723,6 +1753,81 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn typing_heading_marks_keeps_them_visible_until_the_caret_leaves(cx: &mut TestAppContext) {
+        let (handle, session) = mount_writer(cx, "");
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("writer-wysiwyg-content", cx);
+            window.input("#", cx);
+            window.input("#", cx);
+            window.input("#", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let writer = writer.read(cx);
+            let layout = writer.layout.borrow();
+            let layout = layout.as_ref().unwrap();
+            let start = layout.caret(writer.hit_for_source(0).unwrap()).unwrap();
+            let end = layout.caret(writer.hit_for_source(3).unwrap()).unwrap();
+            assert!(
+                end.origin.x > start.origin.x,
+                "the hashes occupy visible space"
+            );
+        })
+        .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("left", cx);
+            let editor = session.read(cx).editor.read(cx);
+            assert_eq!(editor.cursor(), 2, "the caret can move between hashes");
+            window.press("right", cx);
+            window.input(" 标题", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let writer = writer.read(cx);
+            assert_eq!(writer.hit_for_source(0), writer.hit_for_source(4));
+            assert_eq!(writer.document.blocks[0].text.text, "标题");
+            assert_eq!(
+                session.read(cx).editor.read(cx).value().as_str(),
+                "### 标题\n"
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn clicking_formatted_text_reveals_its_markdown_for_editing(cx: &mut TestAppContext) {
+        let source = "A **加粗** word.\n\n### Another block";
+        let (handle, session) = mount_writer(cx, source);
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click_at("writer-wysiwyg-content", point(px(20.), px(10.)), cx);
+            let surface = writer.read(cx);
+            let block_end = source.find('\n').unwrap();
+            assert_eq!(surface.active_source_range(0), Some(&(0..block_end)));
+            assert_eq!(surface.active_source_range(1), None);
+            let after_opening_marks = surface.hit_for_source(4).unwrap();
+            assert_eq!(after_opening_marks.rendered, 4);
+            assert_eq!(surface.source_for_hit(0, 4), Some(4));
+
+            window.press("end", cx);
+            window.press("right", cx);
+            window.press("right", cx);
+            let surface = writer.read(cx);
+            assert!(surface.active_source_range(0).is_none());
+            assert_eq!(surface.document.blocks[0].text.text, "A 加粗 word.");
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn writing_renders_empty_alt_images_and_edits_their_markdown(cx: &mut TestAppContext) {
         let source = "![](./cover.png)\nNext paragraph.";
         let project = tempfile::tempdir().unwrap();
@@ -1752,7 +1857,7 @@ mod tests {
                 );
             }
             window.click_at("writer-wysiwyg-content", point(px(10.), px(50.)), cx);
-            assert_eq!(writer.read(cx).editing_image, Some(0));
+            assert!(writer.read(cx).active_source_range(0).is_some());
             window.input("封面", cx);
         })
         .unwrap();
@@ -1764,9 +1869,9 @@ mod tests {
         );
         cx.update_window(handle.into(), |_, window, cx| {
             window.press("home", cx);
-            assert_eq!(writer.read(cx).editing_image, None);
+            assert!(writer.read(cx).active_source_range(0).is_none());
             window.press("right", cx);
-            assert_eq!(writer.read(cx).editing_image, Some(0));
+            assert!(writer.read(cx).active_source_range(0).is_some());
             window.press("end", cx);
             for _ in 0..5 {
                 window.press("left", cx);
@@ -2033,8 +2138,7 @@ mod tests {
             assert!(writer.scroll.offset().y < px(-1_000.));
             let layout = writer.layout.borrow();
             let layout = layout.as_ref().unwrap();
-            let (block, rendered) = writer.document.caret_location(end).unwrap();
-            let caret = layout.caret(Hit { block, rendered }).unwrap();
+            let caret = layout.caret(writer.hit_for_source(end).unwrap()).unwrap();
             let geometry = writer.geometry.borrow();
             assert!(layout.total_height() > px(1_000.).into());
             assert!(geometry.viewport.contains(&point(
@@ -2052,9 +2156,8 @@ mod tests {
         writer.read_with(cx, |writer, _| {
             let layout = writer.layout.borrow();
             let layout = layout.as_ref().unwrap();
-            let (block, rendered) = writer.document.caret_location(end).unwrap();
             assert!(
-                layout.caret(Hit { block, rendered }).is_some(),
+                layout.caret(writer.hit_for_source(end).unwrap()).is_some(),
                 "the end caret keeps geometry after a resize"
             );
         });
@@ -2101,7 +2204,7 @@ mod tests {
                 writer.last_focus_sentence,
                 Some(FocusSentence {
                     block: 0,
-                    range: "第一句。".len().."第一句。第二句！".len()
+                    range: "**第一句。".len()..source.find('\n').unwrap()
                 })
             );
         });

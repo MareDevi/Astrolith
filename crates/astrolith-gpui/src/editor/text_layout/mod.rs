@@ -1200,7 +1200,7 @@ pub(crate) struct TextLayout {
     heights: HeightIndex,
     stats: LayoutStats,
     images: ImageMetrics,
-    source_image: Option<usize>,
+    source_block: Option<usize>,
 }
 
 impl TextLayout {
@@ -1229,34 +1229,38 @@ impl TextLayout {
             heights,
             stats: LayoutStats::default(),
             images: images.clone(),
-            source_image: None,
+            source_block: None,
         }
     }
 
-    /// Reveal one image's Markdown without invalidating any other block's rows.
-    pub(crate) fn set_image_source(&mut self, source: Option<(usize, &str)>) {
+    /// Reveal one block's Markdown without invalidating any other block's rows.
+    pub(crate) fn set_active_source(&mut self, source: Option<(usize, &str)>) {
         let next = source.map(|(index, _)| index);
-        if self.source_image == next {
+        if self.source_block == next {
             return;
         }
-        if let Some(index) = self.source_image {
+        if let Some(index) = self.source_block {
             let block = &self.document.blocks[index];
             self.blocks[index] = BlockLayout::new(block, &self.style, self.width, &self.images);
             self.heights
                 .set(index, f64::from(self.blocks[index].height()));
         }
         if let Some((index, text)) = source {
-            let depth = self.document.blocks[index].depth;
+            let block = &self.document.blocks[index];
+            let kind = match &block.kind {
+                kind @ BlockKind::Heading(_) if !block.content.is_empty() => kind.clone(),
+                kind @ BlockKind::Code { .. } => kind.clone(),
+                _ => BlockKind::Paragraph,
+            };
             let text = RichText {
                 text: text.to_owned(),
                 ..RichText::default()
             };
-            self.blocks[index] =
-                BlockLayout::build(BlockKind::Paragraph, depth, &text, &self.style, self.width);
+            self.blocks[index] = BlockLayout::build(kind, 0, &text, &self.style, self.width);
             self.heights
                 .set(index, f64::from(self.blocks[index].height()));
         }
-        self.source_image = next;
+        self.source_block = next;
     }
 
     /// The painted picture rectangle, in content coordinates.
@@ -1442,7 +1446,7 @@ impl TextLayout {
     /// before a safe edit prefix, so a local edit does not re-wrap the whole
     /// document.
     pub(crate) fn update(&mut self, document: Arc<WysiwygDocument>) -> UpdateOutcome {
-        self.set_image_source(None);
+        self.set_active_source(None);
         let width = self.width;
         let style = &self.style;
         let mut old: Vec<Option<BlockLayout>> = std::mem::take(&mut self.blocks)

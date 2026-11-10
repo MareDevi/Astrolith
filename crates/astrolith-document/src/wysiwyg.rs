@@ -480,7 +480,7 @@ impl WysiwygDocument {
             }
         }
         for (index, block) in self.blocks.iter().enumerate() {
-            if block.source.start <= source && source <= block.source.end {
+            if block.source.contains(&source) {
                 return Some(index);
             }
         }
