@@ -307,10 +307,10 @@ links for the files it imported.
 
 In **Preferences → Workspace → Clipboard image hosting**, enable **Upload
 pasted images** and enter the S3 API endpoint, bucket, region and public bucket
-URL. Set `ASTROLITH_S3_ACCESS_KEY_ID` and `ASTROLITH_S3_SECRET_ACCESS_KEY` in
-Astrolith's launch environment using credentials with permission to write objects
-to the chosen bucket. Astrolith stores the destination in preferences and reads
-the credentials from the process environment when it uploads.
+URL. Enter the **Access Key ID** and **Secret Access Key** for that bucket and
+click **Apply**. Astrolith stores the credentials in your system keychain.
+When you reopen Preferences, leave both credential fields blank to keep the
+saved values. To replace credentials, enter both new values and apply.
 
 - **Amazon S3** uses its regional API origin, for example
   `https://s3.us-east-1.amazonaws.com`, and the bucket's region. Use a public

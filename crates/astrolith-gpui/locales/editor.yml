@@ -17,6 +17,14 @@ editor:
       en: "Some images could not be uploaded. Their local links are intact. Check the image hosting settings and credentials."
       zh-CN: "部分图片上传失败，本地链接已保留。请检查图床设置和凭据。"
       ja: "一部の画像をアップロードできませんでした。ローカルリンクは保持されています。ホスティングの設定と認証情報を確認してください。"
+    upload_credentials_missing:
+      en: "Add image hosting credentials in Preferences. The local image link is intact."
+      zh-CN: "请在偏好设置中填写图床凭据。本地图片链接已保留。"
+      ja: "環境設定で画像ホスティングの認証情報を入力してください。ローカル画像リンクは保持されています。"
+    upload_keychain_unavailable:
+      en: "Could not read image hosting credentials from the system keychain. The local image link is intact."
+      zh-CN: "无法从系统凭据库读取图床凭据。本地图片链接已保留。"
+      ja: "システムのキーチェーンから画像ホスティングの認証情報を読み込めませんでした。ローカル画像リンクは保持されています。"
     upload_link_changed:
       en: "Some uploaded images were not relinked because the document or its links changed."
       zh-CN: "部分图片已上传，但文档或链接发生变化，未替换对应链接。"

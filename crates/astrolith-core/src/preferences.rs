@@ -645,7 +645,7 @@ impl Default for WindowGeometry {
     }
 }
 
-/// Destination for clipboard image uploads. Credentials come from the process environment.
+/// Destination for clipboard image uploads. Credentials live in the platform keychain.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ImageUploadPreferences {

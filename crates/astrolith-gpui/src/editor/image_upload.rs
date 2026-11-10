@@ -1,13 +1,23 @@
 //! S3-compatible image uploads on the blocking service lane.
 
-use std::{fs::File, io::Read, path::Path, time::Duration};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use astrolith_core::preferences::ImageUploadPreferences;
 use astrolith_workspace::assets::CopiedAsset;
+use gpui_kit::{App, AppContext, Task};
 use ring::{digest, hmac};
+use serde::{Deserialize, Serialize};
 use url::{Host, Position, Url};
 
 const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+type UploadOutcome = (Vec<(String, String)>, usize);
+
+const KEYCHAIN_ACCOUNT: &str = "astrolith-s3";
 const SIGNED_HEADERS: &str = "host;x-amz-content-sha256;x-amz-date";
 
 pub(crate) fn endpoint_url(value: &str) -> Option<Url> {
@@ -49,14 +59,92 @@ pub(crate) fn valid_region(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-/// Successful uploads retain their original Markdown for the guarded editor patch.
-pub(crate) fn upload_images(
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Credentials {
+    access_key: String,
+    secret_key: String,
+}
+
+impl Credentials {
+    pub(crate) fn new(access_key: String, secret_key: String) -> Self {
+        Self {
+            access_key,
+            secret_key,
+        }
+    }
+}
+
+// The endpoint and bucket scope prevent an edit to the destination from
+// forwarding saved credentials to another server or bucket.
+fn credential_key(settings: &ImageUploadPreferences) -> Option<String> {
+    let endpoint = endpoint_url(&settings.endpoint)?;
+    valid_bucket(&settings.bucket)
+        .then(|| format!("astrolith-image-upload:{endpoint}{}", settings.bucket))
+}
+
+pub(crate) fn save_credentials(
     settings: &ImageUploadPreferences,
+    credentials: Credentials,
+    cx: &App,
+) -> Task<anyhow::Result<()>> {
+    let Some(key) = credential_key(settings) else {
+        return Task::ready(Err(anyhow::anyhow!("invalid image upload destination")));
+    };
+    match serde_json::to_vec(&credentials) {
+        Ok(bytes) => cx.write_credentials(&key, KEYCHAIN_ACCOUNT, &bytes),
+        Err(error) => Task::ready(Err(error.into())),
+    }
+}
+
+pub(crate) fn load_credentials(
+    settings: &ImageUploadPreferences,
+    cx: &App,
+) -> Task<anyhow::Result<Option<Credentials>>> {
+    let Some(key) = credential_key(settings) else {
+        return Task::ready(Ok(None));
+    };
+    let read = cx.read_credentials(&key);
+    cx.background_spawn(async move {
+        let Some((_, bytes)) = read.await? else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::from_slice(&bytes)?))
+    })
+}
+
+pub(crate) fn start_upload(
+    settings: ImageUploadPreferences,
+    root: PathBuf,
+    assets: Vec<CopiedAsset>,
+    cx: &App,
+) -> Task<Result<UploadOutcome, String>> {
+    let read = load_credentials(&settings, cx);
+    cx.spawn(async move |cx| {
+        let credentials = match read.await {
+            Ok(Some(credentials)) => credentials,
+            Ok(None) => return Err(tr!("editor.clipboard.upload_credentials_missing")),
+            Err(_) => return Err(tr!("editor.clipboard.upload_keychain_unavailable")),
+        };
+        let upload = cx.update(|cx| {
+            crate::runtime::blocking(cx, move || {
+                upload_images(&settings, credentials, &root, &assets)
+            })
+        });
+        upload
+            .await
+            .map_err(|_| tr!("editor.clipboard.upload_failed"))
+    })
+}
+
+/// Successful uploads retain their original Markdown for the guarded editor patch.
+fn upload_images(
+    settings: &ImageUploadPreferences,
+    credentials: Credentials,
     root: &Path,
     assets: &[CopiedAsset],
-) -> (Vec<(String, String)>, usize) {
+) -> UploadOutcome {
     let images = assets.iter().filter(|asset| asset.is_image());
-    let Some(target) = Target::from_preferences(settings) else {
+    let Some(target) = Target::from_preferences(settings, credentials) else {
         return (Vec::new(), images.count());
     };
     let mut replacements = Vec::new();
@@ -82,15 +170,13 @@ struct Target {
 }
 
 impl Target {
-    fn from_preferences(settings: &ImageUploadPreferences) -> Option<Self> {
+    fn from_preferences(
+        settings: &ImageUploadPreferences,
+        credentials: Credentials,
+    ) -> Option<Self> {
         let endpoint = endpoint_url(&settings.endpoint)?;
         let public = web_url(&settings.public_url)?;
         if !valid_bucket(&settings.bucket) || !valid_region(&settings.region) {
-            return None;
-        }
-        let access_key = std::env::var("ASTROLITH_S3_ACCESS_KEY_ID").ok()?;
-        let secret_key = std::env::var("ASTROLITH_S3_SECRET_ACCESS_KEY").ok()?;
-        if access_key.is_empty() || secret_key.is_empty() {
             return None;
         }
         Some(Self {
@@ -98,8 +184,8 @@ impl Target {
             public,
             bucket: settings.bucket.clone(),
             region: settings.region.clone(),
-            access_key,
-            secret_key,
+            access_key: credentials.access_key,
+            secret_key: credentials.secret_key,
             agent: ureq::Agent::config_builder()
                 .timeout_global(Some(Duration::from_secs(30)))
                 .max_redirects(0)
@@ -219,6 +305,23 @@ fn sign(secret: &str, region: &str, timestamp: &str, scope: &str, canonical: &st
 mod tests {
     use super::*;
     use std::{io::Write, net::TcpListener};
+
+    #[test]
+    fn credentials_are_scoped_to_the_canonical_endpoint_and_bucket() {
+        let mut settings = ImageUploadPreferences {
+            endpoint: "https://s3.example.test:443/".into(),
+            bucket: "images".into(),
+            ..Default::default()
+        };
+        let key = credential_key(&settings).unwrap();
+        settings.endpoint = "https://s3.example.test".into();
+        assert_eq!(credential_key(&settings).as_deref(), Some(key.as_str()));
+        settings.bucket = "another-bucket".into();
+        assert_ne!(credential_key(&settings).as_deref(), Some(key.as_str()));
+        settings.bucket = "images".into();
+        settings.endpoint = "https://other.example.test".into();
+        assert_ne!(credential_key(&settings).as_deref(), Some(key.as_str()));
+    }
 
     #[test]
     fn signature_matches_aws_put_object_example() {

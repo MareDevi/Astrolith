@@ -77,11 +77,7 @@ impl ProjectWorkspace {
                 let settings = this.global_preferences.image_upload.clone();
                 let work =
                     (inserted && settings.enabled && assets.iter().any(|asset| asset.is_image()))
-                        .then(|| {
-                            runtime::blocking(cx, move || {
-                                image_upload::upload_images(&settings, &root, &assets)
-                            })
-                        });
+                        .then(|| image_upload::start_upload(settings, root, assets, cx));
                 if work.is_some() {
                     this.status = format!("{} {}", this.status, tr!("editor.clipboard.uploading"));
                 }
@@ -93,10 +89,13 @@ impl ProjectWorkspace {
             };
             let result = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                let Ok((replacements, failed)) = result else {
-                    this.status = tr!("editor.clipboard.upload_failed");
-                    cx.notify();
-                    return;
+                let (replacements, failed) = match result {
+                    Ok(outcome) => outcome,
+                    Err(message) => {
+                        this.status = message;
+                        cx.notify();
+                        return;
+                    }
                 };
                 let updated = session
                     .upgrade()

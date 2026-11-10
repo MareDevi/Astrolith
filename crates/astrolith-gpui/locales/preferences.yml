@@ -6,9 +6,41 @@ preferences:
       zh-CN: "剪贴板图片图床"
       ja: "クリップボード画像のホスティング"
     description:
-      en: "Upload pasted images to S3-compatible storage and replace their local links. Credentials come from ASTROLITH_S3_ACCESS_KEY_ID and ASTROLITH_S3_SECRET_ACCESS_KEY."
-      zh-CN: "将粘贴的图片上传到 S3 兼容存储，并替换本地链接。凭据从 ASTROLITH_S3_ACCESS_KEY_ID 和 ASTROLITH_S3_SECRET_ACCESS_KEY 读取。"
-      ja: "貼り付けた画像を S3 互換ストレージにアップロードし、ローカルリンクを置き換えます。認証情報は ASTROLITH_S3_ACCESS_KEY_ID と ASTROLITH_S3_SECRET_ACCESS_KEY から読み取ります。"
+      en: "Upload pasted images to S3-compatible storage and replace their local links."
+      zh-CN: "将粘贴的图片上传到 S3 兼容存储，并替换本地链接。"
+      ja: "貼り付けた画像を S3 互換ストレージにアップロードし、ローカルリンクを置き換えます。"
+    access_key:
+      en: "Access Key ID"
+      zh-CN: "Access Key ID"
+      ja: "Access Key ID"
+    secret_key:
+      en: "Secret Access Key"
+      zh-CN: "Secret Access Key"
+      ja: "Secret Access Key"
+    credentials_hint:
+      en: "Credentials are saved in the system keychain. Leave both fields blank to keep the saved credentials for this bucket."
+      zh-CN: "凭据保存在系统凭据库中。两项都留空时，继续使用此存储桶已保存的凭据。"
+      ja: "認証情報はシステムのキーチェーンに保存されます。このバケットの保存済み認証情報を使う場合は、両方の欄を空欄にしてください。"
+    credential_pair_required:
+      en: "Enter both parts of the S3 credentials."
+      zh-CN: "请完整填写 Access Key ID 和 Secret Access Key。"
+      ja: "Access Key ID と Secret Access Key の両方を入力してください。"
+    credentials_required:
+      en: "Enter an Access Key ID and Secret Access Key for this bucket."
+      zh-CN: "请填写此存储桶的 Access Key ID 和 Secret Access Key。"
+      ja: "このバケットの Access Key ID と Secret Access Key を入力してください。"
+    saving_credentials:
+      en: "Applying image hosting settings…"
+      zh-CN: "正在应用图床设置…"
+      ja: "画像ホスティングの設定を適用中…"
+    keychain_save_failed:
+      en: "Could not save image hosting credentials. Unlock the system keychain and try again."
+      zh-CN: "无法保存图床凭据。请解锁系统凭据库后重试。"
+      ja: "画像ホスティングの認証情報を保存できませんでした。システムのキーチェーンをロック解除して再試行してください。"
+    keychain_read_failed:
+      en: "Could not read image hosting credentials. Unlock the system keychain and try again."
+      zh-CN: "无法读取图床凭据。请解锁系统凭据库后重试。"
+      ja: "画像ホスティングの認証情報を読み込めませんでした。システムのキーチェーンをロック解除して再試行してください。"
     enable:
       en: "Upload pasted images"
       zh-CN: "自动上传粘贴的图片"

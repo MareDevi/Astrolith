@@ -3605,14 +3605,18 @@ impl Shell {
             if initial_focus.replace(false) {
                 view.read(cx).focus_handle(cx).focus(window, cx);
             }
+            let applying = view.read(cx).is_applying_credentials();
             dialog
                 .title(tr!("shell.preferences.title"))
+                .keyboard(!applying)
+                .overlay_closable(!applying)
+                .close_button(!applying)
                 .centered()
                 .w(dialog_width)
                 .h(dialog_height)
                 .max_h(dialog_height)
-                .on_close(move |_, _, cx| {
-                    let _ = close.update(cx, |sheet, cx| sheet.cancel(cx));
+                .on_close(move |_, window, cx| {
+                    let _ = close.update(cx, |sheet, cx| sheet.cancel(window, cx));
                 })
                 .child(view.clone())
         });

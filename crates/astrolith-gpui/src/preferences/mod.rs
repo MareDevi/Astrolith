@@ -36,8 +36,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, App, AppContext, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, IntoElement, SharedString, Subscription, TestSupportExt, Window, div,
-    prelude::*, px,
+    FocusHandle, Focusable, IntoElement, SharedString, Subscription, Task, TestSupportExt, Window,
+    div, prelude::*, px,
 };
 
 use crate::theme;
@@ -200,6 +200,8 @@ pub(crate) enum FieldId {
     ImageUploadBucket,
     ImageUploadRegion,
     ImageUploadPublicUrl,
+    ImageUploadAccessKey,
+    ImageUploadSecretKey,
     IdeExecutable,
     IdeArguments,
     PreviewBrowserExecutable,
@@ -246,6 +248,8 @@ struct Inputs {
     image_upload_bucket: Entity<InputState>,
     image_upload_region: Entity<InputState>,
     image_upload_public_url: Entity<InputState>,
+    image_upload_access_key: Entity<InputState>,
+    image_upload_secret_key: Entity<InputState>,
     ide_executable: Entity<InputState>,
     ide_arguments: Entity<TextareaState>,
     preview_browser_executable: Entity<InputState>,
@@ -293,6 +297,7 @@ pub(crate) struct PreferencesSheet {
     autosave: AutosaveDelay,
     writing_wysiwyg: bool,
     image_upload_enabled: bool,
+    credential_apply: Option<Task<()>>,
     focus_mode: bool,
     typewriter_mode: bool,
     preview_presentation: PreviewPresentation,
@@ -315,8 +320,15 @@ impl PreferencesSheet {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut subscriptions = Vec::new();
         macro_rules! input {
-            ($placeholder:expr) => {{
-                let input = cx.new(|cx| InputState::new(window, cx).placeholder($placeholder));
+            ($placeholder:expr) => {
+                input!($placeholder, false)
+            };
+            ($placeholder:expr, $masked:expr) => {{
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder($placeholder)
+                        .masked($masked)
+                });
                 subscriptions.push(cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.refresh_errors(cx);
@@ -346,6 +358,7 @@ impl PreferencesSheet {
             autosave: AutosaveDelay::default(),
             writing_wysiwyg: true,
             image_upload_enabled: false,
+            credential_apply: None,
             focus_mode: false,
             typewriter_mode: false,
             preview_presentation: PreviewPresentation::default(),
@@ -361,6 +374,8 @@ impl PreferencesSheet {
                 image_upload_bucket: input!("my-images"),
                 image_upload_region: input!("auto / us-east-1"),
                 image_upload_public_url: input!("https://"),
+                image_upload_access_key: input!(""),
+                image_upload_secret_key: input!("", true),
                 ide_executable: input!("hx or code"),
                 ide_arguments,
                 preview_browser_executable: input!(tr!(
@@ -437,6 +452,8 @@ impl PreferencesSheet {
         self.autosave = global.autosave_delay;
         self.writing_wysiwyg = global.writing_wysiwyg;
         self.image_upload_enabled = global.image_upload.enabled;
+        self.set_text(FieldId::ImageUploadAccessKey, "", window, cx);
+        self.set_text(FieldId::ImageUploadSecretKey, "", window, cx);
         self.set_text(
             FieldId::ImageUploadEndpoint,
             &global.image_upload.endpoint,
@@ -623,10 +640,93 @@ impl PreferencesSheet {
     }
 
     /// Drop the draft; the shell closes the sheet.
-    pub(crate) fn cancel(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.credential_apply = None;
+        self.set_text(FieldId::ImageUploadAccessKey, "", window, cx);
+        self.set_text(FieldId::ImageUploadSecretKey, "", window, cx);
         self.context = None;
         self.errors.clear();
         cx.notify();
+    }
+
+    pub(crate) fn is_applying_credentials(&self) -> bool {
+        self.credential_apply.is_some()
+    }
+
+    fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::editor::image_upload::{self, Credentials};
+
+        if self.is_applying_credentials() {
+            return;
+        }
+        let Some(edits) = self.edits(cx) else {
+            self.refresh_errors(cx);
+            return;
+        };
+        let upload = &edits.global.image_upload;
+        if !upload.enabled {
+            self.commit_edits(edits, window, cx);
+            return;
+        }
+        let access = self
+            .text(FieldId::ImageUploadAccessKey, cx)
+            .trim()
+            .to_owned();
+        let secret = self
+            .text(FieldId::ImageUploadSecretKey, cx)
+            .trim()
+            .to_owned();
+        let upload_changed = self
+            .context
+            .as_ref()
+            .is_some_and(|context| &context.global.image_upload != upload);
+        let keychain = if !access.is_empty() && !secret.is_empty() {
+            let write =
+                image_upload::save_credentials(upload, Credentials::new(access, secret), cx);
+            cx.background_spawn(async move {
+                write
+                    .await
+                    .map_err(|_| tr!("preferences.upload.keychain_save_failed"))
+            })
+        } else if upload_changed {
+            let read = image_upload::load_credentials(upload, cx);
+            cx.background_spawn(async move {
+                match read.await {
+                    Ok(Some(_)) => Ok(()),
+                    Ok(None) => Err(tr!("preferences.upload.credentials_required")),
+                    Err(_) => Err(tr!("preferences.upload.keychain_read_failed")),
+                }
+            })
+        } else {
+            self.commit_edits(edits, window, cx);
+            return;
+        };
+        self.credential_apply = Some(cx.spawn_in(window, async move |sheet, cx| {
+            let result = keychain.await;
+            let _ = sheet.update_in(cx, |sheet, window, cx| {
+                sheet.credential_apply = None;
+                match result {
+                    Ok(()) => sheet.commit_edits(edits, window, cx),
+                    Err(message) => {
+                        sheet.pane = Pane::Workspace;
+                        sheet.notice = Some(message.into());
+                        cx.notify();
+                    }
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    fn commit_edits(
+        &mut self,
+        edits: PreferenceEdits,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel(window, cx);
+        cx.emit(PreferencesEvent::Apply(Box::new(edits)));
+        window.close_dialog(cx);
     }
 
     /// Whether the Apply button is blocked by an inline validation error.
@@ -803,6 +903,8 @@ impl PreferencesSheet {
             FieldId::ImageUploadEndpoint
             | FieldId::ImageUploadBucket
             | FieldId::ImageUploadPublicUrl
+            | FieldId::ImageUploadAccessKey
+            | FieldId::ImageUploadSecretKey
             | FieldId::CollectionUrlPattern
             | FieldId::HeadingLight
             | FieldId::HeadingDark
@@ -1048,6 +1150,8 @@ impl PreferencesSheet {
 
     fn text(&self, field: FieldId, cx: &App) -> String {
         let value = match field {
+            FieldId::ImageUploadAccessKey => self.inputs.image_upload_access_key.read(cx).value(),
+            FieldId::ImageUploadSecretKey => self.inputs.image_upload_secret_key.read(cx).value(),
             FieldId::ImageUploadEndpoint => self.inputs.image_upload_endpoint.read(cx).value(),
             FieldId::ImageUploadBucket => self.inputs.image_upload_bucket.read(cx).value(),
             FieldId::ImageUploadRegion => self.inputs.image_upload_region.read(cx).value(),
@@ -1093,6 +1197,14 @@ impl PreferencesSheet {
 
     fn set_text(&self, field: FieldId, value: &str, window: &mut Window, cx: &mut Context<Self>) {
         match field {
+            FieldId::ImageUploadAccessKey => self
+                .inputs
+                .image_upload_access_key
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
+            FieldId::ImageUploadSecretKey => self
+                .inputs
+                .image_upload_secret_key
+                .update(cx, |input, cx| input.set_value(value, window, cx)),
             FieldId::ImageUploadEndpoint => self
                 .inputs
                 .image_upload_endpoint
@@ -1289,6 +1401,22 @@ impl PreferencesSheet {
             errors.insert(field, SharedString::from(message));
         };
         if self.image_upload_enabled {
+            let has_access = !self
+                .text(FieldId::ImageUploadAccessKey, cx)
+                .trim()
+                .is_empty();
+            let has_secret = !self
+                .text(FieldId::ImageUploadSecretKey, cx)
+                .trim()
+                .is_empty();
+            if has_access != has_secret {
+                let missing = if has_access {
+                    FieldId::ImageUploadSecretKey
+                } else {
+                    FieldId::ImageUploadAccessKey
+                };
+                insert(missing, tr!("preferences.upload.credential_pair_required"));
+            }
             use crate::editor::image_upload;
             for (field, valid, error) in [
                 (
@@ -1465,6 +1593,16 @@ impl PreferencesSheet {
     /// The text control for one field, ready to render.
     pub(super) fn control(&self, field: FieldId) -> AnyElement {
         match field {
+            FieldId::ImageUploadAccessKey => {
+                gpui_kit::component::input::Input::new(&self.inputs.image_upload_access_key)
+                    .aria_label(tr!("preferences.upload.access_key"))
+                    .into_any_element()
+            }
+            FieldId::ImageUploadSecretKey => {
+                gpui_kit::component::input::Input::new(&self.inputs.image_upload_secret_key)
+                    .aria_label(tr!("preferences.upload.secret_key"))
+                    .into_any_element()
+            }
             FieldId::ImageUploadEndpoint => {
                 gpui_kit::component::input::Input::new(&self.inputs.image_upload_endpoint)
                     .aria_label(tr!("preferences.upload.endpoint"))
@@ -1731,6 +1869,15 @@ impl Render for PreferencesSheet {
             .size_full()
             .min_h_0()
             .track_focus(&self.focus);
+        if self.is_applying_credentials() {
+            return root
+                .justify_center()
+                .items_center()
+                .gap_3()
+                .child(gpui_kit::component::spinner::Spinner::new())
+                .child(tr!("preferences.upload.saving_credentials"))
+                .into_any_element();
+        }
         if let Some(notice) = self.notice.clone() {
             root = root.child(
                 div()
@@ -1892,7 +2039,7 @@ impl Render for PreferencesSheet {
                             .tab_index(1)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.emit(PreferencesEvent::Cancel);
-                                this.cancel(cx);
+                                this.cancel(window, cx);
                                 window.close_dialog(cx);
                             })),
                     )
@@ -1903,12 +2050,7 @@ impl Render for PreferencesSheet {
                             .tab_index(1)
                             .disabled(apply_disabled)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                let Some(edits) = this.edits(cx) else {
-                                    this.refresh_errors(cx);
-                                    return;
-                                };
-                                cx.emit(PreferencesEvent::Apply(Box::new(edits)));
-                                window.close_dialog(cx);
+                                this.apply(window, cx);
                             })),
                     ),
             );
@@ -1948,6 +2090,7 @@ impl Render for PreferencesSheet {
                         ),
                 ),
         )
+        .into_any_element()
     }
 }
 

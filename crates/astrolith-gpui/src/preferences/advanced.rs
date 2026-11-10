@@ -227,7 +227,7 @@ impl PreferencesSheet {
                 .on_ok(move |_, window, cx| {
                     let _ = weak.update(cx, |sheet, cx| {
                         cx.emit(PreferencesEvent::ResetAll);
-                        sheet.cancel(cx);
+                        sheet.cancel(window, cx);
                     });
                     window.close_all_dialogs(cx);
                     true

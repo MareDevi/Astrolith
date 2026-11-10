@@ -326,6 +326,16 @@ impl PreferencesSheet {
                         FieldId::ImageUploadPublicUrl,
                         "preferences.upload.public_url",
                     ),
+                    (
+                        "preferences-field-image-upload-access-key",
+                        FieldId::ImageUploadAccessKey,
+                        "preferences.upload.access_key",
+                    ),
+                    (
+                        "preferences-field-image-upload-secret-key",
+                        FieldId::ImageUploadSecretKey,
+                        "preferences.upload.secret_key",
+                    ),
                 ]
                 .map(|(id, field, label)| {
                     self.field(
@@ -334,7 +344,8 @@ impl PreferencesSheet {
                         self.control(field),
                         FieldExtras {
                             field: Some(field),
-                            hint: None,
+                            hint: (field == FieldId::ImageUploadSecretKey)
+                                .then(|| tr!("preferences.upload.credentials_hint").into()),
                             trailing: None,
                         },
                         cx,
