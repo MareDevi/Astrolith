@@ -389,14 +389,10 @@ preferences:
       en: "Preview"
       zh-CN: "预览"
       ja: "プレビュー"
-    startup:
-      en: "Startup"
-      zh-CN: "启动"
-      ja: "起動"
-    startup_hint:
-      en: "Which workspace mode opens when there is no recorded project mode."
-      zh-CN: "没有记录项目模式时打开的工作区模式。"
-      ja: "プロジェクトのモードが記録されていない場合に開くワークスペースモード。"
+    modes:
+      en: "Modes"
+      zh-CN: "模式"
+      ja: "モード"
     default_mode:
       en: "Default mode"
       zh-CN: "默认模式"
@@ -405,6 +401,14 @@ preferences:
       en: "Used at launch when the open project has not recorded its own last mode."
       zh-CN: "打开的项目尚未记录上次模式时，在启动时使用。"
       ja: "開いているプロジェクトが最後のモードを記録していない場合、起動時に使用します。"
+    writing_wysiwyg:
+      en: "WYSIWYG in Writing mode"
+      zh-CN: "写作模式所见即所得"
+      ja: "執筆モードの WYSIWYG"
+    writing_wysiwyg_hint:
+      en: "Turn off to edit Markdown source in Writing mode."
+      zh-CN: "关闭后，在写作模式中直接编辑 Markdown 源文。"
+      ja: "オフにすると、執筆モードで Markdown のソースを直接編集できます。"
     layouts:
       en: "Layouts"
       zh-CN: "布局"

@@ -205,6 +205,7 @@ impl RenderedDocument {
             return;
         }
         let source = self.text.clone();
+        let writer = writer.filter(|writer| writer.read(cx).wysiwyg());
         self.parse_task = Some(cx.spawn(async move |this, cx| {
             // The writer parses every accepted revision. Wait for that parse
             // instead of doing the same work twice; only a writer that never

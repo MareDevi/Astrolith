@@ -94,6 +94,7 @@ pub(crate) struct LayoutStyle {
     /// Paint standalone images instead of their alt text.
     pub(crate) render_images: bool,
     pub(crate) edit_images: bool,
+    pub(crate) literal_lines: bool,
 }
 
 impl LayoutStyle {
@@ -116,6 +117,7 @@ impl LayoutStyle {
             heading: crate::theme::prose_heading_color(cx),
             render_images: false,
             edit_images: false,
+            literal_lines: false,
         }
     }
 
@@ -139,6 +141,7 @@ impl LayoutStyle {
             && self.line_height == other.line_height
             && self.render_images == other.render_images
             && self.edit_images == other.edit_images
+            && self.literal_lines == other.literal_lines
     }
 
     /// Font size used by a heading level, matching the current block chrome.
@@ -454,7 +457,11 @@ impl BlockLayout {
         let mono_all = matches!(kind, BlockKind::Code { .. });
         let base = base_run(&kind, style);
         let runs = resolve_runs(&text.text, &text.marks, style, mono_all, &base);
-        let gap = f32::from(style.font_size) * 0.75;
+        let gap = if style.literal_lines {
+            0.
+        } else {
+            f32::from(style.font_size) * 0.75
+        };
         let (x_offset, chrome_top, chrome_bottom, marker_offset, marker) = match &kind {
             BlockKind::ListItem { ordered, number } => {
                 let marker = if *ordered {

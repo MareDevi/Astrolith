@@ -283,6 +283,7 @@ pub(crate) struct PreferencesSheet {
     layout_resets: LayoutResets,
     global_extension: FileExtension,
     autosave: AutosaveDelay,
+    writing_wysiwyg: bool,
     focus_mode: bool,
     typewriter_mode: bool,
     preview_presentation: PreviewPresentation,
@@ -334,6 +335,7 @@ impl PreferencesSheet {
             layout_resets: LayoutResets::default(),
             global_extension: FileExtension::default(),
             autosave: AutosaveDelay::default(),
+            writing_wysiwyg: true,
             focus_mode: false,
             typewriter_mode: false,
             preview_presentation: PreviewPresentation::default(),
@@ -419,6 +421,7 @@ impl PreferencesSheet {
         self.layout_resets = LayoutResets::default();
         self.global_extension = global.default_extension;
         self.autosave = global.autosave_delay;
+        self.writing_wysiwyg = global.writing_wysiwyg;
         self.focus_mode = global.focus_mode;
         self.typewriter_mode = global.typewriter_mode;
         self.preview_presentation = global.preview.presentation;
@@ -641,6 +644,7 @@ impl PreferencesSheet {
             .ok()
             .filter(|height| height.is_finite() && (1.2..=3.0).contains(height))
             .unwrap_or(global.editor_line_height);
+        global.writing_wysiwyg = self.writing_wysiwyg;
         global.focus_mode = self.focus_mode;
         global.typewriter_mode = self.typewriter_mode;
         global.preview = PreviewPreferences {

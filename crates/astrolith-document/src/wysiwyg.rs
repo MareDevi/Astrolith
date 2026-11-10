@@ -315,6 +315,27 @@ impl WysiwygDocument {
         Self::parse_cancellable(source, || false).unwrap_or_default()
     }
 
+    /// Map each source line directly to an editable block with its Markdown visible.
+    pub fn literal_cancellable(source: &str, mut cancelled: impl FnMut() -> bool) -> Option<Self> {
+        let mut blocks = Vec::new();
+        for line in lines(source) {
+            if cancelled() {
+                return None;
+            }
+            let content = line.start..line.content_end;
+            blocks.push(RichBlock {
+                kind: BlockKind::Paragraph,
+                source: line.start..line.end,
+                text: RichText::linear(source, content.clone()),
+                content,
+                cells: Vec::new(),
+                depth: 0,
+            });
+        }
+        append_trailing_paragraph(source, &mut blocks);
+        Some(Self { blocks })
+    }
+
     /// Parse a background snapshot, stopping between blocks when obsolete.
     /// Returns `None` rather than exposing a partially mapped document.
     /// A single block's parsing is not interrupted midway.

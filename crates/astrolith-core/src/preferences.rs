@@ -689,6 +689,8 @@ pub struct GlobalPreferences {
     pub editor_line_height: f32,
     /// Page width as a percentage of the editor pane.
     pub page_width_percent: f32,
+    /// Render Markdown in Writing mode while editing.
+    pub writing_wysiwyg: bool,
     /// Dim every sentence except the cursor sentence.
     pub focus_mode: bool,
     /// Keep the cursor line vertically centred.
@@ -730,6 +732,7 @@ impl Default for GlobalPreferences {
             preview_font_size: 16.,
             editor_line_height: 2.,
             page_width_percent: 64.,
+            writing_wysiwyg: true,
             focus_mode: false,
             typewriter_mode: false,
             autosave_delay: AutosaveDelay::default(),
@@ -1489,6 +1492,7 @@ mod tests {
         assert_eq!(retired.page_width_percent, 64.);
         assert!(!retired.focus_mode);
         assert!(!retired.typewriter_mode);
+        assert!(retired.writing_wysiwyg);
     }
 
     #[test]

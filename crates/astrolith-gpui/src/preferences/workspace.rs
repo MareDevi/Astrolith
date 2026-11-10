@@ -1,6 +1,7 @@
 //! Workspace pane: startup mode, per-mode layouts and workspace behaviour.
 
 use super::*;
+use gpui_kit::component::switch::Switch;
 
 /// Localized label for a workspace mode; the core label stays English.
 fn mode_label(mode: WorkspaceMode) -> String {
@@ -94,17 +95,39 @@ impl PreferencesSheet {
             })
             .into_any_element();
 
-        let startup = vec![self.field(
-            "preferences-field-default-mode",
-            tr!("preferences.workspace.default_mode"),
-            default_mode,
-            FieldExtras {
-                field: None,
-                hint: Some(tr!("preferences.workspace.default_mode_hint").into()),
-                trailing: None,
-            },
-            cx,
-        )];
+        let modes = vec![
+            self.field(
+                "preferences-field-default-mode",
+                tr!("preferences.workspace.default_mode"),
+                default_mode,
+                FieldExtras {
+                    field: None,
+                    hint: Some(tr!("preferences.workspace.default_mode_hint").into()),
+                    trailing: None,
+                },
+                cx,
+            ),
+            self.field(
+                "preferences-field-writing-wysiwyg",
+                tr!("preferences.workspace.writing_wysiwyg"),
+                div().into_any_element(),
+                FieldExtras {
+                    field: None,
+                    hint: Some(tr!("preferences.workspace.writing_wysiwyg_hint").into()),
+                    trailing: Some(
+                        Switch::new("preferences-writing-wysiwyg")
+                            .accessibility_label(tr!("preferences.workspace.writing_wysiwyg"))
+                            .checked(self.writing_wysiwyg)
+                            .on_change(cx.listener(|this, checked, _, cx| {
+                                this.writing_wysiwyg = *checked;
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    ),
+                },
+                cx,
+            ),
+        ];
 
         let mut layouts = Vec::new();
         if let Some(context) = self.context.as_ref() {
@@ -233,12 +256,7 @@ impl PreferencesSheet {
             .v_flex()
             .w_full()
             .gap_4()
-            .child(self.section(
-                tr!("preferences.workspace.startup"),
-                Some(tr!("preferences.workspace.startup_hint").into()),
-                startup,
-                cx,
-            ))
+            .child(self.section(tr!("preferences.workspace.modes"), None, modes, cx))
             .child(self.section(
                 tr!("preferences.workspace.layouts"),
                 Some(tr!("preferences.workspace.layouts_hint").into()),

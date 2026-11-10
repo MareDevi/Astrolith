@@ -8334,7 +8334,17 @@ mod tests {
                 sheet.toggle_layout_reset_for_tests(WorkspaceMode::Writing, cx);
             });
             window.render_frame(cx);
+            window.scroll(
+                "preferences-field-default-mode",
+                gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-150.))),
+                cx,
+            );
             assert!(window.find("preferences-field-layout-writing").visible());
+            window.scroll(
+                "preferences-field-layout-writing",
+                gpui_kit::ScrollDelta::Pixels(point(px(0.), px(150.))),
+                cx,
+            );
             window.click("preferences-apply", cx);
         })
         .unwrap();
@@ -8583,6 +8593,8 @@ mod tests {
             });
             window.render_frame(cx);
             assert_ne!(window.find("preferences-apply").disabled(), Some(true));
+            window.click("preferences-pane-workspace", cx);
+            window.click("preferences-writing-wysiwyg", cx);
             window.click("preferences-apply", cx);
         })
         .unwrap();
@@ -8616,6 +8628,7 @@ mod tests {
         assert_eq!(global["build_font_size"], 18.0);
         assert_eq!(global["preview_font_family"], interface_font);
         assert_eq!(global["preview_font_size"], 20.0);
+        assert_eq!(global["writing_wysiwyg"], false);
         let project = project_file(&preferences_root, &id);
         assert_eq!(project["content_directory"], "src/entries");
 

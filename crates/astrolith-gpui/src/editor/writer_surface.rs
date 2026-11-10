@@ -85,6 +85,8 @@ pub(crate) struct WriterSurface {
     image_sizes: ImageMetrics,
     image_location: Option<(PathBuf, PathBuf)>,
     editing_image: Option<usize>,
+    wysiwyg: bool,
+    parsed_wysiwyg: bool,
     /// Content width the current layout was built for.
     laid_out_width: Option<f32>,
     /// Last frame's measured writer work, for the opt-in counters.
@@ -238,6 +240,8 @@ impl WriterSurface {
             image_sizes: ImageMetrics::new(),
             image_location: None,
             editing_image: None,
+            wysiwyg: true,
+            parsed_wysiwyg: true,
             laid_out_width: None,
             frame_stats: perf::Frame::default(),
             document: Arc::new(WysiwygDocument::default()),
@@ -314,6 +318,20 @@ impl WriterSurface {
         self.set_snapshot(revision, source, cx);
     }
 
+    pub(crate) fn wysiwyg(&self) -> bool {
+        self.wysiwyg
+    }
+
+    pub(crate) fn set_wysiwyg(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.wysiwyg != enabled {
+            self.wysiwyg = enabled;
+            let revision = self
+                .requested_revision
+                .map_or(0, |revision| revision.wrapping_add(1));
+            self.set_snapshot(revision, self.source.clone(), cx);
+        }
+    }
+
     /// Snapshot input changes outside rendering. At most one parse runs and
     /// one latest snapshot waits; intermediate preedit revisions never queue.
     pub(crate) fn set_snapshot(&mut self, revision: u64, source: Rope, cx: &mut Context<Self>) {
@@ -346,14 +364,22 @@ impl WriterSurface {
         // document to this snapshot. Obsolete results cannot change that base.
         let previous_text = self.parsed_text.clone();
         let previous_document = self.document.clone();
-        let change = self.pending_edit.clone();
+        let wysiwyg = self.wysiwyg;
+        let change = self
+            .pending_edit
+            .clone()
+            .filter(|_| self.parsed_wysiwyg == wysiwyg);
         let work = cx.background_spawn(async move {
             if cancel.load(Ordering::Relaxed) {
                 return None;
             }
             let started = std::time::Instant::now();
             let text = source.to_string();
-            let parsed = parse_snapshot(&text, &previous_text, &previous_document, change, &cancel)?;
+            let parsed = if wysiwyg {
+                parse_snapshot(&text, &previous_text, &previous_document, change, &cancel)?
+            } else {
+                (WysiwygDocument::literal_cancellable(&text, || cancel.load(Ordering::Relaxed))?, 0)
+            };
             let elapsed = started.elapsed();
             tracing::debug!(revision, bytes = source.len(), parse_ms = elapsed.as_secs_f64() * 1_000.,
                 reused_blocks = parsed.1,
@@ -367,6 +393,7 @@ impl WriterSurface {
                 if let Some((source, text, document, reused_blocks, parsed)) = result {
                     perf::parse_run(source.len(), reused_blocks, parsed);
                     if this.requested_revision == Some(revision) {
+                        this.parsed_wysiwyg = wysiwyg;
                         this.install_document(revision, source, text, document, cx);
                         cx.notify();
                     }
@@ -476,7 +503,13 @@ impl WriterSurface {
     /// The layout is rebuilt only when the column width or the shaping font
     /// metrics change. Colour-only changes restyle the resolved runs.
     fn sync_layout(&mut self, width: f32, cx: &App) {
-        let style = Arc::new(LayoutStyle::from_app(&self.style, cx).with_editable_images());
+        let mut style = LayoutStyle::from_app(&self.style, cx);
+        if self.parsed_wysiwyg {
+            style = style.with_editable_images();
+        } else {
+            style.literal_lines = true;
+        }
+        let style = Arc::new(style);
         let width = width.max(1.);
         let mut slot = self.layout.borrow_mut();
         let rebuild = match slot.as_ref() {
@@ -546,7 +579,7 @@ impl WriterSurface {
 
     fn source_for_hit(&self, block: usize, rendered: usize) -> Option<usize> {
         let rich = self.document.blocks.get(block)?;
-        if self.editing_image == Some(block) {
+        if !self.parsed_wysiwyg || self.editing_image == Some(block) {
             Some(rich.content.start + rendered.min(rich.content.len()))
         } else if matches!(rich.kind, BlockKind::Image { .. }) {
             Some(if rendered == 0 {
@@ -573,6 +606,7 @@ impl WriterSurface {
     /// again.
     pub(crate) fn shared_document(&self) -> Option<(Arc<String>, Arc<WysiwygDocument>)> {
         self.document_revision
+            .filter(|_| self.parsed_wysiwyg)
             .map(|_| (self.parsed_text.clone(), self.document.clone()))
     }
 
@@ -643,6 +677,9 @@ impl WriterSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.parsed_wysiwyg && matches!(key, "left" | "right") {
+            return false;
+        }
         let Some(session) = self.session.upgrade() else {
             return false;
         };
@@ -1643,6 +1680,46 @@ mod tests {
             assert!(writer.parse_task.is_none() && writer.pending_snapshot.is_none());
         });
         assert_eq!(*seen.borrow(), [Some(102)]);
+    }
+
+    #[gpui_kit::test]
+    fn literal_writing_keeps_source_editable_and_switches_back_to_rendered(
+        cx: &mut TestAppContext,
+    ) {
+        let source = "# Title\r\n\r\n**body**\r\n";
+        let (handle, session) = mount_writer(cx, source);
+        let (writer, editor) = session.read_with(cx, |session, _| {
+            (session.writer.clone(), session.editor.clone())
+        });
+        writer.update(cx, |writer, cx| writer.set_wysiwyg(false, cx));
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            {
+                let writer = writer.read(cx);
+                let document = &writer.document;
+                assert_eq!(document.blocks[0].text.text, "# Title");
+                assert_eq!(document.blocks[1].content, 9..9);
+                assert_eq!(document.blocks[2].text.text, "**body**");
+                assert_eq!(document.blocks[3].content, source.len()..source.len());
+                assert!(writer.shared_document().is_none());
+            }
+            window.click_at("writer-wysiwyg-content", point(px(0.), px(16.)), cx);
+            window.press("right", cx);
+            window.input("#", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.value().to_string()),
+            "## Title\r\n\r\n**body**\r\n"
+        );
+        writer.update(cx, |writer, cx| writer.set_wysiwyg(true, cx));
+        cx.run_until_parked();
+        writer.read_with(cx, |writer, _| {
+            let (_, rendered) = writer.shared_document().unwrap();
+            assert_eq!(rendered.blocks[0].kind, BlockKind::Heading(2));
+            assert_eq!(rendered.blocks[0].text.text, "Title");
+        });
     }
 
     #[gpui_kit::test]

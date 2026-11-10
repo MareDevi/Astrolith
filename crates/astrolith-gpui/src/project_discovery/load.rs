@@ -296,6 +296,9 @@ impl ProjectWorkspace {
         session: Entity<DocumentSession>,
         cx: &mut Context<Self>,
     ) {
+        session.read(cx).writer.clone().update(cx, |writer, cx| {
+            writer.set_wysiwyg(self.global_preferences.writing_wysiwyg, cx)
+        });
         let title = path
             .file_name()
             .unwrap_or_default()

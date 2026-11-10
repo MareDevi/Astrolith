@@ -3098,6 +3098,13 @@ impl ProjectWorkspace {
         project: Option<ProjectPreferences>,
         cx: &mut Context<Self>,
     ) {
+        if self.global_preferences.writing_wysiwyg != global.writing_wysiwyg {
+            for session in self.sessions.values() {
+                session.read(cx).writer.clone().update(cx, |writer, cx| {
+                    writer.set_wysiwyg(global.writing_wysiwyg, cx)
+                });
+            }
+        }
         self.global_preferences = global;
         self.project_preferences = project;
         let copyedit = CopyeditConfig::from_preferences(&self.global_preferences.copyedit);
