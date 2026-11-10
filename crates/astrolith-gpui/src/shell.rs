@@ -4322,22 +4322,10 @@ impl Render for Shell {
                 revision: key.map(|(_, revision)| revision),
             };
             if self.rendered_sync_key.as_ref() != Some(&sync_key) {
-                let (body, shared) = self
-                    .project
-                    .read(cx)
-                    .active_session(cx)
-                    .map(|session| {
-                        let session = session.read(cx);
-                        let shared = session.writer.read(cx).shared_document();
-                        let writer = session.writer.clone();
-                        (
-                            (session.kind(), session.projection.visible.clone()),
-                            (shared, writer),
-                        )
-                    })
-                    .map_or((None, (None, None)), |(body, shared)| {
-                        (Some(body), (shared.0, Some(shared.1)))
-                    });
+                let body = self.project.read(cx).active_session(cx).map(|session| {
+                    let session = session.read(cx);
+                    (session.kind(), session.projection.visible.clone())
+                });
                 let root = sync_key.root.clone();
                 let path = sync_key.path.clone();
                 self.rendered.update(cx, |rendered, cx| {
@@ -4345,8 +4333,6 @@ impl Render for Shell {
                         root.as_deref(),
                         path.as_deref(),
                         body.as_ref().map(|(kind, text)| (*kind, text.as_str())),
-                        shared.0,
-                        shared.1,
                         cx,
                     )
                 });

@@ -1,8 +1,7 @@
 //! Rendered document preview: the active entry's body as a reader sees it.
 //!
-//! The pane is read-only and independent of the editor: it shares the writer's
-//! accepted parsed document when that revision is current, lays it out with
-//! the application-owned viewport text layout, and keeps its own selection,
+//! The pane parses the reader's projection, lays it out with the shared
+//! viewport text layout, and keeps its own selection,
 //! focus and scroll anchor. It never mounts a Kit `TextView`, never splits the
 //! source into pages and never copies the body on an unchanged frame.
 
@@ -27,12 +26,7 @@ use crate::editor::image_preview;
 use crate::editor::text_layout::{
     Hit, ImageMetrics, LayoutImagePainter, LayoutStyle, Selection, TextLayout, Viewport,
 };
-use crate::editor::writer_surface::WriterSurface;
 use crate::editor::writing_modes::ProseStyle;
-
-/// Parsed document and the exact visible text it was built from, produced by
-/// the writer surface for the same accepted revision.
-pub(crate) type SharedDocument = Option<(Arc<String>, Arc<WysiwygDocument>)>;
 
 /// Why the reading pane has no body to show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,8 +151,6 @@ impl RenderedDocument {
         root: Option<&Path>,
         document: Option<&Path>,
         body: Option<(DocumentKind, &str)>,
-        shared: SharedDocument,
-        writer: Option<gpui_kit::Entity<WriterSurface>>,
         cx: &mut Context<Self>,
     ) {
         let (unsupported, mdx, text, empty_copy) = match body {
@@ -197,50 +189,8 @@ impl RenderedDocument {
         self.auto_scroll.stop();
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
-        if let Some((shared_text, shared_document)) = shared
-            && shared_text.as_str() == text
-        {
-            self.install(generation, shared_document, cx);
-            cx.notify();
-            return;
-        }
         let source = self.text.clone();
-        let writer = writer.filter(|writer| writer.read(cx).wysiwyg());
         self.parse_task = Some(cx.spawn(async move |this, cx| {
-            // The writer parses every accepted revision. Wait for that parse
-            // instead of doing the same work twice; only a writer that never
-            // lands (for example a view without a writer entity) falls back to
-            // this pane's own background parse.
-            if let Some(writer) = writer {
-                for _ in 0..120 {
-                    let ready = this.update(cx, |this, cx| {
-                        if this.generation != generation {
-                            return None;
-                        }
-                        Some(
-                            writer
-                                .read(cx)
-                                .shared_document()
-                                .filter(|(text, _)| text.as_str() == source.as_ref())
-                                .map(|(_, document)| document),
-                        )
-                    });
-                    match ready {
-                        Ok(Some(Some(document))) => {
-                            let _ = this.update(cx, |this, cx| {
-                                this.install(generation, document, cx);
-                                cx.notify();
-                            });
-                            return;
-                        }
-                        Ok(Some(None)) => {}
-                        Ok(None) | Err(_) => return,
-                    }
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(10))
-                        .await;
-                }
-            }
             let work = source.clone();
             let parsed = cx
                 .background_spawn(async move { WysiwygDocument::parse(&work) })
@@ -1059,14 +1009,7 @@ mod tests {
             .unwrap()
         });
         preview.update(cx, |preview, cx| {
-            preview.set_document(
-                None,
-                None,
-                Some((DocumentKind::Markdown, source)),
-                None,
-                None,
-                cx,
-            );
+            preview.set_document(None, None, Some((DocumentKind::Markdown, source)), cx);
         });
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| {
@@ -1139,14 +1082,7 @@ mod tests {
             .unwrap()
         });
         preview.update(cx, |preview, cx| {
-            preview.set_document(
-                None,
-                None,
-                Some((DocumentKind::Markdown, &source)),
-                None,
-                None,
-                cx,
-            );
+            preview.set_document(None, None, Some((DocumentKind::Markdown, &source)), cx);
         });
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| {
@@ -1220,14 +1156,7 @@ mod tests {
             .unwrap()
         });
         preview.update(cx, |preview, cx| {
-            preview.set_document(
-                None,
-                None,
-                Some((DocumentKind::Markdown, &source)),
-                None,
-                None,
-                cx,
-            );
+            preview.set_document(None, None, Some((DocumentKind::Markdown, &source)), cx);
         });
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| {

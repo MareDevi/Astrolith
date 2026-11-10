@@ -300,8 +300,10 @@ impl ResolvedRun {
 
 #[derive(Clone, Debug)]
 struct Row {
-    /// Rendered byte range covered by this visual row.
+    /// Rendered bytes shaped on this row.
     range: Range<usize>,
+    /// Start of the next row, after any unpainted line terminator.
+    next: usize,
     /// Offset from the block content top.
     y: f32,
     height: f32,
@@ -340,7 +342,6 @@ struct BlockLayout {
     breaks: Vec<usize>,
     break_scanned: usize,
     /// Sum of measured row byte lengths, for the remaining-height estimate.
-    row_bytes: usize,
     /// Bytes per row used before this block has any measured row.
     fallback_row_bytes: f32,
     /// Block content starts this far right of the column.
@@ -515,7 +516,6 @@ impl BlockLayout {
             complete: false,
             breaks: Vec::new(),
             break_scanned: 0,
-            row_bytes: 0,
             fallback_row_bytes,
             x_offset,
             chrome_top,
@@ -534,6 +534,7 @@ impl BlockLayout {
         if this.text.is_empty() {
             this.rows.push(Row {
                 range: 0..0,
+                next: 0,
                 y: 0.,
                 height: row_height,
                 shaped: None,
@@ -604,10 +605,10 @@ impl BlockLayout {
             0.
         } else {
             let remaining = self.text_len.saturating_sub(self.scanned);
-            let average = if self.rows.is_empty() {
-                self.fallback_row_bytes
+            let average = if let Some(row) = self.rows.last() {
+                (row.next as f32 / self.rows.len() as f32).max(1.)
             } else {
-                (self.row_bytes as f32 / self.rows.len() as f32).max(1.)
+                self.fallback_row_bytes
             };
             (remaining as f32 / average).ceil().max(1.)
         };
@@ -618,9 +619,9 @@ impl BlockLayout {
     }
 
     /// Carry rows that end safely before the common prefix of an edit.
-    fn carry_prefix(&mut self, old: &BlockLayout, block: &RichBlock) -> usize {
+    fn carry_prefix(&mut self, old: &BlockLayout) -> usize {
         let old_text = old.text.as_str();
-        let new_text = block.text.text.as_str();
+        let new_text = self.text.as_str();
         // Compare unchanged source in chunks instead of visiting every byte
         // on the UI thread after an edit near the end of a huge paragraph.
         const CHUNK: usize = 64;
@@ -660,18 +661,13 @@ impl BlockLayout {
         if safe == 0 {
             return 0;
         }
-        let reuse_count = old
-            .rows
-            .iter()
-            .take_while(|row| row.range.end <= safe)
-            .count();
+        let reuse_count = old.rows.iter().take_while(|row| row.next <= safe).count();
         if reuse_count == 0 {
             return 0;
         }
         self.rows = old.rows[..reuse_count].to_vec();
-        self.row_bytes = self.rows.iter().map(|row| row.range.len()).sum();
-        self.scanned = self.rows.last().map_or(0, |row| row.range.end);
-        let boundary = self.rows.last().map_or(0, |row| row.range.end);
+        let boundary = self.rows[reuse_count - 1].next;
+        self.scanned = boundary;
         self.breaks = old
             .breaks
             .iter()
@@ -684,11 +680,11 @@ impl BlockLayout {
         reuse_count
     }
 
-    fn push_row(&mut self, range: Range<usize>) {
+    fn push_row(&mut self, range: Range<usize>, next: usize) {
         let y = self.rows.last().map_or(0., |row| row.y + row.height);
-        self.row_bytes += range.len();
         self.rows.push(Row {
             range,
+            next,
             y,
             height: self.row_height,
             shaped: None,
@@ -824,6 +820,7 @@ impl BlockLayout {
                 self.text_len.max(1)
             });
         }
+        let text_y = local_y - self.chrome_top;
         if self.is_table() {
             let cell_index = self
                 .cells
@@ -831,10 +828,10 @@ impl BlockLayout {
                 .rposition(|cell| x >= cell.x_offset - TABLE_CELL_PADDING)
                 .unwrap_or(0);
             let cell = self.cells.get(cell_index)?;
-            let local = cell.hit_test_at(x, local_y)?;
+            let local = cell.hit_test_at(x, text_y)?;
             return Some(self.cell_starts.get(cell_index).copied().unwrap_or(0) + local);
         }
-        let row_index = row_index_at(self, local_y);
+        let row_index = row_index_at(self, text_y);
         let row = self.rows.get(row_index)?;
         let shaped = row.shaped.as_ref()?;
         let index = shaped
@@ -944,18 +941,23 @@ impl BlockLayout {
                 }
                 if partial.scan >= text.len() {
                     if partial.scan > partial.start {
-                        self.push_row(partial.start..partial.scan);
+                        self.push_row(partial.start..partial.scan, partial.scan);
                     } else if text.ends_with('\n') {
-                        self.push_row(partial.scan..partial.scan);
+                        self.push_row(partial.scan..partial.scan, partial.scan);
                     }
                     self.scanned = text.len();
                     self.complete = true;
                     self.partial = None;
                     return true;
                 }
-                if text.as_bytes()[partial.scan] == b'\n' {
-                    self.push_row(partial.start..partial.scan);
-                    let next = partial.scan + 1;
+                let line_break = match &text.as_bytes()[partial.scan..] {
+                    [b'\r', b'\n', ..] => 2,
+                    [b'\n', ..] => 1,
+                    _ => 0,
+                };
+                if line_break != 0 {
+                    let next = partial.scan + line_break;
+                    self.push_row(partial.start..partial.scan, next);
                     partial = PartialRow {
                         start: next,
                         scan: next,
@@ -984,7 +986,7 @@ impl BlockLayout {
                     if partial.width > f32::from(width) && next > partial.start {
                         match previous_break {
                             Some((offset, _)) if offset > partial.start => {
-                                self.push_row(partial.start..offset);
+                                self.push_row(partial.start..offset, offset);
                                 partial = PartialRow {
                                     start: offset,
                                     scan: offset,
@@ -996,7 +998,7 @@ impl BlockLayout {
                             _ if partial.scan == partial.start => {
                                 // One grapheme wider than the column still
                                 // gets its own row instead of looping.
-                                self.push_row(partial.start..next);
+                                self.push_row(partial.start..next, next);
                                 partial = PartialRow {
                                     start: next,
                                     scan: next,
@@ -1006,7 +1008,7 @@ impl BlockLayout {
                                 };
                             }
                             _ => {
-                                self.push_row(partial.start..partial.scan);
+                                self.push_row(partial.start..partial.scan, partial.scan);
                                 partial = PartialRow {
                                     start: partial.scan,
                                     scan: partial.scan,
@@ -1434,9 +1436,31 @@ impl TextLayout {
     /// Nearest caret on the visual row above or below `hit`.
     pub(crate) fn vertical_target(&self, hit: Hit, up: bool) -> Option<Hit> {
         let caret = self.caret(hit)?;
-        let step = self.blocks.get(hit.block)?.row_height;
-        let target_y = f32::from(caret.origin.y) + if up { -step } else { step };
-        self.hit_test(point(caret.origin.x, px(target_y)))
+        let block = self.blocks.get(hit.block)?;
+        let local_y = f32::from(caret.origin.y) - self.block_top(hit.block);
+        let target_y = if up {
+            local_y - block.row_height
+        } else {
+            local_y + block.row_height
+        };
+        let (index, y) = if target_y < block.chrome_top {
+            let index = hit.block.checked_sub(1)?;
+            let previous = self.blocks.get(index)?;
+            (
+                index,
+                previous.height() - previous.gap - previous.chrome_bottom - 0.5,
+            )
+        } else if target_y >= block.height() - block.gap - block.chrome_bottom {
+            let index = hit.block + 1;
+            (index, self.blocks.get(index)?.chrome_top)
+        } else {
+            (hit.block, target_y)
+        };
+        let rendered = self.blocks[index].hit_test_at(f32::from(caret.origin.x), y)?;
+        Some(Hit {
+            block: index,
+            rendered,
+        })
     }
 
     /// Reconcile this layout with a new accepted document revision.
@@ -1494,7 +1518,7 @@ impl TextLayout {
                     && candidate.kind == rebuilt.kind
                     && candidate.depth == rebuilt.depth
                 {
-                    let carried = rebuilt.carry_prefix(&candidate, block);
+                    let carried = rebuilt.carry_prefix(&candidate);
                     outcome.reused_rows += carried;
                 }
                 outcome.rebuilt_blocks += 1;

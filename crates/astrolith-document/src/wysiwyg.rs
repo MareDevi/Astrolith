@@ -93,7 +93,7 @@ impl RichText {
         self.push_run("\n", source, false);
     }
 
-    /// Append `text` and merge adjacent runs with the same source continuity.
+    /// Append `text` and merge contiguous runs with a one-to-one mapping.
     fn push_run(&mut self, text: &str, source: Range<usize>, linear: bool) {
         if text.is_empty() {
             return;
@@ -101,8 +101,9 @@ impl RichText {
         let start = self.text.len();
         self.text.push_str(text);
         let end = self.text.len();
-        if let Some(last) = self.segments.last_mut()
-            && last.linear == linear
+        if linear
+            && let Some(last) = self.segments.last_mut()
+            && last.linear
             && last.rendered.end == start
             && last.source.end == source.start
         {
@@ -287,6 +288,7 @@ pub struct RichBlock {
 pub struct WysiwygDocument {
     /// Rendered blocks in document order.
     pub blocks: Vec<RichBlock>,
+    editable_lines: bool,
 }
 
 /// One applied incremental parse: the document plus how many blocks were
@@ -306,6 +308,20 @@ struct Line {
     end: usize,
 }
 
+impl Line {
+    fn literal_block(&self, source: &str) -> RichBlock {
+        let content = self.start..self.content_end;
+        RichBlock {
+            kind: BlockKind::Paragraph,
+            source: self.start..self.end,
+            text: RichText::linear(source, content.clone()),
+            content,
+            cells: Vec::new(),
+            depth: 0,
+        }
+    }
+}
+
 impl WysiwygDocument {
     /// Parse the writer projection into rendered blocks.
     ///
@@ -322,35 +338,57 @@ impl WysiwygDocument {
             if cancelled() {
                 return None;
             }
-            let content = line.start..line.content_end;
-            blocks.push(RichBlock {
-                kind: BlockKind::Paragraph,
-                source: line.start..line.end,
-                text: RichText::linear(source, content.clone()),
-                content,
-                cells: Vec::new(),
-                depth: 0,
-            });
+            blocks.push(line.literal_block(source));
         }
         append_trailing_paragraph(source, &mut blocks);
-        Some(Self { blocks })
+        Some(Self {
+            blocks,
+            editable_lines: true,
+        })
     }
 
     /// Parse a background snapshot, stopping between blocks when obsolete.
     /// Returns `None` rather than exposing a partially mapped document.
     /// A single block's parsing is not interrupted midway.
-    pub fn parse_cancellable(source: &str, mut cancelled: impl FnMut() -> bool) -> Option<Self> {
+    pub fn parse_cancellable(source: &str, cancelled: impl FnMut() -> bool) -> Option<Self> {
+        Self::parse_with_lines(source, false, cancelled)
+    }
+
+    /// Parse Writing's editable projection, including blank lines between blocks.
+    pub fn parse_writing_cancellable(
+        source: &str,
+        cancelled: impl FnMut() -> bool,
+    ) -> Option<Self> {
+        Self::parse_with_lines(source, true, cancelled)
+    }
+
+    fn parse_with_lines(
+        source: &str,
+        editable_lines: bool,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Option<Self> {
         if cancelled() {
             return None;
         }
         let lines = lines(source);
         let definitions = reference_definitions(source, &lines);
-        let mut blocks = parse_block_range(source, &lines, &definitions, 0, None, &mut cancelled)?;
+        let mut blocks = parse_block_range(
+            source,
+            &lines,
+            &definitions,
+            0,
+            None,
+            editable_lines,
+            &mut cancelled,
+        )?;
         append_trailing_paragraph(source, &mut blocks);
         if cancelled() {
             return None;
         }
-        Some(Self { blocks })
+        Some(Self {
+            blocks,
+            editable_lines,
+        })
     }
 
     /// Reparse only the blocks around one replacement, reusing every block
@@ -429,6 +467,7 @@ impl WysiwygDocument {
             &definitions,
             start_line,
             stop,
+            previous.editable_lines,
             &mut cancelled,
         )?;
 
@@ -464,6 +503,7 @@ impl WysiwygDocument {
         Some(IncrementalParse {
             document: Self {
                 blocks: parsed_blocks,
+                editable_lines: previous.editable_lines,
             },
             reused_blocks,
         })
@@ -589,6 +629,7 @@ fn parse_block_range(
     definitions: &Definitions,
     start: usize,
     stop: Option<usize>,
+    editable_lines: bool,
     cancelled: &mut dyn FnMut() -> bool,
 ) -> Option<Vec<RichBlock>> {
     let mut blocks = Vec::new();
@@ -611,6 +652,9 @@ fn parse_block_range(
         let line = &lines[index];
         let content = &source[line.start..line.content_end];
         if content.trim().is_empty() {
+            if editable_lines {
+                blocks.push(line.literal_block(source));
+            }
             index += 1;
             continue;
         }
@@ -667,7 +711,7 @@ fn parse_block_range(
                 continue;
             }
             if rest.starts_with('>') {
-                let (block, next) = blockquote(source, lines, index, indent, definitions);
+                let (block, next) = blockquote(source, lines, index, definitions);
                 blocks.push(block);
                 index = next;
                 continue;
@@ -920,7 +964,6 @@ fn blockquote(
     source: &str,
     lines: &[Line],
     index: usize,
-    indent: usize,
     definitions: &Definitions,
 ) -> (RichBlock, usize) {
     let mut next = index;
@@ -948,14 +991,13 @@ fn blockquote(
         }
         text.append(inline(source, start..end, definitions));
         content_end = end;
-        previous_end = line.end;
+        previous_end = end;
         next += 1;
     }
-    let source_start = lines[index].start + indent;
     (
         RichBlock {
             kind: BlockKind::Quote,
-            source: source_start..lines[next.saturating_sub(1)].end,
+            source: lines[index].start..lines[next.saturating_sub(1)].end,
             content: content_start..content_end,
             text,
             cells: Vec::new(),
@@ -1015,13 +1057,13 @@ fn paragraph(
         }
         text.append(line_text);
         content_end = end;
-        previous_end = line.end;
+        previous_end = end;
         next += 1;
     }
     (
         RichBlock {
             kind: BlockKind::Paragraph,
-            source: lines[index].start + indent..lines[next.saturating_sub(1)].end,
+            source: lines[index].start..lines[next.saturating_sub(1)].end,
             content: content_start..content_end,
             text,
             cells: Vec::new(),
@@ -1262,7 +1304,7 @@ fn footnote_definition(
             - content[after_marker + colon + 1..].trim_start().len());
     let mut text = inline(source, body_start..line.content_end, definitions);
     let mut next = index + 1;
-    let mut previous_end = line.end;
+    let mut previous_end = line.content_end;
     while let Some(continuation) = lines.get(next) {
         let continuation_text = &source[continuation.start..continuation.content_end];
         if continuation_text.trim().is_empty()
@@ -1274,7 +1316,7 @@ fn footnote_definition(
             continuation.start + (continuation_text.len() - continuation_text.trim_start().len());
         text.push_newline(previous_end..continuation.start);
         text.append(inline(source, start..continuation.content_end, definitions));
-        previous_end = continuation.end;
+        previous_end = continuation.content_end;
         next += 1;
     }
     Some((

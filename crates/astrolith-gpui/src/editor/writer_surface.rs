@@ -4,9 +4,8 @@
 //! selection, IME composition and undo integration. This view renders the same
 //! writer projection through the application-owned viewport text layout, paints
 //! the caret and selection itself, and maps pointer positions back into the
-//! editor's byte offsets. Markdown syntax (heading hashes, emphasis markers,
-//! list bullets, link destinations and fences) is not painted; the source
-//! stays byte-exact.
+//! editor's byte offsets. The focused block can reveal its Markdown for
+//! editing, and every editable blank line gets its own caret position.
 //!
 //! Only the visible visual rows and their overscan are wrapped and shaped.
 //! Long blocks advance across frames under a bounded budget, and geometry for
@@ -318,10 +317,6 @@ impl WriterSurface {
         self.set_snapshot(revision, source, cx);
     }
 
-    pub(crate) fn wysiwyg(&self) -> bool {
-        self.wysiwyg
-    }
-
     pub(crate) fn set_wysiwyg(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.wysiwyg != enabled {
             self.wysiwyg = enabled;
@@ -608,15 +603,6 @@ impl WriterSurface {
         self.pending_edit
             .as_ref()
             .map_or(Some(source), |edit| edit.to_current(source))
-    }
-
-    /// The accepted parsed document and the exact text it was built from, so
-    /// the read-only preview can reuse it instead of parsing the revision
-    /// again.
-    pub(crate) fn shared_document(&self) -> Option<(Arc<String>, Arc<WysiwygDocument>)> {
-        self.document_revision
-            .filter(|_| self.parsed_wysiwyg)
-            .map(|_| (self.parsed_text.clone(), self.document.clone()))
     }
 
     pub(super) fn parsed_offset(&self, offset: usize) -> usize {
@@ -1619,7 +1605,7 @@ fn parse_snapshot(
             return None;
         }
     }
-    WysiwygDocument::parse_cancellable(text, || cancel.load(Ordering::Relaxed))
+    WysiwygDocument::parse_writing_cancellable(text, || cancel.load(Ordering::Relaxed))
         .map(|document| (document, 0))
 }
 
@@ -1732,7 +1718,7 @@ mod tests {
                 assert_eq!(document.blocks[1].content, 9..9);
                 assert_eq!(document.blocks[2].text.text, "**body**");
                 assert_eq!(document.blocks[3].content, source.len()..source.len());
-                assert!(writer.shared_document().is_none());
+                assert!(!writer.parsed_wysiwyg);
             }
             window.click_at("writer-wysiwyg-content", point(px(0.), px(16.)), cx);
             window.press("right", cx);
@@ -1746,10 +1732,66 @@ mod tests {
         writer.update(cx, |writer, cx| writer.set_wysiwyg(true, cx));
         cx.run_until_parked();
         writer.read_with(cx, |writer, _| {
-            let (_, rendered) = writer.shared_document().unwrap();
+            assert!(writer.parsed_wysiwyg);
+            let rendered = &writer.document;
             assert_eq!(rendered.blocks[0].kind, BlockKind::Heading(2));
             assert_eq!(rendered.blocks[0].text.text, "Title");
         });
+    }
+
+    #[gpui_kit::test]
+    fn enter_keeps_each_inserted_line_addressable_in_writing(cx: &mut TestAppContext) {
+        let (handle, session) = mount_writer(cx, "First\nSecond");
+        let writer = session.read_with(cx, |session, _| session.writer.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("writer-wysiwyg-content", cx);
+            session.update(cx, |session, cx| {
+                session.set_writer_selection(5, 5, window, cx)
+            });
+        })
+        .unwrap();
+        let caret_y = |cx: &mut TestAppContext, offset| {
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                let writer = writer.read(cx);
+                let hit = writer.hit_for_source(offset).unwrap();
+                assert_eq!(writer.source_for_hit(hit.block, hit.rendered), Some(offset));
+                writer
+                    .layout
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .caret(hit)
+                    .unwrap()
+                    .origin
+                    .y
+            })
+            .unwrap()
+        };
+        let mut previous_y = caret_y(cx, 5);
+        for cursor in 6..=8 {
+            cx.update_window(handle.into(), |_, window, cx| window.press("enter", cx))
+                .unwrap();
+            let y = caret_y(cx, cursor);
+            assert!(y > previous_y, "Enter moves the caret to a new visual row");
+            previous_y = y;
+        }
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.buffer.current_text(), "First\n\n\n\nSecond");
+            assert_eq!(session.editor.read(cx).cursor(), 8);
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            let editor = session.read(cx).editor.clone();
+            window.press("up", cx);
+            assert_eq!(editor.read(cx).cursor(), 7);
+            window.press("down", cx);
+            assert_eq!(editor.read(cx).cursor(), 8);
+            window.press("down", cx);
+            assert_eq!(editor.read(cx).cursor(), 9);
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

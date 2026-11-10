@@ -41,6 +41,40 @@ fn prepare_all(layout: &mut TextLayout, text_system: &WindowTextSystem, height: 
 }
 
 #[gpui_kit::test]
+fn reusing_rows_after_typing_matches_fresh_layout_across_line_breaks(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        let text_system = WindowTextSystem::new(cx.text_system().clone());
+        let images = ImageMetrics::default();
+        let style = test_style();
+        let width = px(800.);
+        let mut source =
+            "First line.\nA second line long enough to reuse the first row.".to_owned();
+        let mut layout = TextLayout::new(parse(&source), style.clone(), width, &images);
+        prepare_all(&mut layout, &text_system, 2_000.);
+        for character in ['a', '中', '🦀'] {
+            source.push(character);
+            let document = parse(&source);
+            let update = layout.update(document.clone());
+            assert!(update.reused_rows > 0);
+            prepare_all(&mut layout, &text_system, 2_000.);
+
+            let mut fresh = TextLayout::new(document, style.clone(), width, &images);
+            prepare_all(&mut fresh, &text_system, 2_000.);
+            let ranges = |layout: &TextLayout| {
+                layout.blocks[0]
+                    .rows
+                    .iter()
+                    .map(|row| row.range.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(ranges(&layout), ranges(&fresh));
+            assert_eq!(layout.total_height(), fresh.total_height());
+        }
+    });
+}
+
+#[gpui_kit::test]
 fn rows_stay_on_grapheme_and_break_boundaries(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
