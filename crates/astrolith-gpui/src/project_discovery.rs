@@ -6940,17 +6940,6 @@ export const collections = {blog, dataAuthors};
         });
     }
 
-    struct WorkloadHost {
-        editor: Entity<gpui_kit::component::input::EditorState>,
-    }
-    impl Render for WorkloadHost {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .child(gpui_kit::component::input::Editor::new(&self.editor).size_full())
-        }
-    }
-
     /// Open one projected session in a real editor view for typing measurements.
     pub(super) fn mount_workload(
         cx: &mut TestAppContext,
@@ -6967,9 +6956,9 @@ export const collections = {blog, dataAuthors};
                 );
                 let created =
                     cx.new(|cx| DocumentSession::new(identity, source.to_owned(), window, cx));
-                let editor = created.read(cx).editor.clone();
+                let writer = created.read(cx).writer.clone();
                 session = Some(created);
-                cx.new(|_| WorkloadHost { editor })
+                writer
             })
             .unwrap();
             (
@@ -7008,11 +6997,13 @@ export const collections = {blog, dataAuthors};
             let (handle, session) = mount_workload(cx, &source);
             let editor = session.read_with(cx, |session, _| session.editor.clone());
             let visible_bytes = source.len() - frontmatter.len();
+            cx.run_until_parked();
             cx.update_window(handle.into(), |_, window, cx| {
                 window.render_frame(cx);
-                window.click(("input", editor.entity_id()), cx);
-                window.press("secondary-a", cx);
-                window.press("right", cx);
+                window.click("writer-wysiwyg-content", cx);
+                editor.update(cx, |editor, cx| {
+                    editor.set_selected_range(visible_bytes..visible_bytes, cx);
+                });
             })
             .unwrap();
             let mut samples = Vec::with_capacity(100);
@@ -7026,11 +7017,14 @@ export const collections = {blog, dataAuthors};
                     window.render_frame(cx);
                 })
                 .unwrap();
+                cx.run_until_parked();
+                cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+                    .unwrap();
                 samples.push(start.elapsed().as_secs_f64() * 1000.);
             }
             samples.sort_by(f64::total_cmp);
             println!(
-                "PROJECTED_WRITER source_bytes={} body_bytes={visible_bytes} lines={} long_line={long_line} samples=100 p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
+                "WRITER_SURFACE source_bytes={} body_bytes={visible_bytes} lines={} long_line={long_line} samples=100 p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
                 source.len(),
                 body.lines().count(),
                 samples[49],
