@@ -22,7 +22,10 @@ use astrolith_astro::Cancellation;
 use astrolith_core::ProjectId;
 use url::Url;
 
-use crate::process::{OutputCapture, ProcessError, RunningProcess, SpawnSpec};
+use crate::{
+    process::{OutputCapture, ProcessError, RunningProcess, SpawnSpec},
+    readiness::strip_ansi,
+};
 
 /// Default bound on how long Astro may take to become ready.
 pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -33,9 +36,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Short bound for the readiness TCP probe. A refused loopback connection
 /// returns immediately; the bound only covers a host that never answers.
 const READY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
-/// Bytes carried between polls so a token split across two drains is not lost.
-const READY_SCAN_CARRY: usize = 512;
-
 /// Lifecycle state of the preview dev server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerStatus {
@@ -426,7 +426,7 @@ impl DevServer {
             }
         };
 
-        let mut process = match RunningProcess::spawn(spec).await {
+        let mut process = match RunningProcess::spawn_for_preview(spec).await {
             Ok(process) => process,
             Err(error) => {
                 let error = DevServerError::from(error);
@@ -437,7 +437,6 @@ impl DevServer {
         tracing::debug!(pid = ?process.pid(), port, "Astro dev server process spawned");
 
         let deadline = Instant::now() + self.config.startup_timeout;
-        let mut readiness = ReadinessScan::new();
         loop {
             if let Some(cancellation) = cancellation
                 && cancellation.check().is_err()
@@ -447,12 +446,19 @@ impl DevServer {
                 return Err(DevServerError::Cancelled);
             }
 
-            // Only the bytes appended since the previous poll are scanned, and
-            // a printed URL is not readiness on its own: Astro prints it just
-            // before listening, so the loop waits for a real TCP accept.
-            if let Some(url) = readiness.poll(&process, port)
-                && probe_ready(&url).await
-            {
+            // Readiness is observed directly from the drains, independent of
+            // the retained log. Every candidate is probed because either
+            // stream may carry the live URL; a printed URL is not readiness on
+            // its own since Astro prints it just before listening.
+            let mut ready_url = None;
+            for url in process.readiness_candidates(port) {
+                if probe_ready(&url).await {
+                    ready_url = Some(url);
+                    break;
+                }
+            }
+            if let Some(url) = ready_url {
+                process.stop_readiness_observation();
                 tracing::info!(
                     project = %self.project.as_str(),
                     %url,
@@ -701,143 +707,6 @@ fn available_port() -> io::Result<u16> {
     Ok(port)
 }
 
-/// Strip ANSI SGR/CSI escape sequences so readiness parsing sees clean text.
-fn strip_ansi(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(character) = chars.next() {
-        if character == '\u{1b}' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        output.push(character);
-    }
-    output
-}
-
-/// Parse the first loopback preview URL Astro prints once it is listening.
-///
-/// Accepts `localhost` or `127.0.0.1` on any port (Astro may auto-increment past
-/// an occupied port). The returned URL is normalized to `127.0.0.1`.
-fn parse_ready_url(text: &str, fallback_port: u16) -> Option<Url> {
-    let cleaned = strip_ansi(text);
-    for token in cleaned.split(|character: char| {
-        character.is_whitespace()
-            || matches!(character, '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']')
-    }) {
-        let Some(index) = token.find("http://") else {
-            continue;
-        };
-        let raw = token[index..].trim_end_matches([',', ';', '.']);
-        let Ok(url) = Url::parse(raw) else {
-            continue;
-        };
-        let local = matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"));
-        if !local {
-            continue;
-        }
-        let port = url.port().unwrap_or(fallback_port);
-        return Url::parse(&format!("http://127.0.0.1:{port}/")).ok();
-    }
-    None
-}
-
-/// Incremental readiness scan over the captured stdout and stderr.
-///
-/// Each poll decodes only the bytes appended since the previous poll, rather
-/// than re-copying and re-parsing up to 1 MiB per stream every 25 ms. The text
-/// after the last token delimiter is carried into the next poll so an URL
-/// printed across two drains is still read as one token.
-struct ReadinessScan {
-    stdout_offset: usize,
-    stderr_offset: usize,
-    stdout_carry: String,
-    stderr_carry: String,
-}
-
-impl ReadinessScan {
-    fn new() -> Self {
-        Self {
-            stdout_offset: 0,
-            stderr_offset: 0,
-            stdout_carry: String::new(),
-            stderr_carry: String::new(),
-        }
-    }
-
-    /// Scan newly captured output and return the first loopback preview URL.
-    fn poll(&mut self, process: &RunningProcess, fallback_port: u16) -> Option<Url> {
-        scan_tail(
-            process.stdout(),
-            &mut self.stdout_offset,
-            &mut self.stdout_carry,
-            fallback_port,
-        )
-        .or_else(|| {
-            scan_tail(
-                process.stderr(),
-                &mut self.stderr_offset,
-                &mut self.stderr_carry,
-                fallback_port,
-            )
-        })
-    }
-}
-
-/// Decode and parse the bytes appended to one capture since `offset`.
-fn scan_tail(
-    capture: &OutputCapture,
-    offset: &mut usize,
-    carry: &mut String,
-    fallback_port: u16,
-) -> Option<Url> {
-    let (tail, retained) = capture.bytes_from(*offset);
-    if tail.is_empty() {
-        // A complete URL at the end of the previous drain stays in the carry;
-        // keep offering it while the listener finishes binding.
-        return if carry.is_empty() {
-            None
-        } else {
-            parse_ready_url(carry, fallback_port)
-        };
-    }
-    *offset = retained;
-    let mut text = std::mem::take(carry);
-    text.push_str(&String::from_utf8_lossy(&tail));
-    let url = parse_ready_url(&text, fallback_port);
-    *carry = carry_suffix(&text);
-    url
-}
-
-/// Keep the unfinished token at the end of a drained chunk, bounded in size.
-///
-/// A chunk that ends on a delimiter still carries the token before it, so a URL
-/// that was just parsed is offered again by the next poll if its listener was
-/// not yet accepting.
-fn carry_suffix(text: &str) -> String {
-    let end = text.trim_end_matches(is_token_delimiter).len();
-    let start = text[..end].rfind(is_token_delimiter).map_or(0, |index| {
-        index + text[index..].chars().next().map_or(1, char::len_utf8)
-    });
-    let suffix = &text[start..end];
-    let mut start = suffix.len().saturating_sub(READY_SCAN_CARRY);
-    while start < suffix.len() && !suffix.is_char_boundary(start) {
-        start += 1;
-    }
-    suffix[start..].to_owned()
-}
-
-fn is_token_delimiter(character: char) -> bool {
-    character.is_whitespace() || matches!(character, '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']')
-}
-
 /// Whether the parsed loopback URL accepts a connection.
 ///
 /// Text alone is not readiness: Astro prints its URL just before the listener
@@ -886,6 +755,7 @@ fn excerpt(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::readiness::parse_ready_url;
 
     #[test]
     fn parses_plain_and_ansi_colored_ready_lines() {
@@ -915,33 +785,6 @@ mod tests {
             parse_ready_url(text, 1).unwrap().as_str(),
             "http://127.0.0.1:4321/"
         );
-    }
-
-    #[test]
-    fn readiness_scan_finds_a_url_in_appended_output_only() {
-        let capture = OutputCapture::new();
-        let mut offset = 0;
-        let mut carry = String::new();
-
-        capture.push_bytes(b"  Local    ht");
-        assert!(
-            scan_tail(&capture, &mut offset, &mut carry, 4321).is_none(),
-            "an incomplete token is not a URL"
-        );
-
-        capture.push_bytes(b"tp://127.0.0.1:4321/\n");
-        assert_eq!(
-            scan_tail(&capture, &mut offset, &mut carry, 4321)
-                .unwrap()
-                .as_str(),
-            "http://127.0.0.1:4321/",
-            "the URL split across two drains is still found"
-        );
-
-        // No new bytes: the carried token is offered again while the listener
-        // finishes binding, without rescanning the retained prefix.
-        assert!(scan_tail(&capture, &mut offset, &mut carry, 4321).is_some());
-        assert_eq!(offset, capture.len(), "the scan consumed the tail once");
     }
 
     #[test]

@@ -456,3 +456,59 @@ fn output_flooding_stays_under_cap_and_never_deadlocks() {
         server.stop().await.expect("stop after flood");
     });
 }
+
+#[test]
+fn startup_observes_readiness_after_more_than_the_retained_log() {
+    block_on(async {
+        let dir = TempDir::new().unwrap();
+        // Fill and overflow the retained stdout buffer before Astro announces
+        // its URL. Readiness must still observe the later bytes.
+        let body = format!(
+            "{PRELUDE}\ndd if=/dev/zero bs=65536 count=32 2>/dev/null | tr '\\0' 'a'\nprintf '\\n'\n{READY}\nwhile true; do sleep 0.1; done\n"
+        );
+        let script = write_script(dir.path(), "astro.sh", &body);
+        let (_listener, port) = ready_listener();
+        let mut server = direct_server(&script, dir.path(), port);
+
+        let url = server
+            .start()
+            .await
+            .expect("readiness must not depend on the retained log prefix");
+        assert_eq!(url.port(), Some(port));
+        assert_eq!(server.status().label(), "ready");
+
+        let capture = server.stdout_capture().expect("server is running");
+        assert!(
+            capture.is_truncated(),
+            "the fixture must overflow the retained log"
+        );
+        assert!(
+            !server.stdout_text().contains("http://127.0.0.1"),
+            "the ready line must have arrived after the retained prefix"
+        );
+
+        server.stop().await.expect("stop");
+    });
+}
+
+#[test]
+fn stale_stdout_candidate_does_not_mask_ready_stderr() {
+    block_on(async {
+        let dir = TempDir::new().unwrap();
+        let (_listener, port) = ready_listener();
+
+        let body = format!(
+            "{PRELUDE}\nprintf '  Local    http://127.0.0.1:0/\\n'\nprintf '  Local    http://127.0.0.1:%s/\\n' \"$PORT\" >&2\nwhile true; do sleep 0.1; done\n"
+        );
+        let script = write_script(dir.path(), "astro.sh", &body);
+        let mut server = direct_server(&script, dir.path(), port);
+
+        let url = server
+            .start()
+            .await
+            .expect("a stale stdout URL must not hide the ready stderr URL");
+        assert_eq!(url.port(), Some(port));
+
+        server.stop().await.expect("stop");
+    });
+}

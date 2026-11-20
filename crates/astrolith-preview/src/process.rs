@@ -36,6 +36,9 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
+use url::Url;
+
+use crate::readiness::ReadinessObserver;
 
 /// Maximum bytes retained from each output stream (1 MiB per stream).
 pub const OUTPUT_CAP: usize = 1024 * 1024;
@@ -114,25 +117,9 @@ impl OutputCapture {
         self.lock().bytes.clone()
     }
 
-    /// Retained bytes after `offset`, plus the retained length.
-    ///
-    /// Readiness polling walks only the newly appended tail; the prefix is
-    /// never copied again.
-    pub fn bytes_from(&self, offset: usize) -> (Vec<u8>, usize) {
-        let state = self.lock();
-        let start = offset.min(state.bytes.len());
-        (state.bytes[start..].to_vec(), state.bytes.len())
-    }
-
     /// Retained bytes decoded lossily as UTF-8.
     pub fn text_lossy(&self) -> String {
         String::from_utf8_lossy(&self.lock().bytes).into_owned()
-    }
-
-    /// Append bytes without a drain task, for readiness-scan tests.
-    #[cfg(test)]
-    pub(crate) fn push_bytes(&self, chunk: &[u8]) {
-        self.push(chunk);
     }
 }
 
@@ -219,6 +206,8 @@ pub struct RunningProcess {
     child: Child,
     stdout: OutputCapture,
     stderr: OutputCapture,
+    stdout_readiness: Option<ReadinessObserver>,
+    stderr_readiness: Option<ReadinessObserver>,
     stdout_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
     /// Process-group id to signal (Unix). Cleared once the child is reaped so a
@@ -235,6 +224,15 @@ pub struct RunningProcess {
 impl RunningProcess {
     /// Spawn `spec` as a runtime-owned child with both output streams drained.
     pub async fn spawn(spec: SpawnSpec) -> Result<Self, ProcessError> {
+        Self::spawn_inner(spec, false).await
+    }
+
+    /// Spawn a preview server and observe its output only while starting.
+    pub(crate) async fn spawn_for_preview(spec: SpawnSpec) -> Result<Self, ProcessError> {
+        Self::spawn_inner(spec, true).await
+    }
+
+    async fn spawn_inner(spec: SpawnSpec, observe_readiness: bool) -> Result<Self, ProcessError> {
         let mut command = Command::new(&spec.program);
         command
             .args(&spec.args)
@@ -275,19 +273,23 @@ impl RunningProcess {
 
         let stdout = OutputCapture::new();
         let stderr = OutputCapture::new();
+        let stdout_readiness = observe_readiness.then(ReadinessObserver::default);
+        let stderr_readiness = observe_readiness.then(ReadinessObserver::default);
         let stdout_task = child
             .stdout
             .take()
-            .map(|reader| spawn_drain(reader, stdout.clone()));
+            .map(|reader| spawn_drain(reader, stdout.clone(), stdout_readiness.clone()));
         let stderr_task = child
             .stderr
             .take()
-            .map(|reader| spawn_drain(reader, stderr.clone()));
+            .map(|reader| spawn_drain(reader, stderr.clone(), stderr_readiness.clone()));
 
         Ok(Self {
             child,
             stdout,
             stderr,
+            stdout_readiness,
+            stderr_readiness,
             stdout_task,
             stderr_task,
             #[cfg(unix)]
@@ -316,6 +318,29 @@ impl RunningProcess {
     /// The bounded stderr capture.
     pub fn stderr(&self) -> &OutputCapture {
         &self.stderr
+    }
+
+    /// Local URL candidates observed during preview startup.
+    pub(crate) fn readiness_candidates(&self, fallback_port: u16) -> Vec<Url> {
+        let mut urls = self
+            .stdout_readiness
+            .as_ref()
+            .map(|readiness| readiness.urls(fallback_port))
+            .unwrap_or_default();
+        if let Some(readiness) = &self.stderr_readiness {
+            urls.extend(readiness.urls(fallback_port));
+        }
+        urls
+    }
+
+    /// Stop observing startup output once the preview is ready.
+    pub(crate) fn stop_readiness_observation(&mut self) {
+        if let Some(readiness) = self.stdout_readiness.take() {
+            readiness.stop();
+        }
+        if let Some(readiness) = self.stderr_readiness.take() {
+            readiness.stop();
+        }
     }
 
     /// Stdout and stderr text merged for readiness parsing.
@@ -450,6 +475,7 @@ impl Drop for RunningProcess {
         );
         // Safety net for project switch / application exit: never leave the
         // process tree running if the owner is dropped without an explicit stop.
+        self.stop_readiness_observation();
         self.signal_tree_force();
         let _ = self.child.start_kill();
         if let Some(task) = self.stdout_task.take() {
@@ -461,7 +487,11 @@ impl Drop for RunningProcess {
     }
 }
 
-fn spawn_drain<R>(mut reader: R, capture: OutputCapture) -> JoinHandle<()>
+fn spawn_drain<R>(
+    mut reader: R,
+    capture: OutputCapture,
+    readiness: Option<ReadinessObserver>,
+) -> JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -474,7 +504,12 @@ where
                     tracing::trace!(%error, "preview output stream ended with an error");
                     break;
                 }
-                Ok(read) => capture.push(&buffer[..read]),
+                Ok(read) => {
+                    if let Some(readiness) = &readiness {
+                        readiness.push(&buffer[..read]);
+                    }
+                    capture.push(&buffer[..read]);
+                }
             }
         }
     })
