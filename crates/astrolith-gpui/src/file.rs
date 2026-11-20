@@ -5,6 +5,8 @@ use std::{
     path::PathBuf,
 };
 
+use astrolith_document::DocumentError;
+
 pub(crate) struct DocumentSource {
     pub path: PathBuf,
     pub source: String,
@@ -24,9 +26,11 @@ pub(crate) fn read_document(path: PathBuf) -> io::Result<DocumentSource> {
     }
     let source =
         String::from_utf8(bytes).map_err(|_| io::Error::other(tr!("services.file.not_utf8")))?;
-    if source.lines().count() > 50000 {
-        return Err(io::Error::other(tr!("services.file.too_many_lines")));
-    }
+    astrolith_document::validate_document(&source).map_err(|error| match error {
+        DocumentError::TooLarge { .. } => io::Error::other(tr!("services.file.too_large")),
+        DocumentError::TooManyLines { .. } => io::Error::other(tr!("services.file.too_many_lines")),
+        error => io::Error::other(error.to_string()),
+    })?;
     Ok(DocumentSource { path, source })
 }
 
@@ -64,5 +68,30 @@ mod tests {
             .set_len((astrolith_document::MAX_DOCUMENT_BYTES + 1) as u64)
             .unwrap();
         assert!(read_document(path).is_err());
+    }
+
+    #[test]
+    fn line_limit_matches_save_admission_without_changing_existing_open_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let at_cap = directory.path().join("at-cap.md");
+        std::fs::write(&at_cap, "\n".repeat(astrolith_document::MAX_DOCUMENT_LINES)).unwrap();
+        assert_eq!(
+            read_document(at_cap).unwrap().source.lines().count(),
+            astrolith_document::MAX_DOCUMENT_LINES
+        );
+
+        let over_cap = directory.path().join("over-cap.md");
+        std::fs::write(
+            &over_cap,
+            format!(
+                "{}last",
+                "\n".repeat(astrolith_document::MAX_DOCUMENT_LINES)
+            ),
+        )
+        .unwrap();
+        assert!(
+            read_document(over_cap).is_err(),
+            "50,001 logical source lines exceed the existing open limit"
+        );
     }
 }

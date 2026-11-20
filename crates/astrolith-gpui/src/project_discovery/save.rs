@@ -7,6 +7,7 @@ pub(super) fn save_failure_class(error: &astrolith_document::DocumentError) -> &
     match error {
         DocumentError::Io { .. } => "io",
         DocumentError::TooLarge { .. } => "too-large",
+        DocumentError::TooManyLines { .. } => "too-many-lines",
         DocumentError::RevisionOverflow => "revision",
         DocumentError::InvalidEdit { .. } => "invalid-edit",
         DocumentError::InvalidFrontmatter

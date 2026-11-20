@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::{
     collections::HashMap,
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -34,6 +34,44 @@ use crate::version::DiskBaseline;
 /// The open path refuses files above this cap, so a save above it would create
 /// a file the application can never reopen or fingerprint again.
 pub const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Largest source line count accepted by open and save.
+///
+/// This deliberately retains [`str::lines`] semantics: a final newline does
+/// not add a separate empty line. A document accepted by open must therefore
+/// also be accepted by every save path.
+pub const MAX_DOCUMENT_LINES: usize = 50_000;
+
+/// Count source lines using the same rule as the existing open admission.
+pub fn document_line_count(source: &str) -> usize {
+    source.lines().count()
+}
+
+/// Validate that a source can be both opened and saved by the editor.
+///
+/// Byte size is checked before scanning for lines so an oversized input is
+/// rejected without unnecessary work.
+///
+/// # Errors
+///
+/// Returns [`DocumentError::TooLarge`] or [`DocumentError::TooManyLines`]
+/// without writing anything.
+pub fn validate_document(source: &str) -> Result<(), DocumentError> {
+    if source.len() > MAX_DOCUMENT_BYTES {
+        return Err(DocumentError::TooLarge {
+            bytes: source.len(),
+            limit: MAX_DOCUMENT_BYTES,
+        });
+    }
+    let lines = document_line_count(source);
+    if lines > MAX_DOCUMENT_LINES {
+        return Err(DocumentError::TooManyLines {
+            lines,
+            limit: MAX_DOCUMENT_LINES,
+        });
+    }
+    Ok(())
+}
 
 /// Outcome of attempting to save one document snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,6 +157,7 @@ impl DocumentSnapshot {
 /// Returns [`DocumentError::Io`] when the file cannot be read or written for a
 /// reason other than a normal conflict.
 pub async fn save_snapshot(snapshot: &DocumentSnapshot) -> Result<SaveOutcome, DocumentError> {
+    validate_document(&snapshot.content)?;
     let lock = path_lock(&snapshot.path);
     let _guard = lock.lock().await;
 
@@ -146,42 +185,10 @@ fn save_blocking(
     baseline: &DiskBaseline,
     revision: u64,
 ) -> Result<SaveOutcome, DocumentError> {
-    if content.len() > MAX_DOCUMENT_BYTES {
+    if !disk_matches_baseline(path, baseline)? {
         tracing::warn!(
             path = %path.display(),
-            bytes = content.len(),
-            limit = MAX_DOCUMENT_BYTES,
-            "refusing to save a document above the readable size cap"
-        );
-        return Err(DocumentError::TooLarge {
-            bytes: content.len(),
-            limit: MAX_DOCUMENT_BYTES,
-        });
-    }
-    let current = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            tracing::warn!(
-                path = %path.display(),
-                "save conflict: the file no longer exists"
-            );
-            return Ok(SaveOutcome::Conflict);
-        }
-        Err(error) => {
-            tracing::error!(
-                path = %path.display(),
-                %error,
-                "could not read a document before saving"
-            );
-            return Err(DocumentError::Io {
-                message: format!("cannot read {}: {error}", path.display()),
-            });
-        }
-    };
-    if !baseline.matches(&current) {
-        tracing::warn!(
-            path = %path.display(),
-            "save conflict: the file changed on disk"
+            "save conflict: the file changed, vanished, or exceeds the readable limit"
         );
         return Ok(SaveOutcome::Conflict);
     }
@@ -199,6 +206,77 @@ fn save_blocking(
     Ok(SaveOutcome::Saved { revision })
 }
 
+/// Compare the current file with the loaded baseline without reading beyond
+/// the baseline's already-bounded length.
+fn disk_matches_baseline(path: &Path, baseline: &DiskBaseline) -> Result<bool, DocumentError> {
+    if baseline.as_bytes().len() > MAX_DOCUMENT_BYTES {
+        return Ok(false);
+    }
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                %error,
+                "could not inspect a document before saving"
+            );
+            return Err(DocumentError::Io {
+                message: format!("cannot read {}: {error}", path.display()),
+            });
+        }
+    };
+    if !metadata.is_file() {
+        return Err(DocumentError::Io {
+            message: format!("cannot read {}: not a regular file", path.display()),
+        });
+    }
+    if metadata.len() != baseline.as_bytes().len() as u64 {
+        return Ok(false);
+    }
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                %error,
+                "could not open a document before saving"
+            );
+            return Err(DocumentError::Io {
+                message: format!("cannot read {}: {error}", path.display()),
+            });
+        }
+    };
+    let opened = file.metadata().map_err(|error| DocumentError::Io {
+        message: format!("cannot inspect {}: {error}", path.display()),
+    })?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Ok(false);
+    }
+    let current = read_conflict_candidate(file, baseline.as_bytes().len()).map_err(|error| {
+        tracing::error!(
+            path = %path.display(),
+            %error,
+            "could not read a document before saving"
+        );
+        DocumentError::Io {
+            message: format!("cannot read {}: {error}", path.display()),
+        }
+    })?;
+    Ok(baseline.matches(&current))
+}
+
+/// Read at most one byte beyond the expected baseline length. The extra byte
+/// detects growth after the metadata check without unbounded allocation.
+fn read_conflict_candidate(reader: impl Read, expected_len: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(expected_len.saturating_add(1));
+    reader
+        .take(expected_len as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Persist `content` at `path` unconditionally, under the same per-path writer
@@ -206,22 +284,18 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// This deliberately bypasses the baseline comparison: it is the explicit
 /// "overwrite disk with my edits" resolution for a save conflict. The write is
-/// still atomic and is refused above [`MAX_DOCUMENT_BYTES`].
+/// still atomic and is refused when the content exceeds the readable byte or
+/// line limits.
 ///
 /// # Errors
 ///
-/// Returns [`DocumentError::TooLarge`] without writing, or [`DocumentError::Io`]
-/// when the write fails.
+/// Returns [`DocumentError::TooLarge`] or [`DocumentError::TooManyLines`]
+/// without writing, or [`DocumentError::Io`] when the write fails.
 pub async fn overwrite_document(
     path: impl AsRef<Path>,
     content: &str,
 ) -> Result<(), DocumentError> {
-    if content.len() > MAX_DOCUMENT_BYTES {
-        return Err(DocumentError::TooLarge {
-            bytes: content.len(),
-            limit: MAX_DOCUMENT_BYTES,
-        });
-    }
+    validate_document(content)?;
     let path = path.as_ref().to_path_buf();
     let lock = path_lock(&path);
     let _guard = lock.lock().await;
@@ -244,18 +318,13 @@ pub async fn overwrite_document(
 ///
 /// # Errors
 ///
-/// Returns [`DocumentError::TooLarge`] without writing, or [`DocumentError::Io`]
-/// when the copy cannot be created.
+/// Returns [`DocumentError::TooLarge`] or [`DocumentError::TooManyLines`]
+/// without writing, or [`DocumentError::Io`] when the copy cannot be created.
 pub async fn save_document_copy(
     source: impl AsRef<Path>,
     content: &str,
 ) -> Result<PathBuf, DocumentError> {
-    if content.len() > MAX_DOCUMENT_BYTES {
-        return Err(DocumentError::TooLarge {
-            bytes: content.len(),
-            limit: MAX_DOCUMENT_BYTES,
-        });
-    }
+    validate_document(content)?;
     let source = source.as_ref().to_path_buf();
     let lock = path_lock(&source);
     let _guard = lock.lock().await;
@@ -700,6 +769,129 @@ mod tests {
         assert_eq!(second.file_name().unwrap(), "post.local-2.md");
         assert_eq!(fs::read_to_string(&second).unwrap(), "second copy");
         assert_eq!(fs::read_to_string(&source).unwrap(), "original");
+    }
+
+    #[test]
+    fn all_write_paths_refuse_a_document_above_the_line_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "old").unwrap();
+        let too_many_lines = format!("{}last", "\n".repeat(MAX_DOCUMENT_LINES));
+
+        let mut document = buffer("old");
+        document.apply_text(too_many_lines.clone()).unwrap();
+        let snapshot = DocumentSnapshot::capture(&document, &path);
+
+        let expected = DocumentError::TooManyLines {
+            lines: 50_001,
+            limit: MAX_DOCUMENT_LINES,
+        };
+        assert!(expected.to_string().contains("overwriting"));
+        assert!(expected.to_string().contains("saving a copy"));
+        assert_eq!(
+            runtime().block_on(save_snapshot(&snapshot)),
+            Err(expected.clone())
+        );
+        assert_eq!(
+            runtime().block_on(overwrite_document(&path, &too_many_lines)),
+            Err(expected.clone())
+        );
+        assert_eq!(
+            runtime().block_on(save_document_copy(&path, &too_many_lines)),
+            Err(expected)
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+        assert!(!dir.path().join("doc.local.md").exists());
+    }
+
+    #[test]
+    fn a_save_at_the_line_cap_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "old").unwrap();
+        let at_cap = format!("{}last", "\n".repeat(MAX_DOCUMENT_LINES - 1));
+
+        let mut document = buffer("old");
+        let revision = document.apply_text(at_cap.clone()).unwrap();
+        let snapshot = DocumentSnapshot::capture(&document, &path);
+
+        assert_eq!(
+            runtime().block_on(save_snapshot(&snapshot)),
+            Ok(SaveOutcome::Saved {
+                revision: revision.get()
+            })
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), at_cap);
+    }
+
+    #[test]
+    fn a_newline_terminated_document_at_the_line_cap_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "old").unwrap();
+        let at_cap = "\n".repeat(MAX_DOCUMENT_LINES);
+
+        let mut document = buffer("old");
+        let revision = document.apply_text(at_cap.clone()).unwrap();
+        let snapshot = DocumentSnapshot::capture(&document, &path);
+
+        assert_eq!(
+            runtime().block_on(save_snapshot(&snapshot)),
+            Ok(SaveOutcome::Saved {
+                revision: revision.get()
+            })
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), at_cap);
+    }
+
+    #[test]
+    fn an_oversized_external_file_is_a_conflict_without_replacing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.md");
+        fs::write(&path, "old").unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_DOCUMENT_BYTES as u64 + 1)
+            .unwrap();
+
+        let mut document = buffer("old");
+        document.apply_text("mine".to_owned()).unwrap();
+        let snapshot = DocumentSnapshot::capture(&document, &path);
+
+        assert_eq!(
+            runtime().block_on(save_snapshot(&snapshot)),
+            Ok(SaveOutcome::Conflict)
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            MAX_DOCUMENT_BYTES as u64 + 1,
+            "a save must not replace the externally changed file"
+        );
+    }
+
+    #[test]
+    fn conflict_comparison_stops_one_byte_past_the_baseline() {
+        struct CountingReader {
+            read: usize,
+        }
+
+        impl Read for CountingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let count = buffer.len().min(17);
+                buffer[..count].fill(b'x');
+                self.read += count;
+                Ok(count)
+            }
+        }
+
+        let mut reader = CountingReader { read: 0 };
+        assert_eq!(
+            read_conflict_candidate(&mut reader, 8).unwrap(),
+            b"xxxxxxxxx"
+        );
+        assert_eq!(reader.read, 9);
     }
 
     #[test]

@@ -1,6 +1,16 @@
 //! Load admission, bounded reads and session installation.
 use super::*;
 
+fn validate_loaded_source(source: String) -> Result<String, String> {
+    astrolith_document::validate_document(&source).map_err(|error| match error {
+        astrolith_document::DocumentError::TooManyLines { .. } => {
+            tr!("browser.load.line_limit")
+        }
+        error => error.to_string(),
+    })?;
+    Ok(source)
+}
+
 impl ProjectWorkspace {
     /// Whether `path` is a project-owned text source this workspace may edit.
     ///
@@ -93,9 +103,7 @@ impl ProjectWorkspace {
             }
             let source =
                 read_bounded(&actual, MAX_DOCUMENT_BYTES).map_err(|error| error.to_string())?;
-            if source.lines().count() > 50_000 {
-                return Err(tr!("browser.load.line_limit"));
-            }
+            let source = validate_loaded_source(source)?;
             cancellation.check().map_err(|error| error.to_string())?;
             Ok(source)
         });
@@ -201,9 +209,7 @@ impl ProjectWorkspace {
             }
             let source =
                 read_bounded(&actual, MAX_DOCUMENT_BYTES).map_err(|error| error.to_string())?;
-            if source.lines().count() > 50_000 {
-                return Err(tr!("browser.load.line_limit"));
-            }
+            let source = validate_loaded_source(source)?;
             cancellation.check().map_err(|error| error.to_string())?;
             Ok(source)
         });

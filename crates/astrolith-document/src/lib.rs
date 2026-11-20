@@ -52,8 +52,8 @@ pub use projection::{
 };
 pub use recovery::{RecoveryLoad, RecoveryRecord, RecoveryStore};
 pub use save::{
-    DocumentSnapshot, MAX_DOCUMENT_BYTES, SaveOutcome, overwrite_document, save_document_copy,
-    save_snapshot,
+    DocumentSnapshot, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_LINES, SaveOutcome, document_line_count,
+    overwrite_document, save_document_copy, save_snapshot, validate_document,
 };
 pub use sentences::{cursor_sentence, other_sentences, sentences};
 pub use serialize::serialize_document;

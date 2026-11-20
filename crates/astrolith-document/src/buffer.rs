@@ -81,6 +81,13 @@ pub enum DocumentError {
         /// The largest accepted content length.
         limit: usize,
     },
+    /// A save would persist a document above the readable line-count cap.
+    TooManyLines {
+        /// Line count of the content that was refused.
+        lines: usize,
+        /// The largest accepted line count.
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for DocumentError {
@@ -104,7 +111,15 @@ impl std::fmt::Display for DocumentError {
             ),
             Self::TooLarge { bytes, limit } => write!(
                 formatter,
-                "document is {bytes} bytes; the maximum supported size is {limit} bytes"
+                "document is {bytes} bytes; the maximum supported size is {limit} bytes. \
+                 The save was not attempted and your edits are retained; split the document \
+                 into smaller files before saving, overwriting, or saving a copy"
+            ),
+            Self::TooManyLines { lines, limit } => write!(
+                formatter,
+                "document has {lines} lines; the maximum supported line count is {limit}. \
+                 The save was not attempted and your edits are retained; reduce or split the \
+                 document before saving, overwriting, or saving a copy"
             ),
         }
     }
