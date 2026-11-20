@@ -216,6 +216,29 @@ terminal:
       en: "Could not resize the terminal."
       zh-CN: "无法调整终端大小。"
       ja: "ターミナルのサイズを変更できませんでした。"
+  input:
+    action:
+      paste:
+        en: "Paste"
+        zh-CN: "粘贴"
+        ja: "貼り付け"
+      keystroke:
+        en: "Keystroke"
+        zh-CN: "按键"
+        ja: "キー入力"
+    rejected:
+      queue_full:
+        en: "%{action} was not sent because the terminal input queue is full. Retry when it drains."
+        zh-CN: "%{action}未发送，因为终端输入队列已满。请在队列清空后重试。"
+        ja: "%{action}はターミナルの入力キューが満杯のため送信されませんでした。キューが空になってから再試行してください。"
+      too_large:
+        en: "%{action} was not sent because it exceeds the terminal's %{limit} byte input limit. Shorten it and retry."
+        zh-CN: "%{action}未发送，因为超过终端 %{limit} 字节的输入上限。请缩短后重试。"
+        ja: "%{action}はターミナルの入力上限 %{limit} バイトを超えたため送信されませんでした。短くして再試行してください。"
+      failed:
+        en: "%{action} was not sent: %{error}."
+        zh-CN: "%{action}未发送：%{error}。"
+        ja: "%{action}は送信されませんでした: %{error}。"
   status:
     exited_with_signal:
       en: "Terminal exited with code %{code} (%{signal})"

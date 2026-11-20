@@ -5,10 +5,11 @@
 //! and bumps a revision, while the view polls that revision and renders cells.
 
 use std::{
+    collections::VecDeque,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
@@ -39,6 +40,14 @@ pub const DEFAULT_COLS: u16 = 80;
 pub const SCROLLBACK_CAPACITY: usize = 2_000;
 /// Maximum bytes parsed per reader batch.
 const READ_BUFFER: usize = 16 * 1024;
+/// Maximum number of PTY writes waiting for the writer thread.
+const INPUT_QUEUE_CAPACITY: usize = 256;
+/// Queue slots kept available for terminal protocol replies.
+const CONTROL_REPLY_RESERVE: usize = 16;
+/// Maximum bytes accepted by the PTY input queue, including the active write.
+const INPUT_QUEUE_BYTES: usize = 8 * 1024 * 1024;
+/// Queue bytes kept available for terminal protocol replies.
+const CONTROL_REPLY_BYTE_RESERVE: usize = 64 * 1024;
 /// Grace between `SIGHUP` and `SIGKILL` for the child's process group.
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_millis(150);
@@ -46,12 +55,221 @@ const KILL_GRACE: Duration = Duration::from_millis(150);
 const REAP_TIMEOUT: Duration = Duration::from_millis(800);
 /// Upper bound for the reader to drain after the process tree is gone.
 const READER_TIMEOUT: Duration = Duration::from_millis(400);
+/// Upper bound for the writer to drain after the process tree is gone.
+const WRITER_TIMEOUT: Duration = Duration::from_millis(400);
 
-type SharedWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+#[derive(Clone, Copy)]
+enum InputKind {
+    Interactive,
+    Control,
+}
+
+#[derive(Clone, Copy)]
+struct InputLimits {
+    messages: usize,
+    interactive_messages: usize,
+    bytes: usize,
+    interactive_bytes: usize,
+}
+
+struct InputQueue {
+    pending: VecDeque<Vec<u8>>,
+    pending_bytes: usize,
+    in_flight: usize,
+    closed: bool,
+}
+
+#[derive(Clone)]
+struct PtyInput {
+    queue: Arc<(Mutex<InputQueue>, Condvar)>,
+    limits: InputLimits,
+}
+
+impl PtyInput {
+    fn spawn(
+        mut writer: Box<dyn Write + Send>,
+        capacity: usize,
+        control_reserve: usize,
+        byte_capacity: usize,
+        control_byte_reserve: usize,
+    ) -> io::Result<(Self, JoinHandle<()>)> {
+        let capacity = capacity.max(1);
+        let byte_capacity = byte_capacity.max(1);
+        let limits = InputLimits {
+            messages: capacity,
+            interactive_messages: capacity.saturating_sub(control_reserve),
+            bytes: byte_capacity,
+            interactive_bytes: byte_capacity.saturating_sub(control_byte_reserve),
+        };
+        let queue = Arc::new((
+            Mutex::new(InputQueue {
+                pending: VecDeque::new(),
+                pending_bytes: 0,
+                in_flight: 0,
+                closed: false,
+            }),
+            Condvar::new(),
+        ));
+        let input = Self {
+            queue: queue.clone(),
+            limits,
+        };
+        let worker_input = input.clone();
+        let worker = thread::Builder::new()
+            .name("astrolith-terminal-writer".into())
+            .spawn(move || {
+                loop {
+                    let bytes = {
+                        let (lock, ready) = &*queue;
+                        let mut queue = lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        loop {
+                            if queue.closed {
+                                return;
+                            }
+                            if let Some(bytes) = queue.pending.pop_front() {
+                                queue.in_flight += 1;
+                                break bytes;
+                            }
+                            queue = ready
+                                .wait(queue)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        }
+                    };
+                    let result = writer.write_all(&bytes).and_then(|_| writer.flush());
+                    worker_input.finish_write(bytes.len());
+                    if result.is_err() {
+                        worker_input.shutdown();
+                        return;
+                    }
+                }
+            })
+            .map_err(io::Error::other)?;
+        Ok((input, worker))
+    }
+
+    fn write(&self, bytes: &[u8], kind: InputKind) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.check_available(bytes.len(), kind)?;
+        self.enqueue(bytes.to_vec(), kind)
+    }
+
+    fn limits(&self, kind: InputKind) -> (usize, usize) {
+        match kind {
+            InputKind::Interactive => (
+                self.limits.interactive_messages,
+                self.limits.interactive_bytes,
+            ),
+            InputKind::Control => (self.limits.messages, self.limits.bytes),
+        }
+    }
+
+    fn check_size(bytes: usize, byte_limit: usize) -> io::Result<()> {
+        if bytes > byte_limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("terminal input is {bytes} bytes, above the {byte_limit}-byte limit"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_capacity(
+        queue: &InputQueue,
+        bytes: usize,
+        message_limit: usize,
+        byte_limit: usize,
+    ) -> io::Result<()> {
+        if queue.closed {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "terminal session is shut down",
+            ));
+        }
+        if queue.pending.len().saturating_add(queue.in_flight) >= message_limit
+            || queue.pending_bytes.saturating_add(bytes) > byte_limit
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "terminal input queue is full",
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_available(&self, bytes: usize, kind: InputKind) -> io::Result<()> {
+        let (message_limit, byte_limit) = self.limits(kind);
+        Self::check_size(bytes, byte_limit)?;
+        let (lock, _) = &*self.queue;
+        let queue = lock
+            .lock()
+            .map_err(|_| io::Error::other("terminal input queue lock poisoned"))?;
+        Self::check_capacity(&queue, bytes, message_limit, byte_limit)
+    }
+
+    fn enqueue(&self, bytes: Vec<u8>, kind: InputKind) -> io::Result<()> {
+        let (message_limit, byte_limit) = self.limits(kind);
+        Self::check_size(bytes.len(), byte_limit)?;
+        let (lock, ready) = &*self.queue;
+        let mut queue = lock
+            .lock()
+            .map_err(|_| io::Error::other("terminal input queue lock poisoned"))?;
+        Self::check_capacity(&queue, bytes.len(), message_limit, byte_limit)?;
+        queue.pending_bytes += bytes.len();
+        queue.pending.push_back(bytes);
+        ready.notify_one();
+        Ok(())
+    }
+
+    fn write_paste(&self, text: &str, bracketed: bool) -> io::Result<()> {
+        let bracketed = bracketed.then_some((b"\x1b[200~", b"\x1b[201~"));
+        let extra = bracketed.map_or(0, |(start, end)| start.len() + end.len());
+        let length = text.len().checked_add(extra).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "terminal paste size overflowed",
+            )
+        })?;
+        self.check_available(length, InputKind::Interactive)?;
+        let mut bytes = Vec::with_capacity(length);
+        if let Some((start, end)) = bracketed {
+            bytes.extend_from_slice(start);
+            bytes.extend_from_slice(text.as_bytes());
+            bytes.extend_from_slice(end);
+        } else {
+            bytes.extend_from_slice(text.as_bytes());
+        }
+        self.enqueue(bytes, InputKind::Interactive)
+    }
+
+    fn finish_write(&self, bytes: usize) {
+        let (lock, _) = &*self.queue;
+        let mut queue = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.in_flight = queue.in_flight.saturating_sub(1);
+        queue.pending_bytes = queue.pending_bytes.saturating_sub(bytes);
+    }
+
+    fn shutdown(&self) {
+        let (lock, ready) = &*self.queue;
+        let mut queue = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.closed = true;
+        queue.pending.clear();
+        queue.pending_bytes = 0;
+        queue.in_flight = 0;
+        ready.notify_one();
+    }
+}
 
 #[derive(Clone)]
 struct TerminalEventProxy {
-    writer: SharedWriter,
+    input: PtyInput,
     revision: Arc<AtomicU64>,
     title: Arc<Mutex<Option<String>>>,
     cols: Arc<AtomicU16>,
@@ -60,13 +278,7 @@ struct TerminalEventProxy {
 
 impl TerminalEventProxy {
     fn write_reply(&self, text: &str) {
-        let Ok(mut writer) = self.writer.lock() else {
-            return;
-        };
-        if let Some(writer) = writer.as_mut() {
-            let _ = writer.write_all(text.as_bytes());
-            let _ = writer.flush();
-        }
+        let _ = self.input.write(text.as_bytes(), InputKind::Control);
     }
 }
 
@@ -133,7 +345,7 @@ pub struct TerminalSession {
     /// Master side of the PTY; taken (and closed) before shutdown signals the
     /// child so no new input can reach a dying shell.
     master: Option<Box<dyn MasterPty + Send>>,
-    writer: Option<SharedWriter>,
+    input: Option<PtyInput>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     screen: Arc<Mutex<Term<TerminalEventProxy>>>,
     title: Arc<Mutex<Option<String>>>,
@@ -145,6 +357,7 @@ pub struct TerminalSession {
     event_cols: Arc<AtomicU16>,
     event_rows: Arc<AtomicU16>,
     reader: Option<JoinHandle<()>>,
+    writer_thread: Option<JoinHandle<()>>,
 }
 
 /// How a terminal child ended.
@@ -366,9 +579,14 @@ impl TerminalSession {
             .spawn_command(command)
             .map_err(io::Error::other)?;
         let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
-        let writer = Arc::new(Mutex::new(Some(
-            pair.master.take_writer().map_err(io::Error::other)?,
-        )));
+        let writer = pair.master.take_writer().map_err(io::Error::other)?;
+        let (input, writer) = PtyInput::spawn(
+            writer,
+            INPUT_QUEUE_CAPACITY,
+            CONTROL_REPLY_RESERVE,
+            INPUT_QUEUE_BYTES,
+            CONTROL_REPLY_BYTE_RESERVE,
+        )?;
         let revision = Arc::new(AtomicU64::new(0));
         let exited = Arc::new(AtomicBool::new(false));
         let exit = Arc::new(Mutex::new(None));
@@ -376,7 +594,7 @@ impl TerminalSession {
         let event_cols = Arc::new(AtomicU16::new(cols));
         let event_rows = Arc::new(AtomicU16::new(rows));
         let event_proxy = TerminalEventProxy {
-            writer: writer.clone(),
+            input: input.clone(),
             revision: revision.clone(),
             title: title.clone(),
             cols: event_cols.clone(),
@@ -419,12 +637,19 @@ impl TerminalSession {
                 }
                 reader_exited.store(true, Ordering::Release);
                 reader_revision.fetch_add(1, Ordering::Release);
-            })
-            .map_err(io::Error::other)?;
+            });
+        let reader = match reader {
+            Ok(reader) => reader,
+            Err(error) => {
+                input.shutdown();
+                wait_for_thread(Some(writer), WRITER_TIMEOUT);
+                return Err(io::Error::other(error));
+            }
+        };
         Ok(Self {
             root: root.to_path_buf(),
             master: Some(pair.master),
-            writer: Some(writer),
+            input: Some(input),
             child: Arc::new(Mutex::new(child)),
             screen,
             title,
@@ -436,6 +661,7 @@ impl TerminalSession {
             event_cols,
             event_rows,
             reader: Some(reader),
+            writer_thread: Some(writer),
         })
     }
 
@@ -606,22 +832,37 @@ impl TerminalSession {
         (mode, encoding)
     }
 
-    /// Send bytes to the child.
-    pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        let Some(writer) = self.writer.as_mut() else {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "terminal session is shut down",
-            ));
-        };
-        let mut writer = writer
-            .lock()
-            .map_err(|_| io::Error::other("terminal writer lock poisoned"))?;
-        let writer = writer.as_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "terminal session is shut down")
-        })?;
-        writer.write_all(bytes)?;
-        writer.flush()
+    /// Queue bytes for the child without blocking the caller.
+    ///
+    /// A full queue reports [`io::ErrorKind::WouldBlock`]; terminal protocol
+    /// replies use the reserved slots so GUI input cannot starve them.
+    pub fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        self.input
+            .as_ref()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "terminal session is shut down")
+            })?
+            .write(bytes, InputKind::Interactive)
+    }
+
+    /// Maximum interactive input payload accepted by one write, in bytes.
+    pub fn input_limit(&self) -> usize {
+        self.input
+            .as_ref()
+            .map_or(0, |input| input.limits.interactive_bytes)
+    }
+
+    /// Queue a paste, framing it for bracketed-paste mode when requested.
+    ///
+    /// The size and queue capacity are checked before the framed payload is
+    /// allocated.
+    pub fn write_paste(&self, text: &str, bracketed: bool) -> io::Result<()> {
+        self.input
+            .as_ref()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "terminal session is shut down")
+            })?
+            .write_paste(text, bracketed)
     }
 
     /// Resize both the pseudo-terminal and the parsed screen.
@@ -728,10 +969,8 @@ impl TerminalSession {
     pub fn kill(&mut self) {
         // Closing our handles first lets the child notice the terminal went
         // away and keeps new input from reaching a dying shell.
-        if let Some(writer) = self.writer.take()
-            && let Ok(mut writer) = writer.lock()
-        {
-            *writer = None;
+        if let Some(input) = self.input.take() {
+            input.shutdown();
         }
         self.master = None;
         let child = self.child.clone();
@@ -739,6 +978,7 @@ impl TerminalSession {
         let exit_slot = self.exit.clone();
         let revision = self.revision.clone();
         let reader = self.reader.take();
+        let writer = self.writer_thread.take();
 
         #[cfg(unix)]
         let pgid = child
@@ -788,17 +1028,8 @@ impl TerminalSession {
                     }
                     thread::sleep(Duration::from_millis(10));
                 }
-                if let Some(reader) = reader {
-                    let deadline = Instant::now() + READER_TIMEOUT;
-                    while !reader.is_finished() && Instant::now() < deadline {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    if reader.is_finished() {
-                        let _ = reader.join();
-                    }
-                    // Otherwise the reader is detached instead of pinning
-                    // shutdown on a descendant that still holds the pty.
-                }
+                wait_for_thread(writer, WRITER_TIMEOUT);
+                wait_for_thread(reader, READER_TIMEOUT);
                 revision.fetch_add(1, Ordering::Release);
             });
         if reaper.is_err() {
@@ -874,6 +1105,21 @@ impl Drop for TerminalSession {
     }
 }
 
+fn wait_for_thread(thread: Option<JoinHandle<()>>, timeout: Duration) {
+    let Some(thread) = thread else {
+        return;
+    };
+    let deadline = Instant::now() + timeout;
+    while !thread.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    if thread.is_finished() {
+        let _ = thread.join();
+    }
+    // Otherwise the worker is detached instead of pinning shutdown on a
+    // descendant that still holds the pty.
+}
+
 fn size(cols: u16, rows: u16) -> PtySize {
     PtySize {
         rows,
@@ -889,7 +1135,179 @@ fn size(cols: u16, rows: u16) -> PtySize {
 mod tests {
     use super::*;
     use portable_pty::CommandBuilder;
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+
+    struct GatedWriter {
+        started: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+        bytes: Arc<Mutex<Vec<u8>>>,
+        gated: AtomicBool,
+    }
+
+    impl Write for GatedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if !self.gated.swap(true, Ordering::AcqRel) {
+                let _ = self.started.send(());
+                self.release
+                    .recv()
+                    .map_err(|_| io::Error::other("test writer was not released"))?;
+            }
+            self.bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn ordered_writer_preserves_input_and_reserves_room_for_control_replies() {
+        let (started, started_rx) = mpsc::sync_channel(0);
+        let (release, release_rx) = mpsc::sync_channel(0);
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = GatedWriter {
+            started,
+            release: release_rx,
+            bytes: bytes.clone(),
+            gated: AtomicBool::new(false),
+        };
+        let (input, worker) = PtyInput::spawn(Box::new(writer), 4, 1, 11, 5).unwrap();
+
+        input.write(b"one", InputKind::Interactive).unwrap();
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the worker must start the first write");
+        input.write(b"two", InputKind::Interactive).unwrap();
+
+        let started_at = Instant::now();
+        let error = input
+            .write(b"lost", InputKind::Interactive)
+            .expect_err("interactive input must stop at its bounded limit");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(started_at.elapsed() < Duration::from_millis(100));
+
+        input.write(b"reply", InputKind::Control).unwrap();
+        assert_eq!(
+            input.write(b"lost", InputKind::Control).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while bytes.lock().unwrap().as_slice() != b"onetworeply" {
+            assert!(Instant::now() < deadline, "writer did not drain the queue");
+            thread::sleep(Duration::from_millis(5));
+        }
+        input.shutdown();
+        worker.join().unwrap();
+        assert_eq!(bytes.lock().unwrap().as_slice(), b"onetworeply");
+    }
+
+    #[test]
+    fn shutdown_wakes_an_idle_writer_and_rejects_later_input() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (input, worker) =
+            PtyInput::spawn(Box::new(CollectingWriter(bytes)), 4, 1, 64, 16).unwrap();
+        input.write(b"queued", InputKind::Interactive).unwrap();
+
+        input.shutdown();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !worker.is_finished() {
+            assert!(Instant::now() < deadline, "writer did not stop");
+            thread::sleep(Duration::from_millis(5));
+        }
+        worker.join().unwrap();
+        assert_eq!(
+            input
+                .write(b"late", InputKind::Interactive)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
+    fn oversized_input_is_rejected_before_copying_into_the_queue() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (input, worker) =
+            PtyInput::spawn(Box::new(CollectingWriter(bytes.clone())), 4, 1, 8, 2).unwrap();
+        let error = input
+            .write_paste("too-big", false)
+            .expect_err("an oversized paste must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("6-byte limit"), "{error}");
+        assert!(bytes.lock().unwrap().is_empty());
+        input.shutdown();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn paste_framing_is_applied_before_enqueueing() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (input, worker) =
+            PtyInput::spawn(Box::new(CollectingWriter(bytes.clone())), 4, 1, 64, 16).unwrap();
+        input.write_paste("hello", false).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while bytes.lock().unwrap().as_slice() != b"hello" {
+            assert!(Instant::now() < deadline, "plain paste was not written");
+            thread::sleep(Duration::from_millis(5));
+        }
+        bytes.lock().unwrap().clear();
+
+        input.write_paste("hello", true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while bytes.lock().unwrap().as_slice() != b"\x1b[200~hello\x1b[201~" {
+            assert!(Instant::now() < deadline, "bracketed paste was not written");
+            thread::sleep(Duration::from_millis(5));
+        }
+        input.shutdown();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn large_pastes_fit_within_the_payload_bound() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (input, worker) = PtyInput::spawn(
+            Box::new(CollectingWriter(bytes.clone())),
+            4,
+            1,
+            1024 * 1024,
+            16,
+        )
+        .unwrap();
+        let text = "x".repeat(512 * 1024);
+        input.write_paste(&text, false).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while bytes.lock().unwrap().len() != text.len() {
+            assert!(Instant::now() < deadline, "large paste was not written");
+            thread::sleep(Duration::from_millis(5));
+        }
+        input.shutdown();
+        worker.join().unwrap();
+    }
+
+    struct CollectingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CollectingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn wait_for(revision: &AtomicU64, last: u64) -> u64 {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -986,8 +1404,7 @@ mod tests {
         let mut shell = CommandBuilder::new("sh");
         shell.arg("-i");
         shell.env("TERM", "xterm-256color");
-        let mut session =
-            TerminalSession::spawn_command(&std::env::temp_dir(), 40, 8, shell).unwrap();
+        let session = TerminalSession::spawn_command(&std::env::temp_dir(), 40, 8, shell).unwrap();
         session.write(b"printf 'command-output\\n'\r").unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1006,7 +1423,7 @@ mod tests {
 
     #[test]
     fn configured_login_shell_echoes_typed_commands() {
-        let mut session = TerminalSession::spawn(&std::env::temp_dir(), 40, 8).unwrap();
+        let session = TerminalSession::spawn(&std::env::temp_dir(), 40, 8).unwrap();
         session.write(b"echo CODEX_TYPED_MARKER\r").unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {

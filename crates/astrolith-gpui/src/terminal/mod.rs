@@ -5,6 +5,7 @@
 
 use std::{
     cell::Cell,
+    io,
     path::{Path, PathBuf},
     rc::Rc,
     time::Duration,
@@ -219,6 +220,12 @@ impl TerminalFailure {
     }
 }
 
+#[derive(Clone, Copy)]
+enum InputAction {
+    Paste,
+    Keystroke,
+}
+
 /// Status line for a shell that exited.
 fn exit_status(exit: &ExitInfo) -> String {
     match (&exit.code, &exit.detail) {
@@ -240,6 +247,7 @@ struct TerminalInstance {
     last_revision: u64,
     exit: Option<ExitInfo>,
     failure: Option<TerminalFailure>,
+    input_notice: Option<String>,
 }
 
 pub(crate) struct TerminalPanel {
@@ -344,10 +352,6 @@ impl TerminalPanel {
         self.active_instance()?.session.as_ref()
     }
 
-    fn active_session_mut(&mut self) -> Option<&mut TerminalSession> {
-        self.active_instance_mut()?.session.as_mut()
-    }
-
     /// A session that has not recorded an exit or reader EOF.
     fn running_state(&self) -> bool {
         self.active_instance().is_some_and(|terminal| {
@@ -360,8 +364,8 @@ impl TerminalPanel {
 
     /// Write raw bytes to the child (service-level tests through the view).
     #[cfg(test)]
-    pub(crate) fn write(&mut self, bytes: &[u8]) {
-        if let Some(session) = self.active_session_mut() {
+    pub(crate) fn write(&self, bytes: &[u8]) {
+        if let Some(session) = self.active_session() {
             let _ = session.write(bytes);
         }
     }
@@ -393,6 +397,7 @@ impl TerminalPanel {
         }
         terminal.exit = None;
         terminal.failure = None;
+        terminal.input_notice = None;
         match TerminalSession::spawn(&root, 80, 24) {
             Ok(session) => {
                 terminal.last_revision = session.revision();
@@ -475,6 +480,7 @@ impl TerminalPanel {
             last_revision,
             exit: None,
             failure,
+            input_notice: None,
         });
         self.active_terminal = Some(id);
         self.selection = None;
@@ -670,10 +676,47 @@ impl TerminalPanel {
         Some(session.contents_between((start.row, start.col), (end.row, end.col)))
     }
 
-    fn handle_key(&mut self, event: &gpui_kit::KeystrokeEvent, cx: &mut App) -> bool {
-        let Some(session) = self.active_session_mut() else {
-            return false;
+    fn record_input_result(
+        &mut self,
+        action: InputAction,
+        limit: usize,
+        result: io::Result<()>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let action = match action {
+            InputAction::Paste => tr!("terminal.input.action.paste"),
+            InputAction::Keystroke => tr!("terminal.input.action.keystroke"),
         };
+        let accepted = result.is_ok();
+        let notice = result.err().map(|error| match error.kind() {
+            io::ErrorKind::WouldBlock => tr!(
+                "terminal.input.rejected.queue_full",
+                action = action.as_str()
+            ),
+            io::ErrorKind::InvalidInput => tr!(
+                "terminal.input.rejected.too_large",
+                action = action.as_str(),
+                limit = limit
+            ),
+            _ => {
+                let error = error.to_string();
+                tr!(
+                    "terminal.input.rejected.failed",
+                    action = action.as_str(),
+                    error = error.as_str()
+                )
+            }
+        });
+        if let Some(terminal) = self.active_instance_mut()
+            && terminal.input_notice != notice
+        {
+            terminal.input_notice = notice;
+            cx.notify();
+        }
+        accepted
+    }
+
+    fn handle_key(&mut self, event: &gpui_kit::KeystrokeEvent, cx: &mut Context<Self>) -> bool {
         let modifiers = event.keystroke.modifiers;
         let key = event.keystroke.key.as_str();
         // Clipboard chords belong to the terminal, not the application.
@@ -682,17 +725,32 @@ impl TerminalPanel {
         }
         if (modifiers.control || modifiers.platform) && key.eq_ignore_ascii_case("v") {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                let bracketed = session.bracketed_paste();
-                let _ = session.write(&paste_payload(&text, bracketed));
-                session.scroll_to_bottom();
+                let Some((limit, result)) = self.active_session().map(|session| {
+                    let bracketed = session.bracketed_paste();
+                    (session.input_limit(), session.write_paste(&text, bracketed))
+                }) else {
+                    return false;
+                };
+                if self.record_input_result(InputAction::Paste, limit, result, cx)
+                    && let Some(session) = self.active_session()
+                {
+                    session.scroll_to_bottom();
+                }
                 return true;
             }
             return false;
         }
+        let Some(session) = self.active_session() else {
+            return false;
+        };
         let application_cursor = session.application_cursor();
         let bytes = translate_key(event, application_cursor);
         if let Some(bytes) = bytes {
-            if session.write(&bytes).is_ok() {
+            let limit = session.input_limit();
+            let result = session.write(&bytes);
+            if self.record_input_result(InputAction::Keystroke, limit, result, cx)
+                && let Some(session) = self.active_session()
+            {
                 session.scroll_to_bottom();
                 self.selection = None;
             }
@@ -729,7 +787,7 @@ impl TerminalPanel {
             + u8::from(modifiers.control) * 16
             + if motion { 32 } else { 0 };
         let report = encode_mouse_report(code, point, release, encoding);
-        if let Some(session) = self.active_session_mut() {
+        if let Some(session) = self.active_session() {
             let _ = session.write(&report);
         }
     }
@@ -941,6 +999,9 @@ impl Render for TerminalPanel {
         let active_failure = self
             .active_instance()
             .and_then(|terminal| terminal.failure.as_ref().map(TerminalFailure::text));
+        let input_notice = self
+            .active_instance()
+            .and_then(|terminal| terminal.input_notice.clone());
         let status = self
             .active_instance()
             .and_then(|terminal| {
@@ -950,6 +1011,7 @@ impl Render for TerminalPanel {
                     .map(TerminalFailure::text)
                     .or_else(|| terminal.exit.as_ref().map(exit_status))
             })
+            .or(input_notice)
             .unwrap_or_else(|| {
                 if running {
                     tr!("terminal.status.running")
@@ -1383,19 +1445,6 @@ fn function_sequence(number: u8, modifier: Option<u8>) -> Option<Vec<u8>> {
     Some(sequence)
 }
 
-/// Clipboard payload, bracketed when the child enabled paste mode.
-fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(text.len() + 12);
-    if bracketed {
-        bytes.extend_from_slice(b"\x1b[200~");
-    }
-    bytes.extend_from_slice(text.as_bytes());
-    if bracketed {
-        bytes.extend_from_slice(b"\x1b[201~");
-    }
-    bytes
-}
-
 fn mouse_button_code(button: MouseButton) -> Option<u8> {
     match button {
         MouseButton::Left => Some(0),
@@ -1587,15 +1636,6 @@ mod tests {
         assert_eq!(
             function_sequence(12, None).as_deref(),
             Some(b"\x1b[24~".as_slice())
-        );
-    }
-
-    #[test]
-    fn paste_is_bracketed_only_when_the_child_enabled_it() {
-        assert_eq!(paste_payload("hello", false), b"hello".to_vec());
-        assert_eq!(
-            paste_payload("hello", true),
-            b"\x1b[200~hello\x1b[201~".to_vec()
         );
     }
 
