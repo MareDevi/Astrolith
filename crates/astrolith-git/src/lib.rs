@@ -145,7 +145,7 @@ impl GitRepository {
     /// Read the unstaged patch for one path.
     pub fn diff(&self, path: &Path) -> Result<GitDiff, GitError> {
         let path = relative_path(path)?;
-        let output = self.run(with_path(
+        let output = self.run(with_literal_path(
             &["diff", "--no-ext-diff", "--no-color", "--"],
             path,
         ))?;
@@ -155,7 +155,7 @@ impl GitRepository {
             });
         }
         let tracked = self.run_allow_code(
-            with_path(&["ls-files", "--error-unmatch", "--"], path),
+            with_literal_path(&["ls-files", "--error-unmatch", "--"], path),
             &[1],
         )?;
         if tracked.status.success() {
@@ -187,7 +187,7 @@ impl GitRepository {
     /// Read the staged patch for one path.
     pub fn staged_diff(&self, path: &Path) -> Result<GitDiff, GitError> {
         let path = relative_path(path)?;
-        let output = self.run(with_path(
+        let output = self.run(with_literal_path(
             &["diff", "--cached", "--no-ext-diff", "--no-color", "--"],
             path,
         ))?;
@@ -199,19 +199,22 @@ impl GitRepository {
     /// Stage one path without interpreting it as a Git option.
     pub fn stage(&self, path: &Path) -> Result<(), GitError> {
         let path = relative_path(path)?;
-        self.run(with_path(&["add", "--"], path)).map(drop)
+        self.run(with_literal_path(&["add", "--"], path)).map(drop)
     }
 
     /// Remove one path from the index while preserving its working-tree file.
     pub fn unstage(&self, path: &Path) -> Result<(), GitError> {
         let path = relative_path(path)?;
-        let restore = self.run_allow_code(with_path(&["restore", "--staged", "--"], path), &[1]);
+        let restore = self.run_allow_code(
+            with_literal_path(&["restore", "--staged", "--"], path),
+            &[1],
+        );
         if restore.as_ref().is_ok_and(|output| output.status.success()) {
             return Ok(());
         }
         // An unborn branch has no HEAD for `restore`; remove only its index
         // entry, leaving the worktree file in place.
-        self.run(with_path(&["rm", "--cached", "-f", "--"], path))
+        self.run(with_literal_path(&["rm", "--cached", "-f", "--"], path))
             .map(drop)
     }
 
@@ -335,6 +338,13 @@ fn with_path(args: &[&str], path: &OsStr) -> Vec<std::ffi::OsString> {
         .collect()
 }
 
+fn with_literal_path(args: &[&str], path: &OsStr) -> Vec<std::ffi::OsString> {
+    std::iter::once(std::ffi::OsString::from("--literal-pathspecs"))
+        .chain(args.iter().map(std::ffi::OsString::from))
+        .chain(std::iter::once(path.to_owned()))
+        .collect()
+}
+
 fn run_at<I, S>(path: &Path, args: I) -> Result<Output, GitError>
 where
     I: IntoIterator<Item = S>,
@@ -400,8 +410,8 @@ fn parse_status(bytes: &[u8]) -> Result<GitStatus, GitError> {
                 _ => return Err(GitError::InvalidOutput("malformed path record".into())),
             };
             let mut xy = xy.chars();
-            let index_status = xy.next().unwrap_or(' ');
-            let worktree_status = xy.next().unwrap_or(' ');
+            let index_status = unchanged_as_space(xy.next().unwrap_or(' '));
+            let worktree_status = unchanged_as_space(xy.next().unwrap_or(' '));
             let conflicted = kind == b'u'
                 || matches!(
                     (index_status, worktree_status),
@@ -434,6 +444,10 @@ fn parse_status(bytes: &[u8]) -> Result<GitStatus, GitError> {
         }
     }
     Ok(status)
+}
+
+fn unchanged_as_space(status: char) -> char {
+    if status == '.' { ' ' } else { status }
 }
 
 #[cfg(test)]
@@ -479,6 +493,83 @@ mod tests {
             status.paths[0].original_path,
             Some(PathBuf::from("old name.rs"))
         );
+    }
+
+    #[test]
+    fn status_parser_maps_porcelain_unchanged_states_to_spaces() {
+        let output = b"1 .M N... 100644 100644 100644 a b changed.txt\x001 M. N... 100644 100644 100644 a b staged.txt\0";
+        let status = parse_status(output).unwrap();
+
+        assert_eq!(
+            (
+                status.paths[0].index_status,
+                status.paths[0].worktree_status
+            ),
+            (' ', 'M')
+        );
+        assert_eq!(
+            (
+                status.paths[1].index_status,
+                status.paths[1].worktree_status
+            ),
+            ('M', ' ')
+        );
+    }
+
+    #[test]
+    fn single_path_operations_treat_pathspec_magic_literally() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("work tree");
+        std::fs::create_dir(&root).unwrap();
+        git(&root, &["init", "--initial-branch=main"]);
+        git(&root, &["config", "user.name", "Astrolith Test"]);
+        git(&root, &["config", "user.email", "test@example.invalid"]);
+
+        let literal = Path::new("post[1].md");
+        let neighbor = Path::new("post1.md");
+        let untracked_neighbor = Path::new("note1.md");
+        std::fs::write(root.join(literal), "base\n").unwrap();
+        std::fs::write(root.join(neighbor), "base\n").unwrap();
+        std::fs::write(root.join(untracked_neighbor), "base\n").unwrap();
+        git(
+            &root,
+            &[
+                "--literal-pathspecs",
+                "add",
+                "--",
+                "post[1].md",
+                "post1.md",
+                "note1.md",
+            ],
+        );
+        git(&root, &["commit", "-m", "Add fixture files"]);
+        let repository = GitRepository::discover(&root).unwrap();
+
+        std::fs::write(root.join(literal), "literal\n").unwrap();
+        std::fs::write(root.join(neighbor), "neighbor\n").unwrap();
+        let patch = repository.diff(literal).unwrap().patch;
+        assert!(patch.contains("post[1].md"));
+        assert!(!patch.contains("post1.md"));
+
+        repository.stage(literal).unwrap();
+        assert!(!repository.staged_diff(literal).unwrap().patch.is_empty());
+        assert!(repository.staged_diff(neighbor).unwrap().patch.is_empty());
+
+        git(&root, &["add", "--", "post1.md"]);
+        repository.unstage(literal).unwrap();
+        assert!(repository.staged_diff(literal).unwrap().patch.is_empty());
+        assert!(!repository.staged_diff(neighbor).unwrap().patch.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join(literal)).unwrap(),
+            "literal\n"
+        );
+
+        let untracked = Path::new("note[1].md");
+        std::fs::write(root.join(untracked), "untracked\n").unwrap();
+        let patch = repository.diff(untracked).unwrap().patch;
+        assert!(patch.contains("note[1].md"));
+        assert!(patch.contains("+untracked"));
+        assert!(!patch.contains("note1.md"));
     }
 
     #[test]
