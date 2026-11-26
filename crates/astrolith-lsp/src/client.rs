@@ -19,7 +19,10 @@ use std::{
     time::Duration,
 };
 
-use lsp_types::{Diagnostic, InitializeResult, PublishDiagnosticsParams, ServerCapabilities, Uri};
+use lsp_types::{
+    Diagnostic, InitializeResult, PublishDiagnosticsParams, ServerCapabilities,
+    TextDocumentContentChangeEvent, Uri,
+};
 use serde_json::{Value, json};
 use std::str::FromStr;
 use tokio::{
@@ -113,7 +116,7 @@ enum Command {
     Change {
         uri: Uri,
         version: i32,
-        text: String,
+        changes: Vec<TextDocumentContentChangeEvent>,
     },
     Close {
         uri: Uri,
@@ -262,8 +265,28 @@ impl ClientHandle {
     }
 
     pub fn change(&self, uri: Uri, text: String) {
+        self.change_document(
+            uri,
+            vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text,
+            }],
+        );
+    }
+
+    /// Send one batch of ranged edits in application order.
+    pub fn change_incremental(&self, uri: Uri, changes: Vec<TextDocumentContentChangeEvent>) {
+        self.change_document(uri, changes);
+    }
+
+    fn change_document(&self, uri: Uri, changes: Vec<TextDocumentContentChangeEvent>) {
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
-        let _ = self.commands.send(Command::Change { uri, version, text });
+        let _ = self.commands.send(Command::Change {
+            uri,
+            version,
+            changes,
+        });
     }
 
     pub fn close(&self, uri: Uri) {
@@ -885,13 +908,17 @@ async fn handle_command(
                 )
                 .await
         }
-        Command::Change { uri, version, text } => {
+        Command::Change {
+            uri,
+            version,
+            changes,
+        } => {
             connection
                 .send_notification(
                     "textDocument/didChange",
                     json!({
                         "textDocument": {"uri": uri.as_str(), "version": version},
-                        "contentChanges": [{"text": text}],
+                        "contentChanges": changes,
                     }),
                 )
                 .await

@@ -2,82 +2,273 @@
 
 use super::*;
 
+const RECOVERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+const RECOVERY_RETRY_MIN: std::time::Duration = std::time::Duration::from_secs(1);
+const RECOVERY_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+pub(super) enum RecoveryOperation {
+    Save(Arc<RecoveryRecord>),
+    Clear,
+    ClearAfterSave(Arc<str>),
+}
+
+impl RecoveryOperation {
+    fn apply(
+        &self,
+        store: &RecoveryStore,
+        identity: &DocumentIdentity,
+        ticket: RecoveryTicket,
+    ) -> Result<(), astrolith_document::DocumentError> {
+        match self {
+            Self::Save(record) => store.save_at(record, ticket),
+            Self::Clear => store.clear_at(identity, ticket).map(drop),
+            Self::ClearAfterSave(saved_content) => store
+                .clear_after_save_at(identity, saved_content, ticket)
+                .map(drop),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) enum RecoveryWork {
+    Debounced,
+    Fixed(Arc<RecoveryOperation>),
+}
+
 impl ProjectWorkspace {
-    pub(super) fn schedule_recovery(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn schedule_recovery_for(&mut self, path: &Path, cx: &mut Context<Self>) {
         let Some(store) = self.recovery.clone() else {
+            self.recovery_tasks.clear();
             return;
         };
-        let timer = cx
-            .background_executor()
-            .timer(std::time::Duration::from_millis(500));
-        self.recovery_task = Some(cx.spawn(async move |this, cx| {
-            timer.await;
-            let Ok((dirty, clean)) = this.update(cx, |this, cx| this.persist_recovery_records(cx))
-            else {
-                return;
-            };
-            if dirty.is_empty() && clean.is_empty() {
-                return;
-            }
-            let result = runtime::blocking(cx, move || {
-                let mut written = 0usize;
-                let mut cleared = 0usize;
-                for record in dirty {
-                    match store.save(&record) {
-                        Ok(()) => written += 1,
-                        Err(error) => {
-                            tracing::warn!(
-                                source = %record.identity().canonical_source().as_str(),
-                                %error,
-                                "could not write a recovery record"
-                            );
-                        }
-                    }
-                }
-                for identity in clean {
-                    match store.clear(&identity) {
-                        Ok(_) => cleared += 1,
-                        Err(error) => {
-                            tracing::warn!(
-                                source = %identity.canonical_source().as_str(),
-                                %error,
-                                "could not clear a recovery record"
-                            );
-                        }
-                    }
-                }
-                (written, cleared)
-            })
-            .await;
-            match result {
-                Ok((written, cleared)) => {
-                    tracing::debug!(written, cleared, "recovery records persisted")
-                }
-                Err(error) => tracing::warn!(%error, "recovery persistence task failed"),
-            }
-        }));
+        let Some(session) = self.sessions.get(path).cloned() else {
+            return;
+        };
+        let (revision, dirty, identity) = session.update(cx, |session, cx| {
+            session.sync_buffer(cx);
+            (
+                session.buffer.revision().get(),
+                session.buffer.is_dirty(),
+                session.buffer.identity().clone(),
+            )
+        });
+        if self
+            .recovery_tasks
+            .get(path)
+            .is_some_and(|task| task.job.revision == revision && task.job.dirty == dirty)
+        {
+            return;
+        }
+        let ticket = store.next_ticket();
+        let job = RecoveryJob {
+            path: path.to_path_buf(),
+            identity,
+            revision,
+            dirty,
+            work: RecoveryWork::Debounced,
+            ticket,
+        };
+        let task = Self::spawn_recovery_task(job.clone(), RECOVERY_DEBOUNCE, store, cx);
+        self.recovery_tasks
+            .insert(path.to_path_buf(), RecoveryTask { job, _task: task });
     }
 
-    fn persist_recovery_records(
-        &mut self,
+    fn spawn_recovery_task(
+        job: RecoveryJob,
+        initial_delay: std::time::Duration,
+        store: RecoveryStore,
         cx: &mut Context<Self>,
-    ) -> (Vec<RecoveryRecord>, Vec<DocumentIdentity>) {
+    ) -> Task<()> {
+        let RecoveryJob {
+            path,
+            identity,
+            revision,
+            dirty,
+            work,
+            ticket,
+        } = job;
+        cx.spawn(async move |this, cx| {
+            let mut delay = initial_delay;
+            let mut cached = match work {
+                RecoveryWork::Debounced => None,
+                RecoveryWork::Fixed(operation) => Some((identity.clone(), operation)),
+            };
+            loop {
+                cx.background_executor().timer(delay).await;
+                let current = this
+                    .update(cx, |this, _| {
+                        this.recovery_tasks
+                            .get(&path)
+                            .is_some_and(|task| task.job.ticket == ticket)
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    return;
+                }
+                if cached.is_none() {
+                    let Some(captured) = this
+                        .update(cx, |this, cx| {
+                            let session = this.sessions.get(&path)?.clone();
+                            let identity = session.read(cx).buffer.identity().clone();
+                            let dirty = session.update(cx, |session, cx| {
+                                session.sync_buffer(cx);
+                                session.buffer.is_dirty()
+                            });
+                            let operation = if dirty {
+                                Arc::new(RecoveryOperation::Save(Arc::new(
+                                    RecoveryRecord::capture(&session.read(cx).buffer, now_secs()),
+                                )))
+                            } else {
+                                Arc::new(RecoveryOperation::Clear)
+                            };
+                            Some((identity, operation))
+                        })
+                        .ok()
+                        .flatten()
+                    else {
+                        return;
+                    };
+                    cached = Some(captured);
+                }
+                let Some((write_identity, write_operation)) = cached.clone() else {
+                    return;
+                };
+                let write_store = store.clone();
+                let result = runtime::blocking(cx, move || {
+                    write_operation.apply(&write_store, &write_identity, ticket)
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {
+                        tracing::debug!(
+                            path = %path.display(),
+                            source = %identity.canonical_source().as_str(),
+                            revision,
+                            dirty,
+                            "recovery task completed"
+                        );
+                        return;
+                    }
+                    Ok(Err(error)) => tracing::warn!(
+                        path = %path.display(),
+                        source = %identity.canonical_source().as_str(),
+                        %error,
+                        "recovery task failed; retrying"
+                    ),
+                    Err(error) => tracing::warn!(
+                        path = %path.display(),
+                        source = %identity.canonical_source().as_str(),
+                        %error,
+                        "recovery service task failed; retrying"
+                    ),
+                }
+                #[cfg(test)]
+                let _ = this.update(cx, |this, _| this.recovery_failures += 1);
+                let superseded = this
+                    .update(cx, |this, _| {
+                        !this
+                            .recovery_tasks
+                            .get(&path)
+                            .is_some_and(|task| task.job.ticket == ticket)
+                    })
+                    .unwrap_or(true);
+                if superseded {
+                    return;
+                }
+                delay = (delay * 2).max(RECOVERY_RETRY_MIN).min(RECOVERY_RETRY_MAX);
+            }
+        })
+    }
+
+    fn install_recovery_clear(
+        &mut self,
+        path: &Path,
+        identity: DocumentIdentity,
+        revision: u64,
+        operation: Arc<RecoveryOperation>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.recovery.clone() else {
+            self.recovery_tasks.remove(path);
+            return;
+        };
+        let ticket = store.next_ticket();
+        let job = RecoveryJob {
+            path: path.to_path_buf(),
+            identity,
+            revision,
+            dirty: false,
+            work: RecoveryWork::Fixed(operation),
+            ticket,
+        };
+        let task = Self::spawn_recovery_task(job.clone(), std::time::Duration::ZERO, store, cx);
+        self.recovery_tasks
+            .insert(path.to_path_buf(), RecoveryTask { job, _task: task });
+    }
+
+    pub(super) fn clear_recovery_record(
+        &mut self,
+        path: &Path,
+        identity: DocumentIdentity,
+        revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.install_recovery_clear(
+            path,
+            identity,
+            revision,
+            Arc::new(RecoveryOperation::Clear),
+            cx,
+        );
+    }
+
+    pub(super) fn clear_recovery_after_save(
+        &mut self,
+        path: &Path,
+        identity: DocumentIdentity,
+        saved_content: String,
+        revision: u64,
+        ticket: RecoveryTicket,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.recovery.clone() else {
+            self.recovery_tasks.remove(path);
+            return;
+        };
+        let work = RecoveryWork::Fixed(Arc::new(RecoveryOperation::ClearAfterSave(Arc::from(
+            saved_content,
+        ))));
+        let job = RecoveryJob {
+            path: path.to_path_buf(),
+            identity,
+            revision,
+            dirty: false,
+            work,
+            ticket,
+        };
+        let task = Self::spawn_recovery_task(job.clone(), std::time::Duration::ZERO, store, cx);
+        self.recovery_tasks
+            .insert(path.to_path_buf(), RecoveryTask { job, _task: task });
+    }
+
+    fn capture_dirty_recovery_on_quit(
+        &mut self,
+        store: &RecoveryStore,
+        cx: &mut Context<Self>,
+    ) -> Vec<(RecoveryRecord, RecoveryTicket)> {
         let now = now_secs();
-        let mut dirty = Vec::new();
-        let mut clean = Vec::new();
+        let mut captures = Vec::new();
         for session in self.sessions.values().cloned().collect::<Vec<_>>() {
-            let (is_dirty, identity) = session.update(cx, |session, cx| {
+            let dirty = session.update(cx, |session, cx| {
                 session.sync_buffer(cx);
-                (session.buffer.is_dirty(), session.buffer.identity().clone())
+                session.buffer.is_dirty()
             });
-            let session = session.read(cx);
-            if is_dirty {
-                dirty.push(RecoveryRecord::capture(&session.buffer, now));
-            } else {
-                clean.push(identity);
+            if dirty {
+                let record = RecoveryRecord::capture(&session.read(cx).buffer, now);
+                captures.push((record, store.next_ticket()));
             }
         }
-        (dirty, clean)
+        captures
     }
 
     /// Flush every dirty session's current content to the recovery store on the
@@ -90,23 +281,47 @@ impl ProjectWorkspace {
     /// the application exits.
     ///
     /// Returns the flush task so a caller (or a test) can await it, or `None`
-    /// when recovery is disabled or nothing is dirty.
+    /// when recovery is disabled and no recovery work is pending.
     pub fn flush_recovery_on_quit(
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<Task<Result<(), String>>> {
         let store = self.recovery.clone()?;
-        let (dirty, _clean) = self.persist_recovery_records(cx);
-        if dirty.is_empty() {
+        let mut cleanups = self
+            .recovery_tasks
+            .values()
+            .filter_map(|task| match &task.job.work {
+                RecoveryWork::Debounced => None,
+                RecoveryWork::Fixed(operation) => Some((
+                    task.job.ticket,
+                    task.job.identity.clone(),
+                    operation.clone(),
+                )),
+            })
+            .collect::<Vec<_>>();
+        cleanups.sort_by_key(|(ticket, _, _)| *ticket);
+        self.recovery_tasks.clear();
+        let captures = self.capture_dirty_recovery_on_quit(&store, cx);
+        if cleanups.is_empty() && captures.is_empty() {
             return None;
         }
         tracing::debug!(
-            documents = dirty.len(),
-            "flushing unsaved recovery records on exit"
+            cleanups = cleanups.len(),
+            documents = captures.len(),
+            "flushing recovery work on exit"
         );
         Some(runtime::flush_on_quit(cx, move || {
-            for record in dirty {
-                if let Err(error) = store.save(&record) {
+            for (ticket, identity, operation) in cleanups {
+                if let Err(error) = operation.apply(&store, &identity, ticket) {
+                    tracing::error!(
+                        source = %identity.canonical_source().as_str(),
+                        %error,
+                        "could not finish a recovery cleanup on exit"
+                    );
+                }
+            }
+            for (record, ticket) in captures {
+                if let Err(error) = store.save_at(&record, ticket) {
                     tracing::error!(
                         source = %record.identity().canonical_source().as_str(),
                         %error,
@@ -619,6 +834,59 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("src/posts/a.md")).unwrap(),
             "# A\n"
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn failed_recovery_capture_is_retried(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let parent = tempfile::tempdir().unwrap();
+        let recovery_path = parent.path().join("recovery");
+        std::fs::write(&recovery_path, "blocks create_dir_all").unwrap();
+        let store = RecoveryStore::new(&recovery_path);
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| view.recovery = Some(store.clone()));
+        open_fixture_entry(cx, handle, &view, &dir).await;
+
+        edit_active(cx, handle, &view, "# Retry recovery\n").await;
+        wait_for(cx, |cx| {
+            view.read_with(cx, |view, _| view.recovery_failures > 0)
+        })
+        .await;
+        assert!(recovery_path.is_file(), "the first write must have failed");
+
+        std::fs::remove_file(&recovery_path).unwrap();
+        wait_for(cx, |_| {
+            store.load().is_ok_and(|load| {
+                load.records()
+                    .iter()
+                    .any(|record| record.content() == "# Retry recovery\n")
+            })
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn quitting_finishes_a_discarded_documents_pending_clear(cx: &mut TestAppContext) {
+        let dir = fixture();
+        let recovery_dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(recovery_dir.path());
+        let (handle, view) = mount(cx);
+        view.update(cx, |view, _| view.recovery = Some(store.clone()));
+        let path = open_fixture_entry(cx, handle, &view, &dir).await;
+
+        edit_active(cx, handle, &view, "# Discard me\n").await;
+        wait_for(cx, |_| !store.load().unwrap().is_empty()).await;
+
+        view.update(cx, |view, cx| view.remove_session(&path, cx));
+        let flush = view
+            .update(cx, |view, cx| view.flush_recovery_on_quit(cx))
+            .expect("the pending discard cleanup must be flushed on exit");
+        flush.await.unwrap();
+
+        assert!(
+            store.load().unwrap().is_empty(),
+            "quit must finish the clear for a discarded closed document"
         );
     }
 }

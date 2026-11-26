@@ -40,8 +40,8 @@ use astrolith_core::{
 };
 use astrolith_document::{
     DocumentIdentity, DocumentKind, DocumentLoadTicket, DocumentRevision, DocumentSnapshot,
-    FormatCommand, MAX_DOCUMENT_BYTES, RecoveryRecord, RecoveryStore, SaveOutcome, TokenSummary,
-    overwrite_document, parse_document, save_document_copy, save_snapshot,
+    FormatCommand, MAX_DOCUMENT_BYTES, RecoveryRecord, RecoveryStore, RecoveryTicket, SaveOutcome,
+    TokenSummary, overwrite_document, parse_document, save_document_copy, save_snapshot,
 };
 use astrolith_git::{GitRepository, GitStatus};
 use astrolith_preview::RouteMapping;
@@ -757,6 +757,21 @@ pub(crate) struct OpenTab {
     pub externally_changed: bool,
 }
 
+#[derive(Clone)]
+struct RecoveryJob {
+    path: PathBuf,
+    identity: DocumentIdentity,
+    revision: u64,
+    dirty: bool,
+    work: recovery::RecoveryWork,
+    ticket: RecoveryTicket,
+}
+
+struct RecoveryTask {
+    job: RecoveryJob,
+    _task: Task<()>,
+}
+
 pub(crate) struct ProjectWorkspace {
     document: Entity<WorkspacePanel>,
     manifest: Option<Arc<ProjectManifest>>,
@@ -802,6 +817,8 @@ pub(crate) struct ProjectWorkspace {
     /// only sources, so the count stays constant once generation settles.
     #[cfg(test)]
     schema_reconciliations: u32,
+    #[cfg(test)]
+    recovery_failures: u32,
     watcher_owner: Option<ServiceWatcher>,
     loads: HashMap<PathBuf, Task<()>>,
     sessions: BTreeMap<PathBuf, Entity<DocumentSession>>,
@@ -815,7 +832,7 @@ pub(crate) struct ProjectWorkspace {
     session_subscriptions: HashMap<PathBuf, Vec<Subscription>>,
     recovery: Option<RecoveryStore>,
     pending_recovery: Vec<RecoveryRecord>,
-    recovery_task: Option<Task<()>>,
+    recovery_tasks: BTreeMap<PathBuf, RecoveryTask>,
     recovery_load_task: Option<Task<()>>,
     /// In-flight guarded saves, at most one per canonical source.
     save_tasks: HashMap<PathBuf, Task<()>>,
@@ -1089,6 +1106,8 @@ impl ProjectWorkspace {
             schema_dirty: false,
             #[cfg(test)]
             schema_reconciliations: 0,
+            #[cfg(test)]
+            recovery_failures: 0,
             watcher_owner: None,
             loads: HashMap::new(),
             sessions: BTreeMap::new(),
@@ -1099,7 +1118,7 @@ impl ProjectWorkspace {
             session_subscriptions: HashMap::new(),
             recovery: settings::recovery_dir().ok().map(RecoveryStore::new),
             pending_recovery: Vec::new(),
-            recovery_task: None,
+            recovery_tasks: BTreeMap::new(),
             recovery_load_task: None,
             save_tasks: HashMap::new(),
             save_coordinator: SaveCoordinator::new(GlobalPreferences::default().autosave_delay),
@@ -1424,7 +1443,7 @@ impl ProjectWorkspace {
                 .observe(path, revision, dirty, cx.background_executor().now());
         self.update_tab_state(path, cx);
         self.surface_session_notice(path, cx);
-        self.schedule_recovery(cx);
+        self.schedule_recovery_for(path, cx);
         cx.emit(SessionChanged);
         if changed {
             self.arm_autosave(cx);
@@ -2625,6 +2644,7 @@ impl ProjectWorkspace {
         self.save_coordinator.clear();
         self.save_tasks.clear();
         self.autosave_task = None;
+        self.recovery_tasks.clear();
         self.sessions.clear();
         self.session_subscriptions.clear();
         self.session_collections.clear();
@@ -2945,15 +2965,11 @@ impl ProjectWorkspace {
         }
     }
     fn remove_session(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        self.recovery_task = None;
-        if let Some(session) = self.sessions.get(path)
-            && let Some(store) = self.recovery.clone()
-        {
+        self.recovery_tasks.remove(path);
+        if let Some(session) = self.sessions.get(path) {
             let identity = session.read(cx).buffer.identity().clone();
-            let task = runtime::blocking(cx, move || {
-                let _ = store.clear(&identity);
-            });
-            task.detach();
+            let revision = session.read(cx).buffer.revision().get();
+            self.clear_recovery_record(path, identity, revision, cx);
         }
         tracing::debug!(path = %path.display(), "closing a retained document");
         if let Some(session) = self.sessions.get(path).cloned() {
@@ -3005,20 +3021,22 @@ impl ProjectWorkspace {
                                     .label(tr!("browser.dialog.discard_and_close"))
                                     .on_click(move |_, window, cx| {
                                         let _ = owner.update(cx, |this, cx| {
-                                            if let Some(store) = this.recovery.clone() {
-                                                let identities: Vec<_> = this
-                                                    .sessions
-                                                    .values()
-                                                    .map(|session| {
-                                                        session.read(cx).buffer.identity().clone()
-                                                    })
-                                                    .collect();
-                                                let task = runtime::blocking(cx, move || {
-                                                    for identity in identities {
-                                                        let _ = store.clear(&identity);
-                                                    }
-                                                });
-                                                task.detach();
+                                            let clears: Vec<_> = this
+                                                .sessions
+                                                .iter()
+                                                .map(|(path, session)| {
+                                                    let session = session.read(cx);
+                                                    (
+                                                        path.clone(),
+                                                        session.buffer.identity().clone(),
+                                                        session.buffer.revision().get(),
+                                                    )
+                                                })
+                                                .collect();
+                                            for (path, identity, revision) in clears {
+                                                this.clear_recovery_record(
+                                                    &path, identity, revision, cx,
+                                                );
                                             }
                                             this.pending_quit = false;
                                             this.shutdown_lsp(cx);

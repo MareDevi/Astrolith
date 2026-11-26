@@ -5,6 +5,8 @@
 //! [`SaveOutcome::Conflict`] and leaves the file untouched. Writes are atomic
 //! (temp file in the same directory, `fsync`, `rename`), and concurrent saves for
 //! the same path are serialized process-wide so there is one writer per document.
+//! Open admission and every document write path share the same byte and line
+//! limits, and the conflict comparison never reads beyond the loaded baseline.
 //!
 //! Documented limits: the read-compare-then-replace sequence is not a race-free
 //! guarantee against a third-party writer between the check and the rename, and

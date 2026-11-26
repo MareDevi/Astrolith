@@ -50,7 +50,7 @@ pub use projection::{
     DocumentKind, ProjectionError, ProjectionSegment, TextEdit, TextReplacement, WriterProjection,
     apply_visible_edit, diff_visible, map_visible_offset, project_writer,
 };
-pub use recovery::{RecoveryLoad, RecoveryRecord, RecoveryStore};
+pub use recovery::{RecoveryLoad, RecoveryRecord, RecoveryStore, RecoveryTicket};
 pub use save::{
     DocumentSnapshot, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_LINES, SaveOutcome, document_line_count,
     overwrite_document, save_document_copy, save_snapshot, validate_document,

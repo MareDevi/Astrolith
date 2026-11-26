@@ -647,13 +647,8 @@ impl ProjectWorkspace {
             return;
         };
         let identity = session.read(cx).buffer.identity().clone();
-        if let Some(store) = self.recovery.clone() {
-            let stale = identity.clone();
-            let task = runtime::blocking(cx, move || {
-                let _ = store.clear(&stale);
-            });
-            task.detach();
-        }
+        let revision = session.read(cx).buffer.revision().get();
+        self.clear_recovery_record(from, identity.clone(), revision, cx);
         let retargeted = DocumentIdentity::new(
             identity.project().clone(),
             identity.project_generation(),
@@ -694,7 +689,7 @@ impl ProjectWorkspace {
         // A dirty buffer keeps its newer edits recoverable under the new source;
         // the stale record for the old identity was cleared above.
         if dirty {
-            self.schedule_recovery(cx);
+            self.schedule_recovery_for(to, cx);
         }
     }
 
@@ -1328,6 +1323,17 @@ mod tests {
                 .clone();
             assert_eq!(identity.canonical_source().as_str(), "src/posts/renamed.md");
         });
+        // The clear runs in the path's recovery task, so wait for it to land
+        // instead of sampling the store once.
+        wait_for(cx, |_| {
+            store
+                .load()
+                .unwrap()
+                .records()
+                .iter()
+                .all(|record| record.identity().canonical_source().as_str() != "src/posts/a.md")
+        })
+        .await;
         let records = store.load().unwrap();
         assert!(
             records
@@ -1676,6 +1682,7 @@ mod tests {
                     Ok(SaveAttempt::Saved {
                         revision: saved_revision,
                         persisted: "# Saved revision\n".to_owned(),
+                        recovery_ticket: None,
                     }),
                     window,
                     cx,
@@ -1771,6 +1778,7 @@ mod tests {
                     Ok(SaveAttempt::Saved {
                         revision: saved_revision,
                         persisted: "# Saved revision\n".to_owned(),
+                        recovery_ticket: None,
                     }),
                     window,
                     cx,

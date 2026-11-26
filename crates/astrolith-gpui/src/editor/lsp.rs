@@ -74,6 +74,7 @@ pub(crate) struct ProviderSupport {
     pub hover: bool,
     pub definition: bool,
     pub code_actions: bool,
+    pub incremental_sync: bool,
 }
 
 impl ProviderSupport {
@@ -93,6 +94,15 @@ impl ProviderSupport {
             code_actions: match &capabilities.code_action_provider {
                 Some(lsp_types::CodeActionProviderCapability::Simple(advertised)) => *advertised,
                 Some(lsp_types::CodeActionProviderCapability::Options(_)) => true,
+                None => false,
+            },
+            incremental_sync: match capabilities.text_document_sync.as_ref() {
+                Some(lsp_types::TextDocumentSyncCapability::Kind(kind)) => {
+                    *kind == lsp_types::TextDocumentSyncKind::INCREMENTAL
+                }
+                Some(lsp_types::TextDocumentSyncCapability::Options(options)) => {
+                    options.change == Some(lsp_types::TextDocumentSyncKind::INCREMENTAL)
+                }
                 None => false,
             },
         }
@@ -541,6 +551,9 @@ mod tests {
             completion_provider: Some(lsp_types::CompletionOptions::default()),
             definition_provider: Some(lsp_types::OneOf::Left(false)),
             code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(false)),
+            text_document_sync: Some(lsp_types::TextDocumentSyncCapability::Kind(
+                lsp_types::TextDocumentSyncKind::INCREMENTAL,
+            )),
             ..Default::default()
         };
 
@@ -551,6 +564,7 @@ mod tests {
                 hover: true,
                 definition: false,
                 code_actions: false,
+                incremental_sync: true,
             }
         );
     }

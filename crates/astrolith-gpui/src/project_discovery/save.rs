@@ -28,7 +28,11 @@ pub(super) fn file_label(path: &Path) -> String {
 pub(super) enum SaveAttempt {
     /// The revision was persisted; `persisted` is the exact text written, so the
     /// buffer baseline can follow the file when newer edits already exist.
-    Saved { revision: u64, persisted: String },
+    Saved {
+        revision: u64,
+        persisted: String,
+        recovery_ticket: Option<RecoveryTicket>,
+    },
     /// The file changed on disk; nothing was written.
     Conflict,
 }
@@ -122,6 +126,7 @@ impl ProjectWorkspace {
             session.sync_buffer(cx);
             (session.buffer.revision().get(), session.buffer.is_dirty())
         });
+        let recovery_ticket = self.recovery.as_ref().map(RecoveryStore::next_ticket);
         self.save_coordinator
             .observe(&path, revision, dirty, cx.background_executor().now());
         let snapshot = DocumentSnapshot::capture(&session.read(cx).buffer, path.clone());
@@ -145,6 +150,7 @@ impl ProjectWorkspace {
                 Ok(SaveOutcome::Saved { revision }) => Ok(SaveAttempt::Saved {
                     revision,
                     persisted,
+                    recovery_ticket,
                 }),
                 Ok(SaveOutcome::Conflict) => Ok(SaveAttempt::Conflict),
                 Err(error) => Err((save_failure_class(&error), error.to_string())),
@@ -172,13 +178,19 @@ impl ProjectWorkspace {
     ) {
         let path = request.path.clone();
         self.save_tasks.remove(&path);
-        let (outcome, persisted, class) = match result {
+        let (outcome, persisted, recovery_ticket, class) = match result {
             Ok(SaveAttempt::Saved {
                 revision,
                 persisted,
-            }) => (SaveResult::Saved { revision }, Some(persisted), None),
-            Ok(SaveAttempt::Conflict) => (SaveResult::Conflict, None, None),
-            Err((class, message)) => (SaveResult::Failed { message }, None, Some(class)),
+                recovery_ticket,
+            }) => (
+                SaveResult::Saved { revision },
+                Some(persisted),
+                recovery_ticket,
+                None,
+            ),
+            Ok(SaveAttempt::Conflict) => (SaveResult::Conflict, None, None, None),
+            Err((class, message)) => (SaveResult::Failed { message }, None, None, Some(class)),
         };
         let completion = self.save_coordinator.complete(
             &path,
@@ -195,9 +207,9 @@ impl ProjectWorkspace {
             self.record_save_failure(&path, class, cx);
         }
         self.apply_save_completion(
-            &path,
             &request,
             persisted.as_deref(),
+            recovery_ticket,
             completion,
             window,
             cx,
@@ -210,13 +222,14 @@ impl ProjectWorkspace {
 
     pub(super) fn apply_save_completion(
         &mut self,
-        path: &std::path::Path,
         request: &SaveRequest,
         persisted: Option<&str>,
+        recovery_ticket: Option<RecoveryTicket>,
         completion: SaveCompletion,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let path = request.path.as_path();
         let Some(session) = self.sessions.get(path).cloned() else {
             self.save_coordinator.forget(path);
             self.pending_after_save.clear();
@@ -232,7 +245,7 @@ impl ProjectWorkspace {
                 tracing::info!(path = %path.display(), revision, current, "document saved");
                 let identity = session.read(cx).buffer.identity().clone();
                 let persisted = persisted.unwrap_or_default();
-                let (confirmed, content) = session.update(cx, |session, cx| {
+                let (confirmed, content, revision) = session.update(cx, |session, cx| {
                     // A newer edit after the snapshot may still be pending;
                     // materialize it so `confirm_saved` sees the newer revision.
                     session.sync_buffer(cx);
@@ -249,13 +262,12 @@ impl ProjectWorkspace {
                     // the external-change flag and adopt the persisted bytes.
                     session.dirty = session.buffer.is_dirty();
                     cx.notify();
-                    (confirmed, content)
+                    (confirmed, content, session.buffer.revision().get())
                 });
                 if !confirmed {
                     // The buffer is the authority on dirtiness, so the
                     // coordinator follows it instead of assuming newer content.
                     let dirty = session.read(cx).buffer.is_dirty();
-                    let revision = session.read(cx).buffer.revision().get();
                     self.save_coordinator.observe(
                         path,
                         revision,
@@ -263,11 +275,8 @@ impl ProjectWorkspace {
                         cx.background_executor().now(),
                     );
                 }
-                if confirmed && let Some(store) = self.recovery.clone() {
-                    let task = runtime::blocking(cx, move || {
-                        let _ = store.clear_after_save(&identity, &content);
-                    });
-                    task.detach();
+                if confirmed && let Some(ticket) = recovery_ticket {
+                    self.clear_recovery_after_save(path, identity, content, revision, ticket, cx);
                 }
                 if request.kind == SaveKind::Manual || manual {
                     self.status = if current && confirmed {
@@ -299,7 +308,7 @@ impl ProjectWorkspace {
                 self.status = tr!("browser.save.failed", error = message);
                 self.update_tab_state(path, cx);
                 cx.emit(SessionChanged);
-                self.schedule_recovery(cx);
+                self.schedule_recovery_for(path, cx);
                 self.abandon_pending_after_save(path);
             }
             SaveCompletion::Stale => {}
@@ -421,12 +430,7 @@ impl ProjectWorkspace {
                                     false,
                                     cx.background_executor().now(),
                                 );
-                                if let Some(store) = this.recovery.clone() {
-                                    let task = runtime::blocking(cx, move || {
-                                        let _ = store.clear(&identity);
-                                    });
-                                    task.detach();
-                                }
+                                this.clear_recovery_record(&path, identity, revision, cx);
                                 this.status =
                                     tr!("browser.save.reloaded", file = file_label(&path));
                                 this.update_tab_state(&path, cx);
@@ -473,6 +477,7 @@ impl ProjectWorkspace {
             )
         });
         let persisted = content.clone();
+        let recovery_ticket = self.recovery.as_ref().map(RecoveryStore::next_ticket);
         let write_path = path.clone();
         self.status = tr!("browser.save.overwriting");
         cx.notify();
@@ -502,12 +507,10 @@ impl ProjectWorkspace {
                             dirty,
                             cx.background_executor().now(),
                         );
-                        if let Some(store) = this.recovery.clone() {
-                            let saved = persisted.clone();
-                            let task = runtime::blocking(cx, move || {
-                                let _ = store.clear_after_save(&identity, &saved);
-                            });
-                            task.detach();
+                        if confirmed && let Some(ticket) = recovery_ticket {
+                            this.clear_recovery_after_save(
+                                &path, identity, persisted, revision, ticket, cx,
+                            );
                         }
                         this.status = if confirmed {
                             tr!("browser.save.overwrote", file = file_label(&path))
@@ -649,7 +652,7 @@ impl ProjectWorkspace {
                     "aborting a pending trash: newer edits are still unsaved"
                 );
                 self.status = tr!("browser.save.trash_aborted_newer", file = name(&path));
-                self.schedule_recovery(cx);
+                self.schedule_recovery_for(&path, cx);
             }
             PendingAfterSave::Close { path } => {
                 tracing::warn!(
@@ -657,7 +660,7 @@ impl ProjectWorkspace {
                     "keeping a document open: newer edits are still unsaved"
                 );
                 self.status = tr!("browser.save.close_aborted_newer", file = name(&path));
-                self.schedule_recovery(cx);
+                self.schedule_recovery_for(&path, cx);
             }
             PendingAfterSave::Duplicate { path } => {
                 tracing::warn!(
@@ -665,7 +668,7 @@ impl ProjectWorkspace {
                     "aborting a pending duplicate: newer edits are still unsaved"
                 );
                 self.status = tr!("browser.save.duplicate_aborted_newer", file = name(&path));
-                self.schedule_recovery(cx);
+                self.schedule_recovery_for(&path, cx);
             }
         }
     }
@@ -1057,7 +1060,7 @@ mod tests {
         });
 
         // The original keeps its recovery record; the copy does not consume it.
-        view.update(cx, |view, cx| view.schedule_recovery(cx));
+        view.update(cx, |view, cx| view.schedule_recovery_for(&path, cx));
         for _ in 0..300 {
             cx.run_until_parked();
             if store
@@ -1401,6 +1404,7 @@ mod tests {
                     Ok(SaveAttempt::Saved {
                         revision,
                         persisted: "# First\n".to_owned(),
+                        recovery_ticket: None,
                     }),
                     window,
                     cx,
@@ -1468,6 +1472,7 @@ mod tests {
                     Ok(SaveAttempt::Saved {
                         revision,
                         persisted: "# First\n".to_owned(),
+                        recovery_ticket: None,
                     }),
                     window,
                     cx,
@@ -1538,6 +1543,7 @@ mod tests {
                     Ok(SaveAttempt::Saved {
                         revision,
                         persisted: "# First\n".to_owned(),
+                        recovery_ticket: None,
                     }),
                     window,
                     cx,
@@ -1595,6 +1601,7 @@ mod tests {
                     Ok(SaveAttempt::Saved {
                         revision,
                         persisted: "# Queued\n".to_owned(),
+                        recovery_ticket: None,
                     }),
                     window,
                     cx,
@@ -1725,6 +1732,7 @@ mod tests {
                     Ok(SaveAttempt::Saved {
                         revision: rev_a,
                         persisted: "# A edited\n".to_owned(),
+                        recovery_ticket: None,
                     }),
                     window,
                     cx,
@@ -1749,6 +1757,7 @@ mod tests {
                     Ok(SaveAttempt::Saved {
                         revision: rev_b,
                         persisted: b_text,
+                        recovery_ticket: None,
                     }),
                     window,
                     cx,

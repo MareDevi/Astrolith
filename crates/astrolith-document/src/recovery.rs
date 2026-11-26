@@ -14,7 +14,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 use astrolith_core::{ProjectId, SourcePath};
 use serde_json::{Value, json};
@@ -156,6 +159,14 @@ pub struct RecoveryStore {
     directory: PathBuf,
 }
 
+/// Process-local ordering ticket for recovery work on one document.
+///
+/// Tickets order capture, clear and quit-flush intent. They are intentionally
+/// not persisted: a reopened document starts with fresh work even though its
+/// project identity and revision counter may repeat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RecoveryTicket(u64);
+
 impl RecoveryStore {
     /// Create a store rooted at `directory` (created lazily on first write).
     pub fn new(directory: impl Into<PathBuf>) -> Self {
@@ -175,24 +186,63 @@ impl RecoveryStore {
             .join(format!("{}.json", record_key(identity)))
     }
 
+    /// Assign the next process-local ordering ticket.
+    ///
+    /// Call this when recovery intent is captured, before dispatching
+    /// asynchronous work, so execution order cannot invert the intent order.
+    pub fn next_ticket(&self) -> RecoveryTicket {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        RecoveryTicket(NEXT.fetch_add(1, Ordering::Relaxed).saturating_add(1))
+    }
+
     /// Persist a recovery record atomically, replacing any prior record for the
-    /// same document. Writes for one document are serialized in-process.
+    /// same document. This convenience allocates a ticket at call time; callers
+    /// that queue the write asynchronously should use [`Self::save_at`] with a
+    /// ticket allocated at the scheduling point.
     ///
     /// # Errors
     ///
     /// Returns [`DocumentError::Io`] if the directory cannot be created,
     /// serialization fails, or the write fails.
     pub fn save(&self, record: &RecoveryRecord) -> Result<(), DocumentError> {
-        let lock = save_lock(&record_key(record.identity()));
-        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        fs::create_dir_all(&self.directory).map_err(io_error)?;
+        let ticket = self.next_ticket();
+        self.save_at(record, ticket)
+    }
+
+    /// Persist a recovery record unless a newer ticket already owns this
+    /// document's state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::Io`] if the directory cannot be created,
+    /// serialization fails, or the write fails.
+    pub fn save_at(
+        &self,
+        record: &RecoveryRecord,
+        ticket: RecoveryTicket,
+    ) -> Result<(), DocumentError> {
         let path = self.record_path(record.identity());
+        let state = record_state(&path);
+        let mut state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.begin(ticket) {
+            tracing::trace!(
+                source = %record.identity().canonical_source().as_str(),
+                revision = record.revision().get(),
+                "skipped a stale recovery record"
+            );
+            return Ok(());
+        }
+        fs::create_dir_all(&self.directory).map_err(io_error)?;
         tracing::trace!(
             source = %record.identity().canonical_source().as_str(),
             revision = record.revision().get(),
             "writing a recovery record"
         );
-        write_atomic(&path, &serialize_record(record)?).map_err(io_error)
+        write_atomic(&path, &serialize_record(record)?).map_err(io_error)?;
+        state.finish(ticket);
+        Ok(())
     }
 
     /// Load every valid record, reporting corrupt files as diagnostics.
@@ -248,11 +298,36 @@ impl RecoveryStore {
     ///
     /// Returns [`DocumentError::Io`] if the file exists but cannot be removed.
     pub fn clear(&self, identity: &DocumentIdentity) -> Result<bool, DocumentError> {
+        let ticket = self.next_ticket();
+        self.clear_at(identity, ticket)
+    }
+
+    /// Remove a record unless a newer ticket already owns this document's
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::Io`] if the file exists but cannot be removed.
+    pub fn clear_at(
+        &self,
+        identity: &DocumentIdentity,
+        ticket: RecoveryTicket,
+    ) -> Result<bool, DocumentError> {
+        let path = self.record_path(identity);
+        let state = record_state(&path);
+        let mut state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.begin(ticket) {
+            return Ok(false);
+        }
         tracing::trace!(
             source = %identity.canonical_source().as_str(),
             "clearing a recovery record"
         );
-        remove_if_present(&self.record_path(identity))
+        let removed = remove_if_present(&path)?;
+        state.finish(ticket);
+        Ok(removed)
     }
 
     /// Remove the record for `identity` when the persisted content equals
@@ -272,13 +347,44 @@ impl RecoveryStore {
         identity: &DocumentIdentity,
         saved_content: &str,
     ) -> Result<bool, DocumentError> {
+        let ticket = self.next_ticket();
+        self.clear_after_save_at(identity, saved_content, ticket)
+    }
+
+    /// Remove a record made obsolete by a save whose intent was captured at
+    /// `ticket`.
+    ///
+    /// A capture ticket assigned after the save may write normally; a capture
+    /// assigned before it is ignored even if its asynchronous write arrives
+    /// later.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError::Io`] for read/remove failures other than a
+    /// missing file.
+    pub fn clear_after_save_at(
+        &self,
+        identity: &DocumentIdentity,
+        saved_content: &str,
+        ticket: RecoveryTicket,
+    ) -> Result<bool, DocumentError> {
         let path = self.record_path(identity);
+        let state = record_state(&path);
+        let mut state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.begin(ticket) {
+            return Ok(false);
+        }
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                state.finish(ticket);
+                return Ok(false);
+            }
             Err(error) => return Err(io_error(error)),
         };
-        match parse_record(&text) {
+        let result = match parse_record(&text) {
             Ok(record) if record.content() != saved_content => {
                 tracing::debug!(
                     source = %identity.canonical_source().as_str(),
@@ -287,7 +393,31 @@ impl RecoveryStore {
                 Ok(false)
             }
             _ => remove_if_present(&path),
+        }?;
+        state.finish(ticket);
+        Ok(result)
+    }
+}
+
+#[derive(Default)]
+struct RecordState {
+    latest_started: u64,
+    latest_succeeded: u64,
+}
+
+impl RecordState {
+    fn begin(&mut self, ticket: RecoveryTicket) -> bool {
+        if ticket.0 < self.latest_started
+            || (ticket.0 == self.latest_started && ticket.0 <= self.latest_succeeded)
+        {
+            return false;
         }
+        self.latest_started = ticket.0;
+        true
+    }
+
+    fn finish(&mut self, ticket: RecoveryTicket) {
+        self.latest_succeeded = self.latest_succeeded.max(ticket.0);
     }
 }
 
@@ -375,14 +505,14 @@ fn record_key(identity: &DocumentIdentity) -> String {
     format!("{hash:016x}")
 }
 
-fn save_lock(key: &str) -> Arc<Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
-    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut map = locks
+fn record_state(path: &Path) -> Arc<Mutex<RecordState>> {
+    static STATES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<RecordState>>>>> = OnceLock::new();
+    let states = STATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = states
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    map.entry(key.to_owned())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
+    map.entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(RecordState::default())))
         .clone()
 }
 
@@ -555,6 +685,61 @@ mod tests {
         let load = store.load().unwrap();
         assert_eq!(load.records().len(), 1);
         assert_eq!(load.records()[0].content(), "newer unsaved");
+    }
+
+    #[test]
+    fn later_tickets_win_when_a_reopened_document_resets_its_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(dir.path());
+        let old_session = store.next_ticket();
+        let reopened = store.next_ticket();
+
+        store
+            .save_at(&record(0, "fresh after reopen", 100), reopened)
+            .unwrap();
+        store
+            .save_at(&record(6, "stale old session", 101), old_session)
+            .unwrap();
+
+        let load = store.load().unwrap();
+        assert_eq!(load.records().len(), 1);
+        assert_eq!(load.records()[0].content(), "fresh after reopen");
+        assert_eq!(load.records()[0].revision(), DocumentRevision::INITIAL);
+    }
+
+    #[test]
+    fn tickets_order_stale_work_against_clear_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(dir.path());
+        let old_capture = store.next_ticket();
+        let save_intent = store.next_ticket();
+
+        assert!(!store.clear_at(&identity(), save_intent).unwrap());
+        store
+            .save_at(&record(4, "stale task", 101), old_capture)
+            .unwrap();
+        assert!(
+            store.load().unwrap().is_empty(),
+            "a task captured before the save must not restore its obsolete content"
+        );
+
+        let reopened = store.next_ticket();
+        store
+            .save_at(&record(0, "fresh after reopen", 102), reopened)
+            .unwrap();
+        let reopened_save = store.next_ticket();
+        let newer_edit = store.next_ticket();
+        store
+            .save_at(&record(1, "newer edit", 103), newer_edit)
+            .unwrap();
+        assert!(
+            !store
+                .clear_after_save_at(&identity(), "fresh after reopen", reopened_save)
+                .unwrap()
+        );
+        let load = store.load().unwrap();
+        assert_eq!(load.records().len(), 1);
+        assert_eq!(load.records()[0].content(), "newer edit");
     }
 
     #[test]

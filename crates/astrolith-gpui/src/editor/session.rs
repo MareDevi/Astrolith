@@ -1,5 +1,10 @@
 //! One source history and retained editing models per canonical source.
-use std::{ops::Range, path::PathBuf, time::Instant};
+use std::{
+    ops::Range,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use astrolith_document::{
     DocumentBuffer, DocumentIdentity, DocumentKind, DocumentRevision, FormatCommand, FormatOutcome,
@@ -44,6 +49,8 @@ pub(crate) struct DocumentSession {
     absorbed_text: Option<(gpui_kit::EntityId, DocumentRevision, Rope)>,
     /// Previous absorbed input snapshot, used to find only the changed bytes.
     absorbed_writer_text: Rope,
+    /// Previous complete-source snapshot, used to splice only the changed bytes.
+    absorbed_source_text: Rope,
     /// Rendered writing surface; the editor remains its input model.
     pub(crate) writer: Entity<WriterSurface>,
     pub(crate) asset_paste: Option<super::formatting::PasteHook>,
@@ -116,8 +123,10 @@ pub(crate) struct DocumentSession {
     /// This document's attachment to the project's shared server, while Build
     /// shows it. The process belongs to the project, never to a session.
     lsp: Option<LspAttachment>,
-    /// In-flight debounced full-text document sync.
+    /// In-flight debounced document sync.
     lsp_change: Option<Task<()>>,
+    /// What the server holds, shared with the debounced sync task.
+    lsp_sync: Arc<Mutex<LspSyncState>>,
     /// Last diagnostics version accepted for this document, so an older
     /// `publishDiagnostics` cannot overwrite a newer set.
     lsp_diagnostic_version: Option<i32>,
@@ -172,6 +181,19 @@ pub(crate) struct LspAttachment {
     pub handle: ClientHandle,
     pub uri: lsp_types::Uri,
     pub language: LanguageId,
+    incremental_sync: bool,
+}
+
+#[derive(Default)]
+struct LspSyncState {
+    /// Bumped by every queue and every reattach; a stale flush sends nothing.
+    generation: u64,
+    /// The server's copy is unknown; the next flush sends complete source.
+    resync: bool,
+    /// Latest complete source queued for the server.
+    pending: Rope,
+    /// Complete source the server holds after the last flush.
+    sent: Rope,
 }
 
 /// A language server asked the editor to reveal a location in another file.
@@ -490,6 +512,7 @@ impl DocumentSession {
             }
         });
         let absorbed_writer_text = editor.read(cx).text().clone();
+        let absorbed_source_text = buffer.text_snapshot();
         Self {
             writer_editor: editor.clone(),
             source_editor: None,
@@ -499,6 +522,7 @@ impl DocumentSession {
             source_subscriptions: Vec::new(),
             absorbed_text: None,
             absorbed_writer_text,
+            absorbed_source_text,
             editor,
             writer,
             asset_paste: None,
@@ -531,6 +555,7 @@ impl DocumentSession {
             placeholder_text_len: 0,
             lsp: None,
             lsp_change: None,
+            lsp_sync: Arc::default(),
             lsp_diagnostic_version: None,
             lsp_status: LspStatus::Inactive,
             lsp_failure_seen: false,
@@ -555,8 +580,11 @@ impl DocumentSession {
         }
         let started = crate::editor::perf::start();
         if self.origin {
+            let text = self.editor.read(cx).text().clone();
             if !self.source_view {
-                self.absorbed_writer_text = self.editor.read(cx).text().clone();
+                self.absorbed_writer_text = text;
+            } else {
+                self.absorbed_source_text = text;
             }
             // This session's own projection rewrite; the buffer is already
             // authoritative for exactly this text.
@@ -1838,25 +1866,25 @@ impl DocumentSession {
         if !self.source_view && self.writer_preedit.is_some() {
             return;
         }
+        let current = self.editor.read(cx).text().clone();
         let text_key = (
             self.editor.entity_id(),
             self.buffer.revision(),
-            self.editor.read(cx).text().clone(),
+            current.clone(),
         );
         if self.absorbed_text.as_ref() == Some(&text_key) {
             return;
         }
         self.absorbed_text = Some(text_key);
         if self.source_view {
-            self.absorb_source(cx, intent);
-            return;
+            return self.absorb_source(cx, intent, &current);
         }
         if self.refused {
             // The editor text is known to be newer-and-rejected; nothing may be
             // mapped from it until a rebuild resynchronises it.
             return;
         }
-        let visible = self.editor.read(cx).text().clone();
+        let visible = current;
         // Projection replacement (reloads, recovery and synthetic layouts)
         // can precede delivery of its own input event. Such an event is a sync,
         // not an edit to the authoritative source.
@@ -1951,17 +1979,71 @@ impl DocumentSession {
         self.last_selection = selection_after;
     }
 
-    fn absorb_source(&mut self, cx: &App, intent: HistoryIntent) {
+    fn absorb_source(&mut self, cx: &App, intent: HistoryIntent, current: &Rope) {
         if self.refused {
             return;
         }
-        let source = self.editor.read(cx).text().to_string();
-        if source == self.buffer.current_text() {
+        let previous = self.absorbed_source_text.clone();
+        if current == &previous {
             return;
         }
-        let before = self.buffer.current_text().to_owned();
         let selection_before = self.last_selection.clone();
         let selection_after = self.editor.read(cx).selected_range();
+        if previous == self.buffer.text_snapshot()
+            && let Some(change) = TextChange::between(&previous, current)
+            && current.is_char_boundary(change.new.start)
+            && current.is_char_boundary(change.new.end)
+            && previous.is_char_boundary(change.old.start)
+            && previous.is_char_boundary(change.old.end)
+        {
+            let replacement = current.slice(change.new.clone()).to_string();
+            let removed = previous.slice(change.old.clone()).to_string();
+            if self
+                .buffer
+                .splice_text(change.old.clone(), &replacement)
+                .is_ok()
+            {
+                self.history.record_splice(
+                    change.old.clone(),
+                    removed,
+                    replacement.clone(),
+                    selection_before,
+                    selection_after.clone(),
+                    intent,
+                );
+                let visible_edit = source_edit_to_visible(&self.projection, &change.old);
+                let updated_counts = visible_edit
+                    .as_ref()
+                    .filter(|_| !self.presentation_dirty)
+                    .map(|visible| {
+                        self.counts
+                            .edited(&self.projection.visible, visible.clone(), &replacement)
+                    });
+                if visible_edit.is_some()
+                    && renew_source_projection(&mut self.projection, &change.old, &replacement)
+                {
+                    if let Some(counts) = updated_counts {
+                        self.counts = counts;
+                    } else {
+                        self.presentation_dirty = true;
+                    }
+                } else {
+                    let (projection, notice) =
+                        project_or_complete(self.buffer.current_text(), self.kind);
+                    self.projection = projection;
+                    if self.notice.is_none() {
+                        self.notice = notice;
+                        self.lsp_notice_pending = false;
+                    }
+                    self.presentation_dirty = true;
+                }
+                self.absorbed_source_text = current.clone();
+                self.last_selection = selection_after;
+                return;
+            }
+        }
+        let source = current.to_string();
+        let before = self.buffer.current_text().to_owned();
         if let Err(error) = self.buffer.apply_text(source) {
             self.refuse(&error.to_string());
             return;
@@ -1982,6 +2064,7 @@ impl DocumentSession {
             intent,
         );
         self.last_selection = selection_after;
+        self.absorbed_source_text = current.clone();
     }
 
     /// Show the complete source (Build) or the writer projection (Writing/Preview).
@@ -2137,7 +2220,15 @@ impl DocumentSession {
             handle,
             uri,
             language,
+            incremental_sync: support.incremental_sync,
         });
+        // The server's copy came from whichever session opened the document, so
+        // the next flush starts from complete source instead of a guess.
+        {
+            let mut sync = lock_lsp_sync(&self.lsp_sync);
+            sync.generation = sync.generation.wrapping_add(1);
+            sync.resync = true;
+        }
         self.lsp_status = if ready {
             LspStatus::Ready
         } else {
@@ -2240,6 +2331,12 @@ impl DocumentSession {
     /// up, so a tab switch never pays another discovery or `node_modules` scan.
     pub(crate) fn detach_lsp(&mut self, cx: &mut Context<Self>) -> Option<LspAttachment> {
         self.lsp_change = None;
+        // A flush still waiting on the debounce must not reach the closed
+        // document through the handle it captured.
+        {
+            let mut sync = lock_lsp_sync(&self.lsp_sync);
+            sync.generation = sync.generation.wrapping_add(1);
+        }
         self.lsp_diagnostic_version = None;
         self.lsp_failure_seen = false;
         self.lsp_status = LspStatus::Inactive;
@@ -2316,18 +2413,29 @@ impl DocumentSession {
         cx.notify();
     }
 
-    /// Push the latest complete source to the server, coalescing keystrokes.
+    /// Queue the latest complete source for the server, coalescing keystrokes.
+    ///
+    /// The body is shared as a rope, so typing never copies the document on the
+    /// UI thread; the diff against what the server holds runs once per
+    /// debounce, on the background thread.
     fn sync_lsp_change(&mut self, cx: &mut Context<Self>) {
         let Some(attachment) = self.lsp.as_ref() else {
             return;
         };
         let handle = attachment.handle.clone();
         let uri = attachment.uri.clone();
-        let text = self.buffer.current_text().to_owned();
+        let incremental = attachment.incremental_sync;
+        let generation = {
+            let mut state = lock_lsp_sync(&self.lsp_sync);
+            state.generation = state.generation.wrapping_add(1);
+            state.pending = self.buffer.text_snapshot();
+            state.generation
+        };
+        let sync = self.lsp_sync.clone();
         let executor = cx.background_executor().clone();
         self.lsp_change = Some(cx.background_spawn(async move {
             executor.timer(std::time::Duration::from_millis(150)).await;
-            handle.change(uri, text);
+            flush_lsp_sync(&sync, generation, handle, uri, incremental);
         }));
     }
 
@@ -2679,6 +2787,197 @@ fn editor_language(path: &str) -> SharedString {
     .into()
 }
 
+/// Map a complete-source edit into the one visible segment that contains it.
+fn source_edit_to_visible(
+    projection: &WriterProjection,
+    source: &Range<usize>,
+) -> Option<Range<usize>> {
+    projection.segments.iter().find_map(|segment| {
+        let ProjectionSegment::Visible {
+            source: segment_source,
+            visible,
+        } = segment
+        else {
+            return None;
+        };
+        let insertion_at_end = source.is_empty() && source.start == projection.source_len();
+        if source.start < segment_source.start
+            || source.end > segment_source.end
+            || (source.is_empty() && source.start == segment_source.end && !insertion_at_end)
+        {
+            return None;
+        }
+        let start = visible.start + source.start.saturating_sub(segment_source.start);
+        Some(start..start + source.end.saturating_sub(source.start))
+    })
+}
+
+/// Renew the visible allocation and its source mapping after a visible edit.
+fn renew_source_projection(
+    projection: &mut WriterProjection,
+    source: &Range<usize>,
+    replacement: &str,
+) -> bool {
+    let Some(visible) = source_edit_to_visible(projection, source) else {
+        return false;
+    };
+    if !projection.visible.is_char_boundary(visible.start)
+        || !projection.visible.is_char_boundary(visible.end)
+    {
+        return false;
+    }
+    let removed = source.end.saturating_sub(source.start);
+    let delta = if replacement.len() >= removed {
+        let Ok(added) = isize::try_from(replacement.len() - removed) else {
+            return false;
+        };
+        added
+    } else {
+        let Ok(removed) = isize::try_from(removed - replacement.len()) else {
+            return false;
+        };
+        -removed
+    };
+    let shift = |offset: usize| -> Option<usize> {
+        if delta >= 0 {
+            offset.checked_add(delta as usize)
+        } else {
+            offset.checked_sub(delta.unsigned_abs())
+        }
+    };
+    projection
+        .visible
+        .replace_range(visible.clone(), replacement);
+    let mut renewed = false;
+    for segment in &mut projection.segments {
+        if renewed {
+            match segment {
+                ProjectionSegment::Hidden { source } => {
+                    let Some(start) = shift(source.start) else {
+                        return false;
+                    };
+                    let Some(end) = shift(source.end) else {
+                        return false;
+                    };
+                    *source = start..end;
+                }
+                ProjectionSegment::Visible { source, visible } => {
+                    let Some(start) = shift(source.start) else {
+                        return false;
+                    };
+                    let Some(end) = shift(source.end) else {
+                        return false;
+                    };
+                    let Some(visible_start) = shift(visible.start) else {
+                        return false;
+                    };
+                    let Some(visible_end) = shift(visible.end) else {
+                        return false;
+                    };
+                    *source = start..end;
+                    *visible = visible_start..visible_end;
+                }
+            }
+            continue;
+        }
+        let ProjectionSegment::Visible {
+            source: segment_source,
+            visible: segment_visible,
+        } = segment
+        else {
+            continue;
+        };
+        if visible.start < segment_visible.start || visible.end > segment_visible.end {
+            continue;
+        }
+        let Some(source_end) = shift(segment_source.end) else {
+            return false;
+        };
+        let Some(visible_end) = shift(segment_visible.end) else {
+            return false;
+        };
+        segment_source.end = source_end;
+        segment_visible.end = visible_end;
+        renewed = true;
+    }
+    renewed
+}
+
+/// Lock the sync state, ignoring a poison that only a previous panic caused.
+fn lock_lsp_sync(state: &Mutex<LspSyncState>) -> std::sync::MutexGuard<'_, LspSyncState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Tell the server what changed, unless a newer queue or a detach won.
+///
+/// The state lock spans the send and the `sent` update: a cancelled task and a
+/// later flush can then never disagree about what the server holds.
+fn flush_lsp_sync(
+    state: &Mutex<LspSyncState>,
+    generation: u64,
+    handle: ClientHandle,
+    uri: lsp_types::Uri,
+    incremental: bool,
+) {
+    let mut state = lock_lsp_sync(state);
+    if state.generation != generation {
+        return;
+    }
+    if incremental && !state.resync {
+        if let Some(change) = ranged_change(&state.sent, &state.pending) {
+            handle.change_incremental(uri, vec![change]);
+        }
+    } else {
+        handle.change(uri, state.pending.to_string());
+    }
+    state.sent = state.pending.clone();
+    state.resync = false;
+}
+
+/// The one edit that turns `before` into `after`, or `None` when they match.
+///
+/// The retained prefix and suffix stop on character boundaries of both texts,
+/// so a change that shares leading bytes with a different character still
+/// reports whole characters. Positions are UTF-16, as the protocol requires.
+fn ranged_change(before: &Rope, after: &Rope) -> Option<lsp_types::TextDocumentContentChangeEvent> {
+    let before = before.to_string();
+    let after = after.to_string();
+    if before == after {
+        return None;
+    }
+    let (old, new) = (before.as_bytes(), after.as_bytes());
+    let mut prefix = old
+        .iter()
+        .zip(new)
+        .take_while(|(old, new)| old == new)
+        .count();
+    while prefix > 0 && !(before.is_char_boundary(prefix) && after.is_char_boundary(prefix)) {
+        prefix -= 1;
+    }
+    let mut suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(old, new)| old == new)
+        .count();
+    while suffix > 0
+        && !(before.is_char_boundary(before.len() - suffix)
+            && after.is_char_boundary(after.len() - suffix))
+    {
+        suffix -= 1;
+    }
+    Some(lsp_types::TextDocumentContentChangeEvent {
+        range: Some(lsp_types::Range::new(
+            astrolith_lsp::offset_to_position(&before, prefix),
+            astrolith_lsp::offset_to_position(&before, before.len() - suffix),
+        )),
+        range_length: None,
+        text: after[prefix..after.len() - suffix].to_string(),
+    })
+}
+
 /// Project `source`, showing everything (and saying why) when the metadata
 /// cannot be delimited.
 fn project_or_complete(
@@ -2933,5 +3232,54 @@ mod tests {
             });
         })
         .expect("the window is open");
+    }
+
+    /// Applying the reported change must reproduce the new text, whatever
+    /// bytes the two texts share.
+    #[test]
+    fn a_ranged_change_reproduces_the_new_text() {
+        let cases = [
+            ("", "alpha"),
+            ("alpha", ""),
+            ("alpha", "alphabeta"),
+            ("alphabeta", "alpha"),
+            ("a 中文 b", "a 中x b"),
+            ("é", "è"),
+            ("line one\nline two\n", "line one\nline 2\n"),
+            ("🎉🎉\nend", "🎉\nend"),
+            ("unchanged", "unchanged"),
+        ];
+        for (before, after) in cases {
+            let change = ranged_change(&Rope::from_str(before), &Rope::from_str(after));
+            assert_eq!(change.is_none(), before == after, "from {before:?}");
+            let Some(change) = change else {
+                continue;
+            };
+            let range = change.range.expect("an incremental change carries a range");
+            let start = astrolith_lsp::position_to_offset(before, range.start);
+            let end = astrolith_lsp::position_to_offset(before, range.end);
+            assert!(
+                start <= end && end <= before.len(),
+                "the range must be ordered and inside the old text"
+            );
+            let mut applied = before.to_owned();
+            applied.replace_range(start..end, &change.text);
+            assert_eq!(applied, after, "from {before:?}");
+        }
+    }
+
+    /// Columns are UTF-16 units, so an astral character counts twice.
+    #[test]
+    fn a_ranged_change_reports_utf16_columns() {
+        let before = Rope::from_str("🎉a\nb");
+        let change = ranged_change(&before, &Rope::from_str("🎉ab\nb")).expect("the texts differ");
+        assert_eq!(
+            change.range,
+            Some(lsp_types::Range::new(
+                lsp_types::Position::new(0, 3),
+                lsp_types::Position::new(0, 3),
+            ))
+        );
+        assert_eq!(change.text, "b");
     }
 }
