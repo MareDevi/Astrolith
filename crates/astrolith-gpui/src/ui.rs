@@ -13,14 +13,14 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, Icon, Sizable, StyledExt,
+    ActiveTheme, Disableable, Icon, Sizable, StyledExt,
     alert::Alert,
     button::{Button, ButtonVariants},
     kbd::Kbd,
     menu::{DropdownMenu, PopupMenuItem},
 };
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Div, ElementId, Hsla, IntoElement, Keystroke, SharedString,
+    AnyElement, App, ClickEvent, Div, ElementId, Hsla, IntoElement, Keystroke, Rems, SharedString,
     TestSupportExt, Window, div, img, prelude::*, px, rems,
 };
 
@@ -252,25 +252,25 @@ pub(crate) enum NoticeTone {
     Danger,
 }
 
-/// An inline message with a tone icon and an accessible dismiss control.
+/// An inline message with a tone icon.
+///
+/// Dismissal belongs to the caller: chain `.on_close(...)` when the notice can
+/// be closed and leave it off for persistent context, so a notice never grows
+/// a close button the screen cannot act on.
 #[allow(dead_code)]
 pub(crate) fn inline_notice(
     id: impl Into<ElementId>,
     tone: NoticeTone,
     message: impl Into<SharedString>,
-    on_dismiss: impl Fn(&mut Window, &mut App) + 'static,
-    _cx: &App,
-) -> impl IntoElement {
+) -> Alert {
     let message = message.into();
-    let alert = match tone {
+    match tone {
         NoticeTone::Info => Alert::info(id, message),
         NoticeTone::Success => Alert::success(id, message),
         NoticeTone::Warning => Alert::warning(id, message),
         NoticeTone::Danger => Alert::error(id, message),
-    };
-    alert
-        .small()
-        .on_close(move |_, window, cx| on_dismiss(window, cx))
+    }
+    .small()
 }
 
 /// A form field's label row: label, required marker, meta text and control.
@@ -333,7 +333,8 @@ pub(crate) fn removable_chip(
         .h_flex()
         .items_center()
         .gap_1()
-        .h_5()
+        .min_h_6()
+        .py_0p5()
         .pl_2()
         .pr_1()
         .rounded(radius_sm(cx))
@@ -423,14 +424,34 @@ pub(crate) fn picker_button(
     options: Vec<PickerOption>,
     on_select: impl Fn(usize, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    picker_button_with(id, label, options, false, None, on_select)
+}
+
+/// A picker whose trigger can be disabled and whose menu can scroll.
+///
+/// A bounded menu (`max_h`) scrolls; an unbounded one sizes to its items. The
+/// height is expressed in `rem` so it follows the interface zoom.
+#[allow(dead_code)]
+pub(crate) fn picker_button_with(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    options: Vec<PickerOption>,
+    disabled: bool,
+    max_h: Option<Rems>,
+    on_select: impl Fn(usize, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
     let on_select: PickerHandler = std::rc::Rc::new(on_select);
     Button::new(id)
         .small()
         .outline()
         .dropdown_caret(true)
+        .disabled(disabled)
         .label(label)
-        .dropdown_menu(move |menu, _, _| {
-            let mut menu = menu;
+        .dropdown_menu(move |menu, window, _| {
+            let mut menu = menu.scrollable(max_h.is_some());
+            if let Some(max_h) = max_h {
+                menu = menu.max_h(max_h.to_pixels(window.rem_size()));
+            }
             for (index, option) in options.iter().enumerate() {
                 let handler = on_select.clone();
                 menu = menu.item(
