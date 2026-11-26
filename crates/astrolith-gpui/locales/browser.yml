@@ -76,9 +76,9 @@ browser:
       zh-CN: 清除筛选
       ja: フィルターをクリア
     new_entry:
-      en: New entry
-      zh-CN: 新建条目
-      ja: 新規エントリ
+      en: "New entry…"
+      zh-CN: "新建条目…"
+      ja: "新規エントリ…"
     no_collections_title:
       en: No collections
       zh-CN: 没有集合
@@ -333,7 +333,7 @@ browser:
       ja: "終了を中止しました：ドキュメントを保存できませんでした（%{error}）。"
     generation_exhausted:
       en: Project generation exhausted; restart the application.
-      zh-CN: 项目代次已耗尽；请重新启动应用。
+      zh-CN: 项目代次已耗尽；请重启应用。
       ja: プロジェクトの世代が上限に達しました。アプリケーションを再起動してください。
     discovering_project:
       en: Discovering project…
@@ -590,9 +590,9 @@ browser:
       zh-CN: "无法复制路径：%{error}"
       ja: "パスをコピーできませんでした：%{error}"
     image_hint:
-      en: Project-relative image path; external copy arrives with the asset service
-      zh-CN: 项目相对图片路径；外部复制功能将随资源服务提供
-      ja: プロジェクト相対の画像パス。外部からのコピーはアセットサービスで提供予定です
+      en: Project-relative image path
+      zh-CN: 项目相对图片路径
+      ja: プロジェクト相対の画像パス
     image_list_hint:
       en: Comma-separated project-relative image paths
       zh-CN: 以逗号分隔的项目相对图片路径
@@ -615,7 +615,7 @@ browser:
       ja: 参照 ID
     project_root:
       en: (project root)
-      zh-CN: (项目根目录)
+      zh-CN: （项目根目录）
       ja: （プロジェクトルート）
     open_project_prompt:
       en: Open Astro project
@@ -656,9 +656,9 @@ browser:
       zh-CN: 此文档有未保存的更改。
       ja: このドキュメントには保存されていない変更があります。
     keep_editing:
-      en: Keep editing
-      zh-CN: 继续编辑
-      ja: 編集を続ける
+      en: Cancel
+      zh-CN: 取消
+      ja: キャンセル
     discard_changes:
       en: Discard changes
       zh-CN: 放弃更改
@@ -668,9 +668,9 @@ browser:
       zh-CN: 保存并关闭
       ja: 保存して閉じる
     unsaved_title:
-      en: Unsaved documents
-      zh-CN: 未保存的文档
-      ja: 未保存のドキュメント
+      en: Save changes before closing?
+      zh-CN: 关闭前保存更改？
+      ja: 閉じる前に変更を保存しますか？
     unsaved_body:
       en: Changes exist only in memory. Save them, keep the window open, or discard them.
       zh-CN: 更改仅存在于内存中。请保存它们、保持窗口打开，或放弃它们。
@@ -711,6 +711,10 @@ browser:
       en: File name
       zh-CN: 文件名
       ja: ファイル名
+    name_required:
+      en: Enter a file name.
+      zh-CN: 请输入文件名。
+      ja: ファイル名を入力してください。
     create:
       en: Create
       zh-CN: 创建

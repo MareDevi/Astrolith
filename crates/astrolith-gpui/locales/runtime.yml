@@ -38,6 +38,15 @@ preview:
       en: "Serving %{url}"
       zh-CN: "正在提供 %{url}"
       ja: "%{url} を配信中"
+  empty:
+    unattached_title:
+      en: "No project open"
+      zh-CN: "未打开项目"
+      ja: "プロジェクトが開かれていません"
+    unattached:
+      en: "Open a project to preview its development server."
+      zh-CN: "打开项目即可预览其开发服务器。"
+      ja: "プロジェクトを開くと開発サーバーをプレビューできます。"
   actions:
     start:
       en: "Start server"
@@ -53,7 +62,7 @@ preview:
       ja: "停止"
     restart:
       en: "Restart"
-      zh-CN: "重新启动"
+      zh-CN: "重启"
       ja: "再起動"
     open:
       en: "Open in browser"
@@ -78,7 +87,7 @@ preview:
       ja: "プレビューを開始するには Astro プロジェクトを開いてください。"
     open_project_to_restart:
       en: "Open an Astro project to restart a preview."
-      zh-CN: "打开 Astro 项目即可重新启动预览。"
+      zh-CN: "打开 Astro 项目即可重启预览。"
       ja: "プレビューを再起動するには Astro プロジェクトを開いてください。"
     already_running:
       en: "The preview server is already running."
@@ -94,7 +103,7 @@ preview:
       ja: "Astro 開発サーバーを停止しています…"
     restarting:
       en: "Restarting the Astro dev server…"
-      zh-CN: "正在重新启动 Astro 开发服务器…"
+      zh-CN: "正在重启 Astro 开发服务器…"
       ja: "Astro 開発サーバーを再起動しています…"
     ready:
       en: "Preview ready at %{url}"
@@ -173,6 +182,10 @@ preview:
       en: "no page loaded"
       zh-CN: "未加载页面"
       ja: "ページが読み込まれていません"
+    unavailable:
+      en: "Embedded preview unavailable"
+      zh-CN: "内嵌预览不可用"
+      ja: "埋め込みプレビューを利用できません"
     start_prompt:
       en: "Start the preview server to load the page."
       zh-CN: "启动预览服务器以加载页面。"
@@ -182,30 +195,30 @@ preview:
       zh-CN: "预览服务器尚未就绪。"
       ja: "プレビューサーバーの準備がまだできていません。"
     create_failed:
-      en: "could not create the embedded WebView: %{error}"
-      zh-CN: "无法创建内嵌 WebView：%{error}"
-      ja: "埋め込み WebView を作成できませんでした: %{error}"
+      en: "Could not create the embedded WebView: %{error}."
+      zh-CN: "无法创建内嵌 WebView：%{error}。"
+      ja: "埋め込み WebView を作成できませんでした: %{error}。"
     feature_disabled:
-      en: "this build was compiled without the embedded-webview feature"
-      zh-CN: "此构建未编译 embedded-webview 功能"
-      ja: "このビルドは embedded-webview 機能なしでコンパイルされています"
+      en: "This build was compiled without the embedded-webview feature."
+      zh-CN: "此构建未编译 embedded-webview 功能。"
+      ja: "このビルドは embedded-webview 機能なしでコンパイルされています。"
     capability:
       not_compiled:
-        en: "this build was compiled without the embedded WebView feature"
-        zh-CN: "此构建未编译内嵌 WebView 功能"
-        ja: "このビルドは埋め込み WebView 機能なしでコンパイルされています"
+        en: "This build was compiled without the embedded WebView feature."
+        zh-CN: "此构建未编译内嵌 WebView 功能。"
+        ja: "このビルドは埋め込み WebView 機能なしでコンパイルされています。"
       wayland:
-        en: "embedded WebView needs an X11 or XWayland window; this Wayland window is external-only"
-        zh-CN: "内嵌 WebView 需要 X11 或 XWayland 窗口；此 Wayland 窗口仅支持外部预览"
-        ja: "埋め込み WebView には X11 または XWayland のウィンドウが必要です。この Wayland ウィンドウでは外部プレビューのみ利用できます"
+        en: "Embedded WebView needs an X11 or XWayland window; this Wayland window is external-only."
+        zh-CN: "内嵌 WebView 需要 X11 或 XWayland 窗口；此 Wayland 窗口仅支持外部预览。"
+        ja: "埋め込み WebView には X11 または XWayland のウィンドウが必要です。この Wayland ウィンドウでは外部プレビューのみ利用できます。"
       headless:
-        en: "no display server is available"
-        zh-CN: "没有可用的显示服务器"
-        ja: "利用可能なディスプレイサーバーがありません"
+        en: "No display server is available."
+        zh-CN: "没有可用的显示服务器。"
+        ja: "利用可能なディスプレイサーバーがありません。"
       unsupported_platform:
-        en: "the embedded WebView is not supported on this platform"
-        zh-CN: "此平台不支持内嵌 WebView"
-        ja: "このプラットフォームでは埋め込み WebView はサポートされていません"
+        en: "The embedded WebView is not supported on this platform."
+        zh-CN: "此平台不支持内嵌 WebView。"
+        ja: "このプラットフォームでは埋め込み WebView はサポートされていません。"
 terminal:
   failure:
     shell:
@@ -248,9 +261,9 @@ terminal:
       ja: "ターミナル %{number}"
   actions:
     new:
-      en: "+ New"
-      zh-CN: "+ 新建"
-      ja: "+ 新規"
+      en: "New"
+      zh-CN: "新建"
+      ja: "新規"
     close:
       en: "Close"
       zh-CN: "关闭"
@@ -265,7 +278,7 @@ terminal:
       ja: "クリア"
     restart:
       en: "Restart"
-      zh-CN: "重新启动"
+      zh-CN: "重启"
       ja: "再起動"
     close_panel:
       en: "Close terminal panel"
@@ -276,3 +289,7 @@ terminal:
       en: "No project terminal"
       zh-CN: "无项目终端"
       ja: "プロジェクトのターミナルがありません"
+    no_project_body:
+      en: "Open a project to start a shell in it."
+      zh-CN: "打开项目即可在其中启动终端。"
+      ja: "プロジェクトを開くとその中でシェルを起動できます。"

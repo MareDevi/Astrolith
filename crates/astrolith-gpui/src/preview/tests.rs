@@ -794,3 +794,24 @@ fn open_on_enter_survives_entering_preview_before_the_project_attaches(
         vec!["http://127.0.0.1:4321/docs/intro".to_owned()]
     );
 }
+
+#[gpui_kit::test]
+fn start_is_unavailable_without_an_attached_project(cx: &mut gpui_kit::TestAppContext) {
+    let _serial = Serial::acquire();
+    let backend = TestBackend::ready("http://127.0.0.1:4321/");
+    let (_handle, panel, _surface) = mount(cx, backend.clone());
+    panel.read_with(cx, |panel, _| assert!(panel.can_start()));
+    panel.update(cx, |panel, cx| panel.detach(cx));
+    panel.read_with(cx, |panel, _| {
+        assert!(
+            !panel.can_start(),
+            "Start must wait for a project to attach"
+        );
+        assert!(matches!(panel.status(), ServerStatus::Stopped));
+    });
+    assert_eq!(
+        backend.starts.load(Ordering::SeqCst),
+        0,
+        "no server may start without an attached project"
+    );
+}
