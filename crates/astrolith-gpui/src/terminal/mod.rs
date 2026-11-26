@@ -19,14 +19,16 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, StyledExt,
     button::{Button, ButtonVariants},
+    status_bar::StatusBar,
+    tab::{Tab, TabBar},
 };
 use gpui_kit::{
     App, Bounds, Context, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, Task, Window,
-    canvas, div, prelude::*, px,
+    canvas, div, prelude::*, px, rems,
 };
 
-use crate::theme::METRICS;
+use crate::{theme::METRICS, ui};
 
 /// Advance used for the cell grid until the mono face has been measured.
 const FALLBACK_CELL_WIDTH: f32 = 7.8;
@@ -276,7 +278,7 @@ impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}
 impl TerminalPanel {
     /// Create an empty terminal panel; no process starts until a project attaches.
     pub(crate) fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus = cx.focus_handle();
+        let focus = cx.focus_handle().tab_stop(true);
         let weak = cx.weak_entity();
         let keys = cx.intercept_keystrokes({
             let focus = focus.clone();
@@ -843,7 +845,7 @@ impl TerminalPanel {
         })
     }
 
-    fn render_rows(&self, window: &Window, cx: &App) -> Vec<RowView> {
+    fn render_rows(&self, window: &Window, cx: &App, ansi: &[u32; 16]) -> Vec<RowView> {
         let Some(snapshot) = self.snapshot() else {
             return Vec::new();
         };
@@ -933,8 +935,8 @@ impl TerminalPanel {
                     col += 1;
                     continue;
                 }
-                let mut fg = ansi_color(cell.foreground(), foreground);
-                let mut bg = ansi_color(cell.background(), background);
+                let mut fg = ansi_color(cell.foreground(), foreground, ansi);
+                let mut bg = ansi_color(cell.background(), background, ansi);
                 if cell.inverse() {
                     std::mem::swap(&mut fg, &mut bg);
                 }
@@ -992,7 +994,8 @@ impl Render for TerminalPanel {
         let mono = metrics.family.clone();
         let row_height = metrics.row_height;
         let col_width = metrics.col_width;
-        let rows = self.render_rows(_window, cx);
+        let palette = crate::theme::terminal_ansi_palette(cx.theme().mode.is_dark());
+        let rows = self.render_rows(_window, cx, &palette);
         let bounds_cell = self.last_bounds.clone();
         let running = self.running_state();
         let active = self.active_terminal;
@@ -1023,8 +1026,20 @@ impl Render for TerminalPanel {
             .terminals
             .iter()
             .enumerate()
-            .map(|(index, terminal)| (terminal.id, tr!("terminal.tab.label", number = index + 1)))
+            .map(|(index, _)| {
+                let label = tr!("terminal.tab.label", number = index + 1);
+                Tab::new().label(label.clone()).aria_label(label)
+            })
             .collect::<Vec<_>>();
+        let selected_tab =
+            active.and_then(|id| self.terminals.iter().position(|terminal| terminal.id == id));
+        let select_tab = cx.listener(|this, index: &usize, window, cx| {
+            let Some(id) = this.terminals.get(*index).map(|terminal| terminal.id) else {
+                return;
+            };
+            this.select_terminal(id, cx);
+            this.focus.focus(window, cx);
+        });
         let selected = self.selected_text();
         let terminal_size = self
             .active_session()
@@ -1051,234 +1066,230 @@ impl Render for TerminalPanel {
             .child(
                 div()
                     .h_flex()
-                    .h(px(40.))
+                    .min_h(rems(2.5))
                     .flex_shrink_0()
                     .items_center()
-                    .gap_1()
                     .border_b_1()
-                    .border_color(cx.theme().border)
+                    .border_color(cx.theme().window_border)
                     .bg(cx.theme().tab_bar)
-                    .px(px(METRICS.space.sm as f32))
-                    .child(div().h_flex().gap(px(2.)).children(tabs.into_iter().map(
-                        |(id, label)| {
-                            let select = cx.listener(move |this, _, window, cx| {
-                                this.select_terminal(id, cx);
-                                this.focus.focus(window, cx);
-                            });
-                            Button::new(format!("terminal-tab-{id}"))
-                                .small()
-                                .ghost()
-                                .label(label)
-                                .when(active == Some(id), |button| {
-                                    button
-                                        .bg(cx.theme().tab_active)
-                                        .text_color(cx.theme().tab_active_foreground)
-                                })
-                                .when(active != Some(id), |button| {
-                                    button.text_color(cx.theme().tab_foreground)
-                                })
-                                .on_click(select)
-                        },
-                    )))
+                    .px_4()
                     .child(
-                        Button::new("terminal-new")
+                        TabBar::new("terminal-tabs")
                             .small()
-                            .ghost()
-                            .label(tr!("terminal.actions.new"))
-                            .on_click(create),
-                    )
-                    .child(div().flex_1().min_w_0())
-                    .child(
-                        Button::new("terminal-close")
-                            .small()
-                            .ghost()
-                            .label(tr!("terminal.actions.close"))
-                            .disabled(active.is_none())
-                            .on_click(close),
+                            .outline()
+                            .flex_1()
+                            .min_w_0()
+                            .when_some(selected_tab, |bar, index| bar.selected_index(index))
+                            .on_click(select_tab)
+                            .children(tabs),
                     )
                     .child(
-                        Button::new("terminal-copy")
-                            .small()
-                            .ghost()
-                            .label(tr!("terminal.actions.copy"))
-                            .disabled(selected.is_none())
-                            .on_click(copy),
-                    )
-                    .child(
-                        Button::new("terminal-clear")
-                            .small()
-                            .ghost()
-                            .label(tr!("terminal.actions.clear"))
-                            .disabled(!running)
-                            .on_click(clear),
-                    )
-                    .child(
-                        Button::new("terminal-restart")
-                            .small()
-                            .ghost()
-                            .label(tr!("terminal.actions.restart"))
-                            .on_click(restart),
-                    )
-                    .child(
-                        Button::new("terminal-close-panel")
-                            .small()
-                            .ghost()
-                            .icon(IconName::X)
-                            .tooltip(tr!("terminal.actions.close_panel"))
-                            .on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(TerminalPanelEvent::ClosePanel)),
+                        div()
+                            .h_flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                Button::new("terminal-new")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Plus)
+                                    .label(tr!("terminal.actions.new"))
+                                    .on_click(create),
+                            )
+                            .child(
+                                Button::new("terminal-close")
+                                    .small()
+                                    .ghost()
+                                    .label(tr!("terminal.actions.close"))
+                                    .disabled(active.is_none())
+                                    .on_click(close),
+                            )
+                            .child(
+                                Button::new("terminal-copy")
+                                    .small()
+                                    .ghost()
+                                    .label(tr!("terminal.actions.copy"))
+                                    .disabled(selected.is_none())
+                                    .on_click(copy),
+                            )
+                            .child(
+                                Button::new("terminal-clear")
+                                    .small()
+                                    .ghost()
+                                    .label(tr!("terminal.actions.clear"))
+                                    .disabled(!running)
+                                    .on_click(clear),
+                            )
+                            .child(
+                                Button::new("terminal-restart")
+                                    .small()
+                                    .ghost()
+                                    .label(tr!("terminal.actions.restart"))
+                                    .disabled(active.is_none())
+                                    .on_click(restart),
+                            )
+                            .child(
+                                ui::icon_button(
+                                    "terminal-close-panel",
+                                    IconName::X,
+                                    tr!("terminal.actions.close_panel"),
+                                )
+                                .on_click(cx.listener(
+                                    |_, _, _, cx| cx.emit(TerminalPanelEvent::ClosePanel),
+                                )),
                             ),
                     ),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .p(px(METRICS.space.sm as f32))
-                    .child(
-                        div()
-                            .relative()
-                            .size_full()
-                            .min_h_0()
-                            .overflow_hidden()
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(if focused {
-                                cx.theme().tokens.ring.color
-                            } else {
-                                cx.theme().border
-                            })
-                            .bg(cx.theme().background)
-                            .font_family(mono.clone())
-                            .text_size(px(metrics.size))
-                            .track_focus(&self.focus)
-                            .key_context("Terminal")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                    this.handle_mouse_down(event, window, cx)
-                                }),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                    this.handle_mouse_down(event, window, cx)
-                                }),
-                            )
-                            .on_mouse_down(
-                                MouseButton::Middle,
-                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                    this.handle_mouse_down(event, window, cx)
-                                }),
-                            )
-                            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                                let mode = this.mouse_mode();
-                                let report = match mode {
-                                    TerminalMouseMode::AnyMotion => Some(
-                                        event
-                                            .pressed_button
-                                            .and_then(mouse_button_code)
-                                            .unwrap_or(3),
-                                    ),
-                                    TerminalMouseMode::ButtonMotion => {
-                                        event.pressed_button.and_then(mouse_button_code)
+                div().flex_1().min_h_0().p(rems(0.375)).child(
+                    div()
+                        .relative()
+                        .size_full()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .rounded(cx.theme().radius)
+                        .border_1()
+                        .border_color(if focused {
+                            cx.theme().tokens.ring.color
+                        } else {
+                            cx.theme().border
+                        })
+                        .bg(cx.theme().background)
+                        .font_family(mono.clone())
+                        .text_size(px(metrics.size))
+                        .track_focus(&self.focus)
+                        .key_context("Terminal")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                this.handle_mouse_down(event, window, cx)
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                this.handle_mouse_down(event, window, cx)
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Middle,
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                this.handle_mouse_down(event, window, cx)
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                            let mode = this.mouse_mode();
+                            let report = match mode {
+                                TerminalMouseMode::AnyMotion => Some(
+                                    event
+                                        .pressed_button
+                                        .and_then(mouse_button_code)
+                                        .unwrap_or(3),
+                                ),
+                                TerminalMouseMode::ButtonMotion => {
+                                    event.pressed_button.and_then(mouse_button_code)
+                                }
+                                _ => None,
+                            };
+                            if let Some(button) = report {
+                                if let Some(point) = this.point_at(event.position)
+                                    && this.last_mouse_report != Some((point, button))
+                                {
+                                    this.send_mouse_report(
+                                        button,
+                                        point,
+                                        event.modifiers,
+                                        false,
+                                        true,
+                                    );
+                                    this.last_mouse_report = Some((point, button));
+                                }
+                                return;
+                            }
+                            if !this.selecting {
+                                return;
+                            }
+                            if let Some(point) = this.point_at(event.position)
+                                && let Some(selection) = this.selection.as_mut()
+                                && selection.focus != point
+                            {
+                                selection.focus = point;
+                                cx.notify();
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseUpEvent, _, _| {
+                                this.handle_mouse_up(event)
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Right,
+                            cx.listener(|this, event: &MouseUpEvent, _, _| {
+                                this.handle_mouse_up(event)
+                            }),
+                        )
+                        .on_mouse_up(
+                            MouseButton::Middle,
+                            cx.listener(|this, event: &MouseUpEvent, _, _| {
+                                this.handle_mouse_up(event)
+                            }),
+                        )
+                        .on_scroll(cx.listener(
+                            move |this, event: &gpui_kit::ScrollEvent, _, cx| {
+                                let lines = match event.delta {
+                                    gpui_kit::ScrollDelta::Lines(lines) => lines.y,
+                                    gpui_kit::ScrollDelta::Pixels(pixels) => {
+                                        f32::from(pixels.y) / row_height
                                     }
-                                    _ => None,
                                 };
-                                if let Some(button) = report {
-                                    if let Some(point) = this.point_at(event.position)
-                                        && this.last_mouse_report != Some((point, button))
+                                if lines.abs() < f32::EPSILON {
+                                    return;
+                                }
+                                let delta = -(lines.round() as i32) * WHEEL_ROWS;
+                                if this.mouse_mode() != TerminalMouseMode::None {
+                                    if lines.abs() >= f32::EPSILON
+                                        && let Some(point) = this.point_at(event.position)
                                     {
                                         this.send_mouse_report(
-                                            button,
+                                            if lines < 0. { 64 } else { 65 },
                                             point,
                                             event.modifiers,
                                             false,
-                                            true,
+                                            false,
                                         );
-                                        this.last_mouse_report = Some((point, button));
                                     }
                                     return;
                                 }
-                                if !this.selecting {
-                                    return;
-                                }
-                                if let Some(point) = this.point_at(event.position)
-                                    && let Some(selection) = this.selection.as_mut()
-                                    && selection.focus != point
-                                {
-                                    selection.focus = point;
+                                let revision = this.active_session().and_then(|session| {
+                                    session.scroll(delta).then(|| session.revision())
+                                });
+                                if let Some(revision) = revision {
+                                    this.selection = None;
+                                    if let Some(terminal) = this.active_instance_mut() {
+                                        terminal.last_revision = revision;
+                                    }
                                     cx.notify();
                                 }
-                            }))
-                            .on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(|this, event: &MouseUpEvent, _, _| {
-                                    this.handle_mouse_up(event)
-                                }),
-                            )
-                            .on_mouse_up(
-                                MouseButton::Right,
-                                cx.listener(|this, event: &MouseUpEvent, _, _| {
-                                    this.handle_mouse_up(event)
-                                }),
-                            )
-                            .on_mouse_up(
-                                MouseButton::Middle,
-                                cx.listener(|this, event: &MouseUpEvent, _, _| {
-                                    this.handle_mouse_up(event)
-                                }),
-                            )
-                            .on_scroll(cx.listener(
-                                move |this, event: &gpui_kit::ScrollEvent, _, cx| {
-                                    let lines = match event.delta {
-                                        gpui_kit::ScrollDelta::Lines(lines) => lines.y,
-                                        gpui_kit::ScrollDelta::Pixels(pixels) => {
-                                            f32::from(pixels.y) / row_height
-                                        }
-                                    };
-                                    if lines.abs() < f32::EPSILON {
-                                        return;
-                                    }
-                                    let delta = -(lines.round() as i32) * WHEEL_ROWS;
-                                    if this.mouse_mode() != TerminalMouseMode::None {
-                                        if lines.abs() >= f32::EPSILON
-                                            && let Some(point) = this.point_at(event.position)
-                                        {
-                                            this.send_mouse_report(
-                                                if lines < 0. { 64 } else { 65 },
-                                                point,
-                                                event.modifiers,
-                                                false,
-                                                false,
-                                            );
-                                        }
-                                        return;
-                                    }
-                                    let revision = this.active_session().and_then(|session| {
-                                        session.scroll(delta).then(|| session.revision())
-                                    });
-                                    if let Some(revision) = revision {
-                                        this.selection = None;
-                                        if let Some(terminal) = this.active_instance_mut() {
-                                            terminal.last_revision = revision;
-                                        }
-                                        cx.notify();
-                                    }
+                            },
+                        ))
+                        .child(
+                            canvas(
+                                move |bounds, _, _| {
+                                    bounds_cell.set(Some(bounds));
                                 },
-                            ))
-                            .child(
-                                canvas(
-                                    move |bounds, _, _| {
-                                        bounds_cell.set(Some(bounds));
-                                    },
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .inset_0(),
+                                |_, _, _, _| {},
                             )
-                            .child(div().absolute().inset_0().v_flex().children(
-                                rows.into_iter().map(|row| {
+                            .absolute()
+                            .inset_0(),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .v_flex()
+                                .children(rows.into_iter().map(|row| {
                                     div()
                                         .h(px(row_height))
                                         .w_full()
@@ -1304,56 +1315,39 @@ impl Render for TerminalPanel {
                                                 })
                                                 .child(SharedString::from(run.text))
                                         }))
-                                }),
-                            ))
-                            .when(!running, |viewport| {
-                                viewport.child(
-                                    div()
-                                        .absolute()
-                                        .inset_0()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(
-                                            active_failure.clone().unwrap_or_else(|| {
-                                                tr!("terminal.empty.no_project")
-                                            }),
-                                        ),
-                                )
-                            }),
-                    ),
+                                })),
+                        )
+                        .when(active.is_none(), |viewport| {
+                            viewport.child(div().absolute().inset_0().child(ui::empty_state(
+                                "terminal-empty",
+                                IconName::Terminal,
+                                tr!("terminal.empty.no_project"),
+                                tr!("terminal.empty.no_project_body"),
+                                None,
+                                cx,
+                            )))
+                        }),
+                ),
             )
+            .when_some(active_failure, |this, failure| {
+                this.child(div().px_2().pb_1().child(ui::inline_notice(
+                    "terminal-failure",
+                    ui::NoticeTone::Danger,
+                    failure,
+                )))
+            })
             .child(
-                div()
-                    .h_flex()
-                    .h(px(26.))
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap_2()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().status_bar)
-                    .px(px(METRICS.space.md as f32))
-                    .child(div().size(px(6.)).rounded_full().bg(if running {
+                StatusBar::new()
+                    .left(ui::status_dot(if running {
                         cx.theme().success
                     } else {
                         cx.theme().muted_foreground
                     }))
-                    .child(
+                    .left(div().min_w_0().truncate().child(status))
+                    .right(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(status),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
+                            .flex_shrink_0()
+                            .font_family(mono.clone())
                             .child(format!("{} × {}", terminal_size.0, terminal_size.1)),
                     ),
             )
@@ -1547,25 +1541,25 @@ fn translate_key(event: &gpui_kit::KeystrokeEvent, application_cursor: bool) -> 
     Some(bytes)
 }
 
-/// Map a vt100 color to the terminal surface; indexed values use xterm's palette.
-fn ansi_color(color: TerminalColor, default: Hsla) -> Hsla {
+/// Map a vt100 color to the terminal surface.
+///
+/// Indexed values use the theme's ANSI palette: the sixteen base slots are
+/// tuned per appearance so bright text stays legible on a light page, and the
+/// 6×6×6 cube and grayscale ramp follow xterm.
+fn ansi_color(color: TerminalColor, default: Hsla, ansi: &[u32; 16]) -> Hsla {
     match color {
         TerminalColor::Default => default,
         TerminalColor::Rgb(red, green, blue) => gpui_kit::rgba(
             u32::from(red) << 24 | u32::from(green) << 16 | u32::from(blue) << 8 | 0xff,
         )
         .into(),
-        TerminalColor::Indexed(index) => indexed_color(index).into(),
+        TerminalColor::Indexed(index) => indexed_color(index, ansi).into(),
     }
 }
 
-fn indexed_color(index: u8) -> gpui_kit::Rgba {
-    const BASE: [u32; 16] = [
-        0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5, 0x7f7f7f,
-        0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
-    ];
+fn indexed_color(index: u8, ansi: &[u32; 16]) -> gpui_kit::Rgba {
     let rgb = match index {
-        0..=15 => BASE[usize::from(index)],
+        0..=15 => ansi[usize::from(index)],
         16..=231 => {
             const STEPS: [u32; 6] = [0, 95, 135, 175, 215, 255];
             let index = index - 16;
@@ -1585,7 +1579,7 @@ fn indexed_color(index: u8) -> gpui_kit::Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_kit::{TestAppContext, WindowOptions, base::Root, size};
+    use gpui_kit::{TestAppContext, WindowOptions, base::Root, size, test::TestWindowExt};
 
     fn metrics(col_width: f32, row_height: f32) -> CellMetrics {
         CellMetrics {
@@ -1845,7 +1839,11 @@ mod tests {
                     .update_window(handle.into(), |_, window, cx| {
                         panel.update(cx, |panel, cx| {
                             panel
-                                .render_rows(window, cx)
+                                .render_rows(
+                                    window,
+                                    cx,
+                                    &crate::theme::terminal_ansi_palette(cx.theme().mode.is_dark()),
+                                )
                                 .into_iter()
                                 .flat_map(|row| row.runs.into_iter().map(|run| run.text))
                                 .collect::<String>()
@@ -1858,6 +1856,74 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "{contents:?}");
             std::thread::sleep(Duration::from_millis(10));
         }
+        panel.update(cx, |panel, cx| panel.shutdown(cx));
+    }
+
+    #[gpui_kit::test]
+    async fn exited_shell_keeps_its_output_visible(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let mut panel = None;
+        let (handle, _host) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let terminal = cx.new(|cx| TerminalPanel::new(window, cx));
+                panel = Some(terminal.clone());
+                cx.new(|_| TerminalHost(terminal))
+            })
+            .unwrap()
+        });
+        let handle = handle.downcast::<Root>().unwrap();
+        let panel = panel.expect("the panel is mounted");
+        cx.update_window(handle.into(), |_, window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.attach(root.path(), cx);
+                panel.focus.focus(window, cx);
+                panel.set_active(true, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.simulate_input(handle.into(), "echo CODEX_EXIT_MARKER");
+        cx.simulate_keystrokes(handle.into(), "enter");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let contents = panel.read_with(cx, |panel, _| panel.screen_contents());
+            if contents.contains("CODEX_EXIT_MARKER") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{contents:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        cx.simulate_input(handle.into(), "exit");
+        cx.simulate_keystrokes(handle.into(), "enter");
+        loop {
+            if !panel.read_with(cx, |panel, _| panel.running_state()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shell never reported its exit"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+            cx.executor().advance_clock(ACTIVE_POLL);
+            cx.run_until_parked();
+        }
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("terminal-empty").is_none(),
+                "an exited shell must not be covered by the empty-project overlay"
+            );
+        })
+        .unwrap();
+        let contents = panel.read_with(cx, |panel, _| panel.screen_contents());
+        assert!(
+            contents.contains("CODEX_EXIT_MARKER"),
+            "the exit status must not replace the final output: {contents:?}"
+        );
         panel.update(cx, |panel, cx| panel.shutdown(cx));
     }
 

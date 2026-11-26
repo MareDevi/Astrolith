@@ -1,4 +1,6 @@
-use astrolith_core::preferences::{CopyeditCategory, CopyeditPreferences, WorkspaceMode};
+use astrolith_core::preferences::{
+    CopyeditCategory, CopyeditPreferences, ThemePreference, WorkspaceMode,
+};
 use gpui_kit::{
     App, KeyBinding,
     component::input::{GoToDefinition, ShowCompletions},
@@ -67,6 +69,7 @@ pub(crate) enum CommandId {
     ToggleSidebar,
     ToggleInspector,
     TogglePreview,
+    ToggleSourceControl,
     ToggleTerminal,
     StartPreview,
     StopPreview,
@@ -146,6 +149,7 @@ pub(crate) const COMMANDS: &[CommandId] = &[
     CommandId::ToggleSidebar,
     CommandId::ToggleInspector,
     CommandId::TogglePreview,
+    CommandId::ToggleSourceControl,
     CommandId::ToggleTerminal,
     CommandId::StartPreview,
     CommandId::StopPreview,
@@ -225,6 +229,21 @@ pub(crate) struct CollectionItem {
     pub name: String,
     /// Whether the active document already belongs to this collection.
     pub active: bool,
+}
+
+/// Live state that only menu checkmarks need.
+///
+/// Command availability describes whether a command can run; the menu also
+/// needs the theme preference and dock state to mark the active choice, which
+/// the project workspace does not own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MenuState {
+    /// Appearance preference; System stays distinct from its resolved mode.
+    pub theme: ThemePreference,
+    /// The bottom dock currently shows the terminal.
+    pub terminal_visible: bool,
+    /// The floating Source Control sheet is open.
+    pub source_control_visible: bool,
 }
 
 /// The shared label for one generated collection command.
@@ -320,6 +339,20 @@ impl CommandId {
         }
     }
 
+    /// The label that reflects live checked state, for menus and the palette.
+    pub fn label_for(
+        self,
+        copyedit: &CopyeditPreferences,
+        availability: CommandAvailability,
+    ) -> String {
+        match self {
+            Self::ToggleFullscreen if availability.fullscreen => {
+                tr!("commands.label.exit_full_screen")
+            }
+            _ => self.label_in(copyedit, availability.workspace_mode),
+        }
+    }
+
     /// Whether this command can run in the given application state.
     pub fn is_available(self, state: CommandAvailability) -> bool {
         match self {
@@ -375,6 +408,9 @@ impl CommandId {
             | Self::ResolveConflictSaveCopy => state.save_conflict,
             Self::ToggleInspector => {
                 state.frontmatter_available && state.workspace_mode == WorkspaceMode::Writing
+            }
+            Self::ToggleSourceControl => {
+                state.project_open && state.workspace_mode == WorkspaceMode::Build && !state.busy
             }
             _ => true,
         }
@@ -448,6 +484,7 @@ impl CommandId {
             Self::ToggleSidebar => tr!("commands.label.toggle_files"),
             Self::ToggleInspector => tr!("commands.label.toggle_inspector"),
             Self::TogglePreview => tr!("commands.label.toggle_preview"),
+            Self::ToggleSourceControl => tr!("commands.label.toggle_source_control"),
             Self::ToggleTerminal => tr!("commands.label.toggle_terminal"),
             Self::StartPreview => tr!("commands.label.start_preview_server"),
             Self::StopPreview => tr!("commands.label.stop_preview_server"),
@@ -779,6 +816,7 @@ pub(crate) fn install_menus(
     cx: &mut App,
     copyedit: &CopyeditPreferences,
     availability: CommandAvailability,
+    menu_state: MenuState,
     recent: &[RecentEntry],
     collections: &[CollectionItem],
 ) {
@@ -801,6 +839,7 @@ pub(crate) fn install_menus(
             ],
             copyedit,
             availability,
+            menu_state,
         );
         items.push(gpui_kit::MenuItem::separator());
         let mut recent_items: Vec<gpui_kit::MenuItem> = recent
@@ -829,6 +868,7 @@ pub(crate) fn install_menus(
             CommandId::OpenRecentProjects,
             copyedit,
             availability,
+            menu_state,
         ));
         items.push(gpui_kit::MenuItem::submenu(
             gpui_kit::Menu::new(tr!("commands.menu.open_recent")).items(recent_menu),
@@ -841,13 +881,20 @@ pub(crate) fn install_menus(
                 CommandId::CopyPathRelative,
                 CommandId::RecoverUnsaved,
                 CommandId::OpenProjectInIde,
+                CommandId::OpenCollectionInIde,
                 CommandId::OpenEntryInIde,
             ],
             copyedit,
             availability,
+            menu_state,
         ));
         items.push(gpui_kit::MenuItem::separator());
-        items.push(menu_item(CommandId::Quit, copyedit, availability));
+        items.push(menu_item(
+            CommandId::Quit,
+            copyedit,
+            availability,
+            menu_state,
+        ));
         items
     });
     let view = gpui_kit::Menu::new(tr!("commands.menu.view")).items({
@@ -862,6 +909,7 @@ pub(crate) fn install_menus(
                 CommandId::ToggleSidebar,
                 CommandId::ToggleInspector,
                 CommandId::TogglePreview,
+                CommandId::ToggleSourceControl,
                 CommandId::ToggleTerminal,
                 CommandId::FocusDocument,
                 CommandId::ResetLayout,
@@ -869,6 +917,7 @@ pub(crate) fn install_menus(
             ],
             copyedit,
             availability,
+            menu_state,
         );
         if !collections.is_empty() {
             items.push(gpui_kit::MenuItem::separator());
@@ -879,7 +928,7 @@ pub(crate) fn install_menus(
                         id: collection.name.clone(),
                     },
                 )
-                .disabled(collection.active)
+                .checked(collection.active)
             }));
         }
         items.push(gpui_kit::MenuItem::separator());
@@ -891,6 +940,7 @@ pub(crate) fn install_menus(
             ],
             copyedit,
             availability,
+            menu_state,
         ));
         items
     });
@@ -905,6 +955,7 @@ pub(crate) fn install_menus(
             ],
             copyedit,
             availability,
+            menu_state,
         );
         items.push(gpui_kit::MenuItem::separator());
         items.extend(items_for(
@@ -917,6 +968,7 @@ pub(crate) fn install_menus(
             ],
             copyedit,
             availability,
+            menu_state,
         ));
         items
     });
@@ -938,6 +990,7 @@ pub(crate) fn install_menus(
             ],
             copyedit,
             availability,
+            menu_state,
         );
         items.push(gpui_kit::MenuItem::separator());
         items.extend(items_for(
@@ -951,6 +1004,7 @@ pub(crate) fn install_menus(
             ],
             copyedit,
             availability,
+            menu_state,
         ));
         items
     });
@@ -964,12 +1018,14 @@ pub(crate) fn install_menus(
         ],
         copyedit,
         availability,
+        menu_state,
     ));
     let help = gpui_kit::Menu::new(tr!("commands.menu.help")).items({
         let mut items = items_for(
             &[CommandId::OpenUserGuide, CommandId::OpenKeyboardShortcuts],
             copyedit,
             availability,
+            menu_state,
         );
         items.push(gpui_kit::MenuItem::separator());
         items.extend(items_for(
@@ -980,21 +1036,24 @@ pub(crate) fn install_menus(
             ],
             copyedit,
             availability,
+            menu_state,
         ));
         items
     });
     let application = gpui_kit::Menu::new(tr!("commands.menu.application")).items({
         let mut items = items_for(
-            &[
-                CommandId::About,
-                CommandId::OpenPreferences,
-                CommandId::OpenCollectionInIde,
-            ],
+            &[CommandId::About, CommandId::OpenPreferences],
             copyedit,
             availability,
+            menu_state,
         );
         items.push(gpui_kit::MenuItem::separator());
-        items.push(menu_item(CommandId::Quit, copyedit, availability));
+        items.push(menu_item(
+            CommandId::Quit,
+            copyedit,
+            availability,
+            menu_state,
+        ));
         items
     });
     cx.set_menus([file, edit, view, writer, preview, help, application]);
@@ -1004,10 +1063,11 @@ fn items_for(
     commands: &[CommandId],
     copyedit: &CopyeditPreferences,
     availability: CommandAvailability,
+    menu_state: MenuState,
 ) -> Vec<gpui_kit::MenuItem> {
     commands
         .iter()
-        .map(|command| menu_item(*command, copyedit, availability))
+        .map(|command| menu_item(*command, copyedit, availability, menu_state))
         .collect()
 }
 
@@ -1051,6 +1111,7 @@ pub(crate) fn command_group(command: CommandId) -> String {
         | CommandId::ToggleSidebar
         | CommandId::ToggleInspector
         | CommandId::TogglePreview
+        | CommandId::ToggleSourceControl
         | CommandId::ToggleTerminal
         | CommandId::FocusDocument
         | CommandId::FocusSelectionToolbar
@@ -1138,6 +1199,7 @@ fn menu_item(
     command: CommandId,
     copyedit: &CopyeditPreferences,
     availability: CommandAvailability,
+    menu_state: MenuState,
 ) -> gpui_kit::MenuItem {
     let checked = match command {
         CommandId::WorkspaceWriting => availability.workspace_mode == WorkspaceMode::Writing,
@@ -1146,17 +1208,19 @@ fn menu_item(
         CommandId::ToggleSidebar => availability.sidebar_visible,
         CommandId::ToggleInspector => availability.inspector_visible,
         CommandId::TogglePreview => availability.preview_visible,
+        CommandId::ToggleSourceControl => menu_state.source_control_visible,
+        CommandId::ToggleTerminal => menu_state.terminal_visible,
         CommandId::ToggleFocusMode => availability.focus_mode,
         CommandId::ToggleTypewriterMode => availability.typewriter_mode,
         CommandId::ToggleFullscreen => availability.fullscreen,
+        CommandId::LightTheme => menu_state.theme == ThemePreference::Light,
+        CommandId::DarkTheme => menu_state.theme == ThemePreference::Dark,
+        CommandId::SystemTheme => menu_state.theme == ThemePreference::System,
         _ => false,
     };
-    gpui_kit::MenuItem::action(
-        command.label_in(copyedit, availability.workspace_mode),
-        command,
-    )
-    .checked(checked)
-    .disabled(!command.is_available(availability))
+    gpui_kit::MenuItem::action(command.label_for(copyedit, availability), command)
+        .checked(checked)
+        .disabled(!command.is_available(availability))
 }
 
 #[cfg(test)]
@@ -1392,6 +1456,7 @@ mod tests {
                 cx,
                 &copyedit,
                 CommandAvailability::default(),
+                MenuState::default(),
                 &recent,
                 &collections,
             );
@@ -1436,13 +1501,13 @@ mod tests {
             );
         }
         assert!(labels.iter().any(|label| label == "Open site"));
-        assert!(labels.iter().any(|label| label == "Open Collection: blog"));
-        assert!(labels.iter().any(|label| label == "Open Collection: docs"));
+        assert!(labels.iter().any(|label| label == "Open collection: blog"));
+        assert!(labels.iter().any(|label| label == "Open collection: docs"));
     }
 
     #[test]
     fn generated_commands_share_labels_and_availability_rules() {
-        assert_eq!(collection_command_label("blog"), "Open Collection: blog");
+        assert_eq!(collection_command_label("blog"), "Open collection: blog");
         let idle = CommandAvailability::default();
         for command in [CommandId::ReloadCollections, CommandId::OpenProjectInIde] {
             assert!(!command.is_available(idle));

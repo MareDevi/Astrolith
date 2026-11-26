@@ -152,10 +152,6 @@ impl Palette {
         Self { entries }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     pub(crate) fn get(&self, position: usize) -> Option<&PaletteEntry> {
         self.entries.get(position)
     }

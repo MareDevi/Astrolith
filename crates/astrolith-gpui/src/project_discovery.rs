@@ -62,12 +62,14 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::{Input, InputState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
-    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+    menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
+    scroll::ScrollableElement,
+    tag::Tag,
 };
 use gpui_kit::{
     AnyWindowHandle, App, AppContext, Context, Entity, EventEmitter, Focusable, IntoElement,
     PathPromptOptions, Render, SharedString, Subscription, Task, TestSupportExt, WeakEntity,
-    Window, div, prelude::*, px, rems,
+    Window, div, prelude::*, rems,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -84,6 +86,7 @@ mod recovery;
 mod save;
 mod watch;
 
+use entry_operations::DialogSubmit;
 use entry_operations::PendingCreate;
 use lsp::LspRegistry;
 use watch::ServiceWatcher;
@@ -531,7 +534,6 @@ impl ListDelegate for EntryList {
                     .min_h(rems(3.25))
                     .selected(selected)
                     .rounded(cx.theme().radius)
-                    .when(selected, |item| item.bg(cx.theme().selection))
                     .accessibility_label(label)
                     .child(
                         div()
@@ -572,14 +574,6 @@ impl ListDelegate for EntryList {
             .upgrade()
             .map(|project| project.read(cx).command_availability(cx, window))
             .unwrap_or_default();
-        let badge = |label: SharedString, color: gpui_kit::Hsla| {
-            div()
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(color)
-                .opacity(0.9)
-                .child(label)
-        };
         let row_content = div()
             .h_flex()
             .w_full()
@@ -617,13 +611,14 @@ impl ListDelegate for EntryList {
                     }),
             )
             .when(mdx, |row| {
-                row.child(badge("MDX".into(), cx.theme().muted_foreground))
+                row.child(Tag::secondary().outline().small().child("MDX"))
             })
             .when(draft, |row| {
-                row.child(badge(
-                    tr!("browser.library.draft_badge").into(),
-                    cx.theme().warning,
-                ))
+                row.child(
+                    Tag::warning()
+                        .small()
+                        .child(tr!("browser.library.draft_badge")),
+                )
             })
             .when(!date.is_empty(), |row| {
                 row.child(
@@ -633,46 +628,46 @@ impl ListDelegate for EntryList {
                         .text_color(cx.theme().muted_foreground)
                         .child(date),
                 )
-            })
-            .context_menu(move |menu, _, _| {
-                let menu = menu
-                    .item(entry_menu_item(&owner, CommandId::NewEntry, &path, busy))
-                    .separator()
-                    .item(entry_menu_item(
-                        &owner,
-                        CommandId::DuplicateEntry,
-                        &path,
-                        busy,
-                    ))
-                    .item(entry_menu_item(&owner, CommandId::RenameEntry, &path, busy))
-                    .item(entry_menu_item(&owner, CommandId::DeleteEntry, &path, busy))
-                    .separator()
-                    .item(entry_menu_item(&owner, CommandId::RevealEntry, &path, busy))
-                    .item(entry_menu_item(
-                        &owner,
-                        CommandId::CopyPathAbsolute,
-                        &path,
-                        busy,
-                    ))
-                    .item(entry_menu_item(
-                        &owner,
-                        CommandId::CopyPathRelative,
-                        &path,
-                        busy,
-                    ))
-                    .separator();
-                ENTRY_CONTEXT_IDE_COMMANDS
-                    .iter()
-                    .fold(menu, |menu, command| {
-                        let path = (*command == CommandId::OpenEntryInIde).then(|| path.clone());
-                        menu.item(ide_menu_item(
-                            &owner,
-                            *command,
-                            path,
-                            !command.is_available(availability),
-                        ))
-                    })
             });
+        let entry_context = move |menu: PopupMenu, _: &mut Window, _: &mut Context<PopupMenu>| {
+            let menu = menu
+                .item(entry_menu_item(&owner, CommandId::NewEntry, &path, busy))
+                .separator()
+                .item(entry_menu_item(
+                    &owner,
+                    CommandId::DuplicateEntry,
+                    &path,
+                    busy,
+                ))
+                .item(entry_menu_item(&owner, CommandId::RenameEntry, &path, busy))
+                .item(entry_menu_item(&owner, CommandId::DeleteEntry, &path, busy))
+                .separator()
+                .item(entry_menu_item(&owner, CommandId::RevealEntry, &path, busy))
+                .item(entry_menu_item(
+                    &owner,
+                    CommandId::CopyPathAbsolute,
+                    &path,
+                    busy,
+                ))
+                .item(entry_menu_item(
+                    &owner,
+                    CommandId::CopyPathRelative,
+                    &path,
+                    busy,
+                ))
+                .separator();
+            ENTRY_CONTEXT_IDE_COMMANDS
+                .iter()
+                .fold(menu, |menu, command| {
+                    let path = (*command == CommandId::OpenEntryInIde).then(|| path.clone());
+                    menu.item(ide_menu_item(
+                        &owner,
+                        *command,
+                        path,
+                        !command.is_available(availability),
+                    ))
+                })
+        };
         Some(
             ListItem::new(row.id.clone())
                 .min_h(rems(3.25))
@@ -682,8 +677,11 @@ impl ListDelegate for EntryList {
                 .child(
                     div()
                         .w_full()
-                        .h(rems(2.75))
+                        .min_h(rems(2.75))
                         .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .context_menu(entry_context)
                         .child(row_content),
                 ),
         )
@@ -3670,11 +3668,32 @@ impl ProjectWorkspace {
             InputState::new(window, cx).placeholder(tr!("browser.dialog.line_number_placeholder"))
         });
         let focus_input = input.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
+        let submit: DialogSubmit = {
             let owner = owner.clone();
             let input = input.clone();
+            Rc::new(move |window: &mut Window, cx: &mut App| {
+                let typed = input.read(cx).value().to_string();
+                window.close_dialog(cx);
+                let _ = owner.update(cx, |project, cx| match typed.trim().parse::<usize>() {
+                    Ok(line) => {
+                        project.go_to_line(line, window, cx);
+                    }
+                    Err(_) => {
+                        project.status = tr!("browser.status.enter_line_number");
+                        cx.notify();
+                    }
+                });
+            })
+        };
+        window.open_dialog(cx, move |dialog, _, _| {
+            let ok_submit = submit.clone();
+            let confirm_submit = submit.clone();
             dialog
                 .title(tr!("browser.dialog.goto_line_title"))
+                .on_ok(move |_, window, cx| {
+                    ok_submit(window, cx);
+                    true
+                })
                 .child(
                     div()
                         .v_flex()
@@ -3683,39 +3702,22 @@ impl ProjectWorkspace {
                             "browser.dialog.document_lines",
                             lines = lines
                         ))))
-                        .child(Input::new(&input)),
-                )
-                .footer(
-                    div()
-                        .h_flex()
-                        .gap_2()
                         .child(
-                            Button::new("goto-line-cancel")
-                                .label(tr!("browser.dialog.cancel"))
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("goto-line-confirm")
-                                .primary()
-                                .label(tr!("browser.dialog.go"))
-                                .on_click(move |_, window, cx| {
-                                    let typed = input.read(cx).value().to_string();
-                                    window.close_dialog(cx);
-                                    let _ = owner.update(cx, |project, cx| {
-                                        match typed.trim().parse::<usize>() {
-                                            Ok(line) => {
-                                                project.go_to_line(line, window, cx);
-                                            }
-                                            Err(_) => {
-                                                project.status =
-                                                    tr!("browser.status.enter_line_number");
-                                                cx.notify();
-                                            }
-                                        }
-                                    });
-                                }),
+                            Input::new(&input)
+                                .aria_label(tr!("browser.dialog.line_number_placeholder")),
                         ),
                 )
+                .footer(ui::dialog_footer([
+                    Button::new("goto-line-cancel")
+                        .label(tr!("browser.dialog.cancel"))
+                        .on_click(|_, window, cx| window.close_dialog(cx))
+                        .into_any_element(),
+                    Button::new("goto-line-confirm")
+                        .primary()
+                        .label(tr!("browser.dialog.go"))
+                        .on_click(move |_, window, cx| confirm_submit(window, cx))
+                        .into_any_element(),
+                ]))
         });
         focus_input.update(cx, |input, cx| input.focus(window, cx));
     }
@@ -4058,26 +4060,40 @@ impl Render for ProjectWorkspace {
         });
 
         let crumb_owner = cx.weak_entity();
-        let mut trail: Vec<(String, Option<CrumbAction>)> = Vec::new();
+        let mut trail: Vec<(SharedString, Option<CrumbAction>, SharedString)> = Vec::new();
         if let Some(collection) = selected_collection.as_ref() {
-            trail.push((tr!("browser.library.title"), Some(CrumbAction::Collections)));
+            trail.push((
+                tr!("browser.library.title").into(),
+                Some(CrumbAction::Collections),
+                "library-crumb-collections".into(),
+            ));
             let collection_label = collection_title(collection);
             if selected_directory.is_empty() {
-                trail.push((collection_label, None));
+                trail.push((
+                    collection_label.clone().into(),
+                    None,
+                    "library-crumb-collection".into(),
+                ));
             } else {
-                trail.push((collection_label, Some(CrumbAction::Directory(Vec::new()))));
+                trail.push((
+                    collection_label.into(),
+                    Some(CrumbAction::Directory(Vec::new())),
+                    "library-crumb-collection".into(),
+                ));
                 for (index, segment) in selected_directory.iter().enumerate() {
                     let last = index + 1 == selected_directory.len();
+                    let crumbs = selected_directory[..=index].join("/");
                     trail.push((
-                        segment.clone(),
+                        segment.clone().into(),
                         (!last)
                             .then(|| CrumbAction::Directory(selected_directory[..=index].to_vec())),
+                        format!("library-crumb-dir-{crumbs}").into(),
                     ));
                 }
             }
         }
         let title_row = {
-            let mut row = div().h_flex().items_center().gap_2().min_w_0();
+            let mut row = div().h_flex().items_center().gap_1().min_w_0();
             if trail.is_empty() {
                 row = row.child(
                     div()
@@ -4088,35 +4104,29 @@ impl Render for ProjectWorkspace {
                 );
             } else {
                 let last_index = trail.len().saturating_sub(1);
-                for (index, (label, action)) in trail.into_iter().enumerate() {
+                for (index, (label, action, id)) in trail.into_iter().enumerate() {
                     if index > 0 {
                         row = row.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("›"),
+                            Icon::new(IconName::ChevronRight)
+                                .xsmall()
+                                .text_color(cx.theme().muted_foreground),
                         );
                     }
                     match action {
                         Some(action) => {
                             let owner = crumb_owner.clone();
-                            row = row.child(
-                                Button::new(format!("library-crumb-{index}"))
-                                    .small()
-                                    .ghost()
-                                    .label(label)
-                                    .on_click(move |_, window, cx| {
-                                        let _ =
-                                            owner.update(cx, |project, cx| match action.clone() {
-                                                CrumbAction::Collections => {
-                                                    project.select_collection(None, window, cx);
-                                                }
-                                                CrumbAction::Directory(segments) => {
-                                                    project.select_directory(segments, window, cx);
-                                                }
-                                            });
-                                    }),
-                            );
+                            row = row.child(Button::new(id).small().ghost().label(label).on_click(
+                                move |_, window, cx| {
+                                    let _ = owner.update(cx, |project, cx| match action.clone() {
+                                        CrumbAction::Collections => {
+                                            project.select_collection(None, window, cx);
+                                        }
+                                        CrumbAction::Directory(segments) => {
+                                            project.select_directory(segments, window, cx);
+                                        }
+                                    });
+                                },
+                            ));
                         }
                         None => {
                             let weight = if index == last_index {
@@ -4124,13 +4134,8 @@ impl Render for ProjectWorkspace {
                             } else {
                                 gpui_kit::FontWeight::MEDIUM
                             };
-                            row = row.child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(weight)
-                                    .truncate()
-                                    .child(SharedString::from(label)),
-                            );
+                            row = row
+                                .child(div().text_sm().font_weight(weight).truncate().child(label));
                         }
                     }
                 }
@@ -4142,13 +4147,13 @@ impl Render for ProjectWorkspace {
                 .v_flex()
                 .flex_shrink_0()
                 .border_b_1()
-                .border_color(cx.theme().border.opacity(0.55))
+                .border_color(cx.theme().window_border)
                 .child(
                     div()
                         .h_flex()
                         .items_center()
                         .gap_2()
-                        .px_3()
+                        .px_4()
                         .pt_3()
                         .pb_2()
                         .when_some(back, |row, back| row.child(back))
@@ -4163,13 +4168,13 @@ impl Render for ProjectWorkspace {
                         )
                         .when(selected_collection.is_some(), |row| {
                             row.child(
-                                Button::new("entry-more")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Ellipsis)
-                                    .tooltip(tr!("browser.library.actions"))
-                                    .accessibility_label(tr!("browser.library.actions"))
-                                    .dropdown_menu(move |menu, _, _| {
+                                ui::icon_button(
+                                    "entry-more",
+                                    IconName::Ellipsis,
+                                    tr!("browser.library.actions"),
+                                )
+                                .dropdown_menu(
+                                    move |menu, _, _| {
                                         let mut menu = menu;
                                         for command in [
                                             CommandId::DuplicateEntry,
@@ -4293,7 +4298,8 @@ impl Render for ProjectWorkspace {
                                                 )
                                             },
                                         )
-                                    }),
+                                    },
+                                ),
                             )
                         }),
                 )
@@ -4345,7 +4351,7 @@ impl Render for ProjectWorkspace {
                                     .small()
                                     .icon(IconName::PenLine)
                                     .label(tr!("browser.library.new_entry"))
-                                    .tooltip(CommandId::NewEntry.label())
+                                    .tooltip(tr!("browser.library.new_entry"))
                                     .disabled(!CommandId::NewEntry.is_available(availability))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.entry_command(CommandId::NewEntry, None, window, cx)
@@ -4370,222 +4376,132 @@ impl Render for ProjectWorkspace {
             view = view.child(project_loading_state(cx));
         } else if index_error.is_none() && selected_collection.is_none() {
             if collections.is_empty() {
+                view = view.child(ui::empty_state(
+                    "project-no-collections",
+                    IconName::BookOpen,
+                    tr!("browser.library.no_collections_title"),
+                    tr!("browser.library.no_collections_body"),
+                    None,
+                    cx,
+                ));
+            } else {
                 view = view.child(
                     div()
-                        .id("project-no-collections")
+                        .id("project-collections")
                         .test_support()
                         .v_flex()
                         .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .p_6()
-                        .child(
-                            Icon::new(IconName::BookOpen)
-                                .size_6()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .child(tr!("browser.library.no_collections_title")),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_center()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(tr!("browser.library.no_collections_body")),
-                        ),
-                );
-            } else {
-                view =
-                    view.child(
-                        div()
-                            .id("project-collections")
-                            .test_support()
-                            .v_flex()
-                            .flex_1()
-                            .min_h_0()
-                            .gap_0p5()
-                            .p_2()
-                            .overflow_y_scroll()
-                            .children(collections.iter().enumerate().map(
-                                |(index, (name, count))| {
-                                    let owner = collection_owner.clone();
-                                    let chosen = name.clone();
-                                    let title = collection_title(name);
-                                    Button::new(("library-collection", index))
-                                        .ghost()
+                        .min_h_0()
+                        .gap_0p5()
+                        .overflow_y_scroll()
+                        .children(collections.iter().map(|(name, count)| {
+                            let owner = collection_owner.clone();
+                            let chosen = name.clone();
+                            let title = collection_title(name);
+                            Button::new(format!("library-collection-{name}"))
+                                .ghost()
+                                .w_full()
+                                .min_h(rems(3.5))
+                                .py_2()
+                                .justify_start()
+                                .rounded(cx.theme().radius)
+                                .selected(selected_collection.as_deref() == Some(name.as_str()))
+                                .child(
+                                    div()
+                                        .h_flex()
                                         .w_full()
-                                        .h(px(56.))
-                                        .justify_start()
-                                        .rounded(cx.theme().radius)
-                                        .selected(
-                                            selected_collection.as_deref() == Some(name.as_str()),
+                                        .items_center()
+                                        .gap_3()
+                                        .px_2()
+                                        .child(
+                                            Icon::new(IconName::BookOpen)
+                                                .size_4()
+                                                .text_color(cx.theme().muted_foreground),
                                         )
                                         .child(
                                             div()
-                                                .h_flex()
-                                                .w_full()
-                                                .items_center()
-                                                .gap_3()
-                                                .px_2()
+                                                .v_flex()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .gap_0p5()
                                                 .child(
-                                                    Icon::new(IconName::BookOpen)
-                                                        .size_4()
-                                                        .text_color(cx.theme().muted_foreground),
+                                                    div()
+                                                        .font_family(crate::theme::prose_font(cx))
+                                                        .text_sm()
+                                                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                                        .truncate()
+                                                        .child(SharedString::from(title)),
                                                 )
                                                 .child(
                                                     div()
-                                                        .v_flex()
-                                                        .min_w_0()
-                                                        .flex_1()
-                                                        .gap_0p5()
-                                                        .child(
-                                                            div()
-                                                                .font_family(
-                                                                    crate::theme::prose_font(cx),
+                                                        .text_xs()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(SharedString::from(
+                                                            if *count == 1 {
+                                                                tr!(
+                                                                    "browser.count.entry",
+                                                                    count = count
                                                                 )
-                                                                .text_sm()
-                                                                .font_weight(
-                                                                    gpui_kit::FontWeight::MEDIUM,
+                                                            } else {
+                                                                tr!(
+                                                                    "browser.count.entries",
+                                                                    count = count
                                                                 )
-                                                                .truncate()
-                                                                .child(SharedString::from(title)),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(
-                                                                    cx.theme().muted_foreground,
-                                                                )
-                                                                .child(SharedString::from(
-                                                                    if *count == 1 {
-                                                                        tr!(
-                                                                            "browser.count.entry",
-                                                                            count = count
-                                                                        )
-                                                                    } else {
-                                                                        tr!(
-                                                                            "browser.count.entries",
-                                                                            count = count
-                                                                        )
-                                                                    },
-                                                                )),
-                                                        ),
-                                                )
-                                                .child(
-                                                    Icon::new(IconName::ChevronRight)
-                                                        .xsmall()
-                                                        .text_color(cx.theme().muted_foreground),
+                                                            },
+                                                        )),
                                                 ),
                                         )
-                                        .on_click(move |_, window, cx| {
-                                            let _ = owner.update(cx, |project, cx| {
-                                                project.select_collection(
-                                                    Some(chosen.clone()),
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                        })
-                                },
-                            )),
-                    );
+                                        .child(
+                                            Icon::new(IconName::ChevronRight)
+                                                .xsmall()
+                                                .text_color(cx.theme().muted_foreground),
+                                        ),
+                                )
+                                .on_click(move |_, window, cx| {
+                                    let _ = owner.update(cx, |project, cx| {
+                                        project.select_collection(Some(chosen.clone()), window, cx)
+                                    });
+                                })
+                        })),
+                );
             }
         } else if let Some(error) = index_error {
-            view = view.child(
-                div()
-                    .id("project-error")
-                    .test_support()
-                    .v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .p_6()
-                    .child(
-                        Icon::new(IconName::TriangleAlert)
-                            .size_6()
-                            .text_color(cx.theme().danger),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().danger)
-                            .child(tr!("browser.library.index_unavailable")),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_center()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(error),
-                    )
-                    .child(
-                        Button::new("retry-index")
-                            .small()
-                            .label(tr!("browser.library.retry"))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.retry_index(window, cx)),
-                            ),
-                    ),
-            );
+            view = view.child(ui::empty_state(
+                "project-error",
+                IconName::TriangleAlert,
+                tr!("browser.library.index_unavailable"),
+                error,
+                Some(
+                    Button::new("retry-index")
+                        .small()
+                        .label(tr!("browser.library.retry"))
+                        .on_click(cx.listener(|this, _, window, cx| this.retry_index(window, cx)))
+                        .into_any_element(),
+                ),
+                cx,
+            ));
         } else if visible_rows == 0 {
             view = view.child(if filter_active {
-                div()
-                    .id("project-filtered-empty")
-                    .test_support()
-                    .v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .p_6()
-                    .child(
-                        Icon::new(IconName::ListFilter)
-                            .size_6()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .child(tr!("browser.library.filtered_empty_title")),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_center()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tr!("browser.library.filtered_empty_body")),
-                    )
+                ui::empty_state(
+                    "project-filtered-empty",
+                    IconName::ListFilter,
+                    tr!("browser.library.filtered_empty_title"),
+                    tr!("browser.library.filtered_empty_body"),
+                    None,
+                    cx,
+                )
             } else {
-                div()
-                    .id("project-no-entries")
-                    .test_support()
-                    .v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .p_6()
-                    .child(
-                        Icon::new(IconName::FileText)
-                            .size_6()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(div().text_sm().child(tr!("browser.library.empty_title")))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_center()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tr!("browser.library.empty_body")),
-                    )
+                ui::empty_state(
+                    "project-no-entries",
+                    IconName::FileText,
+                    tr!("browser.library.empty_title"),
+                    tr!("browser.library.empty_body"),
+                    None,
+                    cx,
+                )
             });
         } else {
-            view = view.child(div().flex_1().min_h_0().p_2().child(
+            view = view.child(div().flex_1().min_h_0().child(
                 List::new(&self.list).search_placeholder(tr!("browser.library.search_placeholder")),
             ));
         }
@@ -4595,13 +4511,13 @@ impl Render for ProjectWorkspace {
                 div()
                     .id("project-override-warning")
                     .test_support()
-                    .border_t_1()
-                    .border_color(cx.theme().window_border)
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .text_color(cx.theme().danger)
-                    .child(SharedString::from(override_problems.join(" "))),
+                    .px_2()
+                    .py_1()
+                    .child(ui::inline_notice(
+                        "project-override-problem",
+                        ui::NoticeTone::Danger,
+                        SharedString::from(override_problems.join(" ")),
+                    )),
             );
         }
         if !status.is_empty() {
@@ -8114,11 +8030,11 @@ export const collections = {blog, dataAuthors};
             });
             window.render_frame(cx);
             assert!(
-                window.try_find("library-crumb-0").is_some(),
+                window.try_find("library-crumb-collections").is_some(),
                 "the breadcrumb starts at the collections index"
             );
             assert!(
-                window.try_find("library-crumb-1").is_none(),
+                window.try_find("library-crumb-collection").is_none(),
                 "the current collection is plain text, not a link"
             );
         })
@@ -8161,7 +8077,7 @@ export const collections = {blog, dataAuthors};
                 view.select_directory(vec!["zh-cn".into()], window, cx)
             });
             window.render_frame(cx);
-            assert!(window.try_find("library-crumb-1").is_some());
+            assert!(window.try_find("library-crumb-collection").is_some());
         })
         .unwrap();
         assert_eq!(
@@ -8177,7 +8093,7 @@ export const collections = {blog, dataAuthors};
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |view, cx| view.library_back(window, cx));
             window.render_frame(cx);
-            assert!(window.try_find("library-crumb-1").is_none());
+            assert!(window.try_find("library-crumb-collection").is_none());
         })
         .unwrap();
         assert_eq!(
@@ -8239,6 +8155,70 @@ export const collections = {blog, dataAuthors};
             assert!(window.try_find("project-collections").is_some());
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn create_dialog_keeps_input_when_validation_fails(cx: &mut TestAppContext) {
+        let dir = fixture();
+        std::fs::create_dir_all(dir.path().join("src/posts")).unwrap();
+        let (handle, view) = mount(cx);
+        open_project_and_wait(cx, handle, &view, dir.path()).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.select_collection(Some("blog".into()), window, cx)
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        view.update(cx, |view, cx| {
+            view.set_collection_schemas(
+                vec![(
+                    "blog".to_owned(),
+                    schema(vec![required_field("priority", FieldKind::Integer)]),
+                )],
+                cx,
+            )
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |view, cx| {
+                view.entry_command(CommandId::NewEntry, None, window, cx)
+            });
+            window.render_frame(cx);
+            assert!(
+                window.has_active_dialog(cx),
+                "the priority input must be collected before anything is written"
+            );
+        })
+        .unwrap();
+
+        cx.simulate_input(handle.into(), "kept");
+        cx.update_window(handle.into(), |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.has_active_dialog(cx),
+                "an invalid number must not close the dialog"
+            );
+            assert!(
+                view.read_with(cx, |view, _| view.pending_create.is_some()),
+                "an invalid number must not submit the entry"
+            );
+        })
+        .unwrap();
+
+        cx.simulate_input(handle.into(), "7");
+        cx.update_window(handle.into(), |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        cx.run_until_parked();
+        let created: Vec<String> = std::fs::read_dir(dir.path().join("src/posts"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.iter().any(|name| name.contains("kept")),
+            "the name typed before the error must survive: {created:?}"
+        );
     }
 
     #[gpui_kit::test]

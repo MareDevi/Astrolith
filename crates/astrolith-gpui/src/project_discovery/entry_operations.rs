@@ -1,5 +1,9 @@
 //! Document operations: create, rename, duplicate, trash, reveal and copy.
 use super::*;
+use std::cell::Cell;
+
+/// A dialog's submit action: validates the fields and closes on success.
+pub(super) type DialogSubmit = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// Everything a create dialog needs after its required-field inputs are filled.
 pub(super) struct PendingCreate {
@@ -8,6 +12,21 @@ pub(super) struct PendingCreate {
     pub(super) extension: FileExtension,
     pub(super) fields: Vec<CreationField>,
     pub(super) today: String,
+}
+
+/// Inline validation message shown inside an open entry dialog.
+pub(super) struct DialogNotice {
+    message: Option<SharedString>,
+}
+
+impl Render for DialogNotice {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        match self.message.clone() {
+            Some(message) => ui::inline_notice("dialog-notice", ui::NoticeTone::Danger, message)
+                .into_any_element(),
+            None => div().into_any_element(),
+        }
+    }
 }
 
 impl ProjectWorkspace {
@@ -299,35 +318,66 @@ impl ProjectWorkspace {
                 (input, state, hint)
             })
             .collect();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        let notice = cx.new(|_| DialogNotice { message: None });
+        let initial_focus = Rc::new(Cell::new(true));
+        let submit: DialogSubmit = {
             let owner = owner.clone();
             let name_input = name_input.clone();
             let rows = rows.clone();
             let default_name = default_name.clone();
-            let mut body = div()
+            let notice = notice.clone();
+            Rc::new(move |window: &mut Window, cx: &mut App| {
+                let typed_name = name_input.read(cx).value().to_string();
+                if typed_name.trim().is_empty() {
+                    notice.update(cx, |notice, cx| {
+                        notice.message =
+                            Some(SharedString::from(tr!("browser.dialog.name_required")));
+                        cx.notify();
+                    });
+                    name_input.update(cx, |input, cx| input.focus(window, cx));
+                    return;
+                }
+                let mut values = Vec::with_capacity(rows.len());
+                for (input, state, _) in &rows {
+                    let raw = state.read(cx).value().to_string();
+                    match operations::parse_input(input, &raw) {
+                        Ok(value) => values.push((input.name.clone(), value)),
+                        Err(error) => {
+                            notice.update(cx, |notice, cx| {
+                                notice.message = Some(SharedString::from(error));
+                                cx.notify();
+                            });
+                            state.update(cx, |state, cx| state.focus(window, cx));
+                            return;
+                        }
+                    }
+                }
+                let name = if typed_name.trim() == default_name {
+                    None
+                } else {
+                    Some(typed_name.trim().to_owned())
+                };
+                let _ = owner.update(cx, |project, cx| {
+                    project.submit_create(name, values, window, cx)
+                });
+                window.close_dialog(cx);
+            })
+        };
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if initial_focus.replace(false) {
+                name_input.update(cx, |input, cx| input.focus(window, cx));
+            }
+            let mut fields = div()
                 .v_flex()
                 .gap_3()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(SharedString::from(format!(
-                            "{collection} · {directory} · {extension}"
-                        ))),
-                )
-                .child(
-                    div()
-                        .v_flex()
-                        .gap_1()
-                        .child(div().text_sm().child(tr!("browser.dialog.file_name")))
-                        .child(Input::new(&name_input)),
-                );
+                .max_h(rems(22.))
+                .overflow_y_scrollbar();
             for (input, state, hint) in &rows {
                 let mut row = div()
                     .v_flex()
                     .gap_1()
                     .child(div().text_sm().child(input.name.clone()))
-                    .child(Input::new(state));
+                    .child(Input::new(state).aria_label(input.name.clone()));
                 if let Some(hint) = hint {
                     row = row.child(
                         div()
@@ -336,53 +386,52 @@ impl ProjectWorkspace {
                             .child(hint.clone()),
                     );
                 }
-                body = body.child(row);
+                fields = fields.child(row);
             }
+            let ok_submit = submit.clone();
+            let confirm_submit = submit.clone();
             dialog
                 .title(tr!("browser.dialog.new_entry_title"))
-                .child(body)
-                .footer(
+                .on_ok(move |_, window, cx| {
+                    ok_submit(window, cx);
+                    false
+                })
+                .child(
                     div()
-                        .h_flex()
-                        .gap_2()
+                        .v_flex()
+                        .gap_3()
                         .child(
-                            Button::new("create-cancel")
-                                .label(tr!("browser.dialog.cancel"))
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(format!(
+                                    "{collection} · {directory} · {extension}"
+                                ))),
                         )
                         .child(
-                            Button::new("create-confirm")
-                                .primary()
-                                .label(tr!("browser.dialog.create"))
-                                .on_click(move |_, window, cx| {
-                                    let typed_name = name_input.read(cx).value().to_string();
-                                    let mut values = Vec::with_capacity(rows.len());
-                                    for (input, state, _) in &rows {
-                                        let raw = state.read(cx).value().to_string();
-                                        match operations::parse_input(input, &raw) {
-                                            Ok(value) => values.push((input.name.clone(), value)),
-                                            Err(error) => {
-                                                let _ = owner.update(cx, |project, cx| {
-                                                    project.pending_create = None;
-                                                    project.report_entry_error(error, cx)
-                                                });
-                                                window.close_dialog(cx);
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    let name = if typed_name.trim() == default_name {
-                                        None
-                                    } else {
-                                        Some(typed_name.trim().to_owned())
-                                    };
-                                    let _ = owner.update(cx, |project, cx| {
-                                        project.submit_create(name, values, window, cx)
-                                    });
-                                    window.close_dialog(cx);
-                                }),
-                        ),
+                            div()
+                                .v_flex()
+                                .gap_1()
+                                .child(div().text_sm().child(tr!("browser.dialog.file_name")))
+                                .child(
+                                    Input::new(&name_input)
+                                        .aria_label(tr!("browser.dialog.file_name")),
+                                ),
+                        )
+                        .child(fields)
+                        .child(notice.clone()),
                 )
+                .footer(ui::dialog_footer([
+                    Button::new("create-cancel")
+                        .label(tr!("browser.dialog.cancel"))
+                        .on_click(|_, window, cx| window.close_dialog(cx))
+                        .into_any_element(),
+                    Button::new("create-confirm")
+                        .primary()
+                        .label(tr!("browser.dialog.create"))
+                        .on_click(move |_, window, cx| confirm_submit(window, cx))
+                        .into_any_element(),
+                ]))
         });
     }
 
@@ -458,12 +507,31 @@ impl ProjectWorkspace {
         let owner = cx.weak_entity();
         let input =
             cx.new(|cx| InputState::new(window, cx).default_value(source.as_str().to_owned()));
-        window.open_dialog(cx, move |dialog, _, cx| {
+        let initial_focus = Rc::new(Cell::new(true));
+        let submit: DialogSubmit = {
             let owner = owner.clone();
             let input = input.clone();
             let path = path.clone();
+            Rc::new(move |window: &mut Window, cx: &mut App| {
+                let destination = input.read(cx).value().to_string();
+                window.close_dialog(cx);
+                let _ = owner.update(cx, |project, cx| {
+                    project.submit_rename(path.clone(), destination, window, cx)
+                });
+            })
+        };
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if initial_focus.replace(false) {
+                input.update(cx, |input, cx| input.focus(window, cx));
+            }
+            let ok_submit = submit.clone();
+            let confirm_submit = submit.clone();
             dialog
                 .title(tr!("browser.dialog.rename_title"))
+                .on_ok(move |_, window, cx| {
+                    ok_submit(window, cx);
+                    true
+                })
                 .child(
                     div()
                         .v_flex()
@@ -474,30 +542,22 @@ impl ProjectWorkspace {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(tr!("browser.dialog.project_relative_path")),
                         )
-                        .child(Input::new(&input)),
-                )
-                .footer(
-                    div()
-                        .h_flex()
-                        .gap_2()
                         .child(
-                            Button::new("rename-cancel")
-                                .label(tr!("browser.dialog.cancel"))
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            Button::new("rename-confirm")
-                                .primary()
-                                .label(tr!("browser.dialog.rename"))
-                                .on_click(move |_, window, cx| {
-                                    let destination = input.read(cx).value().to_string();
-                                    window.close_dialog(cx);
-                                    let _ = owner.update(cx, |project, cx| {
-                                        project.submit_rename(path.clone(), destination, window, cx)
-                                    });
-                                }),
+                            Input::new(&input)
+                                .aria_label(tr!("browser.dialog.project_relative_path")),
                         ),
                 )
+                .footer(ui::dialog_footer([
+                    Button::new("rename-cancel")
+                        .label(tr!("browser.dialog.cancel"))
+                        .on_click(|_, window, cx| window.close_dialog(cx))
+                        .into_any_element(),
+                    Button::new("rename-confirm")
+                        .primary()
+                        .label(tr!("browser.dialog.rename"))
+                        .on_click(move |_, window, cx| confirm_submit(window, cx))
+                        .into_any_element(),
+                ]))
         });
     }
 
@@ -764,79 +824,62 @@ impl ProjectWorkspace {
             .unwrap_or_else(|| path.display().to_string());
         let dirty = self.needs_save(&path, cx);
         let owner = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, _| {
-            if dirty {
-                let discard_owner = owner.clone();
-                let discard_path = path.clone();
-                let save_owner = owner.clone();
-                let save_path = path.clone();
-                dialog
-                    .title(tr!("browser.dialog.trash_title", title = title))
-                    .child(tr!("browser.dialog.trash_dirty_body"))
-                    .footer(
-                        div()
-                            .h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("trash-cancel")
-                                    .label(tr!("browser.dialog.cancel"))
-                                    .on_click(|_, window, cx| window.close_dialog(cx)),
-                            )
-                            .child(
-                                Button::new("trash-discard")
-                                    .danger()
-                                    .label(tr!("browser.dialog.discard_and_trash"))
-                                    .on_click(move |_, window, cx| {
-                                        window.close_dialog(cx);
-                                        let _ = discard_owner.update(cx, |project, cx| {
-                                            project.discard_and_trash(
-                                                discard_path.clone(),
-                                                window,
-                                                cx,
-                                            )
-                                        });
-                                    }),
-                            )
-                            .child(
-                                Button::new("trash-save")
-                                    .primary()
-                                    .label(tr!("browser.dialog.save_and_trash"))
-                                    .on_click(move |_, window, cx| {
-                                        window.close_dialog(cx);
-                                        let _ = save_owner.update(cx, |project, cx| {
-                                            project.save_and_trash(save_path.clone(), window, cx)
-                                        });
-                                    }),
-                            ),
-                    )
-            } else {
+        if !dirty {
+            let title = title.clone();
+            window.open_alert_dialog(cx, move |alert, _, _| {
                 let owner = owner.clone();
                 let path = path.clone();
-                dialog
+                alert
+                    .confirm()
                     .title(tr!("browser.dialog.trash_title", title = title))
-                    .child(tr!("browser.dialog.trash_body"))
-                    .footer(
-                        div()
-                            .h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("trash-cancel")
-                                    .label(tr!("browser.dialog.cancel"))
-                                    .on_click(|_, window, cx| window.close_dialog(cx)),
-                            )
-                            .child(
-                                Button::new("trash-confirm")
-                                    .danger()
-                                    .label(tr!("browser.dialog.move_to_trash"))
-                                    .on_click(move |_, window, cx| {
-                                        window.close_dialog(cx);
-                                        let _ = owner.update(cx, |project, cx| {
-                                            project.perform_trash(path.clone(), window, cx)
-                                        });
-                                    }),
-                            ),
-                    )
-            }
+                    .description(tr!("browser.dialog.trash_body"))
+                    .ok_text(tr!("browser.dialog.move_to_trash"))
+                    .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
+                    .cancel_text(tr!("browser.dialog.cancel"))
+                    .show_cancel(true)
+                    .on_ok(move |_, window, cx| {
+                        let _ = owner.update(cx, |project, cx| {
+                            project.perform_trash(path.clone(), window, cx)
+                        });
+                        true
+                    })
+            });
+            return;
+        }
+        window.open_dialog(cx, move |dialog, _, _| {
+            let discard_owner = owner.clone();
+            let discard_path = path.clone();
+            let save_owner = owner.clone();
+            let save_path = path.clone();
+            dialog
+                .title(tr!("browser.dialog.trash_title", title = title))
+                .child(tr!("browser.dialog.trash_dirty_body"))
+                .footer(ui::dialog_footer([
+                    Button::new("trash-cancel")
+                        .label(tr!("browser.dialog.cancel"))
+                        .on_click(|_, window, cx| window.close_dialog(cx))
+                        .into_any_element(),
+                    Button::new("trash-discard")
+                        .danger()
+                        .label(tr!("browser.dialog.discard_and_trash"))
+                        .on_click(move |_, window, cx| {
+                            window.close_dialog(cx);
+                            let _ = discard_owner.update(cx, |project, cx| {
+                                project.discard_and_trash(discard_path.clone(), window, cx)
+                            });
+                        })
+                        .into_any_element(),
+                    Button::new("trash-save")
+                        .primary()
+                        .label(tr!("browser.dialog.save_and_trash"))
+                        .on_click(move |_, window, cx| {
+                            window.close_dialog(cx);
+                            let _ = save_owner.update(cx, |project, cx| {
+                                project.save_and_trash(save_path.clone(), window, cx)
+                            });
+                        })
+                        .into_any_element(),
+                ]))
         });
     }
 

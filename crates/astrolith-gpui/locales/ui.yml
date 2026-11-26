@@ -106,18 +106,18 @@ gpui_component:
       ja: 時刻
   Select:
     placeholder:
-      en: Please select
+      en: Select
       zh-CN: 请选择
       ja: 選択してください
   ComboBox:
     placeholder:
-      en: Please select
+      en: Select
       zh-CN: 请选择
       ja: 選択してください
     search_placeholder:
-      en: Search...
-      zh-CN: 搜索...
-      ja: 検索...
+      en: Search…
+      zh-CN: 搜索…
+      ja: 検索…
     empty:
       en: No results
       zh-CN: 暂无数据
@@ -137,11 +137,11 @@ gpui_component:
       zh-CN: 关闭
       ja: 閉じる
     Zoom In:
-      en: Zoom In
+      en: Zoom in
       zh-CN: 放大
       ja: 拡大
     Zoom Out:
-      en: Zoom Out
+      en: Zoom out
       zh-CN: 缩小
       ja: 縮小
     Collapse:
@@ -192,18 +192,18 @@ gpui_component:
       ja: キャンセル
   Command:
     placeholder:
-      en: Type a command or search...
-      zh-CN: 输入命令或搜索...
-      ja: コマンドを入力するか検索...
+      en: Type a command or search…
+      zh-CN: 输入命令或搜索…
+      ja: コマンドを入力するか検索…
     empty:
       en: No results found.
       zh-CN: 未找到结果。
       ja: 結果が見つかりません。
   List:
     search_placeholder:
-      en: Search...
-      zh-CN: 搜索...
-      ja: 検索...
+      en: Search…
+      zh-CN: 搜索…
+      ja: 検索…
   Input:
     Decrement:
       en: Decrement
@@ -218,7 +218,7 @@ gpui_component:
       zh-CN: 替换
       ja: 置換
     Replace All:
-      en: Replace All
+      en: Replace all
       zh-CN: 全部替换
       ja: すべて置換
     Clear:
@@ -238,15 +238,15 @@ gpui_component:
       zh-CN: 粘贴
       ja: 貼り付け
     Select All:
-      en: Select All
+      en: Select all
       zh-CN: 全选
       ja: すべて選択
     Go to Definition:
-      en: Go to Definition
+      en: Go to definition
       zh-CN: 跳转到定义
       ja: 定義へ移動
     Show Code Actions:
-      en: Show Code Actions
+      en: Show code actions
       zh-CN: 显示代码操作
       ja: コードアクションを表示
     Show Password:
@@ -259,9 +259,9 @@ gpui_component:
       ja: パスワードを非表示
   Settings:
     search_placeholder:
-      en: Search...
-      zh-CN: 搜索...
-      ja: 検索...
+      en: Search…
+      zh-CN: 搜索…
+      ja: 検索…
     no_results:
       en: No matching settings
       zh-CN: 没有匹配的设置
@@ -271,8 +271,8 @@ gpui_component:
       zh-CN: 请尝试其他关键词。
       ja: 別のキーワードをお試しください。
     Reset All:
-      en: Reset All
-      zh-CN: 重置全部
+      en: Reset all
+      zh-CN: 全部重置
       ja: すべてリセット
   Pagination:
     previous:

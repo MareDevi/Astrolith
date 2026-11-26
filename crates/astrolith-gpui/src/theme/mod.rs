@@ -5,6 +5,9 @@ mod tokens;
 mod typography;
 
 pub(crate) use metrics::METRICS;
+// Terminal rendering consumes this palette; the re-export stays until then.
+#[allow(unused_imports)]
+pub(crate) use palettes::terminal_ansi_palette;
 pub(crate) use typography::{
     PROSE_INSET, PROSE_TOP, configured_prose_font, default_prose_page_width_percent, display_font,
     font_family_available, installed_font_names, preferred_ui_font, prose_font, system_ui_font,
@@ -67,6 +70,19 @@ impl ResolveTheme for ThemeMode {
             },
             mode => mode,
         }
+    }
+}
+
+/// Compact concentric radius for a control nested inside a rounded panel.
+///
+/// The inner tier sits one 2 px gap inside the control radius and collapses to
+/// square corners wherever the outer radius does.
+pub(crate) fn radius_sm(cx: &App) -> gpui_kit::Pixels {
+    let radius = cx.theme().radius;
+    if radius <= gpui_kit::px(2.) {
+        gpui_kit::px(0.)
+    } else {
+        gpui_kit::px((f32::from(radius) - 2.).max(2.))
     }
 }
 
@@ -179,21 +195,21 @@ pub fn apply(settings: &GlobalPreferences, appearance: WindowAppearance, cx: &mu
         colors.group_box_foreground = tokens.foreground;
         colors.link = tokens.link;
         colors.danger = tokens.danger;
-        colors.danger_hover = tokens.danger;
-        colors.danger_active = tokens.danger;
-        colors.danger_foreground = tokens.background;
+        colors.danger_hover = tokens.danger_hover;
+        colors.danger_active = tokens.danger_active;
+        colors.danger_foreground = tokens.danger_foreground;
         colors.warning = tokens.warning;
-        colors.warning_hover = tokens.warning;
-        colors.warning_active = tokens.warning;
-        colors.warning_foreground = tokens.background;
+        colors.warning_hover = tokens.warning_hover;
+        colors.warning_active = tokens.warning_active;
+        colors.warning_foreground = tokens.warning_foreground;
         colors.success = tokens.success;
-        colors.success_hover = tokens.success;
-        colors.success_active = tokens.success;
-        colors.success_foreground = tokens.background;
+        colors.success_hover = tokens.success_hover;
+        colors.success_active = tokens.success_active;
+        colors.success_foreground = tokens.success_foreground;
         colors.info = tokens.info;
-        colors.info_hover = tokens.info;
-        colors.info_active = tokens.info;
-        colors.info_foreground = tokens.background;
+        colors.info_hover = tokens.info_hover;
+        colors.info_active = tokens.info_active;
+        colors.info_foreground = tokens.info_foreground;
 
         colors.secondary = tokens.control;
         colors.secondary_hover = tokens.foreground.opacity(0.05).blend(tokens.control);
@@ -213,7 +229,7 @@ pub fn apply(settings: &GlobalPreferences, appearance: WindowAppearance, cx: &mu
         colors.drop_target = tokens.selection;
         colors.description_list_label = tokens.surface;
         colors.description_list_label_foreground = tokens.muted;
-        colors.tab_bar_segmented = tokens.control;
+        colors.tab_bar_segmented = tokens.tab_bar_segmented;
 
         colors.table = tokens.background;
         colors.table_head = tokens.surface;
@@ -233,15 +249,20 @@ pub fn apply(settings: &GlobalPreferences, appearance: WindowAppearance, cx: &mu
         highlight.style.editor_active_line = Some(tokens.background);
         highlight.style.editor_gutter_background = Some(tokens.background);
 
-        // The mock's two stored radii: controls use `--radius` (10 px), while
-        // popovers and dialogs use the larger surface tier (14 px).
+        // Concentric radii: the outer surface tier rounds more than the
+        // controls nested inside it, by the 4 px gap the mock draws between a
+        // panel and its contents. Zero keeps everything square.
         theme.font_family = ui_font;
         theme.font_size = ui_font_size;
         theme.mono_font_family = mono_font;
         theme.mono_font_size = gpui_kit::px(settings.build_font_size.clamp(1., 30.));
-        let panel_radius = gpui_kit::px(settings.panel_radius.clamp(0., 24.));
-        theme.radius = panel_radius;
-        theme.radius_lg = panel_radius;
+        let panel_radius = settings.panel_radius.clamp(0., 20.);
+        theme.radius = gpui_kit::px(panel_radius);
+        theme.radius_lg = gpui_kit::px(if panel_radius <= 0. {
+            0.
+        } else {
+            (panel_radius + 4.).min(24.)
+        });
         theme.shadow = true;
     });
     let configured = match mode {

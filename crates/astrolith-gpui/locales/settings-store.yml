@@ -17,7 +17,7 @@ settings_store:
     zh-CN: "无法加载 %{path} 处的偏好设置：%{error}。无效文件已移至 %{destination}；当前使用默认设置。"
     ja: "%{path} の設定を読み込めませんでした: %{error}。無効なファイルは %{destination} に移動されました。現在は既定値が有効です。"
   read_only:
-    en: "Preferences are read-only after a load error; fix the file and restart."
+    en: "Preferences are readonly after a load error; fix the file and restart."
     zh-CN: "加载出错后偏好设置为只读；请修复文件并重启。"
     ja: "読み込みエラー後、設定は読み取り専用です。ファイルを修正して再起動してください。"
   changed_externally:

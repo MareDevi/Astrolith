@@ -18,18 +18,21 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Disableable, IndexPath, Sizable, StyledExt,
     button::{Button, ButtonVariants},
-    checkbox::Checkbox,
-    command::{Command, CommandItem, CommandState},
+    command::{Command, CommandGroup, CommandItem, CommandState},
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
-    menu::{DropdownMenu, PopupMenuItem},
+    scroll::ScrollableElement,
+    spinner::Spinner,
+    switch::Switch,
+    tag::Tag,
 };
 use gpui_kit::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    PathPromptOptions, Render, SharedString, Subscription, Window, div, prelude::*, px,
+    App, AppContext, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    PathPromptOptions, Render, SharedString, Subscription, Window, div, prelude::*, rems,
 };
 
 use crate::frontmatter::{ReferenceCatalog, resolve_image_pick};
 use crate::runtime;
+use crate::ui;
 
 use self::form::{FormState, PlannedFieldValue, PropControl};
 use self::palette::Palette;
@@ -105,7 +108,6 @@ pub(crate) struct ComponentBuilder {
     /// Whether this insertion should add imports (project opt-in still wins).
     add_import: bool,
     search: Entity<CommandState>,
-    notice: Option<SharedString>,
     error: Option<SharedString>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -145,7 +147,6 @@ impl ComponentBuilder {
             directive_input: None,
             add_import: false,
             search,
-            notice: None,
             error: None,
             focus,
             _subscriptions: Vec::new(),
@@ -162,7 +163,6 @@ impl ComponentBuilder {
     ) {
         self.palette = Palette::new(context.index.components());
         self.add_import = context.imports_enabled;
-        self.notice = palette_notice(&context);
         self.error = None;
         self.context = Some(context);
         self.clear_form();
@@ -204,7 +204,6 @@ impl ComponentBuilder {
         if self.stage == Stage::Palette {
             let context = self.context.as_ref().expect("just installed");
             self.palette = Palette::new(context.index.components());
-            self.notice = palette_notice(context);
             self.hits = self.palette.search(&self.query);
             cx.notify();
         }
@@ -602,17 +601,6 @@ fn auto_import_warning(context: Option<&BuilderContext>) -> Option<SharedString>
         .then(|| tr!("editor.builder.auto_import_warning").into())
 }
 
-/// The one line above the palette that explains an empty or pending index.
-fn palette_notice(context: &BuilderContext) -> Option<SharedString> {
-    if context.loading {
-        Some(tr!("editor.builder.indexing").into())
-    } else if let Some(error) = &context.error {
-        Some(tr!("editor.builder.unavailable", error = error).into())
-    } else {
-        auto_import_warning(Some(context))
-    }
-}
-
 fn field_placeholder(field: &form::PropField) -> SharedString {
     match &field.control {
         PropControl::Number => tr!("editor.builder.field_number_placeholder").into(),
@@ -660,19 +648,16 @@ impl Render for ComponentBuilder {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.weak_entity();
         let stage = self.stage;
-        let mut root = div()
-            .v_flex()
-            .gap_3()
-            .p_3()
-            .track_focus(&self.focus)
-            .when_some(self.notice.clone(), |root, notice| {
-                root.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(notice),
-                )
-            });
+        let mut root = div().v_flex().gap_3().track_focus(&self.focus).when_some(
+            self.auto_import_warning(),
+            |root, warning| {
+                root.child(ui::inline_notice(
+                    "component-builder-auto-import",
+                    ui::NoticeTone::Warning,
+                    warning,
+                ))
+            },
+        );
         if stage == Stage::Palette {
             root = root.child(self.palette_view(&weak, window, cx));
         } else {
@@ -689,114 +674,111 @@ impl ComponentBuilder {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let loading = self.context.as_ref().is_some_and(|context| context.loading);
+        let unavailable = self
+            .context
+            .as_ref()
+            .and_then(|context| context.error.clone());
         let headers = self.palette.headers(&self.hits);
-        let rows: Vec<PaletteRow> = self
-            .hits
+        // Group the hits under one non-selectable heading per palette group.
+        let mut groups: Vec<(SharedString, Vec<usize>, Vec<PaletteRow>)> = Vec::new();
+        for (position, header) in self.hits.iter().zip(headers) {
+            let Some(entry) = self.palette.get(*position) else {
+                continue;
+            };
+            let header = header.unwrap_or_default();
+            if groups.last().is_none_or(|(label, _, _)| *label != header) {
+                groups.push((header, Vec::new(), Vec::new()));
+            }
+            let group = groups.last_mut().expect("a group was just pushed");
+            group.1.push(*position);
+            group.2.push(PaletteRow {
+                name: entry.component.name.clone(),
+                badge: entry.badge,
+                requirement: entry.requirement.label(),
+                description: entry.description().map(str::to_owned),
+                wraps: entry.wraps,
+            });
+        }
+        // Confirming a row reports the item index inside its group, so keep the
+        // hit positions grouped in the same order.
+        let positions: Vec<Vec<usize>> = groups
             .iter()
-            .zip(headers)
-            .filter_map(|(position, header)| {
-                let entry = self.palette.get(*position)?;
-                Some(PaletteRow {
-                    header,
-                    name: entry.component.name.clone(),
-                    badge: entry.badge,
-                    requirement: entry.requirement.label(),
-                    description: entry.description().map(str::to_owned),
-                    wraps: entry.wraps,
-                })
-            })
+            .map(|(_, positions, _)| positions.clone())
             .collect();
-        let hits = self.hits.clone();
         let query_weak = weak.clone();
         let confirm_weak = weak.clone();
+        let empty_message: SharedString = if loading {
+            SharedString::default()
+        } else if self.query.trim().is_empty() {
+            tr!("editor.builder.no_components").into()
+        } else {
+            tr!("editor.builder.no_matches").into()
+        };
         let mut view = div().v_flex().gap_2();
-        if self.palette.is_empty() {
+        if loading {
             view = view.child(
                 div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(
-                        if self.context.as_ref().is_some_and(|context| context.loading) {
-                            tr!("editor.builder.indexing")
-                        } else {
-                            tr!("editor.builder.no_components")
-                        },
-                    ),
+                    .child(Spinner::new().xsmall())
+                    .child(tr!("editor.builder.indexing")),
             );
+        } else if let Some(error) = unavailable {
+            view = view.child(ui::inline_notice(
+                "component-builder-unavailable",
+                ui::NoticeTone::Danger,
+                tr!("editor.builder.unavailable", error = error),
+            ));
         }
+        let command =
+            groups.into_iter().fold(
+                Command::new(&self.search)
+                    .bordered(false)
+                    .placeholder(tr!("editor.builder.search_placeholder"))
+                    .filterable(false)
+                    .on_query(move |query, _, cx| {
+                        let query = query.to_owned();
+                        let weak = query_weak.clone();
+                        cx.defer(move |cx| {
+                            let _ = weak.update(cx, |builder, cx| builder.set_query(query, cx));
+                        });
+                    }),
+                |command, (label, _, rows)| {
+                    command.group(CommandGroup::new().label(label).items(rows.into_iter().map(
+                        |row| {
+                            let row = row.clone();
+                            CommandItem::new()
+                                .label(row.name.clone())
+                                .icon(IconName::FileText)
+                                .child(move |_, cx| palette_row(&row, cx))
+                        },
+                    )))
+                },
+            );
         view.child(
-            Command::new(&self.search)
-                .bordered(false)
-                .placeholder(tr!("editor.builder.search_placeholder"))
-                .filterable(false)
-                .on_query(move |query, _, cx| {
-                    let query = query.to_owned();
-                    let weak = query_weak.clone();
-                    cx.defer(move |cx| {
-                        let _ = weak.update(cx, |builder, cx| builder.set_query(query, cx));
-                    });
-                })
-                .items(rows.into_iter().map(|row| {
-                    CommandItem::new()
-                        .label(row.name.clone())
-                        .icon(IconName::FileText)
-                        .child(move |_, cx| {
-                            div()
-                                .v_flex()
-                                .w_full()
-                                .gap_0p5()
-                                .when_some(row.header.clone(), |column, header| {
-                                    column.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(header),
-                                    )
-                                })
-                                .child(
-                                    div()
-                                        .h_flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(div().text_sm().child(row.name.clone()))
-                                        .child(badge(row.badge, cx))
-                                        .when(row.wraps, |line| {
-                                            line.child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(tr!("editor.builder.wraps_content")),
-                                            )
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(row.requirement.clone()),
-                                )
-                                .when_some(row.description.clone(), |column, description| {
-                                    column.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(description),
-                                    )
-                                })
-                        })
-                }))
-                .empty(|_, _, cx| {
+            command
+                .empty(move |_, _, cx| {
                     div()
-                        .p_4()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("editor.builder.no_matches"))
+                        .when(!loading, |container| {
+                            container
+                                .p_4()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                        })
+                        .child(empty_message.clone())
                 })
                 .on_confirm(move |index: IndexPath, window, cx| {
-                    let position = index.row;
-                    if hits.get(position).is_none() {
+                    let Some(position) = positions
+                        .get(index.section)
+                        .and_then(|group| group.get(index.row))
+                        .copied()
+                    else {
                         return;
-                    }
+                    };
                     let _ = confirm_weak
                         .update(cx, |builder, cx| builder.open_form(position, window, cx));
                 }),
@@ -824,16 +806,16 @@ impl ComponentBuilder {
                         let back = weak.clone();
                         Button::new("component-builder-back")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .label(tr!("editor.builder.back"))
                             .on_click(move |_, window, cx| {
                                 let _ = back.update(cx, |builder, cx| builder.back(window, cx));
                             })
                     })
-                    .child(hint("Esc", cx))
+                    .child(ui::kbd_hint("escape", cx))
                     .child(div().flex_1())
                     .child(div().text_sm().child(component.name.clone()))
-                    .child(badge(component.framework.label(), cx))
+                    .child(Tag::new().small().child(component.framework.label()))
                     .when(component.has_default_slot(), |row| {
                         row.child(
                             div()
@@ -851,16 +833,17 @@ impl ComponentBuilder {
                         .child(description),
                 )
             });
-        if let Some(warning) = self.auto_import_warning() {
-            view = view.child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(warning),
-            );
-        }
         let fields_view = self.fields_view(weak, cx);
-        view = view.child(fields_view);
+        view = view.child(
+            div()
+                .id("component-builder-fields")
+                .v_flex()
+                .gap_3()
+                .pr_2()
+                .max_h(rems(24.))
+                .overflow_y_scrollbar()
+                .child(fields_view),
+        );
         view.into_any_element()
     }
 
@@ -872,44 +855,44 @@ impl ComponentBuilder {
         let Some(form) = self.form.as_ref() else {
             return div().into_any_element();
         };
-        let mut fields = div().v_flex().gap_2();
+        let component_name = form.component().name.clone();
+        let mut fields = div().v_flex().gap_3();
         for (index, field) in form.fields().iter().enumerate() {
             let required = field.prop.required;
-            let mut label = div()
-                .h_flex()
-                .items_center()
-                .gap_1()
-                .child(div().text_xs().child(field.prop.name.clone()))
-                .when(required, |label| {
-                    label.child(div().text_xs().text_color(cx.theme().red).child("*"))
-                });
-            if let Some(default) = field.default_label() {
-                label = label.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("editor.builder.default_value", value = default)),
-                );
-            }
-            if !required {
+            // Scoped by component and prop name, so a reordered form never
+            // reuses another field's element identity.
+            let control_id = |suffix: &str| {
+                ElementId::Name(
+                    format!(
+                        "component-field-{}-{}-{suffix}",
+                        component_name, field.prop.name
+                    )
+                    .into(),
+                )
+            };
+            let trailing = (!required).then(|| {
                 let toggle = weak.clone();
                 let included = field.included();
-                label = label.child(div().flex_1()).child(
-                    Checkbox::new(("component-field-include", index))
-                        .checked(included)
-                        .label(tr!("editor.builder.add"))
-                        .on_click(move |checked: &bool, window, cx| {
-                            let _ = toggle.update(cx, |builder, cx| {
-                                builder.set_field_included(index, *checked, window, cx)
-                            });
-                        }),
-                );
-            }
-            let mut row = div()
-                .v_flex()
-                .gap_1()
-                .when(required, |row| row.opacity(1.))
-                .child(label);
+                Switch::new(control_id("include"))
+                    .checked(included)
+                    .label(tr!("editor.builder.add"))
+                    .on_change(move |checked: &bool, window, cx| {
+                        let _ = toggle.update(cx, |builder, cx| {
+                            builder.set_field_included(index, *checked, window, cx)
+                        });
+                    })
+                    .into_any_element()
+            });
+            let meta = field.default_label().map(|default| {
+                SharedString::from(tr!("editor.builder.default_value", value = default))
+            });
+            let mut row = div().v_flex().gap_1().child(ui::form_field_header(
+                field.prop.name.clone(),
+                required,
+                meta,
+                trailing,
+                cx,
+            ));
             if let Some(description) = &field.prop.description {
                 row = row.child(
                     div()
@@ -922,79 +905,75 @@ impl ComponentBuilder {
                 PropControl::Boolean => {
                     let toggle = weak.clone();
                     let flag = field.flag();
-                    div()
-                        .h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            Checkbox::new(("component-field-bool", index))
-                                .checked(flag)
-                                .label(if flag { "true" } else { "false" })
-                                .on_click(move |checked: &bool, _window, cx| {
-                                    let _ = toggle.update(cx, |builder, cx| {
-                                        if let Some(form) = &mut builder.form {
-                                            form.set_flag(index, *checked);
-                                        }
-                                        cx.notify();
-                                    });
-                                }),
-                        )
-                        .into_any_element()
-                }
-                PropControl::Enum { options } => {
-                    let selected = if field.text().is_empty() {
-                        tr!("editor.builder.choose")
-                    } else {
-                        field.text().to_owned()
-                    };
-                    let options = options.clone();
-                    let pick = weak.clone();
-                    Button::new(("component-field-enum", index))
-                        .xsmall()
-                        .outline()
-                        .label(selected)
-                        .dropdown_caret(true)
-                        .dropdown_menu(move |menu, _, _| {
-                            let mut menu = menu;
-                            if !required {
-                                let clear = pick.clone();
-                                let clear_item = PopupMenuItem::new(tr!("editor.builder.clear"))
-                                    .on_click(move |_, window, cx| {
-                                        let _ = clear.update(cx, |builder, cx| {
-                                            if let Some(form) = &mut builder.form {
-                                                form.set_text(index, "");
-                                            }
-                                            if let Some(Some(input)) = builder.inputs.get(index) {
-                                                input.update(cx, |input, cx| {
-                                                    input.set_value("", window, cx)
-                                                });
-                                            }
-                                            cx.notify();
-                                        });
-                                    });
-                                menu = menu.item(clear_item);
-                            }
-                            for option in &options {
-                                let pick = pick.clone();
-                                let value = option.clone();
-                                menu = menu.item(PopupMenuItem::new(option.clone()).on_click(
-                                    move |_, window, cx| {
-                                        let _ = pick.update(cx, |builder, cx| {
-                                            builder.set_entry(index, value.clone(), window, cx)
-                                        });
-                                    },
-                                ));
-                            }
-                            menu
+                    Switch::new(control_id("bool"))
+                        .checked(flag)
+                        .label(if flag {
+                            tr!("editor.builder.boolean_on")
+                        } else {
+                            tr!("editor.builder.boolean_off")
+                        })
+                        .on_change(move |checked: &bool, _, cx| {
+                            let _ = toggle.update(cx, |builder, cx| {
+                                if let Some(form) = &mut builder.form {
+                                    form.set_flag(index, *checked);
+                                }
+                                cx.notify();
+                            });
                         })
                         .into_any_element()
                 }
+                PropControl::Enum { options } => {
+                    let current = field.text().to_owned();
+                    let label = if current.is_empty() {
+                        tr!("editor.builder.choose")
+                    } else {
+                        current.clone()
+                    };
+                    let mut choices: Vec<ui::PickerOption> = Vec::new();
+                    if !required {
+                        choices.push(ui::PickerOption::new(tr!("editor.builder.clear")));
+                    }
+                    for option in options {
+                        choices.push(
+                            ui::PickerOption::new(option.clone())
+                                .selected(option.as_str() == current.as_str()),
+                        );
+                    }
+                    let offset = usize::from(!required);
+                    let options = options.clone();
+                    let pick = weak.clone();
+                    ui::picker_button(
+                        control_id("enum"),
+                        label,
+                        choices,
+                        move |selected, window, cx| {
+                            let value = selected
+                                .checked_sub(offset)
+                                .and_then(|choice| options.get(choice))
+                                .cloned()
+                                .unwrap_or_default();
+                            let _ = pick.update(cx, |builder, cx| {
+                                builder.set_entry(index, value, window, cx)
+                            });
+                        },
+                    )
+                    .into_any_element()
+                }
                 PropControl::Entry { collection } => {
-                    let label = if field.text().is_empty() {
+                    let current = field.text().to_owned();
+                    let label = if current.is_empty() {
                         tr!("editor.builder.choose_entry", collection = collection)
                     } else {
-                        field.text().to_owned()
+                        current.clone()
                     };
+                    let choices: Vec<ui::PickerOption> = field
+                        .entries
+                        .iter()
+                        .map(|(label, value)| {
+                            ui::PickerOption::new(label.clone())
+                                .selected(value.as_str() == current.as_str())
+                        })
+                        .collect();
                     let options = field.entries.clone();
                     let pick = weak.clone();
                     let text_input = self.inputs.get(index).cloned().flatten();
@@ -1004,39 +983,28 @@ impl ComponentBuilder {
                         .when_some(text_input, |column, input| {
                             column.child(Input::new(&input).small())
                         })
-                        .child(
-                            Button::new(("component-field-entry", index))
-                                .xsmall()
-                                .outline()
-                                .label(label)
-                                .dropdown_caret(true)
-                                .dropdown_menu(move |menu, _, _| {
-                                    let mut menu = menu;
-                                    if options.is_empty() {
-                                        return menu.item(PopupMenuItem::label(tr!(
-                                            "editor.builder.no_entries"
-                                        )));
-                                    }
-                                    for (label, value) in &options {
-                                        let pick = pick.clone();
-                                        let value = value.clone();
-                                        menu =
-                                            menu.item(PopupMenuItem::new(label.clone()).on_click(
-                                                move |_, window, cx| {
-                                                    let _ = pick.update(cx, |builder, cx| {
-                                                        builder.set_entry(
-                                                            index,
-                                                            value.clone(),
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    });
-                                                },
-                                            ));
-                                    }
-                                    menu
-                                }),
-                        )
+                        .child(if choices.is_empty() {
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tr!("editor.builder.no_entries"))
+                                .into_any_element()
+                        } else {
+                            ui::picker_button(
+                                control_id("entry"),
+                                label,
+                                choices,
+                                move |selected, window, cx| {
+                                    let Some((_, value)) = options.get(selected).cloned() else {
+                                        return;
+                                    };
+                                    let _ = pick.update(cx, |builder, cx| {
+                                        builder.set_entry(index, value, window, cx)
+                                    });
+                                },
+                            )
+                            .into_any_element()
+                        })
                         .into_any_element()
                 }
                 PropControl::Image => {
@@ -1049,8 +1017,8 @@ impl ComponentBuilder {
                             column.child(Input::new(&input).small())
                         })
                         .child(
-                            Button::new(("component-field-image", index))
-                                .xsmall()
+                            Button::new(control_id("image"))
+                                .small()
                                 .outline()
                                 .label(tr!("editor.builder.choose_image"))
                                 .on_click(move |_, window, cx| {
@@ -1072,56 +1040,44 @@ impl ComponentBuilder {
         if !form.component().client_directives.is_empty() {
             let directives = form.component().client_directives.clone();
             let selected = form.directive().map(str::to_owned);
+            let mut choices = vec![
+                ui::PickerOption::new(tr!("editor.builder.none")).selected(selected.is_none()),
+            ];
+            for directive in &directives {
+                choices.push(
+                    ui::PickerOption::new(directive.name)
+                        .selected(selected.as_deref() == Some(directive.name)),
+                );
+            }
+            let names: Vec<&'static str> = directives.iter().map(|d| d.name).collect();
             let pick = weak.clone();
+            let label = selected
+                .clone()
+                .unwrap_or_else(|| tr!("editor.builder.none"));
             fields = fields.child(
                 div()
                     .v_flex()
                     .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .child(tr!("editor.builder.client_directive")),
-                    )
-                    .child(
-                        Button::new("component-field-directive")
-                            .xsmall()
-                            .outline()
-                            .label(
-                                selected
-                                    .clone()
-                                    .unwrap_or_else(|| tr!("editor.builder.none")),
-                            )
-                            .dropdown_caret(true)
-                            .dropdown_menu(move |menu, _, _| {
-                                let mut menu = menu;
-                                let clear = pick.clone();
-                                menu = menu.item(
-                                    PopupMenuItem::new(tr!("editor.builder.none")).on_click(
-                                        move |_, window, cx| {
-                                            let _ = clear.update(cx, |builder, cx| {
-                                                builder.set_directive(None, window, cx)
-                                            });
-                                        },
-                                    ),
-                                );
-                                for directive in &directives {
-                                    let pick = pick.clone();
-                                    let name = directive.name.to_owned();
-                                    menu = menu.item(PopupMenuItem::new(name.clone()).on_click(
-                                        move |_, window, cx| {
-                                            let _ = pick.update(cx, |builder, cx| {
-                                                builder.set_directive(
-                                                    Some(name.clone()),
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                        },
-                                    ));
-                                }
-                                menu
-                            }),
-                    )
+                    .child(ui::form_field_header(
+                        tr!("editor.builder.client_directive"),
+                        false,
+                        None,
+                        None,
+                        cx,
+                    ))
+                    .child(ui::picker_button(
+                        "component-field-directive",
+                        label,
+                        choices,
+                        move |picked, window, cx| {
+                            let name = picked
+                                .checked_sub(1)
+                                .and_then(|choice| names.get(choice))
+                                .map(|name| (*name).to_owned());
+                            let _ = pick
+                                .update(cx, |builder, cx| builder.set_directive(name, window, cx));
+                        },
+                    ))
                     .when_some(self.directive_input.clone(), |column, input| {
                         column.child(Input::new(&input).small())
                     }),
@@ -1132,33 +1088,41 @@ impl ComponentBuilder {
                 div()
                     .v_flex()
                     .gap_1()
-                    .child(div().text_xs().child(tr!("editor.builder.child_content")))
-                    .child(Textarea::new(&content).small().h(px(96.))),
+                    .child(ui::form_field_header(
+                        tr!("editor.builder.child_content"),
+                        false,
+                        None,
+                        None,
+                        cx,
+                    ))
+                    .child(Textarea::new(&content).small().h_24()),
             );
         }
-        // Optional-prop shortcut and the import switch.
-        fields = fields.child(
-            div()
-                .h_flex()
-                .items_center()
-                .gap_2()
-                .child({
-                    let toggle = weak.clone();
-                    Button::new("component-field-optional")
-                        .ghost()
-                        .xsmall()
-                        .label(if form.all_optional_included() {
-                            tr!("editor.builder.exclude_optional")
-                        } else {
-                            tr!("editor.builder.include_optional")
-                        })
-                        .on_click(move |_, _, cx| {
-                            let _ =
-                                toggle.update(cx, |builder, cx| builder.toggle_all_optional(cx));
-                        })
-                })
-                .child(hint("Alt+O", cx)),
-        );
+        // Optional-prop shortcut, hidden when every prop is required.
+        if form.fields().iter().any(|field| !field.prop.required) {
+            fields = fields.child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child({
+                        let toggle = weak.clone();
+                        Button::new("component-field-optional")
+                            .ghost()
+                            .small()
+                            .label(if form.all_optional_included() {
+                                tr!("editor.builder.exclude_optional")
+                            } else {
+                                tr!("editor.builder.include_optional")
+                            })
+                            .on_click(move |_, _, cx| {
+                                let _ = toggle
+                                    .update(cx, |builder, cx| builder.toggle_all_optional(cx));
+                            })
+                    })
+                    .child(ui::kbd_hint("alt-o", cx)),
+            );
+        }
         if let Some(context) = &self.context {
             fields = fields.child(if context.imports_enabled {
                 let toggle = weak.clone();
@@ -1168,10 +1132,10 @@ impl ComponentBuilder {
                     .items_center()
                     .gap_2()
                     .child(
-                        Checkbox::new("component-field-import")
+                        Switch::new("component-field-import")
                             .checked(checked)
                             .label(tr!("editor.builder.add_import"))
-                            .on_click(move |checked: &bool, _, cx| {
+                            .on_change(move |checked: &bool, _, cx| {
                                 let _ = toggle.update(cx, |builder, cx| {
                                     builder.add_import = *checked;
                                     cx.notify();
@@ -1221,7 +1185,7 @@ impl ComponentBuilder {
                         .rounded(cx.theme().radius)
                         .bg(cx.theme().group_box)
                         .text_xs()
-                        .text_color(cx.theme().red)
+                        .text_color(cx.theme().danger)
                         .child(error)
                         .into_any_element(),
                 })
@@ -1235,7 +1199,11 @@ impl ComponentBuilder {
                 }),
         );
         if let Some(error) = self.error.clone() {
-            fields = fields.child(div().text_xs().text_color(cx.theme().red).child(error));
+            fields = fields.child(ui::inline_notice(
+                "component-builder-error",
+                ui::NoticeTone::Danger,
+                error,
+            ));
         }
         fields = fields.child(
             div()
@@ -1253,15 +1221,14 @@ impl ComponentBuilder {
                             let _ = insert.update(cx, |builder, cx| builder.confirm(cx));
                         })
                 })
-                .child(hint("Ctrl+Enter", cx)),
+                .child(ui::kbd_hint("secondary-enter", cx)),
         );
         fields.into_any_element()
     }
 }
 
+#[derive(Clone)]
 struct PaletteRow {
-    /// Group header, shown only on the first row of each group.
-    header: Option<SharedString>,
     name: String,
     badge: &'static str,
     requirement: SharedString,
@@ -1269,24 +1236,40 @@ struct PaletteRow {
     wraps: bool,
 }
 
-fn hint(text: &'static str, cx: &App) -> impl IntoElement {
+fn palette_row(row: &PaletteRow, cx: &App) -> gpui_kit::AnyElement {
     div()
-        .px_1()
-        .rounded(cx.theme().radius)
-        .border_1()
-        .border_color(cx.theme().border)
-        .text_xs()
-        .text_color(cx.theme().muted_foreground)
-        .child(text)
-}
-
-fn badge(label: &'static str, cx: &App) -> impl IntoElement {
-    div()
-        .px_1p5()
-        .py_0p5()
-        .rounded(cx.theme().radius)
-        .bg(cx.theme().muted)
-        .text_xs()
-        .text_color(cx.theme().muted_foreground)
-        .child(label)
+        .v_flex()
+        .w_full()
+        .gap_0p5()
+        .child(
+            div()
+                .h_flex()
+                .items_center()
+                .gap_2()
+                .child(div().text_sm().child(row.name.clone()))
+                .child(Tag::new().small().child(row.badge))
+                .when(row.wraps, |line| {
+                    line.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr!("editor.builder.wraps_content")),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(row.requirement.clone()),
+        )
+        .when_some(row.description.clone(), |column, description| {
+            column.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(description),
+            )
+        })
+        .into_any_element()
 }

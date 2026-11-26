@@ -33,6 +33,23 @@ impl PaletteEntry {
     }
 }
 
+impl PaletteAction {
+    /// Stable element identity: domain data, never the row's position.
+    fn element_id(&self) -> SharedString {
+        match self {
+            PaletteAction::Command(command) => {
+                SharedString::from(format!("command-palette-command-{command:?}"))
+            }
+            PaletteAction::RecentProject(id) => {
+                SharedString::from(format!("command-palette-recent-{id}"))
+            }
+            PaletteAction::Collection(id) => {
+                SharedString::from(format!("command-palette-collection-{id}"))
+            }
+        }
+    }
+}
+
 pub(crate) type PaletteGroups = Vec<(String, Vec<PaletteEntry>)>;
 type Confirm = Rc<dyn Fn(PaletteAction, &mut Window, &mut App)>;
 
@@ -250,15 +267,7 @@ impl Render for CommandPalette {
         let filtered = self.filtered(&query);
         let has_results = filtered.iter().any(|entries| !entries.is_empty());
         let mut flat_index = 0;
-        let mut results = div()
-            .id("command-palette-results")
-            .v_flex()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .p_2()
-            .gap_1();
+        let mut results = div().id("command-palette-results").v_flex().p_2().gap_1();
 
         for (group_index, entry_indices) in filtered.iter().enumerate() {
             if entry_indices.is_empty() {
@@ -288,9 +297,10 @@ impl Render for CommandPalette {
                 let icon = entry.icon;
                 let disabled = entry.is_disabled();
                 let item_index = flat_index;
+                let element_id = entry.action.element_id();
                 results = results.child(
                     div()
-                        .id(format!("command-palette-item-{item_index}"))
+                        .id(element_id)
                         .w_full()
                         .min_w_0()
                         .h_flex()
@@ -330,8 +340,19 @@ impl Render for CommandPalette {
                             row.child(
                                 div()
                                     .flex_shrink_0()
+                                    .rounded(crate::ui::radius_sm(cx))
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().tab_bar)
+                                    .px_1p5()
+                                    .py_0p5()
                                     .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_color(if selected {
+                                        cx.theme().accent_foreground
+                                    } else {
+                                        cx.theme().muted_foreground
+                                    })
                                     .child(shortcut),
                             )
                         }),
@@ -402,6 +423,14 @@ impl Render for CommandPalette {
                     )
                     .child(Input::new(&self.query).appearance(false).p_0()),
             )
-            .child(results)
+            .child(
+                div()
+                    .id("command-palette-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(results),
+            )
     }
 }

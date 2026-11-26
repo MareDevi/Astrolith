@@ -20,7 +20,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, Task,
-    TestSupportExt, Window, div, prelude::*, px, rems,
+    TestSupportExt, Window, div, prelude::*, rems,
 };
 
 use crate::runtime;
@@ -92,9 +92,9 @@ impl ListDelegate for FileList {
         Some(
             ListItem::new(row.id.clone())
                 .selected(active)
-                .h(rems(1.6))
+                .min_h(rems(1.6))
                 .px_1()
-                .py_0()
+                .py_0p5()
                 .accessibility_label(row.id.clone())
                 .child(
                     div()
@@ -103,11 +103,14 @@ impl ListDelegate for FileList {
                         .gap_1p5()
                         .min_w_0()
                         .w_full()
-                        .pl(rems(0.25 + row.depth as f32 * 0.75))
+                        .pl(rems(0.75 + row.depth as f32 * 0.75))
                         .child(
                             div()
-                                .w(px(14.))
+                                .w_3p5()
                                 .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .when(row.has_children, |slot| {
                                     slot.child(
                                         Icon::new(if row.expanded {
@@ -465,83 +468,41 @@ fn push_rows(
 
 impl Render for FileBrowser {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = div()
-            .h_flex()
-            .items_center()
-            .gap_2()
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(cx.theme().border.opacity(0.55))
-            .px_3()
-            .pt_3()
-            .pb_2()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_xs()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr!("browser.explorer.title")),
+        let mut trailing: Vec<gpui_kit::AnyElement> = Vec::new();
+        if self.loading {
+            trailing.push(Spinner::new().xsmall().into_any_element());
+        }
+        trailing.push(
+            crate::ui::icon_button(
+                "file-browser-refresh",
+                IconName::RefreshCw,
+                tr!("browser.explorer.refresh"),
             )
-            .when(self.loading, |header| header.child(Spinner::new().xsmall()))
-            .child(
-                crate::ui::icon_button(
-                    "file-browser-refresh",
-                    IconName::RefreshCw,
-                    tr!("browser.explorer.refresh"),
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-            );
+            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)))
+            .into_any_element(),
+        );
+        let header = crate::ui::panel_header(tr!("browser.explorer.title"), None, trailing, cx);
 
         let body = if let Some(error) = self.error.clone() {
-            div()
-                .id("file-browser-error")
-                .test_support()
-                .flex_1()
-                .v_flex()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .p_4()
-                .text_center()
-                .child(
-                    Icon::new(IconName::TriangleAlert)
-                        .size_5()
-                        .text_color(cx.theme().danger),
-                )
-                .child(div().text_sm().child(tr!("browser.explorer.error_title")))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(error),
-                )
-                .into_any_element()
+            crate::ui::empty_state(
+                "file-browser-error",
+                IconName::TriangleAlert,
+                tr!("browser.explorer.error_title"),
+                error,
+                None,
+                cx,
+            )
+            .into_any_element()
         } else if self.report.is_empty() && !self.loading {
-            div()
-                .id("file-browser-empty")
-                .test_support()
-                .flex_1()
-                .v_flex()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .p_4()
-                .text_center()
-                .child(
-                    Icon::new(IconName::Folder)
-                        .size_5()
-                        .text_color(cx.theme().muted_foreground),
-                )
-                .child(div().text_sm().child(tr!("browser.explorer.empty_title")))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("browser.explorer.empty_body")),
-                )
-                .into_any_element()
+            crate::ui::empty_state(
+                "file-browser-empty",
+                IconName::Folder,
+                tr!("browser.explorer.empty_title"),
+                tr!("browser.explorer.empty_body"),
+                None,
+                cx,
+            )
+            .into_any_element()
         } else {
             div()
                 .id("file-browser-tree")
@@ -564,13 +525,13 @@ impl Render for FileBrowser {
                 browser.child(
                     div()
                         .flex_shrink_0()
-                        .border_t_1()
-                        .border_color(cx.theme().border.opacity(0.55))
-                        .px_3()
+                        .px_2()
                         .py_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("browser.explorer.truncated")),
+                        .child(crate::ui::inline_notice(
+                            "file-browser-truncated",
+                            crate::ui::NoticeTone::Warning,
+                            tr!("browser.explorer.truncated"),
+                        )),
                 )
             })
     }

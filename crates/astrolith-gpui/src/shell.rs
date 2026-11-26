@@ -64,15 +64,19 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     command::{Command, CommandItem, CommandState},
     dock::{BasePanelView, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle},
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     kbd::Kbd,
     scroll::ScrollableElement as _,
+    spinner::Spinner,
+    status_bar::StatusBar,
+    tab::{Tab, TabBar},
+    tooltip::Tooltip,
 };
 use gpui_kit::{
-    Animation, AnimationExt as _, App, AppContext, Bounds, Context, Entity, ExternalPaths,
-    FocusHandle, Focusable, IntoElement, PathPromptOptions, Render, ScrollHandle, SharedString,
-    Subscription, Task, TestSupportExt, WeakFocusHandle, Window, WindowBounds, WindowOptions,
-    deferred, div, point, prelude::*, px, rems, size,
+    Animation, AnimationExt as _, AnyElement, App, AppContext, Bounds, Context, Entity,
+    ExternalPaths, FocusHandle, Focusable, IntoElement, PathPromptOptions, Pixels, Render,
+    ScrollHandle, SharedString, Subscription, Task, TestSupportExt, WeakFocusHandle, Window,
+    WindowBounds, WindowOptions, deferred, div, point, prelude::*, px, rems, size,
 };
 
 /// Latest global and project snapshots, flushed by the quit observer.
@@ -82,8 +86,6 @@ struct LatestPreferences {
     project: Option<(u64, ProjectPreferences)>,
 }
 type LatestSettings = Arc<Mutex<LatestPreferences>>;
-
-const WRITING_LIBRARY_MIN_WIDTH: f32 = 320.;
 
 /// Preference scope of the project open in the shell.
 ///
@@ -167,6 +169,7 @@ pub fn open(cx: &mut App) {
                 cx,
                 &settings.copyedit,
                 CommandAvailability::default(),
+                commands::MenuState::default(),
                 &[],
                 &[],
             );
@@ -309,6 +312,16 @@ impl ProseStyleInputs {
     }
 }
 
+/// Everything the native menu model is derived from.
+#[derive(Clone, PartialEq)]
+struct MenuSignature {
+    availability: CommandAvailability,
+    state: commands::MenuState,
+    recent: Vec<RecentEntry>,
+    collections: Vec<CollectionItem>,
+    language: String,
+}
+
 pub(crate) struct Shell {
     dock: Entity<DockArea>,
     document: Entity<WorkspacePanel>,
@@ -328,6 +341,8 @@ pub(crate) struct Shell {
     git_message: Option<Entity<InputState>>,
     git_diff: Option<(PathBuf, String, bool)>,
     git_error: Option<String>,
+    /// A Git action is running; every mutating control stays disabled.
+    git_busy: bool,
     /// Writing's library is a transient left-side sheet over the document.
     library_open: bool,
     library_focus: FocusHandle,
@@ -397,6 +412,8 @@ pub(crate) struct Shell {
     updates: update::CapabilityState,
     update_status: update::Status,
     update_task: Option<Task<()>>,
+    /// Whether the dialog currently on screen was opened for an update check.
+    update_dialog_open: bool,
     /// Registered projects ordered by most recent open.
     recent_records: Vec<ProjectRecord>,
     /// Labels generated once for menus and the palette.
@@ -406,12 +423,7 @@ pub(crate) struct Shell {
     /// Last menu model installed, so render does not rebuild unchanged menus.
     /// The active language is part of the identity: a locale change rebuilds
     /// every native menu even when availability did not move.
-    menu_signature: Option<(
-        CommandAvailability,
-        Vec<RecentEntry>,
-        Vec<CollectionItem>,
-        String,
-    )>,
+    menu_signature: Option<MenuSignature>,
     /// Set by the change handlers that can change menu inputs (mode, project
     /// notify, session change, preferences, recent list, collections, dock).
     /// The next frame installs the menus once instead of every frame.
@@ -660,6 +672,9 @@ impl Shell {
                     .update(cx, |terminal, cx| terminal.attach(&root, cx));
                 this.sync_terminal_activity(window, cx);
                 this.finish_pending_entry(window, cx);
+                // The Writing surface must stop asking for a project as soon as
+                // one opens, before any entry or store load resolves.
+                this.sync_document_empty_copy(cx);
             },
         ));
         // Build's file explorer resolves non-editable project files here, so the
@@ -866,6 +881,7 @@ impl Shell {
             git_message: None,
             git_diff: None,
             git_error: None,
+            git_busy: false,
             library_open: mode == WorkspaceMode::Writing && layout.sidebar_visible,
             library_focus: cx.focus_handle(),
             library_return_focus: if mode == WorkspaceMode::Writing && layout.sidebar_visible {
@@ -916,6 +932,7 @@ impl Shell {
             updates,
             update_status,
             update_task: None,
+            update_dialog_open: false,
             recent_records: Vec::new(),
             recent: Vec::new(),
             pending_entry: None,
@@ -1146,18 +1163,22 @@ impl Shell {
         }
         self.menus_dirty = false;
         let availability = self.availability(window, cx);
+        let menu_state = commands::MenuState {
+            theme: self.settings.theme,
+            terminal_visible: self.dock.read(cx).has_dock(DockPlacement::Bottom),
+            source_control_visible: self.git_open,
+        };
         let language = self.settings.language.clone();
         let unchanged = {
             let project = self.project.read(cx);
             let collections = project.collection_items();
-            self.menu_signature.as_ref().is_some_and(
-                |(last, recent, last_collections, last_language)| {
-                    *last == availability
-                        && *recent == self.recent
-                        && last_collections.as_slice() == collections
-                        && *last_language == language
-                },
-            )
+            self.menu_signature.as_ref().is_some_and(|last| {
+                last.availability == availability
+                    && last.state == menu_state
+                    && last.recent == self.recent
+                    && last.collections.as_slice() == collections
+                    && last.language == language
+            })
         };
         if unchanged {
             return;
@@ -1171,10 +1192,17 @@ impl Shell {
             cx,
             &self.settings.copyedit,
             availability,
+            menu_state,
             &self.recent,
             &collections,
         );
-        self.menu_signature = Some((availability, self.recent.clone(), collections, language));
+        self.menu_signature = Some(MenuSignature {
+            availability,
+            state: menu_state,
+            recent: self.recent.clone(),
+            collections,
+            language,
+        });
     }
 
     /// Open one collection through its generated registry command.
@@ -1240,15 +1268,28 @@ impl Shell {
 
     /// The Recent Projects dialog: open or remove registry entries.
     fn open_recent_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) {
+        if !self.prepare_dialog(window, cx) {
             return;
         }
-        let entries = self.recent.clone();
         let owner = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
-            let mut body = div().v_flex().gap_2();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let entries = owner
+                .read_with(cx, |this, _| this.recent.clone())
+                .unwrap_or_default();
+            let mut body = div()
+                .v_flex()
+                .gap_2()
+                .max_h(rems(20.))
+                .overflow_y_scrollbar();
             if entries.is_empty() {
-                body = body.child(div().text_sm().child(tr!("shell.recent.empty")));
+                body = body.child(crate::ui::empty_state(
+                    "recent-projects-empty",
+                    IconName::FolderOpen,
+                    tr!("shell.recent.title"),
+                    tr!("shell.recent.empty"),
+                    None,
+                    cx,
+                ));
             }
             for entry in &entries {
                 let open_owner = owner.clone();
@@ -1263,12 +1304,18 @@ impl Shell {
                         .justify_between()
                         .gap_4()
                         .child(
-                            div().v_flex().child(entry.label.clone()).child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(entry.path.display().to_string()),
-                            ),
+                            div()
+                                .v_flex()
+                                .min_w_0()
+                                .child(div().min_w_0().truncate().child(entry.label.clone()))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(entry.path.display().to_string()),
+                                ),
                         )
                         .child(
                             div()
@@ -1279,6 +1326,8 @@ impl Shell {
                                         "recent-open-{}",
                                         entry.id
                                     )))
+                                    .small()
+                                    .outline()
                                     .label(tr!("shell.recent.open"))
                                     .on_click(
                                         move |_, window, cx| {
@@ -1294,6 +1343,8 @@ impl Shell {
                                         "recent-remove-{}",
                                         entry.id
                                     )))
+                                    .small()
+                                    .danger()
                                     .label(tr!("shell.recent.remove"))
                                     .on_click(
                                         move |_, window, cx| {
@@ -1308,7 +1359,7 @@ impl Shell {
             }
             dialog
                 .title(tr!("shell.recent.title"))
-                .w(px(560.))
+                .w(rems(35.).to_pixels(window.rem_size()))
                 .child(body)
         });
     }
@@ -1375,7 +1426,10 @@ impl Shell {
             })
             .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                window.close_dialog(cx);
+                if this.update_dialog_open && window.has_active_dialog(cx) {
+                    window.close_dialog(cx);
+                }
+                this.update_dialog_open = false;
                 this.apply_update_check(checked, skipped.as_deref());
                 this.show_update_status(window, cx);
                 this.refresh_menus(window, cx);
@@ -1399,12 +1453,13 @@ impl Shell {
 
     /// Show the latest update status, with an external release download only.
     fn show_update_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) {
+        if !self.prepare_dialog(window, cx) {
             return;
         }
         let status = self.update_status.clone();
         let owner = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        self.update_dialog_open = true;
+        window.open_dialog(cx, move |dialog, window, cx| {
             let title_key = match &status {
                 update::Status::Disabled(_) => "shell.update.title_unavailable",
                 update::Status::Failed(_) => "shell.update.title_failed",
@@ -1420,6 +1475,19 @@ impl Shell {
                 .gap_3()
                 .text_sm()
                 .child(SharedString::from(status.message()));
+            if matches!(&status, update::Status::Checking) {
+                body = body.child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(Spinner::new().xsmall())
+                        .child(tr!("shell.update.checking")),
+                );
+            }
+            let mut footer: Vec<AnyElement> = Vec::new();
             if let Some(release) = status.release() {
                 body = body
                     .child(
@@ -1432,43 +1500,63 @@ impl Shell {
                                     .text_color(cx.theme().muted_foreground)
                                     .child(tr!("shell.update.release_notes")),
                             )
-                            .child(div().text_sm().child(release.notes.clone())),
+                            .child(
+                                div()
+                                    .max_h(rems(14.))
+                                    .overflow_y_scrollbar()
+                                    .text_sm()
+                                    .child(release.notes.clone()),
+                            ),
                     )
                     .child(
                         div()
+                            .min_w_0()
+                            .whitespace_normal()
                             .text_xs()
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_color(cx.theme().muted_foreground)
                             .child(tr!("shell.update.checksum", hash = release.sha256)),
                     );
-                let mut actions = div().h_flex().gap_2();
                 let download = release.artifact_url.clone();
-                actions = actions.child(
+                footer.push(
                     Button::new("update-download")
+                        .small()
+                        .outline()
                         .label(tr!("shell.update.download"))
-                        .on_click(move |_, _, cx| cx.open_url(&download)),
+                        .on_click(move |_, _, cx| cx.open_url(&download))
+                        .into_any_element(),
                 );
                 let page = release.page.clone();
-                actions = actions.child(
+                footer.push(
                     Button::new("update-release-page")
+                        .small()
+                        .outline()
                         .label(tr!("shell.update.release_page"))
-                        .on_click(move |_, _, cx| cx.open_url(&page)),
+                        .on_click(move |_, _, cx| cx.open_url(&page))
+                        .into_any_element(),
                 );
                 if matches!(&status, update::Status::Available(_)) {
                     let version = release.version.to_string();
                     let skip_owner = owner.clone();
-                    actions = actions.child(
+                    footer.push(
                         Button::new("update-skip-version")
+                            .small()
+                            .ghost()
                             .label(tr!("shell.update.skip_version"))
                             .on_click(move |_, window, cx| {
                                 let _ = skip_owner
                                     .update(cx, |this, cx| this.skip_update_version(&version, cx));
                                 window.close_dialog(cx);
-                            }),
+                            })
+                            .into_any_element(),
                     );
                 }
-                body = body.child(actions);
             }
-            dialog.title(title).w(px(520.)).child(body)
+            dialog
+                .title(title)
+                .w(rems(32.5).to_pixels(window.rem_size()))
+                .child(body)
+                .footer(crate::ui::dialog_footer(footer))
         });
     }
 
@@ -1486,34 +1574,37 @@ impl Shell {
 
     /// About: version and build identity, with no update action.
     fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) {
+        if !self.prepare_dialog(window, cx) {
             return;
         }
-        window.open_dialog(cx, |dialog, _, cx| {
-            dialog.title(tr!("shell.about.title")).w(px(420.)).child(
-                div()
-                    .v_flex()
-                    .gap_1()
-                    .text_sm()
-                    .child(SharedString::from(commands::about_text()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tr!("shell.about.subtitle")),
-                    ),
-            )
+        window.open_dialog(cx, |dialog, window, cx| {
+            dialog
+                .title(tr!("shell.about.title"))
+                .w(rems(26.25).to_pixels(window.rem_size()))
+                .child(
+                    div()
+                        .v_flex()
+                        .gap_1()
+                        .text_sm()
+                        .child(SharedString::from(commands::about_text()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tr!("shell.about.subtitle")),
+                        ),
+                )
         });
     }
 
     /// Open a bundled help surface. Nothing here reaches the network.
     fn open_help(&mut self, surface: HelpSurface, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) {
+        if !self.prepare_dialog(window, cx) {
             return;
         }
         let shortcuts = help::shortcut_groups(&self.settings.copyedit);
         let paths = help::local_paths();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let body = match surface {
                 HelpSurface::UserGuide => help::guide_body(cx),
                 HelpSurface::KeyboardShortcuts => help::shortcuts_body(&shortcuts, cx),
@@ -1521,8 +1612,8 @@ impl Shell {
             };
             dialog
                 .title(surface.title())
-                .w(px(680.))
-                .max_h(px(620.))
+                .w(rems(42.5).to_pixels(window.rem_size()))
+                .max_h(rems(38.75).to_pixels(window.rem_size()))
                 .child(body)
         });
     }
@@ -1875,6 +1966,8 @@ impl Shell {
         self.mode = resolved.last_mode.unwrap_or(resolved.default_mode);
         self.sync_document_empty_copy(cx);
         let source_view = self.mode == WorkspaceMode::Build;
+        self.document
+            .update(cx, |panel, cx| panel.set_code(source_view, cx));
         self.project.update(cx, |project, cx| {
             project.set_source_view(source_view, window, cx)
         });
@@ -2035,99 +2128,97 @@ impl Shell {
     /// Many tabs scroll horizontally instead of being clipped, and each tab
     /// uses shared tab tokens so it reads as the same surface as the rest of
     /// the application.
-    fn build_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn build_tab_close_id(path: &std::path::Path) -> String {
+        format!("build-tab-close-{}", path.display())
+    }
+
+    fn build_tab_strip(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs = self.project.read(cx).open_tabs();
         let active = self.project.read(cx).active_path();
-        let owner = cx.weak_entity();
         let project = self.project.clone();
         let motion = cx.theme().motion_tokens();
         let terminal_open = self.dock.read(cx).has_dock(DockPlacement::Bottom);
         div()
             .id("build-tabs")
             .test_support()
-            .h(px(40.))
+            .h_9()
             .flex_shrink_0()
             .h_flex()
-            .items_end()
+            .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .bg(cx.theme().tab_bar)
             .child(
                 div()
-                    .id("build-tabs-scroll")
+                    .id("build-tabs-strip")
                     .flex_1()
                     .min_w_0()
                     .h_full()
                     .h_flex()
-                    .items_end()
+                    .items_center()
                     .gap_1()
-                    .px(px(12.))
-                    .overflow_x_scroll()
-                    .restrict_scroll_to_axis()
-                    .track_scroll(&self.build_tabs)
-                    .children(tabs.iter().enumerate().map(|(index, tab)| {
-                        let owner = owner.clone();
-                        let project = project.clone();
-                        let path = tab.path.clone();
-                        let close_owner = owner.clone();
-                        let close_project = project.clone();
-                        let close_path = tab.path.clone();
-                        let selected = active.as_ref() == Some(&tab.path);
-                        div()
-                            .id(format!("build-tab-{index}"))
-                            .test_support()
-                            .flex_none()
-                            .h_flex()
-                            .h(px(32.))
-                            .items_center()
-                            .gap_2()
-                            .px(px(10.))
-                            .rounded_t(px(6.))
-                            .when(selected, |tab| {
-                                tab.bg(cx.theme().tab_active)
-                                    .text_color(cx.theme().tab_active_foreground)
-                            })
-                            .when(!selected, |tab| {
-                                tab.text_color(cx.theme().tab_foreground)
-                                    .hover(|tab| tab.bg(cx.theme().tab_bar))
-                            })
-                            .cursor_pointer()
-                            .on_click(move |_, window, cx| {
-                                let _ = owner.update(cx, |_this, cx| {
-                                    project.update(cx, |project, cx| {
-                                        project.activate_session(&path, window, cx)
-                                    });
-                                });
-                            })
-                            .child(
-                                div()
-                                    .max_w(px(200.))
-                                    .truncate()
-                                    .text_xs()
-                                    .child(tab.label.clone()),
-                            )
-                            .when(tab.dirty, |tab| {
-                                tab.child(div().size_1p5().rounded_full().bg(cx.theme().foreground))
-                            })
-                            .child(
-                                Button::new(("build-tab-close", index))
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::X)
-                                    .tooltip(tr!("shell.tabs.close_file"))
-                                    .accessibility_label(tr!(
-                                        "shell.tabs.close_file_label",
-                                        name = tab.label
-                                    ))
-                                    .on_click(move |_, window, cx| {
-                                        let _ = close_owner.update(cx, |_, cx| {
-                                            close_project.update(cx, |project, cx| {
-                                                project.close_path(close_path.clone(), window, cx)
+                    .px_2()
+                    .when(tabs.is_empty(), |strip| {
+                        strip.child(
+                            div()
+                                .px_2()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tr!("shell.tabs.empty")),
+                        )
+                    })
+                    .when(!tabs.is_empty(), |strip| {
+                        strip.child(
+                            TabBar::new("build-tabs-bar")
+                                .track_scroll(&self.build_tabs)
+                                .max_width(rems(12.5).to_pixels(window.rem_size()))
+                                .border_b_0()
+                                .children(tabs.iter().map(|tab| {
+                                    let path = tab.path.clone();
+                                    let activate_path = path.clone();
+                                    let activate_project = project.clone();
+                                    let close_owner = cx.weak_entity();
+                                    let close_project = project.clone();
+                                    let selected = active.as_ref() == Some(&tab.path);
+                                    Tab::new()
+                                        .label(tab.label.clone())
+                                        .selected(selected)
+                                        .when(tab.dirty, |tab| {
+                                            tab.prefix(
+                                                div()
+                                                    .size_1p5()
+                                                    .rounded_full()
+                                                    .bg(cx.theme().foreground),
+                                            )
+                                        })
+                                        .on_click(move |_, window, cx| {
+                                            activate_project.update(cx, |project, cx| {
+                                                project.activate_session(&activate_path, window, cx)
                                             });
-                                        });
-                                    }),
-                            )
-                    })),
+                                        })
+                                        .suffix(
+                                            Button::new(SharedString::from(
+                                                Self::build_tab_close_id(&path),
+                                            ))
+                                            .xsmall()
+                                            .ghost()
+                                            .icon(IconName::X)
+                                            .tooltip(tr!("shell.tabs.close_file"))
+                                            .accessibility_label(tr!(
+                                                "shell.tabs.close_file_label",
+                                                name = tab.label
+                                            ))
+                                            .on_click(move |_, window, cx| {
+                                                let _ = close_owner.update(cx, |_, cx| {
+                                                    close_project.update(cx, |project, cx| {
+                                                        project.close_path(path.clone(), window, cx)
+                                                    });
+                                                });
+                                            }),
+                                        )
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -2138,28 +2229,26 @@ impl Shell {
                     .border_color(cx.theme().border)
                     .px_2()
                     .child(
-                        Button::new("build-source-control")
-                            .small()
-                            .ghost()
-                            .icon(IconName::GitBranch)
-                            .tooltip(tr!("shell.git.title"))
-                            .accessibility_label(tr!("shell.git.accessibility"))
-                            .selected(self.git_open)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.toggle_git(window, cx)),
-                            ),
+                        crate::ui::icon_button_with_shortcut(
+                            "build-source-control",
+                            IconName::GitBranch,
+                            tr!("shell.git.accessibility"),
+                            help::formatted_shortcut(CommandId::ToggleSourceControl).as_deref(),
+                        )
+                        .selected(self.git_open)
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_git(window, cx))),
                     )
                     .child(
-                        Button::new("build-terminal")
-                            .small()
-                            .ghost()
-                            .icon(IconName::Terminal)
-                            .tooltip(tr!("shell.panel.terminal"))
-                            .accessibility_label(tr!("shell.tabs.toggle_terminal"))
-                            .selected(terminal_open)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx)),
-                            ),
+                        crate::ui::icon_button_with_shortcut(
+                            "build-terminal",
+                            IconName::Terminal,
+                            tr!("shell.tabs.toggle_terminal"),
+                            help::formatted_shortcut(CommandId::ToggleTerminal).as_deref(),
+                        )
+                        .selected(terminal_open)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx)),
+                        ),
                     ),
             )
             .with_animation(
@@ -2173,27 +2262,43 @@ impl Shell {
     /// The centered three-way mode switch.
     fn mode_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.mode;
-        let owner = cx.weak_entity();
+        let selected = WorkspaceMode::ALL
+            .iter()
+            .position(|mode| *mode == current)
+            .unwrap_or(0);
+        let shortcut_hint = WorkspaceMode::ALL
+            .iter()
+            .filter_map(|mode| {
+                let command = match mode {
+                    WorkspaceMode::Writing => CommandId::WorkspaceWriting,
+                    WorkspaceMode::Build => CommandId::WorkspaceBuild,
+                    WorkspaceMode::Preview => CommandId::WorkspacePreview,
+                };
+                let shortcut = help::formatted_shortcut(command)?;
+                Some(format!("{} ({shortcut})", mode_label(*mode)))
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
         div()
-            .h_flex()
-            .items_center()
-            .gap_0p5()
-            .p(px(3.))
-            .rounded(cx.theme().radius)
-            .bg(cx.theme().tab_bar_segmented)
-            .children(WorkspaceMode::ALL.map(|mode| {
-                let owner = owner.clone();
-                let label = mode_label(mode);
-                Button::new(mode_id(mode))
-                    .ghost()
-                    .rounded(cx.theme().radius)
-                    .label(label.clone())
-                    .selected(mode == current)
-                    .tooltip(label)
-                    .on_click(move |_, window, cx| {
-                        let _ = owner.update(cx, |this, cx| this.set_mode(mode, window, cx));
-                    })
-            }))
+            .id("workspace-mode-switch-frame")
+            .tooltip(move |window, cx| Tooltip::new(shortcut_hint.clone()).build(window, cx))
+            .child(
+                TabBar::new("workspace-mode-switch")
+                    .segmented()
+                    .large()
+                    .selected_index(selected)
+                    .on_click(cx.listener(|this, index: &usize, window, cx| {
+                        if let Some(mode) = WorkspaceMode::ALL.get(*index) {
+                            this.set_mode(*mode, window, cx);
+                        }
+                    }))
+                    .children(WorkspaceMode::ALL.map(|mode| {
+                        Tab::new()
+                            .label(mode_label(mode))
+                            .aria_label(mode_label(mode))
+                            .selected(mode == current)
+                    })),
+            )
     }
 
     /// Keep the document empty state aligned with the navigation the mode shows.
@@ -2243,10 +2348,15 @@ impl Shell {
         self.capture_layout(cx);
         let inspector_open = self.inspector_open;
         self.set_inspector_open(false, window, cx);
+        self.inspector_return_focus = None;
         if mode != WorkspaceMode::Build {
             self.set_git_open(false, window, cx);
+            self.git_return_focus = None;
         }
         self.mode = mode;
+        self.document.update(cx, |document, cx| {
+            document.set_code(mode == WorkspaceMode::Build, cx)
+        });
         if mode == WorkspaceMode::Preview {
             // Re-install the reading pane once when the view becomes visible,
             // even when the active document identity did not change.
@@ -2300,24 +2410,44 @@ impl Shell {
             return;
         }
         if open {
+            if window.has_active_dialog(cx) {
+                return;
+            }
             if self.git_focus.is_none() {
                 self.git_focus = Some(cx.focus_handle());
             }
             if self.git_message.is_none() {
-                self.git_message = Some(cx.new(|cx| {
+                let message = cx.new(|cx| {
                     InputState::new(window, cx).placeholder(tr!("shell.git.commit_message"))
-                }));
+                });
+                self._subscriptions.push(cx.subscribe_in(
+                    &message,
+                    window,
+                    |this, _, event: &InputEvent, _window, cx| {
+                        if matches!(
+                            event,
+                            InputEvent::PressEnter {
+                                secondary: false,
+                                ..
+                            }
+                        ) {
+                            this.commit_from_input(cx);
+                        }
+                    },
+                ));
+                self.git_message = Some(message);
             }
             self.git_return_focus = window.focused(cx).map(|focus| focus.downgrade());
+            self.library_return_focus = None;
+            self.inspector_return_focus = None;
+            self.set_library_open(false, window, cx);
+            self.set_inspector_open(false, window, cx);
             if let Some(focus) = &self.git_focus {
                 focus.focus(window, cx);
             }
-        } else if let Some(focus) = self
-            .git_return_focus
-            .take()
-            .and_then(|focus| focus.upgrade())
-        {
-            focus.focus(window, cx);
+        } else {
+            self.git_error = None;
+            self.git_diff = None;
         }
         self.git_open = open;
         self.project
@@ -2325,13 +2455,92 @@ impl Shell {
         cx.notify();
     }
 
+    /// Close every floating sheet; sheets and dialogs never share the stage.
+    fn close_floating_sheets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_library_open(false, window, cx);
+        self.set_inspector_open(false, window, cx);
+        self.set_git_open(false, window, cx);
+    }
+
+    /// Whether a transient overlay currently covers the workspace.
+    fn has_any_overlay(&self, window: &mut Window, cx: &mut App) -> bool {
+        self.library_open || self.inspector_open || self.git_open || window.has_active_dialog(cx)
+    }
+
+    /// Dismiss floating sheets so a dialog can own the foreground.
+    fn prepare_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if window.has_active_dialog(cx) {
+            return false;
+        }
+        self.update_dialog_open = false;
+        if self.has_any_overlay(window, cx) {
+            self.close_floating_sheets(window, cx);
+        }
+        self.library_return_focus = None;
+        self.inspector_return_focus = None;
+        self.git_return_focus = None;
+        true
+    }
+
+    /// Top edge of a floating sheet, below the visible chrome.
+    fn sheet_top(&self, window: &Window) -> Pixels {
+        if self.chrome.is_hidden() && self.warning.is_none() {
+            rems(0.75).to_pixels(window.rem_size())
+        } else if self.mode == WorkspaceMode::Build {
+            // Title bar plus the Build tab strip.
+            rems(6.).to_pixels(window.rem_size())
+        } else {
+            rems(4.).to_pixels(window.rem_size())
+        }
+    }
+
+    /// Top of the modal backdrop: below the document header so chrome stays usable.
+    fn dismiss_top(&self, window: &Window) -> Pixels {
+        if self.chrome.is_hidden() && self.warning.is_none() {
+            self.sheet_top(window)
+        } else {
+            self.sheet_top(window) + rems(3.25).to_pixels(window.rem_size())
+        }
+    }
+
+    /// One width for every floating sheet, clamped to the window.
+    fn sheet_width(&self, window: &Window) -> Pixels {
+        let rem = window.rem_size();
+        let available = (window.viewport_size().width - rems(2.).to_pixels(rem)).max(px(0.));
+        rems(26.)
+            .to_pixels(rem)
+            .min(available)
+            .max(rems(20.).to_pixels(rem).min(available))
+    }
+
+    /// Commit the message when Enter is pressed inside the message field.
+    fn commit_from_input(&mut self, cx: &mut Context<Self>) {
+        if self.git_busy {
+            return;
+        }
+        let Some(message) = &self.git_message else {
+            return;
+        };
+        let value = message.read(cx).value().to_string();
+        if value.trim().is_empty() {
+            return;
+        }
+        self.run_git_action(GitPanelAction::Commit(value), cx);
+    }
+
     fn run_git_action(&mut self, action: GitPanelAction, cx: &mut Context<Self>) {
+        if self.git_busy {
+            return;
+        }
         let Some(root) = self.project.read(cx).project_root() else {
             self.git_error = Some(tr!("shell.git.open_project_first"));
             cx.notify();
             return;
         };
         self.git_error = None;
+        self.git_busy = true;
+        let clears_message = matches!(action, GitPanelAction::Commit(_));
+        let commit_message = self.git_message.clone();
         let work_root = root.clone();
         let work = runtime::blocking(cx, move || perform_git_action(&work_root, action));
         cx.spawn(async move |this, cx| {
@@ -2339,7 +2548,8 @@ impl Shell {
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|result| result);
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.git_busy = false;
                 if this.project.read(cx).project_root().as_ref() != Some(&root) {
                     return;
                 }
@@ -2349,6 +2559,9 @@ impl Shell {
                     }
                     Ok(GitPanelResult::Changed) => {
                         this.git_diff = None;
+                        if clears_message && let Some(message) = &commit_message {
+                            message.update(cx, |message, cx| message.set_value("", window, cx));
+                        }
                         this.project
                             .update(cx, |project, cx| project.refresh_git(cx));
                     }
@@ -2368,21 +2581,39 @@ impl Shell {
     ) -> impl IntoElement {
         let path_label = path.path.to_string_lossy().to_string();
         let status_label = if path.untracked {
-            "??".to_owned()
+            "U".to_owned()
         } else if staged {
             path.index_status.to_string()
         } else {
             path.worktree_status.to_string()
         };
+        let status_tooltip = path.untracked.then(|| tr!("shell.git.untracked"));
         let group = if staged { "staged" } else { "changes" };
+        let busy = self.git_busy;
         let action_path = path.path.clone();
         let stage_path = path.path.clone();
+        let status_lane = div()
+            .id(SharedString::from(format!(
+                "git-{group}-status-{}",
+                path.path.display()
+            )))
+            .w_6()
+            .text_center()
+            .text_xs()
+            .font_family(cx.theme().mono_font_family.clone())
+            .text_color(cx.theme().muted_foreground)
+            .child(status_label)
+            .when_some(status_tooltip, |lane, status_tooltip| {
+                lane.tooltip(move |window, cx| {
+                    Tooltip::new(status_tooltip.clone()).build(window, cx)
+                })
+            });
         div()
             .id(format!("git-{group}-{}", path.path.display()))
             .test_support()
             .h_flex()
             .items_center()
-            .gap_2()
+            .gap_3()
             .min_w_0()
             .py_1()
             .child(
@@ -2393,17 +2624,13 @@ impl Shell {
                     .text_sm()
                     .child(path_label),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(status_label),
-            )
+            .child(status_lane)
             .child(
                 Button::new(format!("git-diff-{group}-{}", path.path.display()))
                     .small()
                     .ghost()
                     .label(tr!("shell.git.diff"))
+                    .disabled(busy)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.run_git_action(GitPanelAction::Diff(action_path.clone(), staged), cx)
                     })),
@@ -2417,6 +2644,7 @@ impl Shell {
                     } else {
                         tr!("shell.git.stage")
                     })
+                    .disabled(busy)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.run_git_action(
                             if staged {
@@ -2428,6 +2656,30 @@ impl Shell {
                         )
                     })),
             )
+    }
+
+    /// Focus returns only after the closing sheet has left the tree; the
+    /// sheet's focus trap would otherwise take focus back the moment we set it.
+    fn restore_focus_after_sheet_exit(
+        pending: &mut Option<WeakFocusHandle>,
+        present: bool,
+        presence_id: &'static str,
+        transition: Transition,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if present || pending.is_none() {
+            return;
+        }
+        let presence = Presence::new(presence_id, false)
+            .transition(transition)
+            .sample(window, cx);
+        if presence.should_render() {
+            return;
+        }
+        if let Some(focus) = pending.take().and_then(|focus| focus.upgrade()) {
+            focus.focus(window, cx);
+        }
     }
 
     fn render_git_panel(
@@ -2448,9 +2700,7 @@ impl Shell {
         }
         let git_focus = self.git_focus.clone()?;
         let inset = window.rem_size();
-        let width = (window.viewport_size().width - inset * 2.)
-            .max(px(0.))
-            .min(px(416.));
+        let width = self.sheet_width(window);
         let right = inset - (width + inset) * (1. - presence.progress);
         let (project_name, status) = {
             let project = self.project.read(cx);
@@ -2461,19 +2711,15 @@ impl Shell {
                 project.git_status(),
             )
         };
-        let mut body = div()
-            .v_flex()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .gap_3()
-            .p_3();
+        let scroll = div().v_flex().flex_1().min_h_0().overflow_y_scrollbar();
+        let mut body = div().v_flex().gap_3().p_4().min_w_0();
         if let Some(error) = &self.git_error {
             body = body.child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().danger)
-                    .child(error.clone()),
+                crate::ui::inline_notice("git-error", crate::ui::NoticeTone::Danger, error.clone())
+                    .on_close(cx.listener(|this, _, _, cx| {
+                        this.git_error = None;
+                        cx.notify();
+                    })),
             );
         }
         match status {
@@ -2486,12 +2732,14 @@ impl Shell {
                 )
             }
             Some(Err(error)) => {
-                body = body.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(error),
-                )
+                body = body.child(crate::ui::empty_state(
+                    "git-unavailable",
+                    IconName::GitBranch,
+                    tr!("shell.git.no_repository"),
+                    error,
+                    None,
+                    cx,
+                ))
             }
             Some(Ok(status)) => {
                 let current_branch = status.branch.clone();
@@ -2530,18 +2778,25 @@ impl Shell {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("↑ {} · ↓ {}", status.ahead, status.behind)),
+                            .child(format!(
+                                "{} · {}",
+                                tr!("shell.git.ahead", count = status.ahead),
+                                tr!("shell.git.behind", count = status.behind)
+                            )),
                     );
                 }
                 body = body.child(
                     div()
                         .h_flex()
+                        .items_center()
                         .gap_1()
+                        .when(self.git_busy, |row| row.child(Spinner::new().xsmall()))
                         .child(
                             Button::new("git-fetch")
                                 .small()
                                 .ghost()
                                 .label(tr!("shell.git.fetch"))
+                                .disabled(self.git_busy)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.run_git_action(GitPanelAction::Fetch, cx)
                                 })),
@@ -2551,7 +2806,10 @@ impl Shell {
                                 .small()
                                 .ghost()
                                 .label(tr!("shell.git.push"))
-                                .disabled(!status.has_upstream && status.remotes.is_empty())
+                                .disabled(
+                                    self.git_busy
+                                        || (!status.has_upstream && status.remotes.is_empty()),
+                                )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.run_git_action(GitPanelAction::Push, cx)
                                 })),
@@ -2561,7 +2819,7 @@ impl Shell {
                                 .small()
                                 .ghost()
                                 .label(tr!("shell.git.pull"))
-                                .disabled(!status.has_upstream)
+                                .disabled(self.git_busy || !status.has_upstream)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.run_git_action(GitPanelAction::Pull, cx)
                                 })),
@@ -2581,9 +2839,10 @@ impl Shell {
                     .is_none_or(|message| message.read(cx).value().trim().is_empty());
                 body = body.child(
                     Button::new("git-commit")
+                        .small()
                         .primary()
                         .label(tr!("shell.git.commit"))
-                        .disabled(!has_staged || message_empty)
+                        .disabled(!has_staged || message_empty || self.git_busy)
                         .on_click(move |_, _, cx| {
                             let _ = owner.update(cx, |this, cx| {
                                 if let Some(message) = &this.git_message {
@@ -2642,12 +2901,14 @@ impl Shell {
                     }
                 }
                 if status.paths.is_empty() {
-                    body = body.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tr!("shell.git.working_tree_clean")),
-                    );
+                    body = body.child(crate::ui::empty_state(
+                        "git-clean",
+                        IconName::Check,
+                        tr!("shell.git.working_tree_clean"),
+                        tr!("shell.git.working_tree_clean_body"),
+                        None,
+                        cx,
+                    ));
                 } else {
                     if staged_count > 0 {
                         body = body.child(staged_section);
@@ -2669,13 +2930,17 @@ impl Shell {
                     );
                     for branch in status.branches {
                         let current = current_branch.as_deref() == Some(branch.as_str());
+                        let busy = self.git_busy;
                         let owner = cx.weak_entity();
                         branches = branches.child(
                             Button::new(format!("git-branch-{branch}"))
                                 .small()
                                 .ghost()
                                 .label(branch.clone())
+                                .w_full()
+                                .justify_start()
                                 .selected(current)
+                                .disabled(current || busy)
                                 .on_click(move |_, _, cx| {
                                     let _ = owner.update(cx, |this, cx| {
                                         this.run_git_action(
@@ -2696,30 +2961,78 @@ impl Shell {
             } else {
                 tr!("shell.git.diff_working", path = path.display())
             };
-            body = body
-                .child(div().text_xs().font_semibold().child(header))
-                .child(
-                    div()
-                        .max_h(px(240.))
-                        .overflow_y_scrollbar()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .rounded(cx.theme().radius)
-                        .p_2()
-                        .text_xs()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .child(if patch.is_empty() {
-                            tr!("shell.git.no_diff")
-                        } else {
-                            patch.clone()
-                        }),
-                );
+            body = body.child(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .child(header),
+                            )
+                            .child(
+                                Button::new("git-diff-close")
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(IconName::X)
+                                    .tooltip(tr!("shell.git.close_diff"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.git_diff = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .max_h(rems(16.))
+                            .overflow_y_scrollbar()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .rounded(cx.theme().radius)
+                            .p_2()
+                            .text_xs()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .child(if patch.is_empty() {
+                                tr!("shell.git.no_diff")
+                            } else {
+                                patch.clone()
+                            }),
+                    ),
+            );
         }
+        let mut git_actions = Vec::new();
+        if self.git_busy {
+            git_actions.push(Spinner::new().xsmall().into_any_element());
+        }
+        git_actions.push(
+            Button::new("git-refresh")
+                .small()
+                .ghost()
+                .icon(IconName::RefreshCw)
+                .tooltip(tr!("shell.git.refresh"))
+                .accessibility_label(tr!("shell.git.refresh_accessibility"))
+                .disabled(self.git_busy)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.project
+                        .update(cx, |project, cx| project.refresh_git(cx))
+                }))
+                .into_any_element(),
+        );
         let surface = div()
             .id("git-inspector-surface")
             .test_support()
             .absolute()
-            .top(rems(4.5))
+            .top(self.sheet_top(window))
             .right(right)
             .bottom(inset)
             .w(width)
@@ -2732,52 +3045,13 @@ impl Shell {
             .bg(cx.theme().popover)
             .opacity(presence.progress)
             .shadow_xl()
-            .child(
-                div()
-                    .v_flex()
-                    .flex_shrink_0()
-                    .gap_0p5()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .h_flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .v_flex()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_semibold()
-                                            .child(tr!("shell.git.title")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(project_name),
-                                    ),
-                            )
-                            .child(
-                                Button::new("git-refresh")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::RefreshCw)
-                                    .tooltip(tr!("shell.git.refresh"))
-                                    .accessibility_label(tr!("shell.git.refresh_accessibility"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.project
-                                            .update(cx, |project, cx| project.refresh_git(cx))
-                                    })),
-                            ),
-                    ),
-            )
-            .child(body);
+            .child(crate::ui::panel_header(
+                tr!("shell.git.title"),
+                Some(project_name),
+                git_actions,
+                cx,
+            ))
+            .child(scroll.child(body));
         let owner = cx.weak_entity();
         let sheet = Sheet::new(cx)
             .focus_handle(git_focus)
@@ -2786,7 +3060,23 @@ impl Shell {
             })
             .surface(surface);
         let sheet = if self.git_open {
-            sheet.overlay(div().absolute().inset_0().occlude())
+            let dismiss_owner = cx.weak_entity();
+            sheet
+                .overlay(
+                    div()
+                        .id("git-panel-dismiss")
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(self.dismiss_top(window))
+                        .bottom_0()
+                        .occlude()
+                        .on_any_mouse_down(move |_, window, cx| {
+                            let _ = dismiss_owner
+                                .update(cx, |this, cx| this.set_git_open(false, window, cx));
+                        }),
+                )
+                .overlay_interactive(false)
         } else {
             sheet
         };
@@ -2855,17 +3145,15 @@ impl Shell {
             return;
         }
         if open {
-            if window.has_active_sheet(cx) || window.has_active_dialog(cx) {
+            if window.has_active_dialog(cx) {
                 return;
             }
             self.library_return_focus = window.focused(cx).map(|focus| focus.downgrade());
+            self.inspector_return_focus = None;
+            self.git_return_focus = None;
+            self.set_inspector_open(false, window, cx);
+            self.set_git_open(false, window, cx);
             self.library_focus.focus(window, cx);
-        } else if let Some(focus) = self
-            .library_return_focus
-            .take()
-            .and_then(|focus| focus.upgrade())
-        {
-            focus.focus(window, cx);
         }
         self.library_open = open;
         self.document_header
@@ -2881,17 +3169,15 @@ impl Shell {
             return;
         }
         if open {
-            if window.has_active_sheet(cx) || window.has_active_dialog(cx) {
+            if window.has_active_dialog(cx) {
                 return;
             }
             self.inspector_return_focus = window.focused(cx).map(|focus| focus.downgrade());
+            self.library_return_focus = None;
+            self.git_return_focus = None;
+            self.set_library_open(false, window, cx);
+            self.set_git_open(false, window, cx);
             self.inspector_focus.focus(window, cx);
-        } else if let Some(focus) = self
-            .inspector_return_focus
-            .take()
-            .and_then(|focus| focus.upgrade())
-        {
-            focus.focus(window, cx);
         }
         self.inspector_open = open;
         self.menus_dirty = true;
@@ -2914,9 +3200,7 @@ impl Shell {
             return None;
         }
         let inset = window.rem_size();
-        let width = (window.viewport_size().width - inset * 2.)
-            .max(px(0.))
-            .min(px(416.));
+        let width = self.sheet_width(window);
         let right = inset - (width + inset) * (1. - presence.progress);
         let project = self.project.read(cx);
         let subtitle = project
@@ -2936,7 +3220,7 @@ impl Shell {
             .id("frontmatter-inspector-surface")
             .test_support()
             .absolute()
-            .top(rems(4.5))
+            .top(self.sheet_top(window))
             .right(right)
             .bottom(inset)
             .w(width)
@@ -2949,35 +3233,19 @@ impl Shell {
             .bg(cx.theme().popover)
             .opacity(presence.progress)
             .shadow_xl()
-            .child(
-                div()
-                    .v_flex()
-                    .flex_shrink_0()
-                    .gap_0p5()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .child(tr!("shell.inspector.title")),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(subtitle),
-                    ),
-            )
+            .child(crate::ui::panel_header(
+                tr!("shell.inspector.title"),
+                Some(subtitle.into()),
+                Vec::new(),
+                cx,
+            ))
             .child(
                 div()
                     .v_flex()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .child(self.frontmatter.clone()),
+                    .child(div().p_4().child(self.frontmatter.clone())),
             );
         let owner = cx.weak_entity();
         let sheet = Sheet::new(cx)
@@ -2987,7 +3255,23 @@ impl Shell {
             })
             .surface(surface);
         let sheet = if self.inspector_open {
-            sheet.overlay(div().absolute().inset_0().occlude())
+            let dismiss_owner = cx.weak_entity();
+            sheet
+                .overlay(
+                    div()
+                        .id("frontmatter-inspector-dismiss")
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(self.dismiss_top(window))
+                        .bottom_0()
+                        .occlude()
+                        .on_any_mouse_down(move |_, window, cx| {
+                            let _ = dismiss_owner
+                                .update(cx, |this, cx| this.set_inspector_open(false, window, cx));
+                        }),
+                )
+                .overlay_interactive(false)
         } else {
             sheet
         };
@@ -3011,19 +3295,14 @@ impl Shell {
             return None;
         }
         let inset = window.rem_size();
-        let width = px(self
-            .active_layout(self.mode)
-            .sidebar_width
-            .max(WRITING_LIBRARY_MIN_WIDTH))
-        .min((window.viewport_size().width - inset * 2.).max(px(0.)))
-        .min(px(400.));
+        let width = self.sheet_width(window);
         let left = inset - (width + inset) * (1. - presence.progress);
         let surface = div()
             .id("writing-library-surface")
             .test_support()
             .absolute()
             .left(left)
-            .top(rems(4.5))
+            .top(self.sheet_top(window))
             .bottom(inset)
             .w(width)
             .occlude()
@@ -3034,32 +3313,36 @@ impl Shell {
             .bg(cx.theme().popover)
             .opacity(presence.progress)
             .shadow_xl()
-            .track_focus(&self.library_focus)
-            .key_context("WritingLibrary")
-            .on_action(
-                cx.listener(|this, _: &gpui_kit::base::actions::Cancel, window, cx| {
-                    this.set_library_open(false, window, cx);
-                }),
-            )
             .child(self.navigator.clone());
-        let mut layer = div().absolute().inset_0();
-        if self.library_open {
-            let owner = cx.weak_entity();
-            layer = layer.child(
-                div()
-                    .id("writing-library-dismiss")
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .top(rems(4.5))
-                    .bottom(inset)
-                    .on_mouse_down(gpui_kit::MouseButton::Left, move |_, window, cx| {
-                        let _ =
-                            owner.update(cx, |this, cx| this.set_library_open(false, window, cx));
-                    }),
-            );
-        }
-        Some(layer.child(surface).into_any_element())
+        let owner = cx.weak_entity();
+        let sheet = Sheet::new(cx)
+            .focus_handle(self.library_focus.clone())
+            .request_close(move |window, cx| {
+                let _ = owner.update(cx, |this, cx| this.set_library_open(false, window, cx));
+            })
+            .surface(surface);
+        let sheet = if self.library_open {
+            let dismiss_owner = cx.weak_entity();
+            sheet
+                .overlay(
+                    div()
+                        .id("writing-library-dismiss")
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(self.dismiss_top(window))
+                        .bottom_0()
+                        .occlude()
+                        .on_any_mouse_down(move |_, window, cx| {
+                            let _ = dismiss_owner
+                                .update(cx, |this, cx| this.set_library_open(false, window, cx));
+                        }),
+                )
+                .overlay_interactive(false)
+        } else {
+            sheet
+        };
+        Some(deferred(sheet).into_any_element())
     }
 }
 
@@ -3306,6 +3589,7 @@ impl Shell {
                 self.toggle_bottom_dock(window, cx)
             }
             CommandId::TogglePreview => self.toggle_panel(PanelKind::Preview, window, cx),
+            CommandId::ToggleSourceControl => self.toggle_git(window, cx),
             CommandId::ToggleTerminal => self.toggle_terminal(window, cx),
             CommandId::StartPreview => self.preview.update(cx, |preview, cx| preview.start(cx)),
             CommandId::StopPreview => self.preview.update(cx, |preview, cx| preview.stop(cx)),
@@ -3517,7 +3801,7 @@ impl Shell {
     }
 
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) {
+        if !self.prepare_dialog(window, cx) {
             return;
         }
         let groups = self.palette_groups(window, cx);
@@ -3561,7 +3845,7 @@ impl Shell {
 
     /// Open the single preferences sheet with the current snapshots.
     fn open_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) {
+        if !self.prepare_dialog(window, cx) {
             return;
         }
         let collections = self
@@ -3619,6 +3903,7 @@ impl Shell {
                     let _ = close.update(cx, |sheet, cx| sheet.cancel(window, cx));
                 })
                 .child(view.clone())
+                .footer(view.update(cx, |sheet, cx| sheet.footer(cx)))
         });
     }
 
@@ -3722,7 +4007,7 @@ impl Shell {
     /// The Format menu is not gated before P12, so the command itself re-checks
     /// the document kind: an MDX tag must never be offered for Markdown.
     fn open_component_builder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) {
+        if !self.prepare_dialog(window, cx) {
             return;
         }
         if !self
@@ -3795,7 +4080,7 @@ impl Shell {
 
     /// Open the searchable index of every entry in the project.
     fn open_content_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) {
+        if !self.prepare_dialog(window, cx) {
             return;
         }
         let entries = Arc::new(self.project.read(cx).content_finder_entries());
@@ -3957,11 +4242,12 @@ impl Shell {
 
     /// List project `.astro` sources and open one as an editable retained document.
     fn open_project_source_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.has_active_dialog(cx) {
+        if !self.prepare_dialog(window, cx) {
             return;
         }
         let Some(root) = self.project.read(cx).project_root() else {
             self.file_status = tr!("shell.file.open_project_first");
+            cx.notify();
             return;
         };
         let scan = runtime::blocking(cx, move || scan_project_astro_sources(&root));
@@ -3983,48 +4269,59 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.prepare_dialog(window, cx) {
+            return;
+        }
         let owner = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let rows = if sources.is_empty() {
-                div()
-                    .p_4()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr!("shell.file.no_astro_sources"))
-                    .into_any_element()
+                crate::ui::empty_state(
+                    "project-source-empty",
+                    IconName::FileText,
+                    tr!("shell.file.open_source_title"),
+                    tr!("shell.file.no_astro_sources"),
+                    None,
+                    cx,
+                )
+                .into_any_element()
             } else {
                 div()
                     .id("project-source-list")
                     .test_support()
                     .v_flex()
-                    .max_h(px(380.))
-                    .overflow_y_scroll()
-                    .children(sources.iter().enumerate().map(|(index, (path, label))| {
+                    .gap_1()
+                    .max_h(rems(24.))
+                    .overflow_y_scrollbar()
+                    .children(sources.iter().map(|(path, label)| {
                         let owner = owner.clone();
                         let path = path.clone();
-                        Button::new(format!("project-source-{index}"))
-                            .small()
-                            .ghost()
-                            .label(label.clone())
-                            .w_full()
-                            .justify_start()
-                            .on_click(move |_, window, cx| {
-                                window.close_dialog(cx);
-                                let _ = owner.update(cx, |this, cx| {
-                                    if let Err(error) = this.project.update(cx, |project, cx| {
-                                        project.open_project_source(path.clone(), window, cx)
-                                    }) {
-                                        this.file_status = error;
-                                        cx.notify();
-                                    }
-                                });
-                            })
+                        Button::new(SharedString::from(format!(
+                            "project-source-{}",
+                            path.display()
+                        )))
+                        .small()
+                        .ghost()
+                        .label(label.clone())
+                        .tooltip(SharedString::from(path.display().to_string()))
+                        .w_full()
+                        .justify_start()
+                        .on_click(move |_, window, cx| {
+                            window.close_dialog(cx);
+                            let _ = owner.update(cx, |this, cx| {
+                                if let Err(error) = this.project.update(cx, |project, cx| {
+                                    project.open_project_source(path.clone(), window, cx)
+                                }) {
+                                    this.file_status = error;
+                                    cx.notify();
+                                }
+                            });
+                        })
                     }))
                     .into_any_element()
             };
             dialog
                 .title(tr!("shell.file.open_source_title"))
-                .w(px(560.))
+                .w(rems(35.).to_pixels(window.rem_size()))
                 .child(rows)
         });
     }
@@ -4133,6 +4430,7 @@ fn command_icon(command: CommandId) -> IconName {
         CommandId::ToggleSidebar => IconName::PanelLeft,
         CommandId::ToggleInspector => IconName::PanelRight,
         CommandId::TogglePreview => IconName::PanelBottom,
+        CommandId::ToggleSourceControl => IconName::GitBranch,
         CommandId::ToggleTerminal => IconName::Terminal,
         CommandId::StartPreview => IconName::Play,
         CommandId::StopPreview => IconName::Square,
@@ -4184,6 +4482,41 @@ fn command_icon(command: CommandId) -> IconName {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let motion = cx.theme().motion_tokens();
+        let transition = Transition::new(motion.duration_normal).easing(motion.easing_move.clone());
+        Self::restore_focus_after_sheet_exit(
+            &mut self.library_return_focus,
+            self.library_open,
+            "writing-library-motion",
+            transition.clone(),
+            window,
+            cx,
+        );
+        Self::restore_focus_after_sheet_exit(
+            &mut self.inspector_return_focus,
+            self.inspector_open,
+            "frontmatter-inspector-motion",
+            transition.clone(),
+            window,
+            cx,
+        );
+        Self::restore_focus_after_sheet_exit(
+            &mut self.git_return_focus,
+            self.git_open,
+            "git-inspector-motion",
+            transition,
+            window,
+            cx,
+        );
+        // The library is modal: while it is open, focus belongs inside it.
+        // Project activation focuses the editor, which would otherwise leave
+        // Escape without the sheet's key context.
+        if self.library_open
+            && !self.library_focus.is_focused(window)
+            && !self.navigator.read(cx).focus_handle(cx).is_focused(window)
+        {
+            self.library_focus.focus(window, cx);
+        }
         // Editor focus and selection change availability without an event;
         // compare the cheap pair and rebuild menus only when it moved.
         let editor_key = self.project.read(cx).active_session(cx).map(|session| {
@@ -4291,7 +4624,6 @@ impl Render for Shell {
                 style,
             ));
         }
-        let code_mode = self.mode == WorkspaceMode::Build;
         if style_changed && let Some((_, style)) = self.prose_style.as_ref() {
             let style = style.clone();
             self.document.update(cx, |panel, cx| {
@@ -4300,8 +4632,6 @@ impl Render for Shell {
             self.rendered
                 .update(cx, |rendered, cx| rendered.set_prose_style(style, cx));
         }
-        self.document
-            .update(cx, |panel, cx| panel.set_code(code_mode, cx));
         if self.mode == WorkspaceMode::Preview {
             // Only the identity of the active document is compared per frame;
             // the visible body is copied only when that identity changed.
@@ -4349,28 +4679,43 @@ impl Render for Shell {
         // stays implicit so a healthy window keeps its original layout.
         let file_status = self.file_status.clone();
         let show_file_status = !file_status.is_empty();
-        let motion = cx.theme().motion_tokens();
+        let status_motion = cx.theme().motion_tokens();
+        let status_transition =
+            Transition::new(status_motion.duration_fast).easing(status_motion.easing_enter.clone());
+        let chrome_duration = status_motion.duration_fast;
         let status_presence = Presence::new("file-status-presence", show_file_status)
-            .transition(Transition::new(motion.duration_fast).easing(motion.easing_enter.clone()))
+            .transition(status_transition)
             .sample(window, cx);
         let file_status = (show_file_status || status_presence.progress > 0.).then(|| {
+            let mut bar = StatusBar::new().left(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(file_status.clone()),
+            );
+            if show_file_status {
+                bar = bar.right(
+                    Button::new("file-status-dismiss")
+                        .xsmall()
+                        .ghost()
+                        .icon(IconName::X)
+                        .tooltip(tr!("shell.file.dismiss_status"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.file_status.clear();
+                            cx.notify();
+                        })),
+                );
+            }
             div()
                 .id("file-status")
                 .test_support()
                 .flex_shrink_0()
-                .h(px(20. * status_presence.progress))
+                .h(rems(1.25 * status_presence.progress))
                 .w_full()
-                .h_flex()
-                .items_center()
                 .overflow_hidden()
-                .px_3()
-                .border_t_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().tab_bar)
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
                 .opacity(status_presence.progress)
-                .child(file_status)
+                .child(bar)
                 .into_any_element()
         });
 
@@ -4442,6 +4787,7 @@ impl Render for Shell {
                                     .items_center()
                                     .gap_2()
                                     .pr_2()
+                                    .min_w_0()
                                     .child(
                                         div()
                                             .h_flex()
@@ -4453,7 +4799,7 @@ impl Render for Shell {
                                             .when_some(project_name.clone(), |row, name| {
                                                 row.child(
                                                     div()
-                                                        .max_w(px(220.))
+                                                        .max_w(rems(14.))
                                                         .truncate()
                                                         .text_xs()
                                                         .text_color(cx.theme().muted_foreground)
@@ -4463,11 +4809,52 @@ impl Render for Shell {
                                             .when_some(self.warning.clone(), |row, warning| {
                                                 row.child(crate::ui::v_divider(cx)).child(
                                                     div()
-                                                        .max_w(px(320.))
-                                                        .truncate()
-                                                        .text_xs()
-                                                        .text_color(cx.theme().warning)
-                                                        .child(warning),
+                                                        .id("titlebar-warning")
+                                                        .h_flex()
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .max_w(rems(20.))
+                                                        .min_w_0()
+                                                        .rounded(cx.theme().radius)
+                                                        .bg(cx.theme().warning.opacity(0.12))
+                                                        .px_2()
+                                                        .py_0p5()
+                                                        .child(
+                                                            Icon::new(IconName::TriangleAlert)
+                                                                .xsmall()
+                                                                .text_color(cx.theme().warning),
+                                                        )
+                                                        .child({
+                                                            let warning_tooltip = warning.clone();
+                                                            div()
+                                                                .id("titlebar-warning-message")
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .text_xs()
+                                                                .text_color(cx.theme().warning)
+                                                                .tooltip(move |window, cx| {
+                                                                    Tooltip::new(
+                                                                        warning_tooltip.clone(),
+                                                                    )
+                                                                    .build(window, cx)
+                                                                })
+                                                                .child(warning)
+                                                        })
+                                                        .child(
+                                                            Button::new("titlebar-warning-dismiss")
+                                                                .xsmall()
+                                                                .ghost()
+                                                                .icon(IconName::X)
+                                                                .tooltip(tr!(
+                                                                    "shell.warning.dismiss"
+                                                                ))
+                                                                .on_click(cx.listener(
+                                                                    |this, _, _, cx| {
+                                                                        this.warning = None;
+                                                                        cx.notify();
+                                                                    },
+                                                                )),
+                                                        ),
                                                 )
                                             }),
                                     )
@@ -4478,46 +4865,45 @@ impl Render for Shell {
                                             .items_center()
                                             .gap_2()
                                             .flex_1()
+                                            .min_w_0()
                                             .justify_end()
                                             .child(
-                                                Button::new("command-palette")
-                                                    .small()
-                                                    .ghost()
-                                                    .icon(IconName::Search)
-                                                    .tooltip(CommandId::OpenPalette.label())
-                                                    .accessibility_label(
-                                                        CommandId::OpenPalette.label(),
+                                                crate::ui::icon_button_with_shortcut(
+                                                    "command-palette",
+                                                    IconName::Search,
+                                                    CommandId::OpenPalette.label(),
+                                                    help::formatted_shortcut(
+                                                        CommandId::OpenPalette,
                                                     )
-                                                    .track_focus(&self.palette_focus)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.palette_focus.focus(window, cx);
-                                                            this.execute(
-                                                                CommandId::OpenPalette,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
+                                                    .as_deref(),
+                                                )
+                                                .track_focus(&self.palette_focus)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.palette_focus.focus(window, cx);
+                                                    this.execute(
+                                                        CommandId::OpenPalette,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                })),
                                             )
                                             .child(
-                                                Button::new("open-preferences")
-                                                    .small()
-                                                    .ghost()
-                                                    .icon(IconName::Settings)
-                                                    .tooltip(CommandId::OpenPreferences.label())
-                                                    .accessibility_label(
-                                                        CommandId::OpenPreferences.label(),
+                                                crate::ui::icon_button_with_shortcut(
+                                                    "open-preferences",
+                                                    IconName::Settings,
+                                                    CommandId::OpenPreferences.label(),
+                                                    help::formatted_shortcut(
+                                                        CommandId::OpenPreferences,
                                                     )
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.execute(
-                                                                CommandId::OpenPreferences,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
+                                                    .as_deref(),
+                                                )
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.execute(
+                                                        CommandId::OpenPreferences,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                })),
                                             ),
                                     ),
                             ),
@@ -4526,14 +4912,15 @@ impl Render for Shell {
                     // frames) when the platform asks for reduced motion.
                     .with_animation(
                         "writer-chrome-reveal",
-                        Animation::new(std::time::Duration::from_millis(140)),
+                        Animation::new(chrome_duration),
                         |element, delta| element.opacity(delta),
                     )
                     .into_any_element()
             })
-            .when(self.mode == WorkspaceMode::Build, |shell| {
-                shell.child(self.build_tab_strip(cx))
-            })
+            .when(
+                self.mode == WorkspaceMode::Build && !chrome_hidden,
+                |shell| shell.child(self.build_tab_strip(window, cx)),
+            )
             .child(div().flex_1().min_h_0().min_w_0().child(self.dock.clone()))
             .children(self.render_library(window, cx))
             .children(self.render_inspector(window, cx))
@@ -4547,16 +4934,10 @@ fn document_empty_key(mode: WorkspaceMode, has_project: bool) -> &'static str {
     match (mode, has_project) {
         (WorkspaceMode::Build, true) => "shell.empty.document_build_file",
         (WorkspaceMode::Build, false) => "shell.empty.document_build_no_project",
-        (WorkspaceMode::Writing | WorkspaceMode::Preview, _) => "shell.empty.document_project",
-    }
-}
-
-/// Stable element id of one workspace mode button.
-fn mode_id(mode: WorkspaceMode) -> &'static str {
-    match mode {
-        WorkspaceMode::Writing => "workspace-mode-writing",
-        WorkspaceMode::Build => "workspace-mode-build",
-        WorkspaceMode::Preview => "workspace-mode-preview",
+        (WorkspaceMode::Writing | WorkspaceMode::Preview, true) => {
+            "shell.empty.document_project_ready"
+        }
+        (WorkspaceMode::Writing | WorkspaceMode::Preview, false) => "shell.empty.document_project",
     }
 }
 
@@ -5002,6 +5383,14 @@ mod tests {
         (project, path)
     }
 
+    /// Close Writing's modal library before a test drives the document.
+    fn dismiss_library(cx: &mut TestAppContext, handle: WindowHandle<Root>, view: &Entity<Shell>) {
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| shell.set_library_open(false, window, cx));
+        })
+        .unwrap();
+    }
+
     #[gpui_kit::test]
     async fn writing_surface_click_moves_the_caret_and_keeps_typing_working(
         cx: &mut TestAppContext,
@@ -5021,6 +5410,7 @@ mod tests {
             .unwrap()
             .read_with(cx, |session, _| session.editor.clone());
         let original = editor.read_with(cx, |editor, _| editor.value().to_string());
+        dismiss_library(cx, handle, &view);
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             editor.update(cx, |editor, cx| editor.set_selected_range(0..0, cx));
@@ -5168,6 +5558,9 @@ mod tests {
 
         cx.update_window(handle.into(), |_, window, cx| {
             cx.set_reduce_motion(true);
+            window.render_frame(cx);
+            // The library sheet is modal: dismiss it before reaching the editor.
+            window.press("escape", cx);
             window.render_frame(cx);
             window.click(("input", editor.entity_id()), cx);
             window.press("ctrl-2", cx);
@@ -5750,9 +6143,13 @@ mod tests {
         wait_for_active_session(cx, &project_entity).await;
 
         cx.update_window(handle.into(), |_, window, cx| {
+            let tab_id = project_entity.read_with(cx, |project, _| {
+                let tabs = project.open_tabs();
+                Shell::build_tab_close_id(&tabs.first().expect("open tab").path)
+            });
             window.render_frame(cx);
             assert!(window.find("build-tabs").visible());
-            assert!(window.find("build-tab-0").visible());
+            assert!(window.find(SharedString::from(tab_id)).visible());
         })
         .unwrap();
 
@@ -5807,8 +6204,12 @@ mod tests {
             view.update(cx, |view, cx| {
                 view.set_mode(WorkspaceMode::Build, window, cx)
             });
+            let tab_id = project_entity.read_with(cx, |project, _| {
+                let tabs = project.open_tabs();
+                Shell::build_tab_close_id(&tabs.first().expect("open tab").path)
+            });
             window.render_frame(cx);
-            assert!(window.find("build-tab-0").visible());
+            assert!(window.find(SharedString::from(tab_id)).visible());
             view.update(cx, |view, cx| {
                 let session = view
                     .project
@@ -6796,7 +7197,7 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(
                 window.find("writing-library-surface").bounds().size.width,
-                px(WRITING_LIBRARY_MIN_WIDTH)
+                rems(26.).to_pixels(window.rem_size())
             );
             assert!(
                 window
@@ -7234,6 +7635,7 @@ mod tests {
         .await;
 
         cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |shell, cx| shell.set_library_open(false, window, cx));
             window.render_frame(cx);
             let start = window.find("resize-handle-bottom").bounds().center();
             window.drag(start, point(start.x, start.y - px(48.)), cx);
@@ -7523,6 +7925,13 @@ mod tests {
             project_handle.update(cx, |project, cx| {
                 project.select_first_collection_for_tests(window, cx)
             });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        // The library sheet slides in; let its entrance finish before querying.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             assert_ne!(window.find("entry-new").disabled(), Some(true));
             window.click("command-palette", cx);
@@ -7830,6 +8239,7 @@ mod tests {
         open_source(cx, handle, &project, "src/content/first.md").await;
         let session = project.read_with(cx, |project, cx| project.active_session(cx).unwrap());
         let editor = session.read_with(cx, |session, _| session.editor.clone());
+        dismiss_library(cx, handle, &view);
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click(("input", editor.entity_id()), cx);
@@ -7860,6 +8270,7 @@ mod tests {
         open_source(cx, handle, &project, "src/content/doc.mdx").await;
         let session = project.read_with(cx, |project, cx| project.active_session(cx).unwrap());
         let editor = session.read_with(cx, |session, _| session.editor.clone());
+        dismiss_library(cx, handle, &view);
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click(("input", editor.entity_id()), cx);
@@ -7899,6 +8310,7 @@ mod tests {
         open_source(cx, handle, &project, "src/content/doc.mdx").await;
         let session = project.read_with(cx, |project, cx| project.active_session(cx).unwrap());
         let editor = session.read_with(cx, |session, _| session.editor.clone());
+        dismiss_library(cx, handle, &view);
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click(("input", editor.entity_id()), cx);
@@ -8049,6 +8461,7 @@ mod tests {
         open_source(cx, handle, &project, "src/content/doc.mdx").await;
         let session = project.read_with(cx, |project, cx| project.active_session(cx).unwrap());
         let editor = session.read_with(cx, |session, _| session.editor.clone());
+        dismiss_library(cx, handle, &view);
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             window.click(("input", editor.entity_id()), cx);
@@ -9044,7 +9457,7 @@ mod tests {
             .find(|(title, _)| *title == "Collections")
             .expect("collection rows are generated from the live index");
         assert!(collections.1.iter().any(|entry| {
-            entry.label == "Open Collection: blog"
+            entry.label == "Open collection: blog"
                 && matches!(&entry.action, PaletteAction::Collection(id) if id == "blog")
         }));
         assert!(groups.iter().any(|(title, entries)| {

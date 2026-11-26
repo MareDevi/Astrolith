@@ -1018,48 +1018,44 @@ async fn form_renders_the_typed_control_for_every_family(cx: &mut gpui_kit::Test
             ],
             "every schema family must keep its own control"
         );
-        let index = |path: &str| {
-            paths
-                .iter()
-                .position(|candidate| candidate == path)
-                .unwrap()
-        };
 
         for image in ["cover", "seo.socialImage"] {
             assert!(
                 window
-                    .try_find(("frontmatter-image-pick", index(image)))
+                    .try_find(ElementId::Name(
+                        format!("frontmatter-image-pick-{image}").into()
+                    ))
                     .is_some(),
                 "the image control for {image} must render its picker"
             );
         }
         assert!(
             window
-                .try_find(("frontmatter-reference", index("author")))
+                .try_find(ElementId::Name("frontmatter-reference-author".into()))
                 .is_some(),
             "a single reference must render its labelled dropdown"
         );
         assert!(
             window
-                .try_find(("frontmatter-reference-add", index("related")))
+                .try_find(ElementId::Name("frontmatter-reference-add-related".into()))
                 .is_some(),
             "an array reference must render its add menu"
         );
         assert!(
             window
-                .try_find(("frontmatter-bool", index("draft")))
+                .try_find(ElementId::Name("frontmatter-boolean-draft".into()))
                 .is_some(),
             "a boolean must render its toggle"
         );
         assert!(
             window
-                .try_find(("frontmatter-enum", index("status")))
+                .try_find(ElementId::Name("frontmatter-enum-status".into()))
                 .is_some(),
             "an enum must render its dropdown"
         );
         assert!(
             window
-                .try_find(("frontmatter-chip-remove", index("tags") * 64))
+                .try_find(ElementId::Name("frontmatter-chip-tags-a-0".into()))
                 .is_some(),
             "a tags control must render one removable chip per item"
         );
@@ -1184,4 +1180,101 @@ fn image_value_uses_the_manual_path_verbatim_and_clears(cx: &mut gpui_kit::TestA
     assert!(!form.read_with(cx, |form, _| {
         form.editor().unwrap().document.has_field("cover")
     }));
+}
+
+#[gpui_kit::test]
+fn an_unparsable_value_reports_inline_and_clears_on_a_valid_edit(
+    cx: &mut gpui_kit::TestAppContext,
+) {
+    use gpui_kit::{WindowOptions, base::Root, test::TestWindowExt};
+
+    struct Host {
+        form: Entity<FrontmatterForm>,
+    }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.form.clone()
+        }
+    }
+
+    let (handle, form) = cx.update(|cx| {
+        gpui_kit::init(cx);
+        let mut created = None;
+        let (handle, _host) = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            let form = cx.new(FrontmatterForm::new);
+            let schema = schema(vec![
+                field("score", false, FieldKind::Number),
+                field("count", false, FieldKind::Integer),
+            ]);
+            form.update(cx, |form, cx| {
+                form.set_document(
+                    FrontmatterDocument {
+                        schema: Some(schema),
+                        mappings: FieldMappings::default(),
+                        references: Arc::new(ReferenceCatalog::new()),
+                        root: None,
+                        source: None,
+                        assets: None,
+                        path_mode: astrolith_core::preferences::ImagePathMode::Relative,
+                        text: "---\nscore: 1.5\ncount: 2\n---\n".to_owned(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+            created = Some(form.clone());
+            cx.new(|_| Host { form })
+        })
+        .unwrap();
+        (handle.downcast::<Root>().unwrap(), created.unwrap())
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+    })
+    .unwrap();
+
+    // A value the schema cannot parse is reported against its own field and
+    // leaves the document untouched.
+    form.update(cx, |form, cx| form.apply_value("score", "not a number", cx));
+    let reported = form.read_with(cx, |form, _| form.validation.clone());
+    assert_eq!(reported.len(), 1);
+    assert_eq!(&*reported[0].0, "score");
+    assert!(
+        reported[0].1.contains("not a number"),
+        "unexpected message: {}",
+        reported[0].1
+    );
+    assert!(
+        form.read_with(cx, |form, _| form.editor().unwrap().text().to_owned())
+            .contains("score: 1.5")
+    );
+
+    // A valid edit clears the message and writes the value.
+    form.update(cx, |form, cx| form.apply_value("score", "2.5", cx));
+    let text = form.read_with(cx, |form, _| {
+        assert!(form.validation.is_empty());
+        form.editor().unwrap().text().to_owned()
+    });
+    assert!(text.contains("score: 2.5"));
+
+    // Integers keep their own wording.
+    form.update(cx, |form, cx| form.apply_value("count", "2.5", cx));
+    let reported = form.read_with(cx, |form, _| form.validation.clone());
+    assert_eq!(&*reported[0].0, "count");
+    assert!(reported[0].1.contains("2.5"));
+}
+
+#[gpui_kit::test]
+fn warnings_and_errors_keep_their_own_tone(cx: &mut gpui_kit::TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        assert_eq!(
+            diagnostic_tone(ValidationSeverity::Warning, cx),
+            cx.theme().warning
+        );
+        assert_eq!(
+            diagnostic_tone(ValidationSeverity::Error, cx),
+            cx.theme().danger
+        );
+    });
 }

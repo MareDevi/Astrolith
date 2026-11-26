@@ -3,7 +3,7 @@ frontmatter:
   form:
     load_error_title:
       en: Frontmatter cannot be edited safely
-      zh-CN: 无法安全地编辑 Frontmatter
+      zh-CN: 无法安全地编辑前置元数据
       ja: フロントマターを安全に編集できません
     load_error_hint:
       en: Edit the raw source instead; the document is never rewritten.
@@ -11,12 +11,12 @@ frontmatter:
       ja: 代わりに生のソースを編集してください。ドキュメントは書き換えられません。
     empty_title:
       en: No frontmatter form
-      zh-CN: 没有可用的 Frontmatter 表单
+      zh-CN: 没有可用的前置元数据表单
       ja: フロントマターのフォームがありません
     empty_hint:
       en: Choose an entry to see its details.
       zh-CN: 选择一个条目以查看其详细信息。
-      ja: エントリーを選択すると詳細が表示されます。
+      ja: エントリを選択すると詳細が表示されます。
   type:
     text:
       en: Text
@@ -71,7 +71,7 @@ frontmatter:
       zh-CN: 固定值
       ja: 固定値
     read_only:
-      en: Read only
+      en: Readonly
       zh-CN: 只读
       ja: 読み取り専用
   field:
@@ -80,16 +80,24 @@ frontmatter:
       zh-CN: 移除此可选字段
       ja: この任意フィールドを削除
     read_only:
-      en: Read-only · %{reason}
+      en: Readonly · %{reason}
       zh-CN: 只读 · %{reason}
       ja: 読み取り専用 · %{reason}
     read_only_reason_fallback:
-      en: read-only field
+      en: readonly field
       zh-CN: 只读字段
       ja: 読み取り専用フィールド
+    boolean_on:
+      en: On
+      zh-CN: 开启
+      ja: オン
+    boolean_off:
+      en: Off
+      zh-CN: 关闭
+      ja: オフ
     aria:
       en: frontmatter field %{path}
-      zh-CN: Frontmatter 字段 %{path}
+      zh-CN: 前置元数据字段 %{path}
       ja: フロントマターフィールド %{path}
     add_tag_aria:
       en: add tag to %{path}
@@ -157,7 +165,7 @@ frontmatter:
     no_entries:
       en: No entries
       zh-CN: 没有条目
-      ja: エントリーがありません
+      ja: エントリがありません
     add_reference:
       en: Add reference
       zh-CN: 添加引用
@@ -198,45 +206,45 @@ frontmatter:
       ja: スラッグをクリップボードにコピーしました
   error:
     unknown_field:
-      en: unknown frontmatter field `%{path}`
-      zh-CN: 未知的 Frontmatter 字段 `%{path}`
-      ja: 不明なフロントマターフィールド `%{path}`
+      en: Unknown frontmatter field `%{path}`.
+      zh-CN: 未知的前置元数据字段 `%{path}`。
+      ja: 不明なフロントマターフィールド `%{path}` です。
     read_only:
-      en: this field is read-only
-      zh-CN: 此字段为只读
-      ja: このフィールドは読み取り専用です
+      en: This field is readonly.
+      zh-CN: 此字段为只读。
+      ja: このフィールドは読み取り専用です。
     list_item_by_item:
-      en: list fields are edited item by item
-      zh-CN: 列表字段需逐项编辑
-      ja: リストフィールドは項目ごとに編集します
+      en: List fields are edited item by item.
+      zh-CN: 列表字段需逐项编辑。
+      ja: リストフィールドは項目ごとに編集します。
     not_list_items:
-      en: this field does not accept list items
-      zh-CN: 此字段不接受列表项目
-      ja: このフィールドはリスト項目を受け付けません
+      en: This field does not accept list items.
+      zh-CN: 此字段不接受列表项目。
+      ja: このフィールドはリスト項目を受け付けません。
     required_not_removable:
-      en: a required field cannot be removed
-      zh-CN: 必填字段无法移除
-      ja: 必須フィールドは削除できません
+      en: A required field cannot be removed.
+      zh-CN: 必填字段无法移除。
+      ja: 必須フィールドは削除できません。
     invalid_number:
-      en: '`%{value}` is not a valid number'
-      zh-CN: '`%{value}` 不是有效的数字'
-      ja: '`%{value}` は有効な数値ではありません'
+      en: '`%{value}` is not a valid number.'
+      zh-CN: '`%{value}` 不是有效的数字。'
+      ja: '`%{value}` は有効な数値ではありません。'
     invalid_integer:
-      en: '`%{value}` is not a valid integer'
-      zh-CN: '`%{value}` 不是有效的整数'
-      ja: '`%{value}` は有効な整数ではありません'
+      en: '`%{value}` is not a valid integer.'
+      zh-CN: '`%{value}` 不是有效的整数。'
+      ja: '`%{value}` は有効な整数ではありません。'
     invalid_boolean:
-      en: '`%{value}` is not a valid boolean'
-      zh-CN: '`%{value}` 不是有效的布尔值'
-      ja: '`%{value}` は有効な真偽値ではありません'
+      en: '`%{value}` is not a valid boolean.'
+      zh-CN: '`%{value}` 不是有效的布尔值。'
+      ja: '`%{value}` は有効な真偽値ではありません。'
     not_scalar:
-      en: '`%{value}` cannot be represented as a scalar'
-      zh-CN: '`%{value}` 无法表示为标量'
-      ja: '`%{value}` をスカラーとして表現できません'
+      en: '`%{value}` cannot be represented as a scalar.'
+      zh-CN: '`%{value}` 无法表示为标量。'
+      ja: '`%{value}` をスカラーとして表現できません。'
     not_allowed:
-      en: '`%{value}` is not one of the allowed values'
-      zh-CN: '`%{value}` 不在允许的取值范围内'
-      ja: '`%{value}` は許可された値ではありません'
+      en: '`%{value}` is not one of the allowed values.'
+      zh-CN: '`%{value}` 不在允许的取值范围内。'
+      ja: '`%{value}` は許可された値ではありません。'
     root_unavailable:
       en: The project root is unavailable.
       zh-CN: 项目根目录不可用。

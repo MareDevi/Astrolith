@@ -40,10 +40,14 @@ pub struct ThemeTokens {
     pub active: Hsla,
     /// Bottom status bar surface.
     pub status_bar: Hsla,
-    /// Dock tab strip surface.
+    /// Dock tab strip surface; shares the chrome plane with [`Self::surface`].
     pub tab_bar: Hsla,
+    /// Recessed track behind a segmented control.
+    pub tab_bar_segmented: Hsla,
     /// Active tab surface; equals the editor surface.
     pub tab_active: Hsla,
+    /// Fill of the selected segment; equals the editor surface.
+    pub segmented_active: Hsla,
     pub tab_active_foreground: Hsla,
     pub tab_foreground: Hsla,
     /// Dialog, menu and popover surface.
@@ -56,11 +60,28 @@ pub struct ThemeTokens {
     pub scrollbar_thumb: Hsla,
     /// Modal backdrop over the window canvas.
     pub overlay: Hsla,
-    // Status roles: only for real state, never for navigation.
+    // Status roles: only for real state, never for navigation. Each fill has a
+    // readable foreground and real hover/pressed feedback.
     pub danger: Hsla,
+    pub danger_hover: Hsla,
+    pub danger_active: Hsla,
+    /// Text and icon colour on top of [`Self::danger`].
+    pub danger_foreground: Hsla,
     pub warning: Hsla,
+    pub warning_hover: Hsla,
+    pub warning_active: Hsla,
+    /// Text and icon colour on top of [`Self::warning`].
+    pub warning_foreground: Hsla,
     pub success: Hsla,
+    pub success_hover: Hsla,
+    pub success_active: Hsla,
+    /// Text and icon colour on top of [`Self::success`].
+    pub success_foreground: Hsla,
     pub info: Hsla,
+    pub info_hover: Hsla,
+    pub info_active: Hsla,
+    /// Text and icon colour on top of [`Self::info`].
+    pub info_foreground: Hsla,
     /// Inline links; follows the neutral primary action.
     pub link: Hsla,
 }

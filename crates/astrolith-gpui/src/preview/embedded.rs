@@ -8,6 +8,7 @@
 
 use url::Url;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, StyledExt,
     button::{Button, ButtonVariants},
@@ -16,6 +17,8 @@ use gpui_kit::{
     App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Window, div,
     prelude::*,
 };
+
+use crate::ui;
 
 /// Emitted when the embedded surface asks the shell for another action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,7 +69,7 @@ impl EmbeddedPreview {
             #[cfg(feature = "embedded-webview")]
             webview: None,
             active: true,
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
         }
     }
 
@@ -211,57 +214,40 @@ impl Render for EmbeddedPreview {
         };
         div()
             .id("embedded-preview")
+            .track_focus(&self.focus)
             .v_flex()
             .size_full()
             .min_w_0()
             .min_h_0()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border.opacity(0.55))
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(tr!("preview.embedded.title")),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(
-                                url.clone()
-                                    .unwrap_or_else(|| tr!("preview.embedded.no_page")),
-                            ),
-                    )
-                    .child(
-                        Button::new("embedded-preview-reload")
-                            .xsmall()
-                            .ghost()
-                            .label(tr!("preview.actions.reload"))
-                            .disabled(!has_webview)
-                            .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
-                    )
-                    .child(
-                        Button::new("embedded-preview-open-external")
-                            .xsmall()
-                            .outline()
-                            .label(tr!("preview.actions.open"))
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(EmbeddedPreviewEvent::OpenExternal)
-                            })),
-                    ),
-            )
+            .child(ui::panel_header(
+                tr!("preview.embedded.title"),
+                Some(
+                    url.clone()
+                        .unwrap_or_else(|| tr!("preview.embedded.no_page"))
+                        .into(),
+                ),
+                [
+                    Button::new("embedded-preview-reload")
+                        .small()
+                        .ghost()
+                        .label(tr!("preview.actions.reload"))
+                        .disabled(!has_webview)
+                        .on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
+                        .into_any_element(),
+                    Button::new("embedded-preview-open-external")
+                        .small()
+                        .outline()
+                        .label(tr!("preview.actions.open"))
+                        .disabled(url.is_none())
+                        .on_click(
+                            cx.listener(|_, _, _, cx| cx.emit(EmbeddedPreviewEvent::OpenExternal)),
+                        )
+                        .into_any_element(),
+                ],
+                cx,
+            ))
             .child({
                 #[cfg(feature = "embedded-webview")]
                 if let Some(webview) = self.webview.clone() {
@@ -289,28 +275,27 @@ impl EmbeddedPreview {
         failure: Option<EmbeddedFailure>,
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let message = if let Some(failure) = failure {
-            failure.text()
-        } else if loading {
-            tr!("preview.embedded.start_prompt")
-        } else {
-            tr!("preview.embedded.not_ready")
+        let (id, icon, title, body) = match failure {
+            Some(failure) => (
+                "embedded-preview-failure",
+                IconName::TriangleAlert,
+                tr!("preview.embedded.unavailable"),
+                failure.text(),
+            ),
+            None if loading => (
+                "embedded-preview-start",
+                IconName::Monitor,
+                tr!("preview.embedded.title"),
+                tr!("preview.embedded.start_prompt"),
+            ),
+            None => (
+                "embedded-preview-not-ready",
+                IconName::Monitor,
+                tr!("preview.embedded.title"),
+                tr!("preview.embedded.not_ready"),
+            ),
         };
-        div()
-            .flex_1()
-            .min_h_0()
-            .v_flex()
-            .items_center()
-            .justify_center()
-            .p_6()
-            .child(
-                div()
-                    .max_w(gpui_kit::px(360.))
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(message),
-            )
-            .into_any_element()
+        ui::empty_state(id, icon, title, body, None, cx).into_any_element()
     }
 }
 
