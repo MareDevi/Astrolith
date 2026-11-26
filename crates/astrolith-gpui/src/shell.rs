@@ -2285,7 +2285,7 @@ impl Shell {
             .child(
                 TabBar::new("workspace-mode-switch")
                     .segmented()
-                    .small()
+                    .large()
                     .selected_index(selected)
                     .on_click(cx.listener(|this, index: &usize, window, cx| {
                         if let Some(mode) = WorkspaceMode::ALL.get(*index) {
