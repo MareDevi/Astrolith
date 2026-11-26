@@ -317,3 +317,85 @@ fn preferred_browser_argv_rejects_shell_ambiguous_placeholders() {
             .contains("control characters")
     );
 }
+
+#[test]
+fn unavailable_embedded_preview_cannot_be_selected() {
+    let external = super::preview::presentation_options(PreviewPresentation::External, false);
+    assert!(!external[0].disabled && external[0].selected);
+    assert!(external[1].disabled && !external[1].selected);
+    assert_eq!(
+        external[1].label,
+        tr!("preferences.option.embedded_unavailable")
+    );
+
+    let embedded = super::preview::presentation_options(PreviewPresentation::Embedded, true);
+    assert!(!embedded[1].disabled && embedded[1].selected);
+}
+
+#[gpui_kit::test]
+fn saving_credentials_keeps_the_sheet_and_disables_apply(cx: &mut gpui_kit::TestAppContext) {
+    use gpui_kit::test::TestWindowExt;
+    let (handle, sheet) = cx.update(|cx| {
+        gpui_kit::init(cx);
+        gpui_kit::open_window(
+            gpui_kit::WindowOptions {
+                window_bounds: Some(gpui_kit::WindowBounds::Windowed(gpui_kit::Bounds::new(
+                    gpui_kit::Point::default(),
+                    gpui_kit::size(gpui_kit::px(1000.), gpui_kit::px(700.)),
+                ))),
+                ..Default::default()
+            },
+            cx,
+            |window, cx| cx.new(|cx| PreferencesSheet::new(window, cx)),
+        )
+        .expect("the test window opens")
+    });
+    let view = sheet.clone();
+    sheet.update(cx, |sheet, cx| {
+        sheet.credential_apply = Some(cx.spawn(async |_, _| std::future::pending::<()>().await));
+        cx.notify();
+    });
+    cx.update_window(handle, |_, window, cx| {
+        let viewport = window.viewport_size();
+        let available_width = f32::from(viewport.width) - 48.;
+        let available_height = f32::from(viewport.height) - 64.;
+        let dialog_height =
+            gpui_kit::px(available_height.min(available_width * 10. / 16.).min(900.));
+        let dialog_width = gpui_kit::px(f32::from(dialog_height) * 16. / 10.);
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let footer = view.clone();
+            dialog
+                .title(tr!("shell.preferences.title"))
+                .centered()
+                .w(dialog_width)
+                .h(dialog_height)
+                .max_h(dialog_height)
+                .child(view.clone())
+                .footer(footer.update(cx, |sheet, cx| sheet.footer(cx)))
+        });
+    })
+    .unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let sheet = window.within("surface");
+        assert!(
+            sheet.find("preferences-theme").visible(),
+            "the sheet keeps its pane content while credentials save"
+        );
+        assert!(
+            sheet.find(Pane::Appearance.element_id()).visible(),
+            "the sidebar stays in place while credentials save"
+        );
+        assert_eq!(
+            sheet.find("preferences-apply").disabled(),
+            Some(true),
+            "Apply is disabled while credentials save"
+        );
+        assert_eq!(
+            sheet.find("preferences-cancel").disabled(),
+            Some(true),
+            "Cancel is disabled while credentials save"
+        );
+    })
+    .unwrap();
+}

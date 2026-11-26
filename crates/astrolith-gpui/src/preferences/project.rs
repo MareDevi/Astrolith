@@ -4,100 +4,92 @@ use super::*;
 
 impl PreferencesSheet {
     pub(super) fn project_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let weak = cx.weak_entity();
         let image_label = match self.project_image_mode {
             None => tr!("preferences.option.inherit_relative"),
             Some(ImagePathMode::Relative) => tr!("preferences.option.relative"),
             Some(ImagePathMode::Absolute) => tr!("preferences.option.absolute"),
         };
+        let image_options = vec![
+            ui::PickerOption::new(tr!("preferences.option.inherit_relative"))
+                .selected(self.project_image_mode.is_none()),
+            ui::PickerOption::new(tr!("preferences.option.relative"))
+                .selected(self.project_image_mode == Some(ImagePathMode::Relative)),
+            ui::PickerOption::new(tr!("preferences.option.absolute"))
+                .selected(self.project_image_mode == Some(ImagePathMode::Absolute)),
+        ];
+        let image_mode = self.picker(
+            "preferences-project-image-mode",
+            image_label,
+            image_options,
+            None,
+            cx,
+            |sheet, index, _, cx| {
+                sheet.project_image_mode = match index {
+                    1 => Some(ImagePathMode::Relative),
+                    2 => Some(ImagePathMode::Absolute),
+                    _ => None,
+                };
+                cx.notify();
+            },
+        );
+
         let extension_label = match self.project_extension {
             None => tr!("preferences.option.inherit_global"),
             Some(FileExtension::Md) => tr!("preferences.option.markdown"),
             Some(FileExtension::Mdx) => tr!("preferences.option.mdx"),
         };
+        let extension_options = vec![
+            ui::PickerOption::new(tr!("preferences.option.inherit_global"))
+                .selected(self.project_extension.is_none()),
+            ui::PickerOption::new(tr!("preferences.option.markdown"))
+                .selected(self.project_extension == Some(FileExtension::Md)),
+            ui::PickerOption::new(tr!("preferences.option.mdx"))
+                .selected(self.project_extension == Some(FileExtension::Mdx)),
+        ];
+        let extension = self.picker(
+            "preferences-project-extension",
+            extension_label,
+            extension_options,
+            None,
+            cx,
+            |sheet, index, _, cx| {
+                sheet.project_extension = match index {
+                    1 => Some(FileExtension::Md),
+                    2 => Some(FileExtension::Mdx),
+                    _ => None,
+                };
+                cx.notify();
+            },
+        );
+
         let imports_label = match self.project_insert_imports {
             None => tr!("preferences.option.inherit"),
             Some(true) => tr!("preferences.option.on"),
             Some(false) => tr!("preferences.option.off"),
         };
-
-        let image_weak = weak.clone();
-        let image_mode = Button::new("preferences-project-image-mode")
-            .outline()
-            .label(image_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (label, mode) in [
-                    (tr!("preferences.option.inherit_relative"), None),
-                    (
-                        tr!("preferences.option.relative"),
-                        Some(ImagePathMode::Relative),
-                    ),
-                    (
-                        tr!("preferences.option.absolute"),
-                        Some(ImagePathMode::Absolute),
-                    ),
-                ] {
-                    let weak = image_weak.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
-                            sheet.project_image_mode = mode;
-                            cx.notify();
-                        });
-                    }));
-                }
-                menu
-            })
-            .into_any_element();
-
-        let extension_weak = weak.clone();
-        let extension = Button::new("preferences-project-extension")
-            .outline()
-            .label(extension_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (label, value) in [
-                    (tr!("preferences.option.inherit_global"), None),
-                    (tr!("preferences.option.markdown"), Some(FileExtension::Md)),
-                    (tr!("preferences.option.mdx"), Some(FileExtension::Mdx)),
-                ] {
-                    let weak = extension_weak.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
-                            sheet.project_extension = value;
-                            cx.notify();
-                        });
-                    }));
-                }
-                menu
-            })
-            .into_any_element();
-
-        let imports_weak = weak.clone();
-        let imports = Button::new("preferences-project-imports")
-            .outline()
-            .label(imports_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (label, value) in [
-                    (tr!("preferences.option.inherit"), None),
-                    (tr!("preferences.option.on"), Some(true)),
-                    (tr!("preferences.option.off"), Some(false)),
-                ] {
-                    let weak = imports_weak.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
-                            sheet.project_insert_imports = value;
-                            cx.notify();
-                        });
-                    }));
-                }
-                menu
-            })
-            .into_any_element();
+        let imports_options = vec![
+            ui::PickerOption::new(tr!("preferences.option.inherit"))
+                .selected(self.project_insert_imports.is_none()),
+            ui::PickerOption::new(tr!("preferences.option.on"))
+                .selected(self.project_insert_imports == Some(true)),
+            ui::PickerOption::new(tr!("preferences.option.off"))
+                .selected(self.project_insert_imports == Some(false)),
+        ];
+        let imports = self.picker(
+            "preferences-project-imports",
+            imports_label,
+            imports_options,
+            None,
+            cx,
+            |sheet, index, _, cx| {
+                sheet.project_insert_imports = match index {
+                    1 => Some(true),
+                    2 => Some(false),
+                    _ => None,
+                };
+                cx.notify();
+            },
+        );
 
         let auto_import = self
             .context
@@ -107,7 +99,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-project-content",
                 tr!("preferences.project.content_directory"),
-                self.control(FieldId::ProjectContent),
+                FieldBody::Text(FieldId::ProjectContent),
                 FieldExtras {
                     field: Some(FieldId::ProjectContent),
                     hint: Some(tr!("preferences.project.content_directory_hint").into()),
@@ -122,7 +114,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-project-assets",
                 tr!("preferences.project.assets_directory"),
-                self.control(FieldId::ProjectAssets),
+                FieldBody::Text(FieldId::ProjectAssets),
                 FieldExtras {
                     field: Some(FieldId::ProjectAssets),
                     hint: Some(tr!("preferences.project.assets_directory_hint").into()),
@@ -137,7 +129,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-project-mdx",
                 tr!("preferences.project.mdx_directory"),
-                self.control(FieldId::ProjectMdx),
+                FieldBody::Text(FieldId::ProjectMdx),
                 FieldExtras {
                     field: Some(FieldId::ProjectMdx),
                     hint: Some(tr!("preferences.project.mdx_directory_hint").into()),
@@ -153,7 +145,7 @@ impl PreferencesSheet {
         directories.push(self.field(
             "preferences-field-project-image-mode",
             tr!("preferences.project.image_paths"),
-            image_mode,
+            FieldBody::Control(Some(image_mode)),
             FieldExtras {
                 field: None,
                 hint: Some(tr!("preferences.project.image_paths_hint").into()),
@@ -164,7 +156,7 @@ impl PreferencesSheet {
         directories.push(self.field(
             "preferences-field-project-extension",
             tr!("preferences.project.new_files"),
-            extension,
+            FieldBody::Control(Some(extension)),
             FieldExtras {
                 field: None,
                 hint: Some(tr!("preferences.project.new_files_hint").into()),
@@ -179,25 +171,19 @@ impl PreferencesSheet {
                 div()
                     .id("preferences-auto-import-notice")
                     .test_support()
-                    .h_flex()
                     .w_full()
-                    .gap_2()
-                    .p_2()
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().warning.opacity(0.12))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().foreground)
-                            .child(tr!("preferences.project.auto_import_notice")),
-                    )
+                    .child(ui::inline_notice(
+                        "preferences-auto-import-alert",
+                        NoticeTone::Info,
+                        tr!("preferences.project.auto_import_notice"),
+                    ))
                     .into_any_element(),
             );
         }
         imports_section.push(self.field(
             "preferences-field-project-imports",
             tr!("preferences.project.insert_imports"),
-            imports,
+            FieldBody::Control(Some(imports)),
             FieldExtras {
                 field: None,
                 hint: Some(tr!("preferences.project.insert_imports_hint").into()),
@@ -210,7 +196,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-project-title",
                 tr!("preferences.project.title_field"),
-                self.control(FieldId::ProjectTitle),
+                FieldBody::Text(FieldId::ProjectTitle),
                 FieldExtras {
                     field: Some(FieldId::ProjectTitle),
                     hint: Some(tr!("preferences.project.title_field_hint").into()),
@@ -225,7 +211,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-project-date",
                 tr!("preferences.project.date_field"),
-                self.control(FieldId::ProjectDate),
+                FieldBody::Text(FieldId::ProjectDate),
                 FieldExtras {
                     field: Some(FieldId::ProjectDate),
                     hint: Some(tr!("preferences.project.date_field_hint").into()),
@@ -240,7 +226,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-project-description",
                 tr!("preferences.project.description_field"),
-                self.control(FieldId::ProjectDescription),
+                FieldBody::Text(FieldId::ProjectDescription),
                 FieldExtras {
                     field: Some(FieldId::ProjectDescription),
                     hint: Some(tr!("preferences.project.description_field_hint").into()),
@@ -255,7 +241,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-project-draft",
                 tr!("preferences.project.draft_field"),
-                self.control(FieldId::ProjectDraft),
+                FieldBody::Text(FieldId::ProjectDraft),
                 FieldExtras {
                     field: Some(FieldId::ProjectDraft),
                     hint: Some(tr!("preferences.project.draft_field_hint").into()),

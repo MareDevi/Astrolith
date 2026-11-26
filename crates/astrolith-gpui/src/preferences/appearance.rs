@@ -4,96 +4,50 @@ use super::*;
 
 impl PreferencesSheet {
     pub(super) fn appearance_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let weak = cx.weak_entity();
         let theme_label = match self.theme {
             ThemePreference::Light => tr!("preferences.option.light"),
             ThemePreference::Dark => tr!("preferences.option.dark"),
             ThemePreference::System => tr!("preferences.option.follow_system"),
         };
-        let schemes = [
-            ("Astrolith Light", ColorScheme::AstrolithLight),
-            ("Astrolith Dark", ColorScheme::AstrolithDark),
-            ("Catppuccin Latte", ColorScheme::CatppuccinLatte),
-            ("Catppuccin Frappé", ColorScheme::CatppuccinFrappe),
-            ("Catppuccin Macchiato", ColorScheme::CatppuccinMacchiato),
-            ("Catppuccin Mocha", ColorScheme::CatppuccinMocha),
-            ("Nord", ColorScheme::Nord),
-            ("Nord Light", ColorScheme::NordLight),
-            ("Tokyo Night", ColorScheme::TokyoNight),
-            ("Tokyo Night Storm", ColorScheme::TokyoNightStorm),
-            ("Tokyo Night Moon", ColorScheme::TokyoNightMoon),
-            ("Tokyo Day", ColorScheme::TokyoDay),
-            ("Gruvbox Light", ColorScheme::GruvboxLight),
-            ("Gruvbox Dark", ColorScheme::GruvboxDark),
-        ];
-        let scheme_picker = |id: &'static str, light: bool, selected: ColorScheme| {
-            let owner = weak.clone();
-            let label = schemes
-                .iter()
-                .find(|(_, value)| *value == selected)
-                .unwrap()
-                .0;
-            Button::new(id)
-                .outline()
-                .label(label)
-                .dropdown_caret(true)
-                .dropdown_menu(move |menu, _, _| {
-                    let mut menu = menu;
-                    for (label, value) in schemes
-                        .into_iter()
-                        .filter(|(_, value)| value.is_dark() == !light)
-                    {
-                        let owner = owner.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(label)
-                                .checked(value == selected)
-                                .on_click(move |_, _, cx| {
-                                    let _ = owner.update(cx, |sheet, cx| {
-                                        if light {
-                                            sheet.light_color_scheme = value;
-                                        } else {
-                                            sheet.dark_color_scheme = value;
-                                        }
-                                        cx.notify();
-                                    });
-                                }),
-                        );
-                    }
-                    menu
-                })
-                .into_any_element()
-        };
-        let theme_owner = weak.clone();
-        let theme = Button::new("preferences-theme")
-            .outline()
-            .label(theme_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (label, preference) in [
-                    (
-                        tr!("preferences.option.follow_system"),
-                        ThemePreference::System,
-                    ),
-                    (tr!("preferences.option.light"), ThemePreference::Light),
-                    (tr!("preferences.option.dark"), ThemePreference::Dark),
-                ] {
-                    let owner = theme_owner.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        let _ = owner.update(cx, |sheet, cx| {
-                            sheet.theme = preference;
-                            cx.notify();
-                        });
-                    }));
-                }
-                menu
-            })
-            .into_any_element();
+        let theme = self.picker(
+            "preferences-theme",
+            theme_label,
+            vec![
+                ui::PickerOption::new(tr!("preferences.option.follow_system"))
+                    .selected(self.theme == ThemePreference::System),
+                ui::PickerOption::new(tr!("preferences.option.light"))
+                    .selected(self.theme == ThemePreference::Light),
+                ui::PickerOption::new(tr!("preferences.option.dark"))
+                    .selected(self.theme == ThemePreference::Dark),
+            ],
+            None,
+            cx,
+            |sheet, index, _, cx| {
+                sheet.theme = match index {
+                    1 => ThemePreference::Light,
+                    2 => ThemePreference::Dark,
+                    _ => ThemePreference::System,
+                };
+                cx.notify();
+            },
+        );
+        let light_scheme = self.scheme_picker(
+            "preferences-light-color-scheme",
+            true,
+            self.light_color_scheme,
+            cx,
+        );
+        let dark_scheme = self.scheme_picker(
+            "preferences-dark-color-scheme",
+            false,
+            self.dark_color_scheme,
+            cx,
+        );
         let appearance = vec![
             self.field(
                 "preferences-field-theme",
                 tr!("preferences.appearance.theme"),
-                theme,
+                FieldBody::Control(Some(theme)),
                 FieldExtras {
                     field: None,
                     hint: Some(tr!("preferences.appearance.theme_hint").into()),
@@ -104,11 +58,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-light-color-scheme",
                 tr!("preferences.appearance.light_color_scheme"),
-                scheme_picker(
-                    "preferences-light-color-scheme",
-                    true,
-                    self.light_color_scheme,
-                ),
+                FieldBody::Control(Some(light_scheme)),
                 FieldExtras {
                     field: None,
                     hint: None,
@@ -119,11 +69,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-dark-color-scheme",
                 tr!("preferences.appearance.dark_color_scheme"),
-                scheme_picker(
-                    "preferences-dark-color-scheme",
-                    false,
-                    self.dark_color_scheme,
-                ),
+                FieldBody::Control(Some(dark_scheme)),
                 FieldExtras {
                     field: None,
                     hint: Some(tr!("preferences.appearance.color_scheme_hint").into()),
@@ -137,36 +83,30 @@ impl PreferencesSheet {
             "ja" => "日本語",
             _ => "English",
         };
-        let selected_language = self.language.clone();
-        let language_weak = weak.clone();
-        let language_picker = Button::new("preferences-language")
-            .outline()
-            .label(language_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (label, language) in
-                    [("简体中文", "zh-CN"), ("English", "en"), ("日本語", "ja")]
-                {
-                    let weak = language_weak.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(label)
-                            .checked(language == selected_language)
-                            .on_click(move |_, _, cx| {
-                                let _ = weak.update(cx, |sheet, cx| {
-                                    sheet.language = language.to_owned();
-                                    cx.notify();
-                                });
-                            }),
-                    );
+        let language_picker = self.picker(
+            "preferences-language",
+            language_label,
+            vec![
+                ui::PickerOption::new("简体中文").selected(self.language == "zh-CN"),
+                ui::PickerOption::new("English").selected(self.language == "en"),
+                ui::PickerOption::new("日本語").selected(self.language == "ja"),
+            ],
+            None,
+            cx,
+            |sheet, index, _, cx| {
+                sheet.language = match index {
+                    0 => "zh-CN",
+                    2 => "ja",
+                    _ => "en",
                 }
-                menu
-            })
-            .into_any_element();
+                .to_owned();
+                cx.notify();
+            },
+        );
         let mut interface = vec![self.field(
             "preferences-field-language",
             tr!("app.language"),
-            language_picker,
+            FieldBody::Control(Some(language_picker)),
             FieldExtras {
                 field: None,
                 hint: Some(tr!("app.choose_language").into()),
@@ -178,7 +118,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-ui-font-family",
                 tr!("preferences.appearance.interface_font"),
-                self.control(FieldId::UiFontFamily),
+                FieldBody::Text(FieldId::UiFontFamily),
                 FieldExtras {
                     field: Some(FieldId::UiFontFamily),
                     hint: Some(tr!("preferences.appearance.interface_font_hint").into()),
@@ -201,7 +141,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-ui-font-size",
                 tr!("preferences.appearance.interface_size"),
-                self.control(FieldId::UiFontSize),
+                FieldBody::Text(FieldId::UiFontSize),
                 FieldExtras {
                     field: Some(FieldId::UiFontSize),
                     hint: Some(tr!("preferences.appearance.interface_size_hint").into()),
@@ -217,7 +157,7 @@ impl PreferencesSheet {
         let panel = vec![self.field(
             "preferences-field-panel-radius",
             tr!("preferences.appearance.panel_radius"),
-            self.control(FieldId::PanelRadius),
+            FieldBody::Text(FieldId::PanelRadius),
             FieldExtras {
                 field: Some(FieldId::PanelRadius),
                 hint: Some(tr!("preferences.appearance.panel_radius_hint").into()),
@@ -233,7 +173,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-prose-font-family",
                 tr!("preferences.appearance.document_font"),
-                self.control(FieldId::ProseFontFamily),
+                FieldBody::Text(FieldId::ProseFontFamily),
                 FieldExtras {
                     field: Some(FieldId::ProseFontFamily),
                     hint: Some(tr!("preferences.appearance.document_font_hint").into()),
@@ -260,7 +200,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-font-size",
                 tr!("preferences.appearance.document_font_size"),
-                self.control(FieldId::FontSize),
+                FieldBody::Text(FieldId::FontSize),
                 FieldExtras {
                     field: Some(FieldId::FontSize),
                     hint: Some(tr!("preferences.appearance.document_font_size_hint").into()),
@@ -275,7 +215,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-line-height",
                 tr!("preferences.appearance.line_height"),
-                self.control(FieldId::LineHeight),
+                FieldBody::Text(FieldId::LineHeight),
                 FieldExtras {
                     field: Some(FieldId::LineHeight),
                     hint: Some(tr!("preferences.appearance.line_height_hint").into()),
@@ -290,7 +230,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-editor-width",
                 tr!("preferences.appearance.page_width"),
-                self.control(FieldId::PageWidth),
+                FieldBody::Text(FieldId::PageWidth),
                 FieldExtras {
                     field: Some(FieldId::PageWidth),
                     hint: Some(tr!("preferences.appearance.page_width_hint").into()),
@@ -307,7 +247,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-build-font-family",
                 tr!("preferences.appearance.build_font"),
-                self.control(FieldId::BuildFontFamily),
+                FieldBody::Text(FieldId::BuildFontFamily),
                 FieldExtras {
                     field: Some(FieldId::BuildFontFamily),
                     hint: Some(tr!("preferences.appearance.build_font_hint").into()),
@@ -334,7 +274,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-build-font-size",
                 tr!("preferences.appearance.build_font_size"),
-                self.control(FieldId::BuildFontSize),
+                FieldBody::Text(FieldId::BuildFontSize),
                 FieldExtras {
                     field: Some(FieldId::BuildFontSize),
                     hint: Some(tr!("preferences.appearance.build_font_size_hint").into()),
@@ -351,7 +291,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-preview-font-family",
                 tr!("preferences.appearance.preview_font"),
-                self.control(FieldId::PreviewFontFamily),
+                FieldBody::Text(FieldId::PreviewFontFamily),
                 FieldExtras {
                     field: Some(FieldId::PreviewFontFamily),
                     hint: Some(tr!("preferences.appearance.preview_font_hint").into()),
@@ -378,7 +318,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-preview-font-size",
                 tr!("preferences.appearance.preview_font_size"),
-                self.control(FieldId::PreviewFontSize),
+                FieldBody::Text(FieldId::PreviewFontSize),
                 FieldExtras {
                     field: Some(FieldId::PreviewFontSize),
                     hint: Some(tr!("preferences.appearance.preview_font_size_hint").into()),
@@ -395,7 +335,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-heading-light",
                 tr!("preferences.appearance.heading_light"),
-                self.control(FieldId::HeadingLight),
+                FieldBody::Text(FieldId::HeadingLight),
                 FieldExtras {
                     field: Some(FieldId::HeadingLight),
                     hint: Some(tr!("preferences.appearance.heading_hint").into()),
@@ -410,7 +350,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-heading-dark",
                 tr!("preferences.appearance.heading_dark"),
-                self.control(FieldId::HeadingDark),
+                FieldBody::Text(FieldId::HeadingDark),
                 FieldExtras {
                     field: Some(FieldId::HeadingDark),
                     hint: Some(tr!("preferences.appearance.heading_hint").into()),
@@ -426,7 +366,7 @@ impl PreferencesSheet {
         div()
             .v_flex()
             .w_full()
-            .gap_4()
+            .gap_6()
             .child(self.section(
                 tr!("preferences.appearance.theme_section"),
                 Some(tr!("preferences.appearance.theme_section_hint").into()),
@@ -470,6 +410,44 @@ impl PreferencesSheet {
             .into_any_element()
     }
 
+    fn scheme_picker(
+        &self,
+        id: &'static str,
+        light: bool,
+        selected: ColorScheme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let schemes: Vec<(&'static str, ColorScheme)> = SCHEMES
+            .into_iter()
+            .filter(|(_, value)| value.is_dark() == !light)
+            .collect();
+        let label = schemes
+            .iter()
+            .find(|(_, value)| *value == selected)
+            .map_or("", |(label, _)| *label);
+        let options = schemes
+            .iter()
+            .map(|(label, value)| ui::PickerOption::new(*label).selected(*value == selected))
+            .collect();
+        self.picker(
+            id,
+            label,
+            options,
+            Some(28.0),
+            cx,
+            move |sheet, index, _, cx| {
+                if let Some((_, value)) = schemes.get(index) {
+                    if light {
+                        sheet.light_color_scheme = *value;
+                    } else {
+                        sheet.dark_color_scheme = *value;
+                    }
+                }
+                cx.notify();
+            },
+        )
+    }
+
     fn font_picker(
         &self,
         field: FieldId,
@@ -477,36 +455,48 @@ impl PreferencesSheet {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let families = theme::installed_font_names(cx);
-        let owner = cx.weak_entity();
-        Button::new(id)
-            .small()
-            .outline()
-            .label(tr!("preferences.appearance.browse"))
-            .dropdown_menu(move |menu, _, _| {
-                let default_owner = owner.clone();
-                let mut menu = menu.item(
-                    PopupMenuItem::new(tr!("preferences.option.system_default")).on_click(
-                        move |_, window, cx| {
-                            let _ = default_owner.update(cx, |sheet, cx| {
-                                sheet.set_text(field, "", window, cx);
-                                sheet.refresh_errors(cx);
-                            });
-                        },
-                    ),
-                );
-                for family in families {
-                    let owner = owner.clone();
-                    let family: &'static str = family;
-                    let label = family.to_owned();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        let _ = owner.update(cx, |sheet, cx| {
-                            sheet.set_text(field, family, window, cx);
-                            sheet.refresh_errors(cx);
-                        });
-                    }));
+        let current = self
+            .input_entity(field)
+            .map(|input| input.read(cx).value())
+            .unwrap_or_default();
+        let mut options = vec![
+            ui::PickerOption::new(tr!("preferences.option.system_default"))
+                .selected(current.is_empty()),
+        ];
+        options.extend(families.iter().map(|family| {
+            ui::PickerOption::new(family.clone()).selected(family.as_str() == current.as_ref())
+        }));
+        self.picker(
+            id,
+            tr!("preferences.appearance.browse"),
+            options,
+            Some(28.0),
+            cx,
+            move |sheet, index, window, cx| {
+                if index == 0 {
+                    sheet.set_text(field, "", window, cx);
+                } else if let Some(family) = families.get(index - 1) {
+                    sheet.set_text(field, family, window, cx);
                 }
-                menu.scrollable(true).max_h(px(450.))
-            })
-            .into_any_element()
+                sheet.refresh_errors(cx);
+            },
+        )
     }
 }
+
+const SCHEMES: [(&str, ColorScheme); 14] = [
+    ("Astrolith Light", ColorScheme::AstrolithLight),
+    ("Astrolith Dark", ColorScheme::AstrolithDark),
+    ("Catppuccin Latte", ColorScheme::CatppuccinLatte),
+    ("Catppuccin Frappé", ColorScheme::CatppuccinFrappe),
+    ("Catppuccin Macchiato", ColorScheme::CatppuccinMacchiato),
+    ("Catppuccin Mocha", ColorScheme::CatppuccinMocha),
+    ("Nord", ColorScheme::Nord),
+    ("Nord Light", ColorScheme::NordLight),
+    ("Tokyo Night", ColorScheme::TokyoNight),
+    ("Tokyo Night Storm", ColorScheme::TokyoNightStorm),
+    ("Tokyo Night Moon", ColorScheme::TokyoNightMoon),
+    ("Tokyo Day", ColorScheme::TokyoDay),
+    ("Gruvbox Light", ColorScheme::GruvboxLight),
+    ("Gruvbox Dark", ColorScheme::GruvboxDark),
+];

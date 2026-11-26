@@ -79,11 +79,11 @@ preferences:
       ja: "バケットのルートを指す公開 HTTP または HTTPS URL を入力してください。"
   group:
     general:
-      en: "GENERAL"
+      en: "General"
       zh-CN: "通用"
       ja: "一般"
     project:
-      en: "PROJECT"
+      en: "Project"
       zh-CN: "项目"
       ja: "プロジェクト"
     advanced:
@@ -116,9 +116,9 @@ preferences:
       zh-CN: "请先修正高亮显示的值再应用。"
       ja: "適用する前にハイライトされた値を修正してください。"
     apply_note:
-      en: "Changes apply immediately and persist atomically."
-      zh-CN: "更改会立即生效并以原子方式保存。"
-      ja: "変更はすぐに反映され、アトミックに保存されます。"
+      en: "Review changes across tabs, then choose Apply to save."
+      zh-CN: "在多个标签页之间检查更改，然后选择“应用”保存。"
+      ja: "タブを切り替えて変更を確認し、「適用」で保存します。"
   pane:
     appearance:
       label:
@@ -146,12 +146,12 @@ preferences:
       description:
         en: "How the live site opens and which browser to use."
         zh-CN: "实时站点如何打开以及使用哪个浏览器。"
-        ja: "ライブサイトの開き方と使用するブラウザー。"
+        ja: "ライブサイトの開き方と使用するブラウザ。"
     project:
       label:
-        en: "Project Settings"
-        zh-CN: "项目设置"
-        ja: "プロジェクト設定"
+        en: "Project"
+        zh-CN: "项目"
+        ja: "プロジェクト"
       description:
         en: "Defaults for this project's content workflow."
         zh-CN: "此项目内容工作流的默认值。"
@@ -230,7 +230,7 @@ preferences:
     external_browser:
       en: "External browser"
       zh-CN: "外部浏览器"
-      ja: "外部ブラウザー"
+      ja: "外部ブラウザ"
     embedded:
       en: "Embedded WebView"
       zh-CN: "内嵌 WebView"
@@ -247,7 +247,7 @@ preferences:
     browser_executable:
       en: "Empty uses the system browser"
       zh-CN: "留空则使用系统浏览器"
-      ja: "空欄の場合はシステムのブラウザーを使用します"
+      ja: "空欄の場合はシステムのブラウザを使用します"
     ui_font_family:
       en: "System UI font"
       zh-CN: "系统界面字体"
@@ -280,9 +280,53 @@ preferences:
       en: "Inherit the project mapping"
       zh-CN: "继承项目映射"
       ja: "プロジェクトのマッピングを継承"
+    image_endpoint:
+      en: "https://account.r2.cloudflarestorage.com"
+      zh-CN: "https://account.r2.cloudflarestorage.com"
+      ja: "https://account.r2.cloudflarestorage.com"
+    image_bucket:
+      en: "my-images"
+      zh-CN: "my-images"
+      ja: "my-images"
+    image_region:
+      en: "auto / us-east-1"
+      zh-CN: "auto / us-east-1"
+      ja: "auto / us-east-1"
+    image_public_url:
+      en: "https://images.example.com"
+      zh-CN: "https://images.example.com"
+      ja: "https://images.example.com"
+    ide_executable:
+      en: "hx or code"
+      zh-CN: "hx 或 code"
+      ja: "hx または code"
+    prose_font_family:
+      en: "Inter / system sans"
+      zh-CN: "Inter / 系统无衬线字体"
+      ja: "Inter / システムのサンセリフ体"
+    preview_font_family:
+      en: "Inter / system sans"
+      zh-CN: "Inter / 系统无衬线字体"
+      ja: "Inter / システムのサンセリフ体"
+    entry_title:
+      en: "title"
+      zh-CN: "title"
+      ja: "title"
+    entry_date:
+      en: "date"
+      zh-CN: "date"
+      ja: "date"
+    entry_description:
+      en: "description"
+      zh-CN: "description"
+      ja: "description"
+    entry_draft:
+      en: "draft"
+      zh-CN: "draft"
+      ja: "draft"
   appearance:
     theme:
-      en: "Colour mode"
+      en: "Color mode"
       zh-CN: "颜色模式"
       ja: "カラーモード"
     theme_hint:
@@ -290,11 +334,11 @@ preferences:
       zh-CN: "选择浅色、深色，或跟随桌面外观。"
       ja: "ライト、ダーク、またはデスクトップの外観に従う設定を選びます。"
     light_color_scheme:
-      en: "Light colour scheme"
+      en: "Light color scheme"
       zh-CN: "浅色配色方案"
       ja: "ライトの配色"
     dark_color_scheme:
-      en: "Dark colour scheme"
+      en: "Dark color scheme"
       zh-CN: "深色配色方案"
       ja: "ダークの配色"
     color_scheme_hint:
@@ -306,7 +350,7 @@ preferences:
       zh-CN: "主题"
       ja: "テーマ"
     theme_section_hint:
-      en: "Colour schemes shared by every project."
+      en: "Color schemes shared by every project."
       zh-CN: "所有项目共用的配色方案。"
       ja: "すべてのプロジェクトで共有される配色。"
     interface_section:
@@ -354,7 +398,7 @@ preferences:
       zh-CN: "文档"
       ja: "ドキュメント"
     document_section_hint:
-      en: "Body typography, page measure and heading colours."
+      en: "Body typography, page measure and heading colors."
       zh-CN: "正文排版、页面宽度和标题颜色。"
       ja: "本文のタイポグラフィ、ページ幅、見出しの色。"
     document_font:
@@ -362,9 +406,9 @@ preferences:
       zh-CN: "文档字体"
       ja: "ドキュメントフォント"
     document_font_hint:
-      en: "An installed font family. Empty uses the mock's sans face (Inter or the platform UI font)."
-      zh-CN: "已安装的字体族。留空则使用预览的无衬线字体（Inter 或平台界面字体）。"
-      ja: "インストール済みのフォントファミリー。空欄の場合はモックのサンセリフ書体（Inter またはプラットフォームの UI フォント）を使用します。"
+      en: "Leave empty to use the default sans-serif interface font."
+      zh-CN: "留空以使用默认无衬线字体。"
+      ja: "空欄の場合は既定のサンセリフ体を使用します。"
     document_font_size:
       en: "Document font size"
       zh-CN: "文档字号"
@@ -390,15 +434,15 @@ preferences:
       zh-CN: "编辑区的 30–100%；默认 64%。"
       ja: "エディターペインの 30〜100%。既定値は 64%。"
     heading_light:
-      en: "Light heading colour"
+      en: "Light heading color"
       zh-CN: "浅色标题颜色"
       ja: "ライトの見出し色"
     heading_dark:
-      en: "Dark heading colour"
+      en: "Dark heading color"
       zh-CN: "深色标题颜色"
       ja: "ダークの見出し色"
     heading_hint:
-      en: "Optional #rrggbb or #rrggbbaa. Empty keeps the palette heading colour."
+      en: "Optional #rrggbb or #rrggbbaa. Empty keeps the palette heading color."
       zh-CN: "可选 #rrggbb 或 #rrggbbaa。留空则使用调色板的标题颜色。"
       ja: "任意で #rrggbb または #rrggbbaa。空欄の場合はパレットの見出し色を使用します。"
     build_section:
@@ -585,7 +629,7 @@ preferences:
     new_files_hint:
       en: "Extension used for new entries unless a project or collection overrides it."
       zh-CN: "新建条目使用的扩展名，除非项目或集合覆盖。"
-      ja: "プロジェクトまたはコレクションが上書きしない限り、新規エントリーに使用する拡張子。"
+      ja: "プロジェクトまたはコレクションが上書きしない限り、新規エントリに使用する拡張子。"
     external_editor:
       en: "External editor"
       zh-CN: "外部编辑器"
@@ -599,9 +643,9 @@ preferences:
       zh-CN: "IDE 命令"
       ja: "IDE コマンド"
     ide_command_hint:
-      en: "Launched directly as argv; no shell interprets it."
-      zh-CN: "直接以 argv 启动；不经过 shell 解释。"
-      ja: "argv として直接起動され、シェルは介在しません。"
+      en: "Started directly, without a shell."
+      zh-CN: "直接启动程序，不经过 shell。"
+      ja: "シェルを介さず直接起動します。"
     ide_arguments:
       en: "IDE arguments"
       zh-CN: "IDE 参数"
@@ -618,35 +662,35 @@ preferences:
     presentation_hint:
       en: "Embedded WebView is available only on supported hosts; Wayland windows use the external browser."
       zh-CN: "内嵌 WebView 仅在受支持的主机上可用；Wayland 窗口使用外部浏览器。"
-      ja: "埋め込み WebView は対応ホストでのみ利用できます。Wayland ウィンドウは外部ブラウザーを使用します。"
+      ja: "埋め込み WebView は対応ホストでのみ利用できます。Wayland ウィンドウは外部ブラウザを使用します。"
     browser_section:
       en: "Browser"
       zh-CN: "浏览器"
-      ja: "ブラウザー"
+      ja: "ブラウザ"
     browser_executable:
       en: "Preferred browser executable"
       zh-CN: "首选浏览器可执行文件"
-      ja: "優先ブラウザーの実行ファイル"
+      ja: "優先ブラウザの実行ファイル"
     browser_executable_hint:
       en: "Empty uses the system default browser. The executable is started directly, without a shell."
       zh-CN: "留空则使用系统默认浏览器。可执行文件直接启动，不经过 shell。"
-      ja: "空欄の場合はシステム既定のブラウザーを使用します。実行ファイルはシェルを介さず直接起動されます。"
+      ja: "空欄の場合はシステム既定のブラウザを使用します。実行ファイルはシェルを介さず直接起動されます。"
     browser_arguments:
       en: "Browser arguments"
       zh-CN: "浏览器参数"
-      ja: "ブラウザーの引数"
+      ja: "ブラウザの引数"
     browser_arguments_hint:
       en: "One argument per line. {url} is replaced with the preview URL; without it the URL is appended."
       zh-CN: "每行一个参数。{url} 会替换为预览 URL；若没有 {url}，URL 将追加到末尾。"
       ja: "1 行に 1 つの引数。{url} はプレビュー URL に置換されます。ない場合 URL は末尾に追加されます。"
     open_on_enter:
-      en: "Open on Enter"
-      zh-CN: "按 Enter 时打开"
-      ja: "Enter で開く"
+      en: "Open when entering Preview"
+      zh-CN: "进入预览模式时打开"
+      ja: "プレビュー切り替え時に開く"
     open_on_enter_hint:
-      en: "Open the active entry once when you explicitly enter Preview. A failed launch offers the system browser."
-      zh-CN: "当你主动进入预览时打开当前条目一次。启动失败时提供系统浏览器。"
-      ja: "明示的にプレビューに入ったときにアクティブなエントリーを 1 回開きます。起動に失敗するとシステムブラウザーを提案します。"
+      en: "Open the active document once, when you explicitly switch to Preview. A failed launch offers the system browser."
+      zh-CN: "当你主动切换到预览模式时，打开当前文档一次。启动失败时会提示使用系统浏览器。"
+      ja: "明示的にプレビューへ切り替えたときに、現在のドキュメントを 1 回開きます。起動に失敗するとシステムブラウザを提案します。"
     embedded_unavailable_notice:
       en: "Embedded WebView unavailable: %{reason}"
       zh-CN: "内嵌 WebView 不可用：%{reason}"
@@ -731,7 +775,7 @@ preferences:
     title_field_hint:
       en: "Schema field mapped to the entry title; empty uses “title”."
       zh-CN: "映射到条目标题的 schema 字段；留空则使用“title”。"
-      ja: "エントリータイトルにマップされるスキーマフィールド。空欄の場合は「title」を使用します。"
+      ja: "エントリタイトルにマップされるスキーマフィールド。空欄の場合は「title」を使用します。"
     date_field:
       en: "Date field"
       zh-CN: "日期字段"
@@ -848,7 +892,7 @@ preferences:
     links_hint:
       en: "Used when inserting a Content Finder entry as a Markdown link."
       zh-CN: "将 Content Finder 条目作为 Markdown 链接插入时使用。"
-      ja: "Content Finder のエントリーを Markdown リンクとして挿入するときに使用します。"
+      ja: "Content Finder のエントリを Markdown リンクとして挿入するときに使用します。"
     url_pattern:
       en: "Content Finder URL pattern"
       zh-CN: "Content Finder URL 模式"
@@ -856,7 +900,7 @@ preferences:
     url_pattern_hint:
       en: "Empty links to the entry file. {slug} is URL-encoded."
       zh-CN: "留空则链接到条目文件。{slug} 会进行 URL 编码。"
-      ja: "空欄の場合はエントリーファイルにリンクします。{slug} は URL エンコードされます。"
+      ja: "空欄の場合はエントリファイルにリンクします。{slug} は URL エンコードされます。"
   advanced:
     versions:
       en: "Versions"
@@ -904,7 +948,7 @@ preferences:
       ja: "設定フォルダーを開けませんでした: %{error}"
     folder_unavailable_notice:
       en: "The preferences folder is unavailable, so Reset All cannot run."
-      zh-CN: "偏好设置文件夹不可用，无法执行全部重置。"
+      zh-CN: "偏好设置文件夹不可用，无法重置全部偏好设置。"
       ja: "設定フォルダーを利用できないため、すべてリセットを実行できません。"
     file_manager_unsupported:
       en: "opening a file manager is unsupported on this platform"
@@ -939,9 +983,9 @@ preferences:
       zh-CN: "重置并重启"
       ja: "リセットして再起動"
     reset_cancel:
-      en: "Keep preferences"
-      zh-CN: "保留偏好设置"
-      ja: "設定を保持"
+      en: "Cancel"
+      zh-CN: "取消"
+      ja: "キャンセル"
   surface:
     build:
       en: "Build"
@@ -1022,7 +1066,7 @@ preferences:
       zh-CN: "界面字号必须在 8 到 28 之间。"
       ja: "インターフェースサイズは 8〜28 の範囲で指定してください。"
     heading_color:
-      en: "Enter a colour as #rrggbb or #rrggbbaa."
+      en: "Enter a color as #rrggbb or #rrggbbaa."
       zh-CN: "请以 #rrggbb 或 #rrggbbaa 格式输入颜色。"
       ja: "色は #rrggbb または #rrggbbaa の形式で入力してください。"
     ide_executable_control_chars:
@@ -1092,24 +1136,24 @@ preferences:
     browser_executable_control_chars:
       en: "The browser executable cannot contain control characters."
       zh-CN: "浏览器可执行文件不能包含控制字符。"
-      ja: "ブラウザーの実行ファイルに制御文字は使用できません。"
+      ja: "ブラウザの実行ファイルに制御文字は使用できません。"
     browser_missing_executable:
       en: "Enter the browser executable before its arguments."
       zh-CN: "请先填写浏览器可执行文件，再填写参数。"
-      ja: "引数の前にブラウザーの実行ファイルを入力してください。"
+      ja: "引数の前にブラウザの実行ファイルを入力してください。"
     browser_argument_control_chars:
       en: "Browser arguments cannot contain control characters."
       zh-CN: "浏览器参数不能包含控制字符。"
-      ja: "ブラウザーの引数に制御文字は使用できません。"
+      ja: "ブラウザの引数に制御文字は使用できません。"
     browser_unclosed_placeholder:
       en: "Browser arguments have an unclosed placeholder."
       zh-CN: "浏览器参数中存在未闭合的占位符。"
-      ja: "ブラウザーの引数に閉じられていないプレースホルダーがあります。"
+      ja: "ブラウザの引数に閉じられていないプレースホルダーがあります。"
     browser_unknown_placeholder:
       en: "Unknown browser placeholder {%{name}}; use {url}."
       zh-CN: "未知的浏览器占位符 {%{name}}；请使用 {url}。"
-      ja: "不明なブラウザーのプレースホルダー {%{name}} です。{url} を使用してください。"
+      ja: "不明なブラウザのプレースホルダー {%{name}} です。{url} を使用してください。"
     browser_stray_brace:
       en: "Browser arguments have an unmatched closing brace."
       zh-CN: "浏览器参数中存在未匹配的右花括号。"
-      ja: "ブラウザーの引数に対応しない閉じ括弧があります。"
+      ja: "ブラウザの引数に対応しない閉じ括弧があります。"

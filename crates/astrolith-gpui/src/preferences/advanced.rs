@@ -37,19 +37,22 @@ pub(crate) fn versions() -> Versions {
 }
 
 impl Versions {
-    /// Rows in display order.
-    pub(crate) fn lines(&self) -> Vec<(String, String)> {
+    /// Rows in display order, each with a stable key for its element id.
+    pub(crate) fn lines(&self) -> Vec<(&'static str, String, String)> {
         vec![
-            ("Astrolith".into(), self.app.to_owned()),
+            ("app", "Astrolith".to_owned(), self.app.to_owned()),
             (
+                "global",
                 tr!("preferences.advanced.global_preferences"),
                 tr!("preferences.advanced.version", version = self.global),
             ),
             (
+                "project",
                 tr!("preferences.advanced.project_preferences"),
                 tr!("preferences.advanced.version", version = self.project),
             ),
             (
+                "registry",
                 tr!("preferences.advanced.project_registry"),
                 tr!("preferences.advanced.version", version = self.registry),
             ),
@@ -112,10 +115,9 @@ impl PreferencesSheet {
         let rows = versions
             .lines()
             .into_iter()
-            .enumerate()
-            .map(|(index, (label, value))| {
+            .map(|(key, label, value)| {
                 div()
-                    .id(("preferences-version-row", index))
+                    .id(SharedString::from(format!("preferences-version-row-{key}")))
                     .h_flex()
                     .w_full()
                     .justify_between()
@@ -161,7 +163,7 @@ impl PreferencesSheet {
                         .text_color(cx.theme().muted_foreground)
                         .child(folder_label)
                         .into_any_element(),
-                    open_button.into_any_element(),
+                    open_button.self_start().into_any_element(),
                 ],
                 cx,
             ))
@@ -171,6 +173,7 @@ impl PreferencesSheet {
                 vec![
                     Button::new("preferences-reset-all")
                         .danger()
+                        .self_start()
                         .label(tr!("preferences.advanced.reset_all"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.confirm_reset_all(window, cx)
@@ -187,10 +190,16 @@ impl PreferencesSheet {
         cx.spawn(async move |this, cx| {
             let result = opened.await.and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                this.notice = Some(SharedString::from(match result {
-                    Ok(()) => tr!("preferences.advanced.folder_opened"),
-                    Err(error) => tr!("preferences.advanced.folder_open_failed", error = error),
-                }));
+                this.notice = Some(match result {
+                    Ok(()) => Notice::new(
+                        NoticeTone::Success,
+                        tr!("preferences.advanced.folder_opened"),
+                    ),
+                    Err(error) => Notice::new(
+                        NoticeTone::Danger,
+                        tr!("preferences.advanced.folder_open_failed", error = error),
+                    ),
+                });
                 cx.notify();
             });
         })
@@ -204,9 +213,10 @@ impl PreferencesSheet {
             .as_ref()
             .and_then(|context| context.preferences_folder.clone());
         let Some(folder) = folder else {
-            self.notice = Some(SharedString::from(tr!(
-                "preferences.advanced.folder_unavailable_notice"
-            )));
+            self.notice = Some(Notice::new(
+                NoticeTone::Warning,
+                tr!("preferences.advanced.folder_unavailable_notice"),
+            ));
             cx.notify();
             return;
         };

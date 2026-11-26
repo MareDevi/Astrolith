@@ -3972,6 +3972,7 @@ impl Shell {
                     let _ = close.update(cx, |sheet, cx| sheet.cancel(window, cx));
                 })
                 .child(view.clone())
+                .footer(view.update(cx, |sheet, cx| sheet.footer(cx)))
         });
     }
 
