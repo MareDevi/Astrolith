@@ -9,7 +9,7 @@
 
 use astrolith_core::preferences::CopyeditPreferences;
 use gpui_kit::component::{ActiveTheme, StyledExt, kbd::Kbd, scroll::ScrollableElement};
-use gpui_kit::{AnyElement, App, IntoElement, SharedString, div, prelude::*, px};
+use gpui_kit::{AnyElement, App, IntoElement, SharedString, div, prelude::*, rems};
 
 use crate::commands::{COMMANDS, CommandId, command_group, command_group_names};
 use crate::settings::{recovery_dir, save_failure_dir, settings_path};
@@ -193,7 +193,7 @@ pub(crate) fn guide_body(cx: &App) -> AnyElement {
         .v_flex()
         .w_full()
         .gap_1()
-        .max_h(px(520.))
+        .max_h(rems(32.5))
         .overflow_y_scrollbar()
         .children(guide_blocks(USER_GUIDE).into_iter().map(|block| {
             match block {
@@ -234,7 +234,7 @@ pub(crate) fn shortcuts_body(groups: &[(String, Vec<ShortcutRow>)], cx: &App) ->
         .v_flex()
         .w_full()
         .gap_1()
-        .max_h(px(520.))
+        .max_h(rems(32.5))
         .overflow_y_scrollbar()
         .children(groups.iter().flat_map(|(title, rows)| {
             let mut elements = vec![
@@ -256,6 +256,14 @@ pub(crate) fn shortcuts_body(groups: &[(String, Vec<ShortcutRow>)], cx: &App) ->
                     .child(SharedString::from(row.label.clone()))
                     .child(
                         div()
+                            .flex_shrink_0()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().tab_bar)
+                            .px_1p5()
+                            .py_0p5()
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_color(cx.theme().muted_foreground)
                             .child(SharedString::from(row.keys.clone())),
                     )
@@ -273,7 +281,7 @@ pub(crate) fn local_data_body(rows: &[LocalPathRow], cx: &App) -> AnyElement {
         .v_flex()
         .w_full()
         .gap_2()
-        .max_h(px(520.))
+        .max_h(rems(32.5))
         .overflow_y_scrollbar()
         .child(
             div()
@@ -292,7 +300,12 @@ pub(crate) fn local_data_body(rows: &[LocalPathRow], cx: &App) -> AnyElement {
                         .text_color(cx.theme().muted_foreground)
                         .child(SharedString::from(tr!(row.label_key))),
                 )
-                .child(div().text_sm().child(SharedString::from(row.path.clone())))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .child(SharedString::from(row.path.clone())),
+                )
                 .into_any_element()
         }))
         .child(

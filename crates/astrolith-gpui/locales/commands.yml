@@ -30,7 +30,7 @@ commands:
       zh-CN: "Astrolith"
       ja: "Astrolith"
     open_recent:
-      en: "Open Recent"
+      en: "Open recent"
       zh-CN: "打开最近项目"
       ja: "最近のプロジェクトを開く"
     no_recent_projects:
@@ -80,9 +80,9 @@ commands:
       zh-CN: "打开项目…"
       ja: "プロジェクトを開く…"
     manage_recent_projects:
-      en: "Manage Recent Projects…"
-      zh-CN: "管理最近项目…"
-      ja: "最近のプロジェクトを管理…"
+      en: "Recent projects…"
+      zh-CN: "最近的项目…"
+      ja: "最近のプロジェクト…"
     reload_collections:
       en: "Reload collections"
       zh-CN: "重新加载集合"
@@ -100,21 +100,21 @@ commands:
       zh-CN: "在 IDE 中打开文件"
       ja: "ファイルを IDE で開く"
     new_file:
-      en: "New file"
-      zh-CN: "新建文件"
-      ja: "新規ファイル"
+      en: "New entry…"
+      zh-CN: "新建条目…"
+      ja: "新規エントリ…"
     duplicate_file:
       en: "Duplicate file"
       zh-CN: "创建文件副本"
-      ja: "ファイルを複製"
+      ja: "エントリを複製"
     rename_or_move_file:
       en: "Rename or move file…"
       zh-CN: "重命名或移动文件…"
-      ja: "ファイル名の変更または移動…"
+      ja: "エントリ名の変更または移動…"
     move_file_to_trash:
-      en: "Move file to Trash…"
-      zh-CN: "将文件移至回收站…"
-      ja: "ファイルをゴミ箱に移動…"
+      en: "Move file to trash…"
+      zh-CN: "将文件移至废纸篓…"
+      ja: "エントリをゴミ箱に移動…"
     reveal_in_file_manager:
       en: "Reveal in file manager"
       zh-CN: "在文件管理器中显示"
@@ -176,7 +176,7 @@ commands:
       zh-CN: "转到行…"
       ja: "行へ移動…"
     content_finder:
-      en: "Content Finder…"
+      en: "Content finder…"
       zh-CN: "内容查找器…"
       ja: "コンテンツファインダー…"
     select_next_occurrence:
@@ -230,7 +230,7 @@ commands:
     focus_mode:
       en: "Focus mode"
       zh-CN: "专注模式"
-      ja: "集中モード"
+      ja: "フォーカスモード"
     typewriter_mode:
       en: "Typewriter mode"
       zh-CN: "打字机模式"
@@ -258,7 +258,7 @@ commands:
     preferences:
       en: "Preferences…"
       zh-CN: "偏好设置…"
-      ja: "設定…"
+      ja: "環境設定…"
     toggle_files:
       en: "Toggle files"
       zh-CN: "切换文件栏"
@@ -271,6 +271,10 @@ commands:
       en: "Toggle preview"
       zh-CN: "切换预览"
       ja: "プレビューを切り替え"
+    toggle_source_control:
+      en: "Source control"
+      zh-CN: "源代码管理"
+      ja: "ソース管理"
     toggle_terminal:
       en: "Toggle terminal"
       zh-CN: "切换终端"
@@ -286,7 +290,7 @@ commands:
     open_preview_in_browser:
       en: "Open preview in browser"
       zh-CN: "在浏览器中打开预览"
-      ja: "ブラウザーでプレビューを開く"
+      ja: "ブラウザでプレビューを開く"
     restart_preview_server:
       en: "Restart preview server"
       zh-CN: "重启预览服务器"
@@ -323,18 +327,22 @@ commands:
       en: "Enter full screen"
       zh-CN: "进入全屏"
       ja: "全画面表示"
+    exit_full_screen:
+      en: "Exit full screen"
+      zh-CN: "退出全屏"
+      ja: "全画面表示を終了"
     user_guide:
-      en: "User guide"
-      zh-CN: "用户指南"
-      ja: "ユーザーガイド"
+      en: "User guide…"
+      zh-CN: "用户指南…"
+      ja: "ユーザーガイド…"
     keyboard_shortcuts:
-      en: "Keyboard shortcuts"
-      zh-CN: "键盘快捷键"
-      ja: "キーボードショートカット"
+      en: "Keyboard shortcuts…"
+      zh-CN: "键盘快捷键…"
+      ja: "キーボードショートカット…"
     privacy_and_local_data:
-      en: "Privacy and local data"
-      zh-CN: "隐私与本地数据"
-      ja: "プライバシーとローカルデータ"
+      en: "Privacy and local data…"
+      zh-CN: "隐私与本地数据…"
+      ja: "プライバシーとローカルデータ…"
     about:
       en: "About Astrolith"
       zh-CN: "关于 Astrolith"
@@ -398,7 +406,7 @@ commands:
       ja: "校正表示をすべて非表示"
   collection:
     open:
-      en: "Open Collection: %{name}"
+      en: "Open collection: %{name}"
       zh-CN: "打开集合：%{name}"
       ja: "コレクションを開く: %{name}"
   build:
@@ -416,7 +424,7 @@ commands:
       preferences:
         en: "Preferences and project registry"
         zh-CN: "偏好设置与项目注册表"
-        ja: "設定とプロジェクトレジストリ"
+        ja: "環境設定とプロジェクトレジストリ"
       recovery:
         en: "Unsaved-edit recovery"
         zh-CN: "未保存编辑的恢复数据"
@@ -444,4 +452,4 @@ commands:
       delete_warning:
         en: "Quit Astrolith before deleting these directories. The user privacy page documents what each one contains and how to remove it; Preferences → Advanced → Reset All removes only preferences and the registry."
         zh-CN: "删除这些目录之前请先退出 Astrolith。用户隐私页面说明了每个目录包含的内容以及如何删除；偏好设置 → 高级 → 全部重置只会删除偏好设置和注册表。"
-        ja: "これらのディレクトリを削除する前に Astrolith を終了してください。各ディレクトリの内容と削除方法はユーザープライバシーページに記載されています。設定 → 詳細設定 → すべてリセットでは、設定とレジストリのみが削除されます。"
+        ja: "これらのディレクトリを削除する前に Astrolith を終了してください。各ディレクトリの内容と削除方法はユーザープライバシーページに記載されています。環境設定 → 詳細設定 → すべてリセットでは、設定とレジストリのみが削除されます。"
