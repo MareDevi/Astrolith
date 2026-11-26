@@ -254,19 +254,7 @@ pub(crate) fn shortcuts_body(groups: &[(String, Vec<ShortcutRow>)], cx: &App) ->
                     .gap_4()
                     .text_xs()
                     .child(SharedString::from(row.label.clone()))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().tab_bar)
-                            .px_1p5()
-                            .py_0p5()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_color(cx.theme().muted_foreground)
-                            .child(SharedString::from(row.keys.clone())),
-                    )
+                    .child(crate::ui::kbd_hint(&row.keys, cx))
                     .into_any_element()
             }));
             elements

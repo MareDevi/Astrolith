@@ -38,7 +38,7 @@ impl PaletteAction {
     fn element_id(&self) -> SharedString {
         match self {
             PaletteAction::Command(command) => {
-                SharedString::from(format!("command-palette-command-{}", command.label()))
+                SharedString::from(format!("command-palette-command-{command:?}"))
             }
             PaletteAction::RecentProject(id) => {
                 SharedString::from(format!("command-palette-recent-{id}"))
@@ -340,7 +340,7 @@ impl Render for CommandPalette {
                             row.child(
                                 div()
                                     .flex_shrink_0()
-                                    .rounded_sm()
+                                    .rounded(crate::ui::radius_sm(cx))
                                     .border_1()
                                     .border_color(cx.theme().border)
                                     .bg(cx.theme().tab_bar)

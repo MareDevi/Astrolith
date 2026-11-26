@@ -66,6 +66,10 @@ shell:
       en: Open a project, then choose an entry from the library to begin writing.
       zh-CN: 打开项目，然后从资料库中选择一个条目开始写作。
       ja: プロジェクトを開き、ライブラリからエントリを選んで執筆を始めましょう。
+    document_project_ready:
+      en: Choose an entry from the library to begin writing.
+      zh-CN: 从资料库中选择一个条目开始写作。
+      ja: ライブラリからエントリを選んで執筆を始めましょう。
   editor:
     source_file_editable:
       en: Source file, editable

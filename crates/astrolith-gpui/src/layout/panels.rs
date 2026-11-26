@@ -584,16 +584,11 @@ impl Render for WorkspacePanel {
                 }
                 if let Some(image) = preview_image.filter(|_| !code) {
                     body = body.child(
-                        div()
+                        crate::ui::popover_surface(cx)
                             .absolute()
                             .bottom(rems(0.75))
                             .right(rems(0.75))
                             .p_1()
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().popover)
-                            .shadow_lg()
                             .child(
                                 img(image)
                                     .max_w(rems(22.5))

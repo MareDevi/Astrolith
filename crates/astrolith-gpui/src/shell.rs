@@ -73,10 +73,10 @@ use gpui_kit::component::{
     tooltip::Tooltip,
 };
 use gpui_kit::{
-    Animation, AnimationExt as _, App, AppContext, Bounds, Context, Entity, ExternalPaths,
-    FocusHandle, Focusable, IntoElement, PathPromptOptions, Pixels, Render, ScrollHandle,
-    SharedString, Subscription, Task, TestSupportExt, WeakFocusHandle, Window, WindowBounds,
-    WindowOptions, deferred, div, point, prelude::*, px, rems, size,
+    Animation, AnimationExt as _, AnyElement, App, AppContext, Bounds, Context, Entity,
+    ExternalPaths, FocusHandle, Focusable, IntoElement, PathPromptOptions, Pixels, Render,
+    ScrollHandle, SharedString, Subscription, Task, TestSupportExt, WeakFocusHandle, Window,
+    WindowBounds, WindowOptions, deferred, div, point, prelude::*, px, rems, size,
 };
 
 /// Latest global and project snapshots, flushed by the quit observer.
@@ -672,6 +672,9 @@ impl Shell {
                     .update(cx, |terminal, cx| terminal.attach(&root, cx));
                 this.sync_terminal_activity(window, cx);
                 this.finish_pending_entry(window, cx);
+                // The Writing surface must stop asking for a project as soon as
+                // one opens, before any entry or store load resolves.
+                this.sync_document_empty_copy(cx);
             },
         ));
         // Build's file explorer resolves non-editable project files here, so the
@@ -1484,7 +1487,7 @@ impl Shell {
                         .child(tr!("shell.update.checking")),
                 );
             }
-            let mut footer = div().h_flex().w_full().justify_end().gap_2();
+            let mut footer: Vec<AnyElement> = Vec::new();
             if let Some(release) = status.release() {
                 body = body
                     .child(
@@ -1515,25 +1518,27 @@ impl Shell {
                             .child(tr!("shell.update.checksum", hash = release.sha256)),
                     );
                 let download = release.artifact_url.clone();
-                footer = footer.child(
+                footer.push(
                     Button::new("update-download")
                         .small()
                         .outline()
                         .label(tr!("shell.update.download"))
-                        .on_click(move |_, _, cx| cx.open_url(&download)),
+                        .on_click(move |_, _, cx| cx.open_url(&download))
+                        .into_any_element(),
                 );
                 let page = release.page.clone();
-                footer = footer.child(
+                footer.push(
                     Button::new("update-release-page")
                         .small()
                         .outline()
                         .label(tr!("shell.update.release_page"))
-                        .on_click(move |_, _, cx| cx.open_url(&page)),
+                        .on_click(move |_, _, cx| cx.open_url(&page))
+                        .into_any_element(),
                 );
                 if matches!(&status, update::Status::Available(_)) {
                     let version = release.version.to_string();
                     let skip_owner = owner.clone();
-                    footer = footer.child(
+                    footer.push(
                         Button::new("update-skip-version")
                             .small()
                             .ghost()
@@ -1542,7 +1547,8 @@ impl Shell {
                                 let _ = skip_owner
                                     .update(cx, |this, cx| this.skip_update_version(&version, cx));
                                 window.close_dialog(cx);
-                            }),
+                            })
+                            .into_any_element(),
                     );
                 }
             }
@@ -1550,7 +1556,7 @@ impl Shell {
                 .title(title)
                 .w(rems(32.5).to_pixels(window.rem_size()))
                 .child(body)
-                .footer(footer)
+                .footer(crate::ui::dialog_footer(footer))
         });
     }
 
@@ -2223,28 +2229,26 @@ impl Shell {
                     .border_color(cx.theme().border)
                     .px_2()
                     .child(
-                        Button::new("build-source-control")
-                            .small()
-                            .ghost()
-                            .icon(IconName::GitBranch)
-                            .tooltip(command_tooltip(CommandId::ToggleSourceControl))
-                            .accessibility_label(tr!("shell.git.accessibility"))
-                            .selected(self.git_open)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.toggle_git(window, cx)),
-                            ),
+                        crate::ui::icon_button_with_shortcut(
+                            "build-source-control",
+                            IconName::GitBranch,
+                            tr!("shell.git.accessibility"),
+                            help::formatted_shortcut(CommandId::ToggleSourceControl).as_deref(),
+                        )
+                        .selected(self.git_open)
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_git(window, cx))),
                     )
                     .child(
-                        Button::new("build-terminal")
-                            .small()
-                            .ghost()
-                            .icon(IconName::Terminal)
-                            .tooltip(tr!("shell.panel.terminal"))
-                            .accessibility_label(tr!("shell.tabs.toggle_terminal"))
-                            .selected(terminal_open)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx)),
-                            ),
+                        crate::ui::icon_button_with_shortcut(
+                            "build-terminal",
+                            IconName::Terminal,
+                            tr!("shell.tabs.toggle_terminal"),
+                            help::formatted_shortcut(CommandId::ToggleTerminal).as_deref(),
+                        )
+                        .selected(terminal_open)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx)),
+                        ),
                     ),
             )
             .with_animation(
@@ -2711,36 +2715,11 @@ impl Shell {
         let mut body = div().v_flex().gap_3().p_4().min_w_0();
         if let Some(error) = &self.git_error {
             body = body.child(
-                div()
-                    .id("git-error")
-                    .test_support()
-                    .h_flex()
-                    .items_start()
-                    .gap_2()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().danger.opacity(0.4))
-                    .bg(cx.theme().danger.opacity(0.08))
-                    .p_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_xs()
-                            .text_color(cx.theme().danger)
-                            .child(error.clone()),
-                    )
-                    .child(
-                        Button::new("git-error-dismiss")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::X)
-                            .tooltip(tr!("shell.git.dismiss_error"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.git_error = None;
-                                cx.notify();
-                            })),
-                    ),
+                crate::ui::inline_notice("git-error", crate::ui::NoticeTone::Danger, error.clone())
+                    .on_close(cx.listener(|this, _, _, cx| {
+                        this.git_error = None;
+                        cx.notify();
+                    })),
             );
         }
         match status {
@@ -3031,6 +3010,24 @@ impl Shell {
                     ),
             );
         }
+        let mut git_actions = Vec::new();
+        if self.git_busy {
+            git_actions.push(Spinner::new().xsmall().into_any_element());
+        }
+        git_actions.push(
+            Button::new("git-refresh")
+                .small()
+                .ghost()
+                .icon(IconName::RefreshCw)
+                .tooltip(tr!("shell.git.refresh"))
+                .accessibility_label(tr!("shell.git.refresh_accessibility"))
+                .disabled(self.git_busy)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.project
+                        .update(cx, |project, cx| project.refresh_git(cx))
+                }))
+                .into_any_element(),
+        );
         let surface = div()
             .id("git-inspector-surface")
             .test_support()
@@ -3048,62 +3045,12 @@ impl Shell {
             .bg(cx.theme().popover)
             .opacity(presence.progress)
             .shadow_xl()
-            .child(
-                div()
-                    .v_flex()
-                    .flex_shrink_0()
-                    .gap_0p5()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .h_flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .v_flex()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_semibold()
-                                            .child(tr!("shell.git.title")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(project_name),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h_flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .when(self.git_busy, |row| row.child(Spinner::new().xsmall()))
-                                    .child(
-                                        Button::new("git-refresh")
-                                            .small()
-                                            .ghost()
-                                            .icon(IconName::RefreshCw)
-                                            .tooltip(tr!("shell.git.refresh"))
-                                            .accessibility_label(tr!(
-                                                "shell.git.refresh_accessibility"
-                                            ))
-                                            .disabled(self.git_busy)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.project.update(cx, |project, cx| {
-                                                    project.refresh_git(cx)
-                                                })
-                                            })),
-                                    ),
-                            ),
-                    ),
-            )
+            .child(crate::ui::panel_header(
+                tr!("shell.git.title"),
+                Some(project_name),
+                git_actions,
+                cx,
+            ))
             .child(scroll.child(body));
         let owner = cx.weak_entity();
         let sheet = Sheet::new(cx)
@@ -3286,28 +3233,12 @@ impl Shell {
             .bg(cx.theme().popover)
             .opacity(presence.progress)
             .shadow_xl()
-            .child(
-                div()
-                    .v_flex()
-                    .flex_shrink_0()
-                    .gap_0p5()
-                    .px_4()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .child(tr!("shell.inspector.title")),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(subtitle),
-                    ),
-            )
+            .child(crate::ui::panel_header(
+                tr!("shell.inspector.title"),
+                Some(subtitle.into()),
+                Vec::new(),
+                cx,
+            ))
             .child(
                 div()
                     .v_flex()
@@ -4937,48 +4868,42 @@ impl Render for Shell {
                                             .min_w_0()
                                             .justify_end()
                                             .child(
-                                                Button::new("command-palette")
-                                                    .small()
-                                                    .ghost()
-                                                    .icon(IconName::Search)
-                                                    .tooltip(command_tooltip(
+                                                crate::ui::icon_button_with_shortcut(
+                                                    "command-palette",
+                                                    IconName::Search,
+                                                    CommandId::OpenPalette.label(),
+                                                    help::formatted_shortcut(
                                                         CommandId::OpenPalette,
-                                                    ))
-                                                    .accessibility_label(
-                                                        CommandId::OpenPalette.label(),
                                                     )
-                                                    .track_focus(&self.palette_focus)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.palette_focus.focus(window, cx);
-                                                            this.execute(
-                                                                CommandId::OpenPalette,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
+                                                    .as_deref(),
+                                                )
+                                                .track_focus(&self.palette_focus)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.palette_focus.focus(window, cx);
+                                                    this.execute(
+                                                        CommandId::OpenPalette,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                })),
                                             )
                                             .child(
-                                                Button::new("open-preferences")
-                                                    .small()
-                                                    .ghost()
-                                                    .icon(IconName::Settings)
-                                                    .tooltip(command_tooltip(
+                                                crate::ui::icon_button_with_shortcut(
+                                                    "open-preferences",
+                                                    IconName::Settings,
+                                                    CommandId::OpenPreferences.label(),
+                                                    help::formatted_shortcut(
                                                         CommandId::OpenPreferences,
-                                                    ))
-                                                    .accessibility_label(
-                                                        CommandId::OpenPreferences.label(),
                                                     )
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.execute(
-                                                                CommandId::OpenPreferences,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
+                                                    .as_deref(),
+                                                )
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.execute(
+                                                        CommandId::OpenPreferences,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                })),
                                             ),
                                     ),
                             ),
@@ -5009,7 +4934,10 @@ fn document_empty_key(mode: WorkspaceMode, has_project: bool) -> &'static str {
     match (mode, has_project) {
         (WorkspaceMode::Build, true) => "shell.empty.document_build_file",
         (WorkspaceMode::Build, false) => "shell.empty.document_build_no_project",
-        (WorkspaceMode::Writing | WorkspaceMode::Preview, _) => "shell.empty.document_project",
+        (WorkspaceMode::Writing | WorkspaceMode::Preview, true) => {
+            "shell.empty.document_project_ready"
+        }
+        (WorkspaceMode::Writing | WorkspaceMode::Preview, false) => "shell.empty.document_project",
     }
 }
 
@@ -5019,14 +4947,6 @@ fn mode_label(mode: WorkspaceMode) -> String {
         WorkspaceMode::Writing => tr!("shell.mode.writing"),
         WorkspaceMode::Build => tr!("shell.mode.build"),
         WorkspaceMode::Preview => tr!("shell.mode.preview"),
-    }
-}
-
-/// A command label with its platform-formatted shortcut, when it has one.
-fn command_tooltip(command: CommandId) -> SharedString {
-    match help::formatted_shortcut(command) {
-        Some(shortcut) => SharedString::from(format!("{} ({shortcut})", command.label())),
-        None => SharedString::from(command.label()),
     }
 }
 
