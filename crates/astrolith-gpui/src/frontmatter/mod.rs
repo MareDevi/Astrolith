@@ -31,19 +31,19 @@ use gpui_kit::component::{
     ActiveTheme, Icon, Sizable, StyledExt,
     button::{Button, ButtonVariants},
     calendar::Date,
-    checkbox::Checkbox,
     date_picker::{DatePicker, DatePickerEvent, DatePickerState, DateTime},
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
-    menu::{DropdownMenu, PopupMenuItem},
+    switch::Switch,
 };
 use gpui_kit::{
-    AnyElement, App, AppContext, Context, Entity, EventEmitter, IntoElement, ObjectFit,
-    PathPromptOptions, Render, SharedString, Subscription, TestSupportExt, Window, div, img,
-    prelude::*, px,
+    AnyElement, App, AppContext, Context, ElementId, Entity, EventEmitter, Hsla, IntoElement,
+    ObjectFit, PathPromptOptions, Render, SharedString, Subscription, TestSupportExt, Window, div,
+    img, prelude::*, rems,
 };
 
 use crate::editor::image_preview::{self, PreviewSource};
 use crate::runtime;
+use crate::ui;
 use serde_json::{Map, Value};
 
 pub use fields::{
@@ -430,6 +430,10 @@ pub struct FrontmatterForm {
     path_mode: astrolith_core::preferences::ImagePathMode,
     load_error: Option<SharedString>,
     notice: Option<SharedString>,
+    notice_tone: ui::NoticeTone,
+    /// Inline validation message per field path, cleared by a valid edit or a
+    /// document reload.
+    validation: Vec<(SharedString, SharedString)>,
 }
 
 impl EventEmitter<FrontmatterEdit> for FrontmatterForm {}
@@ -447,6 +451,24 @@ impl FrontmatterForm {
             path_mode: astrolith_core::preferences::ImagePathMode::Relative,
             load_error: None,
             notice: None,
+            notice_tone: ui::NoticeTone::Info,
+            validation: Vec::new(),
+        }
+    }
+
+    /// Show one inline notice above the form.
+    fn set_notice(&mut self, tone: ui::NoticeTone, message: SharedString, cx: &mut Context<Self>) {
+        self.notice = Some(message);
+        self.notice_tone = tone;
+        cx.notify();
+    }
+
+    /// Record or clear the inline validation message for one field.
+    fn set_validation(&mut self, path: &str, message: Option<SharedString>) {
+        self.validation.retain(|(known, _)| known.as_ref() != path);
+        if let Some(message) = message {
+            self.validation
+                .push((SharedString::from(path.to_owned()), message));
         }
     }
 
@@ -473,6 +495,7 @@ impl FrontmatterForm {
         self.assets = document.assets;
         self.path_mode = document.path_mode;
         self.notice = None;
+        self.validation.clear();
         match FrontmatterEditor::new(document.schema, document.mappings, document.text) {
             Ok(editor) => {
                 self.load_error = None;
@@ -496,22 +519,30 @@ impl FrontmatterForm {
         self.rows.clear();
         self.load_error = None;
         self.notice = None;
+        self.validation.clear();
         cx.notify();
     }
 
     /// Apply a raw edit at `path` and emit the document edit.
     pub fn apply_value(&mut self, path: &str, raw: &str, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor.as_mut() else {
-            return;
-        };
-        let Some(control) = editor.control(path).cloned() else {
+        let Some(control) = self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.control(path))
+            .cloned()
+        else {
             return;
         };
         if !control.editable {
             return;
         }
         if matches!(control.kind, ControlKind::RawYaml { .. }) {
-            match editor.set_value(path, raw) {
+            let outcome = self
+                .editor
+                .as_mut()
+                .expect("the editor exists while it is edited")
+                .set_value(path, raw);
+            match outcome {
                 Ok(_) => {
                     cx.emit(FrontmatterEdit::Raw {
                         path: path.to_owned(),
@@ -519,19 +550,32 @@ impl FrontmatterForm {
                     });
                     self.sync_rows(cx);
                 }
-                Err(error) => self.notice = Some(SharedString::from(error)),
+                Err(error) => {
+                    self.set_notice(ui::NoticeTone::Danger, SharedString::from(error), cx)
+                }
             }
             cx.notify();
             return;
         }
-        let Ok(value) = fields::parse_value(&control.kind, raw) else {
-            return;
+        let value = match fields::parse_value(&control.kind, raw) {
+            Ok(value) => value,
+            Err(_) => {
+                self.set_validation(path, Some(validation_message(&control.kind, raw)));
+                cx.notify();
+                return;
+            }
         };
-        if let Err(error) = editor.set_value(path, raw) {
-            self.notice = Some(SharedString::from(error));
+        if let Err(error) = self
+            .editor
+            .as_mut()
+            .expect("the editor exists while it is edited")
+            .set_value(path, raw)
+        {
+            self.set_notice(ui::NoticeTone::Danger, SharedString::from(error), cx);
             cx.notify();
             return;
         }
+        self.set_validation(path, None);
         cx.emit(FrontmatterEdit::Scalar {
             path: path.to_owned(),
             value,
@@ -554,8 +598,7 @@ impl FrontmatterForm {
         }
         let index = editor.items(path).len();
         if let Err(error) = editor.add_item(path, raw) {
-            self.notice = Some(SharedString::from(error));
-            cx.notify();
+            self.set_notice(ui::NoticeTone::Danger, SharedString::from(error), cx);
             return;
         }
         cx.emit(FrontmatterEdit::AddItem {
@@ -573,8 +616,7 @@ impl FrontmatterForm {
             return;
         };
         if let Err(error) = editor.remove_item(path, index) {
-            self.notice = Some(SharedString::from(error));
-            cx.notify();
+            self.set_notice(ui::NoticeTone::Danger, SharedString::from(error), cx);
             return;
         }
         cx.emit(FrontmatterEdit::RemoveItem {
@@ -591,8 +633,7 @@ impl FrontmatterForm {
             return;
         };
         if let Err(error) = editor.remove_field(path) {
-            self.notice = Some(SharedString::from(error));
-            cx.notify();
+            self.set_notice(ui::NoticeTone::Danger, SharedString::from(error), cx);
             return;
         }
         cx.emit(FrontmatterEdit::Remove {
@@ -625,8 +666,11 @@ impl FrontmatterForm {
         };
         let slug = slugify(&title);
         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(slug));
-        self.notice = Some(SharedString::from(tr!("frontmatter.notice.slug_copied")));
-        cx.notify();
+        self.set_notice(
+            ui::NoticeTone::Info,
+            SharedString::from(tr!("frontmatter.notice.slug_copied")),
+            cx,
+        );
     }
 
     /// Apply a project-relative image path through a normal scalar edit.
@@ -699,6 +743,15 @@ fn read_only_label(control: &FieldControl, is_object: bool) -> Option<SharedStri
         "frontmatter.field.read_only",
         reason = refusal
     )))
+}
+
+/// Inline message for a raw value that fails to parse as a scalar.
+fn validation_message(kind: &ControlKind, raw: &str) -> SharedString {
+    if matches!(kind, ControlKind::Integer) {
+        SharedString::from(tr!("frontmatter.error.invalid_integer", value = raw))
+    } else {
+        SharedString::from(tr!("frontmatter.error.invalid_number", value = raw))
+    }
 }
 
 fn build_rows(
@@ -889,14 +942,16 @@ impl Render for FrontmatterForm {
                 .p_4()
                 .child(
                     div()
-                        .h_flex()
-                        .items_center()
-                        .gap_2()
-                        .text_sm()
-                        .child(Icon::new(IconName::TriangleAlert))
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
                         .child(tr!("frontmatter.form.load_error_title")),
                 )
-                .child(div().text_xs().text_color(cx.theme().danger).child(error))
+                .child(ui::inline_notice(
+                    "frontmatter-load-error",
+                    ui::NoticeTone::Danger,
+                    error,
+                ))
                 .child(
                     div()
                         .text_xs()
@@ -909,28 +964,23 @@ impl Render for FrontmatterForm {
         let Some(editor) = self.editor.as_ref() else {
             return div()
                 .id("frontmatter-form")
+                .size_full()
                 .v_flex()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .p_6()
-                .text_center()
-                .child(
-                    Icon::new(IconName::SlidersHorizontal)
-                        .size_6()
-                        .text_color(cx.theme().muted_foreground),
-                )
-                .child(div().text_sm().child(tr!("frontmatter.form.empty_title")))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("frontmatter.form.empty_hint")),
-                )
+                .child(ui::empty_state(
+                    "frontmatter-empty",
+                    IconName::SlidersHorizontal,
+                    tr!("frontmatter.form.empty_title"),
+                    tr!("frontmatter.form.empty_hint"),
+                    None,
+                    cx,
+                ))
                 .test_support()
                 .into_any_element();
         };
-        let notice = self.notice.clone();
+        let notice = self
+            .notice
+            .clone()
+            .map(|message| (message, self.notice_tone));
         let images = RowImageContext {
             root: self.root.clone(),
             source: self.source.clone(),
@@ -938,23 +988,28 @@ impl Render for FrontmatterForm {
             path_mode: self.path_mode,
         };
         let mut rows: Vec<AnyElement> = Vec::with_capacity(self.rows.len());
-        for (index, row) in self.rows.iter().enumerate() {
-            rows.push(render_row(index, row, editor, &images, cx, window).into_any_element());
+        for row in &self.rows {
+            let validation = self
+                .validation
+                .iter()
+                .find(|(path, _)| path == &row.path)
+                .map(|(_, message)| message.clone());
+            rows.push(render_row(row, editor, &images, validation, cx, window).into_any_element());
         }
         // The inspector owns the scrolling region.
         div()
             .id("frontmatter-form")
             .v_flex()
             .w_full()
-            .when_some(notice, |form, notice| {
-                form.child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(notice),
-                )
+            .when_some(notice, |form, (message, tone)| {
+                form.child(div().px_3().pt_2().child(
+                    ui::inline_notice("frontmatter-notice", tone, message).on_close(cx.listener(
+                        |this, _, _window, cx| {
+                            this.notice = None;
+                            cx.notify();
+                        },
+                    )),
+                ))
             })
             .child(div().v_flex().gap_5().p_4().children(rows))
             .test_support()
@@ -962,81 +1017,73 @@ impl Render for FrontmatterForm {
     }
 }
 
+/// Field feedback never shares a colour: warnings stay amber, errors red.
+fn diagnostic_tone(severity: ValidationSeverity, cx: &App) -> Hsla {
+    match severity {
+        ValidationSeverity::Error => cx.theme().danger,
+        ValidationSeverity::Warning => cx.theme().warning,
+    }
+}
+
 fn render_row(
-    index: usize,
     row: &RowEditor,
     editor: &FrontmatterEditor,
     images: &RowImageContext,
+    validation: Option<SharedString>,
     cx: &mut Context<FrontmatterForm>,
     window: &Window,
 ) -> impl IntoElement {
     let _ = window;
     let control = &row.control;
-    let mut diagnostics = String::new();
+    let mut errors = String::new();
+    let mut warnings = String::new();
     for diagnostic in editor.diagnostics_for(&row.path) {
-        if !diagnostics.is_empty() {
-            diagnostics.push_str(" · ");
-        }
         let severity = match diagnostic.severity {
             ValidationSeverity::Error => tr!("frontmatter.severity.error"),
             ValidationSeverity::Warning => tr!("frontmatter.severity.warning"),
         };
-        diagnostics.push_str(&tr!(
+        let text = tr!(
             "frontmatter.field.diagnostic",
             severity = severity,
             message = diagnostic.message.as_str()
-        ));
-    }
-    let header = div()
-        .h_flex()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .child(
-            div()
-                .h_flex()
-                .items_center()
-                .gap_1()
-                .text_xs()
-                .when(control.required, |label| {
-                    label.child(div().text_color(cx.theme().warning).child("*"))
-                })
-                .font_family(crate::theme::display_font(cx))
-                .text_sm()
-                .child(row.label.clone()),
-        )
-        .child(
-            div()
-                .h_flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(kind_display(&control.kind)),
-                )
-                .when(row.control.removable, |group| {
-                    let path = row.path.clone();
-                    group.child(
-                        Button::new(("frontmatter-remove", index))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::X)
-                            .tooltip(tr!("frontmatter.field.remove_action"))
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.apply_remove_field(&path, cx);
-                            })),
-                    )
-                }),
         );
+        let target = match diagnostic.severity {
+            ValidationSeverity::Error => &mut errors,
+            ValidationSeverity::Warning => &mut warnings,
+        };
+        if !target.is_empty() {
+            target.push_str(" · ");
+        }
+        target.push_str(&text);
+    }
+    let remove = row.control.removable.then(|| {
+        let path = row.path.clone();
+        ui::icon_button(
+            ElementId::Name(format!("frontmatter-remove-{}", row.path).into()),
+            IconName::X,
+            tr!("frontmatter.field.remove_action"),
+        )
+        .on_click(cx.listener(move |this, _, _window, cx| {
+            this.apply_remove_field(&path, cx);
+        }))
+        .into_any_element()
+    });
+    let header = ui::form_field_header(
+        row.label.clone(),
+        control.required,
+        Some(kind_display(&control.kind)),
+        remove,
+        cx,
+    );
 
     let mut row_view = div()
-        .id(("frontmatter-field", index))
+        .id(ElementId::Name(
+            format!("frontmatter-field-{}", row.path).into(),
+        ))
         .v_flex()
         .gap_1p5()
         .when(row.hierarchy > 0, |view| {
-            view.pl(px((row.hierarchy * 12) as f32))
+            view.pl(rems(row.hierarchy as f32 * 0.75))
         })
         .child(header);
 
@@ -1049,17 +1096,10 @@ fn render_row(
         );
     }
 
-    if row.is_object {
-        row_view = row_view.child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(row.label.clone()),
-        );
-    } else if matches!(control.kind, ControlKind::Image) {
+    if matches!(control.kind, ControlKind::Image) {
         // The image control owns its path input, so it must render before the
         // generic text input built for it.
-        row_view = row_view.child(image_control(index, row, images, cx));
+        row_view = row_view.child(image_control(row, images, cx));
     } else if matches!(
         control.kind,
         ControlKind::Reference {
@@ -1067,20 +1107,20 @@ fn render_row(
             ..
         }
     ) {
-        row_view = row_view.child(reference_dropdown(index, row, editor, cx));
+        row_view = row_view.child(reference_dropdown(row, editor, cx));
     } else if let Some(area) = row.textarea.as_ref() {
         row_view = row_view.child(
             Textarea::new(area)
                 .small()
-                .h(px(96.))
+                .h_24()
                 .aria_label(tr!("frontmatter.field.aria", path = row.path.as_ref())),
         );
     } else if let Some(input) = row.input.as_ref() {
-        let field = Input::new(input)
-            .small()
-            .aria_label(tr!("frontmatter.field.aria", path = row.path.as_ref()));
-        let field = if row.is_title { field.large() } else { field };
-        row_view = row_view.child(field);
+        row_view = row_view.child(
+            Input::new(input)
+                .small()
+                .aria_label(tr!("frontmatter.field.aria", path = row.path.as_ref())),
+        );
     } else if let Some(picker) = row.date.as_ref() {
         row_view = row_view.child(DatePicker::new(picker).small());
     } else if matches!(control.kind, ControlKind::Boolean) {
@@ -1090,20 +1130,26 @@ fn render_row(
         );
         let toggle_path = row.path.clone();
         row_view = row_view.child(
-            Checkbox::new(("frontmatter-bool", index))
-                .checked(boolean_value)
-                .label(if boolean_value { "true" } else { "false" })
-                .on_click(cx.listener(move |this, checked: &bool, _window, cx| {
-                    let raw = if *checked { "true" } else { "false" };
-                    this.apply_value(&toggle_path, raw, cx);
-                })),
+            Switch::new(ElementId::Name(
+                format!("frontmatter-boolean-{}", row.path).into(),
+            ))
+            .checked(boolean_value)
+            .label(if boolean_value {
+                tr!("frontmatter.field.boolean_on")
+            } else {
+                tr!("frontmatter.field.boolean_off")
+            })
+            .on_change(cx.listener(move |this, checked: &bool, _window, cx| {
+                let raw = if *checked { "true" } else { "false" };
+                this.apply_value(&toggle_path, raw, cx);
+            })),
         );
     } else if !row.enum_values.is_empty() {
-        row_view = row_view.child(enum_dropdown(index, row, editor, cx));
+        row_view = row_view.child(enum_dropdown(row, editor, cx));
     } else if matches!(control.kind, ControlKind::Reference { multiple: true, .. }) {
-        row_view = row_view.child(reference_list(index, row, cx));
+        row_view = row_view.child(reference_list(row, cx));
     } else if matches!(control.kind, ControlKind::Tags) {
-        row_view = row_view.child(tag_control(index, row, cx));
+        row_view = row_view.child(tag_control(row, cx));
     } else if let Some(label) = read_only_label(control, row.is_object) {
         row_view = row_view.child(
             div()
@@ -1119,14 +1165,16 @@ fn render_row(
 
     if row.is_title {
         let actions = div().h_flex().items_center().gap_2().pt_1().child(
-            Button::new(("frontmatter-copy-slug", index))
-                .ghost()
-                .xsmall()
-                .label(tr!("frontmatter.field.copy_slug"))
-                .tooltip(tr!("frontmatter.field.copy_slug_tooltip"))
-                .on_click(cx.listener(|this, _, _window, cx| {
-                    this.copy_slug(cx);
-                })),
+            Button::new(ElementId::Name(
+                format!("frontmatter-copy-slug-{}", row.path).into(),
+            ))
+            .ghost()
+            .small()
+            .label(tr!("frontmatter.field.copy_slug"))
+            .tooltip(tr!("frontmatter.field.copy_slug_tooltip"))
+            .on_click(cx.listener(|this, _, _window, cx| {
+                this.copy_slug(cx);
+            })),
         );
         row_view = row_view.child(actions);
     }
@@ -1139,12 +1187,28 @@ fn render_row(
                 .child(hint),
         );
     }
-    if !diagnostics.is_empty() {
+    if let Some(validation) = validation {
         row_view = row_view.child(
             div()
                 .text_xs()
-                .text_color(cx.theme().danger)
-                .child(SharedString::from(diagnostics)),
+                .text_color(diagnostic_tone(ValidationSeverity::Error, cx))
+                .child(validation),
+        );
+    }
+    if !warnings.is_empty() {
+        row_view = row_view.child(
+            div()
+                .text_xs()
+                .text_color(diagnostic_tone(ValidationSeverity::Warning, cx))
+                .child(SharedString::from(warnings)),
+        );
+    }
+    if !errors.is_empty() {
+        row_view = row_view.child(
+            div()
+                .text_xs()
+                .text_color(diagnostic_tone(ValidationSeverity::Error, cx))
+                .child(SharedString::from(errors)),
         );
     }
     row_view
@@ -1168,189 +1232,150 @@ fn selected_option_label(options: &[(SharedString, SharedString)], current: &str
         })
 }
 
-fn enum_dropdown(
-    index: usize,
-    row: &RowEditor,
-    editor: &FrontmatterEditor,
+fn option_picker(
+    id: ElementId,
+    path: SharedString,
+    current: String,
+    options: &[(SharedString, SharedString)],
     cx: &mut Context<FrontmatterForm>,
 ) -> impl IntoElement {
-    let current = editor
-        .value(&row.path)
-        .map(scalar_display)
-        .unwrap_or_default();
-    let label = selected_option_label(&row.enum_values, &current);
-    let values = row.enum_values.clone();
-    let path = row.path.to_string();
-    let this = cx.weak_entity();
-    Button::new(("frontmatter-enum", index))
-        .xsmall()
-        .outline()
-        .label(label)
-        .dropdown_caret(true)
-        .dropdown_menu(move |menu, _window, _cx| {
-            let mut menu = menu;
-            for (display, raw) in &values {
-                let path = path.clone();
-                let raw = raw.to_string();
-                let this = this.clone();
-                menu = menu.item(PopupMenuItem::new(display.clone()).on_click(
-                    move |_, _window, cx: &mut App| {
-                        let raw = raw.clone();
-                        let path = path.clone();
-                        let _ = this.update(cx, |form, cx| form.apply_value(&path, &raw, cx));
-                    },
-                ));
-            }
-            menu
+    let label = selected_option_label(options, &current);
+    let choices = options
+        .iter()
+        .map(|(display, value)| {
+            ui::PickerOption::new(display.clone()).selected(value.as_ref() == current.as_str())
         })
-}
-
-fn reference_dropdown(
-    index: usize,
-    row: &RowEditor,
-    editor: &FrontmatterEditor,
-    cx: &mut Context<FrontmatterForm>,
-) -> impl IntoElement {
-    let current = editor
-        .value(&row.path)
-        .map(scalar_display)
-        .unwrap_or_default();
-    let label = selected_option_label(&row.reference_options, &current);
-    let options = row.reference_options.clone();
-    let path = row.path.to_string();
+        .collect::<Vec<_>>();
+    let values = options
+        .iter()
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    let disabled = values.is_empty();
+    let path = path.to_string();
     let this = cx.weak_entity();
-    Button::new(("frontmatter-reference", index))
-        .xsmall()
-        .outline()
-        .label(label)
-        .dropdown_caret(true)
-        .dropdown_menu(move |menu, _window, _cx| {
-            let mut menu = menu;
-            if options.is_empty() {
-                return menu.item(PopupMenuItem::label(tr!("frontmatter.list.no_entries")));
-            }
-            for (display, value) in &options {
-                let path = path.clone();
-                let value = value.to_string();
-                let this = this.clone();
-                menu = menu.item(PopupMenuItem::new(display.clone()).on_click(
-                    move |_, _window, cx: &mut App| {
-                        let value = value.clone();
-                        let path = path.clone();
-                        let _ = this.update(cx, |form, cx| form.apply_value(&path, &value, cx));
-                    },
-                ));
-            }
-            menu
-        })
-}
-
-fn reference_list(
-    index: usize,
-    row: &RowEditor,
-    cx: &mut Context<FrontmatterForm>,
-) -> impl IntoElement {
-    let path = row.path.to_string();
-    let this = cx.weak_entity();
-    let options = row.reference_options.clone();
-    let mut view = div().v_flex().gap_1();
-    if !row.items.is_empty() {
-        let chips = row
-            .items
-            .iter()
-            .map(|(item_index, item)| {
-                let path = path.clone();
-                let item_index = *item_index;
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_0p5()
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().muted)
-                    .text_xs()
-                    .child(item.clone())
-                    .child(
-                        Button::new(("frontmatter-chip-remove", index * 64 + item_index))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::X)
-                            .tooltip(tr!("frontmatter.list.remove_item"))
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.apply_remove_item(&path, item_index, cx);
-                            })),
-                    )
-            })
-            .collect::<Vec<_>>();
-        view = view.child(div().h_flex().flex_wrap().gap_1().children(chips));
-    }
-    view.child(
-        Button::new(("frontmatter-reference-add", index))
-            .xsmall()
-            .outline()
-            .label(tr!("frontmatter.list.add_reference"))
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _window, _cx| {
-                if options.is_empty() {
-                    return menu.item(PopupMenuItem::label(tr!("frontmatter.list.no_entries")));
-                }
-                let mut menu = menu;
-                for (display, value) in &options {
-                    let path = path.clone();
-                    let value = value.to_string();
-                    let this = this.clone();
-                    menu = menu.item(PopupMenuItem::new(display.clone()).on_click(
-                        move |_, _window, cx: &mut App| {
-                            let value = value.clone();
-                            let path = path.clone();
-                            let _ =
-                                this.update(cx, |form, cx| form.apply_add_item(&path, &value, cx));
-                        },
-                    ));
-                }
-                menu
-            }),
+    ui::picker_button_with(
+        id,
+        label,
+        choices,
+        disabled,
+        None,
+        move |index, _window, cx: &mut App| {
+            let Some(value) = values.get(index).cloned() else {
+                return;
+            };
+            let path = path.clone();
+            let _ = this.update(cx, |form, cx| form.apply_value(&path, value.as_ref(), cx));
+        },
     )
 }
 
-fn tag_control(
-    index: usize,
+fn enum_dropdown(
     row: &RowEditor,
+    editor: &FrontmatterEditor,
     cx: &mut Context<FrontmatterForm>,
 ) -> impl IntoElement {
-    let path = row.path.to_string();
+    let current = editor
+        .value(&row.path)
+        .map(scalar_display)
+        .unwrap_or_default();
+    option_picker(
+        ElementId::Name(format!("frontmatter-enum-{}", row.path).into()),
+        row.path.clone(),
+        current,
+        &row.enum_values,
+        cx,
+    )
+}
+
+fn reference_dropdown(
+    row: &RowEditor,
+    editor: &FrontmatterEditor,
+    cx: &mut Context<FrontmatterForm>,
+) -> impl IntoElement {
+    let current = editor
+        .value(&row.path)
+        .map(scalar_display)
+        .unwrap_or_default();
+    option_picker(
+        ElementId::Name(format!("frontmatter-reference-{}", row.path).into()),
+        row.path.clone(),
+        current,
+        &row.reference_options,
+        cx,
+    )
+}
+
+fn item_chips(
+    row: &RowEditor,
+    remove_label: SharedString,
+    cx: &mut Context<FrontmatterForm>,
+) -> impl IntoElement {
+    let mut chips = Vec::with_capacity(row.items.len());
+    for (occurrence, (item_index, item)) in row.items.iter().enumerate() {
+        let path = row.path.to_string();
+        let item_index = *item_index;
+        let label = item.clone();
+        let id = ElementId::Name(
+            format!("frontmatter-chip-{}-{}-{}", row.path, item, occurrence).into(),
+        );
+        let on_remove = cx.listener(move |this, _, _window, cx| {
+            this.apply_remove_item(&path, item_index, cx);
+        });
+        chips.push(
+            ui::removable_chip(id, label, remove_label.clone(), on_remove, cx).into_any_element(),
+        );
+    }
+    div().h_flex().flex_wrap().gap_1().children(chips)
+}
+
+fn reference_list(row: &RowEditor, cx: &mut Context<FrontmatterForm>) -> impl IntoElement {
     let mut view = div().v_flex().gap_1();
     if !row.items.is_empty() {
-        let chips = row
-            .items
-            .iter()
-            .map(|(item_index, item)| {
-                let path = path.clone();
-                let item_index = *item_index;
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_0p5()
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().muted)
-                    .text_xs()
-                    .child(item.clone())
-                    .child(
-                        Button::new(("frontmatter-chip-remove", index * 64 + item_index))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::X)
-                            .tooltip(tr!("frontmatter.list.remove_tag"))
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.apply_remove_item(&path, item_index, cx);
-                            })),
-                    )
-            })
-            .collect::<Vec<_>>();
-        view = view.child(div().h_flex().flex_wrap().gap_1().children(chips));
+        view = view.child(item_chips(
+            row,
+            SharedString::from(tr!("frontmatter.list.remove_item")),
+            cx,
+        ));
+    }
+    let choices = row
+        .reference_options
+        .iter()
+        .map(|(display, _)| ui::PickerOption::new(display.clone()))
+        .collect::<Vec<_>>();
+    let values = row
+        .reference_options
+        .iter()
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    let disabled = values.is_empty();
+    let path = row.path.to_string();
+    let this = cx.weak_entity();
+    view.child(ui::picker_button_with(
+        ElementId::Name(format!("frontmatter-reference-add-{}", row.path).into()),
+        tr!("frontmatter.list.add_reference"),
+        choices,
+        disabled,
+        Some(rems(16.)),
+        move |index, _window, cx: &mut App| {
+            let Some(value) = values.get(index).cloned() else {
+                return;
+            };
+            let path = path.clone();
+            let _ = this.update(cx, |form, cx| {
+                form.apply_add_item(&path, value.as_ref(), cx)
+            });
+        },
+    ))
+}
+
+fn tag_control(row: &RowEditor, cx: &mut Context<FrontmatterForm>) -> impl IntoElement {
+    let mut view = div().v_flex().gap_1();
+    if !row.items.is_empty() {
+        view = view.child(item_chips(
+            row,
+            SharedString::from(tr!("frontmatter.list.remove_tag")),
+            cx,
+        ));
     }
     if let Some(input) = row.add_input.as_ref() {
         view = view.child(Input::new(input).small().aria_label(tr!(
@@ -1399,7 +1424,6 @@ pub(crate) fn resolve_image_pick(
 }
 
 fn image_control(
-    index: usize,
     row: &RowEditor,
     images: &RowImageContext,
     cx: &mut Context<FrontmatterForm>,
@@ -1430,14 +1454,14 @@ fn image_control(
         .h_flex()
         .items_center()
         .justify_center()
-        .size(px(56.))
-        .rounded(cx.theme().radius)
+        .size(rems(3.5))
+        .rounded(ui::radius_sm(cx))
         .overflow_hidden()
         .border_1()
-        .border_color(cx.theme().window_border)
+        .border_color(cx.theme().border)
         .bg(cx.theme().muted);
     preview = match thumbnail {
-        Some(path) => preview.child(img(path).size(px(48.)).object_fit(ObjectFit::Contain)),
+        Some(path) => preview.child(img(path).size(rems(3.)).object_fit(ObjectFit::Contain)),
         None => preview.child(
             Icon::new(IconName::Image)
                 .small()
@@ -1445,19 +1469,15 @@ fn image_control(
         ),
     };
     if let Some(input) = row.input.as_ref() {
-        preview = div()
-            .h_flex()
-            .items_center()
-            .gap_2()
-            .child(preview)
-            .child(
-                div()
-                    .flex_1()
-                    .child(Input::new(input).small().aria_label(tr!(
-                        "frontmatter.field.image_path_aria",
-                        path = row.path.as_ref()
-                    ))),
-            );
+        preview = div().h_flex().items_center().gap_2().child(preview).child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(Input::new(input).small().aria_label(tr!(
+                    "frontmatter.field.image_path_aria",
+                    path = row.path.as_ref()
+                ))),
+        );
     }
     let mut actions = div().h_flex().gap_2();
     let pick_path = path.clone();
@@ -1465,73 +1485,84 @@ fn image_control(
     let pick_source = source.clone();
     let pick_assets = assets.clone();
     actions = actions.child(
-        Button::new(("frontmatter-image-pick", index))
-            .xsmall()
-            .outline()
-            .label(tr!("frontmatter.image.choose"))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                let _ = this;
-                let path = pick_path.clone();
-                let root = pick_root.clone();
-                let source = pick_source.clone();
-                let assets = pick_assets.clone();
-                let expected_source = source.clone();
-                let paths = cx.prompt_for_paths(PathPromptOptions {
-                    files: true,
-                    directories: false,
-                    multiple: false,
-                    prompt: Some(tr!("frontmatter.image.choose_prompt").into()),
+        Button::new(ElementId::Name(
+            format!("frontmatter-image-pick-{}", row.path).into(),
+        ))
+        .small()
+        .outline()
+        .label(tr!("frontmatter.image.choose"))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            let _ = this;
+            let path = pick_path.clone();
+            let root = pick_root.clone();
+            let source = pick_source.clone();
+            let assets = pick_assets.clone();
+            let expected_source = source.clone();
+            let paths = cx.prompt_for_paths(PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: Some(tr!("frontmatter.image.choose_prompt").into()),
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let Ok(Ok(Some(paths))) = paths.await else {
+                    return;
+                };
+                let Some(selected) = paths.into_iter().next() else {
+                    return;
+                };
+                let work = runtime::blocking(cx, move || {
+                    resolve_image_pick(
+                        root.clone(),
+                        source.clone(),
+                        assets.clone(),
+                        path_mode,
+                        selected,
+                    )
                 });
-                cx.spawn_in(window, async move |this, cx| {
-                    let Ok(Ok(Some(paths))) = paths.await else {
+                let result = work.await.and_then(|result| result);
+                let _ = this.update(cx, |form, cx| {
+                    if form.source != expected_source {
                         return;
-                    };
-                    let Some(selected) = paths.into_iter().next() else {
-                        return;
-                    };
-                    let work = runtime::blocking(cx, move || {
-                        resolve_image_pick(
-                            root.clone(),
-                            source.clone(),
-                            assets.clone(),
-                            path_mode,
-                            selected,
-                        )
-                    });
-                    let result = work.await.and_then(|result| result);
-                    let _ = this.update(cx, |form, cx| {
-                        if form.source != expected_source {
-                            return;
+                    }
+                    match result {
+                        Ok(value) => {
+                            form.set_image_path(&path, value, cx);
+                            form.set_notice(
+                                ui::NoticeTone::Success,
+                                SharedString::from(tr!("frontmatter.image.updated")),
+                                cx,
+                            );
                         }
-                        match result {
-                            Ok(value) => {
-                                form.set_image_path(&path, value, cx);
-                                form.notice =
-                                    Some(SharedString::from(tr!("frontmatter.image.updated")));
-                            }
-                            Err(error) => {
-                                form.notice = Some(SharedString::from(tr!(
+                        Err(error) => {
+                            form.set_notice(
+                                ui::NoticeTone::Danger,
+                                SharedString::from(tr!(
                                     "frontmatter.image.copy_failed",
                                     error = error
-                                )));
-                            }
+                                )),
+                                cx,
+                            );
                         }
-                        cx.notify();
-                    });
-                })
-                .detach();
-            })),
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        })),
     );
     if row.control.present {
         let path = path.clone();
         actions = actions.child(
-            Button::new(("frontmatter-image-clear", index))
-                .xsmall()
-                .ghost()
-                .label(tr!("frontmatter.image.clear"))
-                .on_click(cx.listener(move |this, _, _window, cx| {
-                    this.apply_remove_field(&path, cx);
-                })),
+            Button::new(ElementId::Name(
+                format!("frontmatter-image-clear-{}", row.path).into(),
+            ))
+            .small()
+            .ghost()
+            .label(tr!("frontmatter.image.clear"))
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.apply_remove_field(&path, cx);
+            })),
         );
     }
     div().v_flex().gap_2().child(preview).child(actions)

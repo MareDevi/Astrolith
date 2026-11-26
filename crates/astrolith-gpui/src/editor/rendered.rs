@@ -61,6 +61,8 @@ pub(crate) struct RenderedDocument {
     scroll: ScrollHandle,
     selection: Option<Selection>,
     drag_anchor: Option<Hit>,
+    /// The pointer rests on a link, so the pane shows the pointing hand.
+    link_hover: bool,
     auto_scroll: AutoScroll,
     /// Source offset and in-block pixel offset to restore after an update.
     pending_anchor: Option<(usize, f32)>,
@@ -114,6 +116,7 @@ impl RenderedDocument {
             scroll: ScrollHandle::new(),
             selection: None,
             drag_anchor: None,
+            link_hover: false,
             auto_scroll: AutoScroll::default(),
             pending_anchor: None,
             parse_task: None,
@@ -554,6 +557,7 @@ impl Render for RenderedDocument {
         if self.unsupported || self.text.is_empty() {
             return div()
                 .size_full()
+                .v_flex()
                 .child(crate::ui::empty_state(
                     "preview-empty",
                     gpui_kit::assets::IconName::Eye,
@@ -623,6 +627,7 @@ impl Render for RenderedDocument {
         let content = div()
             .id("rendered-preview-content")
             .size_full()
+            .cursor_text()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .child(
@@ -654,6 +659,13 @@ impl Render for RenderedDocument {
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if event.pressed_button != Some(MouseButton::Left) {
+                    let over_link = this.hit_at(event.position).is_some_and(|hit| {
+                        this.document.link_at(hit.block, hit.rendered).is_some()
+                    });
+                    if over_link != this.link_hover {
+                        this.link_hover = over_link;
+                        cx.notify();
+                    }
                     return;
                 }
                 let Some(anchor) = this.drag_anchor else {
@@ -687,8 +699,10 @@ impl Render for RenderedDocument {
                     cx.notify();
                 }),
             );
+        let focused = self.focus.is_focused(window);
         let root = div()
             .size_full()
+            .relative()
             .track_focus(&self.focus)
             .key_context("TextView")
             .capture_action(cx.listener(
@@ -755,7 +769,23 @@ impl Render for RenderedDocument {
             .overflow_hidden()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(content);
+            .when(self.link_hover, |root| root.cursor_pointer())
+            .when(focused, |root| {
+                root.border_1().border_color(cx.theme().selection)
+            })
+            .child(content)
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .bottom_0()
+                    .w(px(12.))
+                    .child(
+                        gpui_kit::base::Scrollbar::new(&self.scroll)
+                            .axis(gpui_kit::base::ScrollbarAxis::Vertical),
+                    ),
+            );
         root.into_any_element()
     }
 }

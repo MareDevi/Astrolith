@@ -16,18 +16,20 @@ use super::input_boundaries::{grapheme_boundary, word_boundary};
 use super::perf;
 use super::session::DocumentSession;
 use super::text_layout::source::{SourceLayout, SourceRuns, SourceStyle, SourceViewport};
+use crate::ui;
+use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{DiagnosticColors, DiagnosticEntry, DiagnosticSet, DiagnosticSeverity};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::highlighter::{HighlightTheme, SyntaxHighlighter};
 use gpui_kit::component::input::{self, EditorState, Input, InputEvent, InputState, Rope, RopeExt};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _};
 use gpui_kit::{
     AnyElement, App, Bounds, ClipboardItem, Context, Div, Element, ElementId, Entity,
     EntityInputHandler, Focusable, GlobalElementId, HighlightStyle, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Render, ScrollHandle, SharedString,
     Stateful, TestSupportExt, TextAlign, TextRun, UTF16Selection, UnderlineStyle, WeakEntity,
-    Window, div, fill, point, prelude::*, px, size,
+    Window, div, fill, point, prelude::*, px, rems, size,
 };
 use std::cell::RefCell;
 use std::ops::Range;
@@ -905,26 +907,28 @@ impl SourceSurface {
             editor.completion_menu_state().items[start..end].to_vec()
         };
         let theme = cx.theme();
-        let (popover, foreground, muted, active, border) = (
-            theme.popover,
+        let (foreground, muted, active, hover) = (
             theme.popover_foreground,
             theme.muted_foreground,
             theme.list_active,
-            theme.border,
+            theme.list_hover,
         );
         let mut rows = Vec::with_capacity(items.len());
         for (offset, item) in items.iter().enumerate() {
             let index = start + offset;
             let mut row = div()
-                .id(("completion-row", index as u64))
+                .id(ElementId::Name(
+                    format!("completion-row-{}", item.label).into(),
+                ))
                 .h(px(placement.row_height))
                 .w_full()
-                .px(px(6.))
-                .flex()
+                .px_1p5()
+                .h_flex()
                 .items_center()
                 .gap_2()
-                .rounded(cx.theme().radius)
+                .rounded(ui::radius_sm(cx))
                 .when(index == selected, |row| row.bg(active))
+                .hover(|row| row.bg(hover))
                 .child(
                     div()
                         .flex_1()
@@ -955,17 +959,15 @@ impl SourceSurface {
             rows.push(row.into_any_element());
         }
         Some(
-            div()
+            ui::popover_surface(cx)
                 .id("source-completion-menu")
                 .absolute()
                 .left(px(placement.left))
                 .top(px(placement.top))
                 .w(px(placement.width))
-                .py(px(COMPLETION_PADDING))
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(border)
-                .bg(popover)
+                .p_1()
+                .v_flex()
+                .gap_0p5()
                 .occlude()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .children(rows)
@@ -1264,20 +1266,14 @@ impl SourceSurface {
         cx: &App,
     ) -> AnyElement {
         let contents = hover_contents(hover);
-        let theme = cx.theme();
-        div()
+        ui::popover_surface(cx)
             .id("source-hover-popover")
             .absolute()
             .left(px(placement.left))
             .top(px(placement.top))
             .w(px(placement.width))
-            .px(px(8.))
-            .py(px(5.))
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .text_color(theme.popover_foreground)
+            .px_2()
+            .py_1p5()
             .text_size(px(placement.font_size))
             .child(TextView::markdown(("source-hover-text", anchor), contents).selectable(false))
             .into_any_element()
@@ -1342,24 +1338,26 @@ impl SourceSurface {
             editor.code_action_menu_state().items[start..end].to_vec()
         };
         let theme = cx.theme();
-        let (popover, foreground, active, border) = (
-            theme.popover,
+        let (foreground, active, hover) = (
             theme.popover_foreground,
             theme.list_active,
-            theme.border,
+            theme.list_hover,
         );
         let mut rows = Vec::with_capacity(items.len());
         for (offset, item) in items.iter().enumerate() {
             let index = start + offset;
             let row = div()
-                .id(("code-action-row", index as u64))
+                .id(ElementId::Name(
+                    format!("code-action-row-{}", item.action.title).into(),
+                ))
                 .h(px(placement.row_height))
                 .w_full()
-                .px(px(6.))
-                .flex()
+                .px_1p5()
+                .h_flex()
                 .items_center()
-                .rounded(cx.theme().radius)
+                .rounded(ui::radius_sm(cx))
                 .when(index == selected, |row| row.bg(active))
+                .hover(|row| row.bg(hover))
                 .child(
                     div()
                         .flex_1()
@@ -1380,17 +1378,15 @@ impl SourceSurface {
             rows.push(row.into_any_element());
         }
         Some(
-            div()
+            ui::popover_surface(cx)
                 .id("source-code-action-menu")
                 .absolute()
                 .left(px(placement.left))
                 .top(px(placement.top))
                 .w(px(placement.width))
-                .py(px(COMPLETION_PADDING))
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(border)
-                .bg(popover)
+                .p_1()
+                .v_flex()
+                .gap_0p5()
                 .occlude()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .children(rows)
@@ -1501,52 +1497,71 @@ impl SourceSurface {
         let theme = cx.theme();
         let replaceable = self.editor.read(cx).is_replaceable();
         let replace_mode = session.replace_mode && replaceable;
-        let matches = session.matcher.label();
+        let has_matches = !session.matcher.is_empty();
         let count = div()
             .flex_none()
+            .min_w(rems(4.5))
+            .text_right()
+            .font_family(theme.mono_font_family.clone())
             .text_size(px(11.))
-            .text_color(if session.matcher.is_empty() {
-                theme.muted_foreground
-            } else {
+            .text_color(if has_matches {
                 theme.foreground
+            } else {
+                theme.muted_foreground
             })
-            .child(SharedString::from(matches));
-        let button = |id: &'static str, label: &'static str| {
+            .child(SharedString::from(session.matcher.label()));
+        let previous = {
             let view = cx.entity();
-            let step = if id == "find-previous" { -1 } else { 1 };
-            let close = id == "find-close";
-            Button::new(id)
-                .small()
-                .ghost()
-                .label(label)
-                .on_click(move |_, window, cx| {
-                    let view = view.clone();
-                    if close {
-                        view.update(cx, |this, cx| this.close_find(window, cx));
-                    } else {
-                        view.update(cx, |this, cx| {
-                            this.find_step(step > 0, cx);
-                        });
-                    }
-                })
+            ui::icon_button(
+                "find-previous",
+                IconName::ChevronUp,
+                tr!("editor.source.find_previous"),
+            )
+            .disabled(!has_matches)
+            .on_click(move |_, _, cx| {
+                let view = view.clone();
+                view.update(cx, |this, cx| this.find_step(false, cx));
+            })
         };
-        let query = Input::new(&self.find_query)
-            .small()
-            .w(px(220.))
-            .aria_label(tr!("editor.source.find_in_document"));
+        let next = {
+            let view = cx.entity();
+            ui::icon_button(
+                "find-next",
+                IconName::ChevronDown,
+                tr!("editor.source.find_next"),
+            )
+            .disabled(!has_matches)
+            .on_click(move |_, _, cx| {
+                let view = view.clone();
+                view.update(cx, |this, cx| this.find_step(true, cx));
+            })
+        };
+        let close = {
+            let view = cx.entity();
+            ui::icon_button("find-close", IconName::X, tr!("editor.source.find_close")).on_click(
+                move |_, window, cx| {
+                    let view = view.clone();
+                    view.update(cx, |this, cx| this.close_find(window, cx));
+                },
+            )
+        };
         let row = div()
             .h_flex()
             .items_center()
             .gap_1()
-            .child(query)
+            .child(
+                Input::new(&self.find_query)
+                    .small()
+                    .w(rems(13.75))
+                    .aria_label(tr!("editor.source.find_in_document")),
+            )
             .child(count)
-            .child(button("find-previous", "↑"))
-            .child(button("find-next", "↓"))
-            .child(button("find-close", "×"));
+            .child(previous)
+            .child(next)
+            .child(close);
         let replace = replace_mode.then(|| {
-            let view = cx.entity();
-            let replace_one = view.clone();
-            let replace_all = view.clone();
+            let replace_one = cx.entity();
+            let replace_all = cx.entity();
             div()
                 .h_flex()
                 .items_center()
@@ -1554,7 +1569,7 @@ impl SourceSurface {
                 .child(
                     Input::new(&self.find_replace)
                         .small()
-                        .w(px(220.))
+                        .w(rems(13.75))
                         .aria_label(tr!("editor.source.replace_with")),
                 )
                 .child(
@@ -1562,6 +1577,7 @@ impl SourceSurface {
                         .small()
                         .ghost()
                         .label(tr!("editor.source.replace"))
+                        .disabled(!has_matches)
                         .on_click(move |_, window, cx| {
                             let view = replace_one.clone();
                             view.update(cx, |this, cx| this.replace_matches(false, window, cx));
@@ -1572,6 +1588,7 @@ impl SourceSurface {
                         .small()
                         .ghost()
                         .label(tr!("editor.source.replace_all"))
+                        .disabled(!has_matches)
                         .on_click(move |_, window, cx| {
                             let view = replace_all.clone();
                             view.update(cx, |this, cx| this.replace_matches(true, window, cx));
@@ -1579,20 +1596,15 @@ impl SourceSurface {
                 )
         });
         Some(
-            div()
+            ui::popover_surface(cx)
                 .id("source-find-bar")
                 .absolute()
-                .top(px(8.))
-                .right(px(8.))
+                .top_2()
+                .right_2()
                 .occlude()
                 .v_flex()
                 .gap_1()
-                .p(px(6.))
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.popover)
-                .text_color(theme.popover_foreground)
+                .p_1p5()
                 .on_action(cx.listener(|this, action: &input::Enter, _, cx| {
                     this.find_step(!action.shift, cx);
                     cx.stop_propagation();
@@ -1653,21 +1665,19 @@ impl SourceSurface {
         if let Some(code) = entry.code.as_ref() {
             body = body.child(
                 div()
-                    .mt(px(3.))
+                    .mt_1()
                     .text_size(px((placement.font_size - 2.).max(8.)))
                     .child(code.clone()),
             );
         }
-        div()
+        ui::popover_surface(cx)
             .id("source-diagnostic-popover")
             .absolute()
             .left(px(placement.left))
             .top(px(placement.top))
             .w(px(placement.width))
-            .px(px(8.))
-            .py(px(5.))
-            .rounded(cx.theme().radius)
-            .border_1()
+            .px_2()
+            .py_1p5()
             .border_color(border)
             .bg(background)
             .text_color(foreground)
@@ -2029,10 +2039,7 @@ impl Render for SourceSurface {
                         ranges: ranges.as_slice(),
                         current: *current,
                         active: selection_color,
-                        inactive: gpui_kit::Hsla {
-                            s: 0.1,
-                            ..selection_color
-                        },
+                        inactive: selection_color.opacity(0.45),
                     }),
             };
             let focus = self.search_reveal.unwrap_or(cursor);
@@ -2314,6 +2321,7 @@ impl Render for SourceSurface {
         let scroll_area = div()
             .id(("source-surface", self.editor.entity_id()))
             .size_full()
+            .cursor_text()
             .overflow_scroll()
             .track_scroll(&self.scroll)
             .child(canvas)
@@ -2356,7 +2364,19 @@ impl Render for SourceSurface {
             .id(("source-surface-root", self.editor.entity_id()))
             .size_full()
             .relative()
-            .child(scroll_area);
+            .child(scroll_area)
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .bottom_0()
+                    .w(px(12.))
+                    .child(
+                        gpui_kit::base::Scrollbar::new(&self.scroll)
+                            .axis(gpui_kit::base::ScrollbarAxis::Vertical),
+                    ),
+            );
         if let Some(popup) = popup {
             root = root.child(popup);
         }
@@ -3254,10 +3274,7 @@ mod tests {
                     ranges: &ranges,
                     current: 1,
                     active: selection,
-                    inactive: gpui_kit::Hsla {
-                        s: 0.1,
-                        ..selection
-                    },
+                    inactive: selection.opacity(0.45),
                 }),
             }
             .runs(0..7);
