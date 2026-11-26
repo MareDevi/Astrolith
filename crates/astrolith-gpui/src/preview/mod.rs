@@ -18,17 +18,20 @@ use astrolith_preview::{
     PreviewSession, PreviewSurface, PreviewTarget, RouteMapping, ServerStatus, StartupFailure,
     TargetChange, target_change,
 };
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable, StyledExt,
     button::{Button, ButtonVariants},
+    scroll::ScrollableElement,
+    spinner::Spinner,
 };
 use gpui_kit::{
     App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Task, Window, div,
-    prelude::*,
+    prelude::*, rems,
 };
 use url::Url;
 
-use crate::runtime;
+use crate::{runtime, ui};
 
 pub(crate) mod embedded;
 
@@ -340,7 +343,7 @@ impl PreviewPanel {
             pending_entry: None,
             task: None,
             exit_task: None,
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
         }
     }
 
@@ -383,6 +386,11 @@ impl PreviewPanel {
             self.phase(),
             PreviewPhase::Starting | PreviewPhase::Ready | PreviewPhase::Stopping
         )
+    }
+
+    /// Whether the Start action can launch a server for the attached project.
+    pub(crate) fn can_start(&self) -> bool {
+        self.backend.is_some() && !self.is_running() && !self.is_busy()
     }
 
     /// Whether the last operation failed and can be retried.
@@ -992,7 +1000,7 @@ impl Render for PreviewPanel {
         let failed = self.is_failed();
         let busy = self.is_busy();
         let attached = self.backend.is_some();
-        let url = self.lifecycle.status().url().map(|url| url.to_string());
+        let can_start = self.can_start();
         let status_color = match phase {
             PreviewPhase::Ready => cx.theme().success,
             PreviewPhase::Starting | PreviewPhase::Stopping => cx.theme().warning,
@@ -1008,42 +1016,24 @@ impl Render for PreviewPanel {
             .min_h_0()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border.opacity(0.55))
-                    .child(div().size_2().rounded_full().bg(status_color))
-                    .child(
-                        div()
-                            .font_family(crate::theme::display_font(cx))
-                            .text_base()
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .child(tr!("preview.title")),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("preview-state")
-                            .max_w(gpui_kit::px(420.))
-                            .truncate()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(status_line),
-                    ),
-            )
+            .child(ui::panel_header(
+                tr!("preview.title"),
+                Some(status_line.into()),
+                [ui::status_dot(status_color).into_any_element()],
+                cx,
+            ))
             .child(
                 div()
                     .v_flex()
+                    .flex_1()
+                    .min_h_0()
                     .gap_3()
-                    .p_5()
+                    .p_4()
                     .child(
                         div()
                             .h_flex()
+                            .flex_wrap()
+                            .items_center()
                             .gap_2()
                             .child(
                                 Button::new("preview-start")
@@ -1053,7 +1043,7 @@ impl Render for PreviewPanel {
                                     } else {
                                         tr!("preview.actions.start")
                                     })
-                                    .disabled(running || busy)
+                                    .disabled(!can_start)
                                     .on_click(move |_, _, cx| {
                                         let _ = start_owner.update(cx, |this, cx| this.start(cx));
                                     }),
@@ -1111,23 +1101,31 @@ impl Render for PreviewPanel {
                                                 .update(cx, |this, cx| this.open_fallback(cx));
                                         }),
                                 )
-                            }),
+                            })
+                            .when(busy, |row| row.child(Spinner::new().xsmall())),
                     )
                     .when_some(message, |view, message| {
+                        let tone = if failed {
+                            ui::NoticeTone::Danger
+                        } else {
+                            ui::NoticeTone::Info
+                        };
                         view.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(message),
+                            div().max_h(rems(12.)).overflow_y_scrollbar().child(
+                                ui::inline_notice("preview-message", tone, message)
+                                    .font_family(cx.theme().mono_font_family.clone()),
+                            ),
                         )
                     })
-                    .when_some(url, |view, url| {
-                        view.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(tr!("preview.status.serving", url = url.as_str())),
-                        )
+                    .when(!attached, |view| {
+                        view.child(ui::empty_state(
+                            "preview-unattached",
+                            IconName::Globe,
+                            tr!("preview.empty.unattached_title"),
+                            tr!("preview.empty.unattached"),
+                            None,
+                            cx,
+                        ))
                     }),
             )
     }

@@ -133,7 +133,7 @@ services:
     not_content_entry:
       en: "%{path} is not a Markdown or MDX entry."
       zh-CN: "%{path} 不是 Markdown 或 MDX 条目。"
-      ja: "%{path} は Markdown または MDX のエントリーではありません。"
+      ja: "%{path} は Markdown または MDX のエントリではありません。"
     missing_target:
       en: "%{path} does not exist."
       zh-CN: "%{path} 不存在。"
@@ -183,7 +183,7 @@ services:
     markdown_only:
       en: "Only Markdown and MDX entries can be opened in the IDE."
       zh-CN: "只有 Markdown 和 MDX 条目才能在 IDE 中打开。"
-      ja: "IDE で開けるのは Markdown と MDX のエントリーだけです。"
+      ja: "IDE で開けるのは Markdown と MDX のエントリだけです。"
     file_placeholder_missing:
       en: "The IDE command uses the %{placeholder} placeholder, but this action has no file selected."
       zh-CN: "IDE 命令使用了 %{placeholder} 占位符，但此操作没有选中文件。"
