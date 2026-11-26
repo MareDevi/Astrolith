@@ -15,7 +15,7 @@ use gpui_kit::component::{
 use gpui_kit::{
     App, AppContext, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
     IntoElement, ModifiersChangedEvent, MouseButton, MouseMoveEvent, ObjectFit, Render,
-    SharedString, Task, TestSupportExt, Window, div, img, prelude::*, px,
+    SharedString, Task, TestSupportExt, Window, div, img, prelude::*, px, rems,
 };
 
 pub(crate) struct WorkspacePanel {
@@ -586,17 +586,18 @@ impl Render for WorkspacePanel {
                     body = body.child(
                         div()
                             .absolute()
-                            .bottom(px(12.))
-                            .right(px(12.))
+                            .bottom(rems(0.75))
+                            .right(rems(0.75))
                             .p_1()
                             .rounded(cx.theme().radius)
                             .border_1()
-                            .border_color(cx.theme().window_border)
-                            .bg(cx.theme().background)
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().popover)
+                            .shadow_lg()
                             .child(
                                 img(image)
-                                    .max_w(px(360.))
-                                    .max_h(px(240.))
+                                    .max_w(rems(22.5))
+                                    .max_h(rems(15.))
                                     .object_fit(ObjectFit::Contain),
                             ),
                     );
@@ -604,7 +605,15 @@ impl Render for WorkspacePanel {
                 view.child(body.when_some(overlay, |body, overlay| body.child(overlay)))
             })
             .when_some(self.view.as_ref(), |view, content| {
-                view.child(div().flex_1().min_h_0().child(content.clone()))
+                view.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .size_full()
+                        .flex_1()
+                        .min_h_0()
+                        .child(content.clone()),
+                )
             })
             .when(self.editor.is_none() && self.view.is_none(), |view| {
                 view.child(crate::ui::empty_state(
