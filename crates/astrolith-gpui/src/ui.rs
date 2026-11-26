@@ -6,10 +6,8 @@
 //! empty-state rhythm shared by every panel.
 //!
 //! The primitives below are the single home for the patterns the shell, the
-//! preferences panes and the explorer keep re-implementing. They are consumed
-//! across the crate; the ones still waiting for their call sites are marked
-//! `dead_code` so the shared surface stays complete instead of being rebuilt
-//! ad hoc at each screen.
+//! preferences panes and the explorer keep re-implementing, so a screen builds
+//! its surfaces from the shared vocabulary instead of rebuilding them ad hoc.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -74,7 +72,6 @@ pub(crate) fn icon_button(
 }
 
 /// An icon-only toolbar button whose tooltip names its keyboard shortcut.
-#[allow(dead_code)]
 pub(crate) fn icon_button_with_shortcut(
     id: impl Into<ElementId>,
     icon: IconName,
@@ -95,7 +92,6 @@ pub(crate) fn icon_button_with_shortcut(
 }
 
 /// Compact concentric radius for a control nested inside a rounded panel.
-#[allow(dead_code)]
 pub(crate) fn radius_sm(cx: &App) -> gpui_kit::Pixels {
     crate::theme::radius_sm(cx)
 }
@@ -173,7 +169,6 @@ pub(crate) fn empty_state(
 ///
 /// `trailing` holds the panel's own controls; the leading column keeps the
 /// title and subtitle on one quiet baseline and truncates rather than wraps.
-#[allow(dead_code)]
 pub(crate) fn panel_header(
     title: impl Into<SharedString>,
     subtitle: Option<SharedString>,
@@ -225,7 +220,6 @@ pub(crate) fn panel_header(
 }
 
 /// The shell of an anchored Level-2 overlay: menu, popover or selection bar.
-#[allow(dead_code)]
 pub(crate) fn popover_surface(cx: &App) -> Div {
     div()
         .bg(cx.theme().popover)
@@ -237,14 +231,12 @@ pub(crate) fn popover_surface(cx: &App) -> Div {
 }
 
 /// A small round indicator for a state that is also named in text.
-#[allow(dead_code)]
 pub(crate) fn status_dot(color: Hsla) -> Div {
     div().size_2().rounded_full().flex_shrink_0().bg(color)
 }
 
 /// The four message tones an [`inline_notice`] can carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum NoticeTone {
     Info,
     Success,
@@ -257,7 +249,6 @@ pub(crate) enum NoticeTone {
 /// Dismissal belongs to the caller: chain `.on_close(...)` when the notice can
 /// be closed and leave it off for persistent context, so a notice never grows
 /// a close button the screen cannot act on.
-#[allow(dead_code)]
 pub(crate) fn inline_notice(
     id: impl Into<ElementId>,
     tone: NoticeTone,
@@ -274,7 +265,6 @@ pub(crate) fn inline_notice(
 }
 
 /// A form field's label row: label, required marker, meta text and control.
-#[allow(dead_code)]
 pub(crate) fn form_field_header(
     label: impl Into<SharedString>,
     required: bool,
@@ -320,7 +310,6 @@ pub(crate) fn form_field_header(
 }
 
 /// A removable token: a quiet chip with a named remove button.
-#[allow(dead_code)]
 pub(crate) fn removable_chip(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -353,7 +342,6 @@ pub(crate) fn removable_chip(
 }
 
 /// A keyboard-shortcut hint; unparseable shortcuts fall back to the raw text.
-#[allow(dead_code)]
 pub(crate) fn kbd_hint(shortcut: &str, cx: &App) -> AnyElement {
     match Keystroke::parse_with_os(shortcut, cx.platform_info().os) {
         Ok(stroke) => Kbd::new(stroke).outline().into_any_element(),
@@ -370,7 +358,6 @@ pub(crate) fn kbd_hint(shortcut: &str, cx: &App) -> AnyElement {
 }
 
 /// A dialog's action row: right-aligned, one gap, no per-dialog decisions.
-#[allow(dead_code)]
 pub(crate) fn dialog_footer(children: impl IntoIterator<Item = AnyElement>) -> Div {
     div()
         .h_flex()
@@ -385,14 +372,12 @@ pub(crate) fn dialog_footer(children: impl IntoIterator<Item = AnyElement>) -> D
 ///
 /// Selection and disabled state travel with the entry so a picker cannot
 /// render without them.
-#[allow(dead_code)]
 pub(crate) struct PickerOption {
     pub label: SharedString,
     pub selected: bool,
     pub disabled: bool,
 }
 
-#[allow(dead_code)]
 impl PickerOption {
     pub fn new(label: impl Into<SharedString>) -> Self {
         Self {
@@ -417,7 +402,6 @@ impl PickerOption {
 type PickerHandler = std::rc::Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// A compact outline button that always renders its menu with checkmarks.
-#[allow(dead_code)]
 pub(crate) fn picker_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -431,7 +415,6 @@ pub(crate) fn picker_button(
 ///
 /// A bounded menu (`max_h`) scrolls; an unbounded one sizes to its items. The
 /// height is expressed in `rem` so it follows the interface zoom.
-#[allow(dead_code)]
 pub(crate) fn picker_button_with(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,

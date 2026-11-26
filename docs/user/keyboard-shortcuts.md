@@ -106,7 +106,7 @@ toggle in Markdown, the component builder in MDX.
 The following commands are available from menus, the palette, the toolbar or
 context menus but have no default key binding:
 
-- Open recent projects, Reload collections
+- Open recent projects, Reload collections, Toggle source control
 - Duplicate file, Rename or move file…, Move file to Trash…, Reveal in file
   manager, Copy absolute path, Copy project-relative path
 - Recover unsaved changes…

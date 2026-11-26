@@ -77,7 +77,6 @@ impl ResolveTheme for ThemeMode {
 ///
 /// The inner tier sits one 2 px gap inside the control radius and collapses to
 /// square corners wherever the outer radius does.
-#[allow(dead_code)]
 pub(crate) fn radius_sm(cx: &App) -> gpui_kit::Pixels {
     let radius = cx.theme().radius;
     if radius <= gpui_kit::px(2.) {

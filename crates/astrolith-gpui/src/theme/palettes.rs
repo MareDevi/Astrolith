@@ -199,7 +199,6 @@ pub(super) fn named(scheme: ColorScheme) -> ThemeTokens {
 /// The sixteen slots mirror the application's status hues, but each palette is
 /// tuned against its own canvas: Dark keeps the quiet editorial tones, Light
 /// deepens them so the same terminal view is legible on a page-white surface.
-#[allow(dead_code)]
 pub(crate) fn terminal_ansi_palette(dark: bool) -> [u32; 16] {
     if dark {
         [
