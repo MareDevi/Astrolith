@@ -60,15 +60,11 @@ editor:
       ja: "ライブラリの表示を切り替え"
     edit_frontmatter:
       en: "Edit frontmatter"
-      zh-CN: "编辑 frontmatter"
+      zh-CN: "编辑前置元数据"
       ja: "フロントマターを編集"
-    no_frontmatter:
-      en: "No frontmatter for the active document"
-      zh-CN: "当前文档没有 frontmatter"
-      ja: "現在のドキュメントにフロントマターはありません"
     frontmatter_unavailable:
       en: "Frontmatter unavailable for the active document"
-      zh-CN: "当前文档的 frontmatter 不可用"
+      zh-CN: "当前文档的前置元数据不可用"
       ja: "現在のドキュメントではフロントマターを利用できません"
     focus_mode:
       en: "Focus mode"
@@ -150,21 +146,21 @@ editor:
       ja: "保存済み"
   selection_toolbar:
     bold:
-      en: "Bold (Ctrl/Cmd+B)"
-      zh-CN: "加粗 (Ctrl/Cmd+B)"
-      ja: "太字 (Ctrl/Cmd+B)"
+      en: "Bold"
+      zh-CN: "加粗"
+      ja: "太字"
     italic:
-      en: "Italic (Ctrl/Cmd+I)"
-      zh-CN: "斜体 (Ctrl/Cmd+I)"
-      ja: "斜体 (Ctrl/Cmd+I)"
+      en: "Italic"
+      zh-CN: "斜体"
+      ja: "斜体"
     link:
-      en: "Link (Ctrl/Cmd+K)"
-      zh-CN: "链接 (Ctrl/Cmd+K)"
-      ja: "リンク (Ctrl/Cmd+K)"
+      en: "Link"
+      zh-CN: "链接"
+      ja: "リンク"
     comment:
-      en: "Markdown comment (Ctrl/Cmd+/)"
-      zh-CN: "Markdown 注释 (Ctrl/Cmd+/)"
-      ja: "Markdown コメント (Ctrl/Cmd+/)"
+      en: "Markdown comment"
+      zh-CN: "Markdown 注释"
+      ja: "Markdown コメント"
     heading:
       en: "Heading"
       zh-CN: "标题"
@@ -215,6 +211,18 @@ editor:
       en: "All"
       zh-CN: "全部"
       ja: "すべて"
+    find_previous:
+      en: "Previous match"
+      zh-CN: "上一个匹配"
+      ja: "前の一致"
+    find_next:
+      en: "Next match"
+      zh-CN: "下一个匹配"
+      ja: "次の一致"
+    find_close:
+      en: "Close find"
+      zh-CN: "关闭查找"
+      ja: "検索を閉じる"
   palette:
     project_group:
       en: "Project components"
@@ -254,7 +262,7 @@ editor:
       zh-CN: "按名称搜索组件…"
       ja: "名前でコンポーネントを検索…"
     wraps_content:
-      en: "wraps content"
+      en: "Wraps content"
       zh-CN: "包裹内容"
       ja: "コンテンツを包みます"
     no_matches:
@@ -270,7 +278,7 @@ editor:
       zh-CN: "添加"
       ja: "追加"
     default_value:
-      en: "default: %{value}"
+      en: "Default: %{value}"
       zh-CN: "默认值：%{value}"
       ja: "既定値：%{value}"
     choose:
@@ -298,15 +306,23 @@ editor:
       zh-CN: "选择图片"
       ja: "画像を選択"
     client_directive:
-      en: "client directive"
+      en: "Client directive"
       zh-CN: "客户端指令"
       ja: "クライアントディレクティブ"
     none:
       en: "None"
       zh-CN: "无"
       ja: "なし"
+    boolean_on:
+      en: "On"
+      zh-CN: "开启"
+      ja: "オン"
+    boolean_off:
+      en: "Off"
+      zh-CN: "关闭"
+      ja: "オフ"
     child_content:
-      en: "child content"
+      en: "Child content"
       zh-CN: "子内容"
       ja: "子コンテンツ"
     child_content_placeholder:
@@ -374,7 +390,7 @@ editor:
       zh-CN: "项目内图片路径"
       ja: "プロジェクト内の画像パス"
     field_entry_placeholder:
-      en: "Entry id"
+      en: "Entry ID"
       zh-CN: "条目 ID"
       ja: "エントリ ID"
   session:
