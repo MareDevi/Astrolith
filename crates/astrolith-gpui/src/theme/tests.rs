@@ -1,6 +1,6 @@
 use super::*;
 use gpui_kit::{
-    Hsla, Rgba, SharedString, TestAppContext, WindowAppearance, component::ActiveTheme, px,
+    Hsla, Rgba, SharedString, TestAppContext, WindowAppearance, component::ActiveTheme, px, rgb,
 };
 
 #[test]
@@ -203,9 +203,153 @@ fn theme_adapter_projects_complete_semantic_roles_in_both_modes(cx: &mut TestApp
             assert_eq!(cx.theme().caret, tokens.caret);
             assert_eq!(cx.theme().font_size, gpui_kit::px(settings.ui_font_size));
             assert_eq!(cx.theme().radius, gpui_kit::px(settings.panel_radius));
-            assert_eq!(cx.theme().radius_lg, gpui_kit::px(settings.panel_radius));
+            assert_eq!(
+                cx.theme().radius_lg,
+                gpui_kit::px(settings.panel_radius + 4.)
+            );
+            assert_eq!(cx.theme().tab_bar_segmented, tokens.tab_bar_segmented);
+            assert_eq!(cx.theme().danger_hover, tokens.danger_hover);
+            assert_eq!(cx.theme().danger_foreground, tokens.danger_foreground);
             assert_ne!(tokens.background, tokens.foreground);
             assert!(tokens.background.a > 0.99 && tokens.foreground.a > 0.99);
         }
     });
+}
+
+#[gpui_kit::test]
+fn radii_stay_concentric_and_collapse_with_the_panel_radius(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        for (panel_radius, inner, outer) in [(10., 10., 14.), (30., 20., 24.), (0., 0., 0.)] {
+            let settings = GlobalPreferences {
+                panel_radius,
+                ..GlobalPreferences::default()
+            };
+            apply(&settings, WindowAppearance::Dark, cx);
+            assert_eq!(cx.theme().radius, px(inner), "radius for {panel_radius}");
+            assert_eq!(
+                cx.theme().radius_lg,
+                px(outer),
+                "radius_lg for {panel_radius}"
+            );
+            if inner > 0. {
+                assert!(
+                    cx.theme().radius_lg > cx.theme().radius,
+                    "the surface tier rounds more than the controls inside it"
+                );
+                assert_eq!(radius_sm(cx), px(inner - 2.));
+            } else {
+                assert_eq!(radius_sm(cx), px(0.), "square corners stay square");
+            }
+        }
+    });
+}
+
+#[test]
+fn chrome_planes_and_segmented_tracks_stay_distinct() {
+    use astrolith_core::preferences::ColorScheme;
+
+    for scheme in [
+        ColorScheme::AstrolithLight,
+        ColorScheme::AstrolithDark,
+        ColorScheme::CatppuccinLatte,
+        ColorScheme::CatppuccinFrappe,
+        ColorScheme::CatppuccinMacchiato,
+        ColorScheme::CatppuccinMocha,
+        ColorScheme::Nord,
+        ColorScheme::NordLight,
+        ColorScheme::TokyoNight,
+        ColorScheme::TokyoNightStorm,
+        ColorScheme::TokyoNightMoon,
+        ColorScheme::TokyoDay,
+        ColorScheme::GruvboxLight,
+        ColorScheme::GruvboxDark,
+    ] {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let tokens = palette(mode, scheme);
+            assert_eq!(tokens.tab_bar, tokens.surface, "{scheme:?} {mode:?} strip");
+            assert_eq!(
+                tokens.tab_active, tokens.background,
+                "{scheme:?} {mode:?} active tab"
+            );
+            assert_eq!(
+                tokens.segmented_active, tokens.tab_active,
+                "{scheme:?} {mode:?} selected segment rises onto the canvas"
+            );
+            assert_ne!(
+                tokens.tab_bar_segmented, tokens.surface,
+                "{scheme:?} {mode:?} track is a well inside the chrome plane"
+            );
+            assert_ne!(
+                tokens.elevated, tokens.tab_bar_segmented,
+                "{scheme:?} {mode:?} the raised pill clears the track"
+            );
+        }
+    }
+}
+
+#[test]
+fn semantic_status_roles_keep_readable_foregrounds_and_feedback() {
+    use astrolith_core::preferences::ColorScheme;
+
+    for scheme in [
+        ColorScheme::AstrolithLight,
+        ColorScheme::AstrolithDark,
+        ColorScheme::CatppuccinLatte,
+        ColorScheme::CatppuccinFrappe,
+        ColorScheme::CatppuccinMacchiato,
+        ColorScheme::CatppuccinMocha,
+        ColorScheme::Nord,
+        ColorScheme::NordLight,
+        ColorScheme::TokyoNight,
+        ColorScheme::TokyoNightStorm,
+        ColorScheme::TokyoNightMoon,
+        ColorScheme::TokyoDay,
+        ColorScheme::GruvboxLight,
+        ColorScheme::GruvboxDark,
+    ] {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let tokens = palette(mode, scheme);
+            for (role, fill, foreground) in [
+                ("danger", tokens.danger, tokens.danger_foreground),
+                ("warning", tokens.warning, tokens.warning_foreground),
+                ("success", tokens.success, tokens.success_foreground),
+                ("info", tokens.info, tokens.info_foreground),
+            ] {
+                assert!(
+                    contrast(foreground, fill) >= 4.5,
+                    "{scheme:?} {mode:?} {role} text"
+                );
+            }
+            assert_ne!(tokens.danger_hover, tokens.danger);
+            assert_ne!(tokens.danger_active, tokens.danger);
+            assert_ne!(tokens.warning_hover, tokens.warning);
+            assert_ne!(tokens.success_hover, tokens.success);
+            assert_ne!(tokens.info_hover, tokens.info);
+        }
+    }
+}
+
+#[test]
+fn terminal_ansi_palettes_stay_readable_on_each_canvas() {
+    use astrolith_core::preferences::ColorScheme;
+
+    for (dark, canvas) in [
+        (
+            true,
+            palette(ThemeMode::Dark, ColorScheme::AstrolithDark).background,
+        ),
+        (
+            false,
+            palette(ThemeMode::Light, ColorScheme::AstrolithLight).background,
+        ),
+    ] {
+        let ansi = terminal_ansi_palette(dark);
+        // Slots 0 and 15 are the terminal's own background/fill, so only the
+        // four ordinary hues have to read as text on the canvas.
+        for value in &ansi[1..=4] {
+            let color: Hsla = rgb(*value).into();
+            assert!(contrast(color, canvas) >= 4.5, "{dark:?} ansi hues");
+        }
+    }
 }

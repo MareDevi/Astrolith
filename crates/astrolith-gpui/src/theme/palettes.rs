@@ -1,4 +1,4 @@
-//! The two neutral palettes and the OKLCH boundary.
+//! The neutral palettes and the OKLCH boundary.
 //!
 //! Values come from the web mock's `index.css` and are the only raw colour
 //! literals in the application. CSS speaks OKLCH; GPUI components speak HSLA,
@@ -22,8 +22,8 @@ pub(super) fn named(scheme: ColorScheme) -> ThemeTokens {
         ),
         ColorScheme::AstrolithDark => (
             [
-                "090909", "e8e8e8", "151515", "292929", "c4c4c4", "cc7777", "bea978", "7fa38b",
-                "8996a1",
+                "111214", "eaedf1", "181a1f", "2c303a", "c8cdd6", "e06c75", "d8b16a", "6fb88a",
+                "7aa8d8",
             ],
             true,
         ),
@@ -128,28 +128,44 @@ pub(super) fn named(scheme: ColorScheme) -> ThemeTokens {
     let selection = primary.opacity(if dark { 0.25 } else { 0.16 });
     let hover = foreground.opacity(if dark { 0.06 } else { 0.045 });
     let active = foreground.opacity(if dark { 0.1 } else { 0.08 });
+    // The tab strip is chrome, so it shares the sidebar and title-bar plane; the
+    // active tab rises onto the editor canvas instead of duplicating the strip.
+    let tab_bar = surface;
+    let tab_active = background;
+    // A segmented track is a well cut into the chrome plane: darker than the
+    // surrounding surface in Dark, a quiet tint in Light. Because the blend is
+    // composited over `surface`, the track can never equal the plane it sits on.
+    let tab_bar_segmented = if dark {
+        background.blend(hex("000000").opacity(0.32))
+    } else {
+        surface.blend(foreground.opacity(0.065))
+    };
+    // A raised pill must clear both the chrome plane and the recessed track.
+    let elevated = if dark {
+        surface.blend(foreground.opacity(0.09))
+    } else {
+        hex("ffffff")
+    };
     ThemeTokens {
         background,
         foreground,
         surface,
-        elevated: surface,
+        elevated,
         control,
         muted,
         border,
         border_variant: border.opacity(if dark { 0.7 } else { 0.8 }),
         primary,
-        primary_foreground: if luminance(primary) > 0.18 {
-            hex("000000")
-        } else {
-            hex("ffffff")
-        },
+        primary_foreground: on_color(primary),
         focus: primary,
         selection,
         hover,
         active,
         status_bar: surface,
-        tab_bar: background,
-        tab_active: surface,
+        tab_bar,
+        tab_bar_segmented,
+        tab_active,
+        segmented_active: tab_active,
         tab_active_foreground: foreground,
         tab_foreground: muted,
         popover: surface,
@@ -159,10 +175,54 @@ pub(super) fn named(scheme: ColorScheme) -> ThemeTokens {
         scrollbar_thumb: border,
         overlay: hex("000000").opacity(if dark { 0.55 } else { 0.32 }),
         danger,
+        danger_hover: danger.opacity(0.88),
+        danger_active: danger.opacity(0.76),
+        danger_foreground: on_color(danger),
         warning,
+        warning_hover: warning.opacity(0.88),
+        warning_active: warning.opacity(0.76),
+        warning_foreground: on_color(warning),
         success,
+        success_hover: success.opacity(0.88),
+        success_active: success.opacity(0.76),
+        success_foreground: on_color(success),
         info,
+        info_hover: info.opacity(0.88),
+        info_active: info.opacity(0.76),
+        info_foreground: on_color(info),
         link: primary,
+    }
+}
+
+/// Terminal ANSI colours that stay readable on the given appearance.
+///
+/// The sixteen slots mirror the application's status hues, but each palette is
+/// tuned against its own canvas: Dark keeps the quiet editorial tones, Light
+/// deepens them so the same terminal view is legible on a page-white surface.
+#[allow(dead_code)]
+pub(crate) fn terminal_ansi_palette(dark: bool) -> [u32; 16] {
+    if dark {
+        [
+            0x1a1c21, 0xe06c75, 0x6fb88a, 0xd8b16a, 0x7aa8d8, 0xb48ead, 0x7fb8b0, 0xd4d8e0,
+            0x3a3f4a, 0xf08c95, 0x8ecfa6, 0xe8c684, 0x94bde8, 0xcbb0d6, 0x97cfc6, 0xeaedf1,
+        ]
+    } else {
+        [
+            0x2b3140, 0xc33f54, 0x28794e, 0x8a5a0a, 0x2f6bb0, 0x8a3d8f, 0x1f6f78, 0x5f6672,
+            0x667085, 0xa52c40, 0x1f6b42, 0x7a4f07, 0x275c99, 0x7a3380, 0x1a6169, 0xd0d4dc,
+        ]
+    }
+}
+
+/// Text colour that keeps contrast on top of `color`.
+///
+/// One threshold covers every status fill in the fourteen palettes: fills
+/// lighter than 0.18 relative luminance take black text, the rest white.
+fn on_color(color: Hsla) -> Hsla {
+    if luminance(color) > 0.18 {
+        hex("000000")
+    } else {
+        hex("ffffff")
     }
 }
 
