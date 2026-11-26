@@ -4,127 +4,106 @@ use super::*;
 
 impl PreferencesSheet {
     pub(super) fn collection_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let weak = cx.weak_entity();
         let Some(context) = self.context.clone() else {
             return div().into_any_element();
         };
         if context.collections.is_empty() {
-            return div()
-                .v_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .child(tr!("preferences.collection.no_collections")),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr!("preferences.collection.no_collections_hint")),
-                )
-                .into_any_element();
+            return ui::empty_state(
+                "preferences-collection-empty",
+                gpui_kit::assets::IconName::FolderOpen,
+                tr!("preferences.collection.no_collections"),
+                tr!("preferences.collection.no_collections_hint"),
+                None,
+                cx,
+            )
+            .into_any_element();
         }
         let current = self
             .collection_index
             .and_then(|index| context.collections.get(index))
             .map(|entry| entry.name.clone())
             .unwrap_or_else(|| context.collections[0].name.clone());
-        let selector_weak = weak.clone();
-        let collections: Vec<String> = context
+        let selector_options = context
             .collections
             .iter()
-            .map(|entry| entry.name.clone())
-            .collect();
-        let selector = Button::new("preferences-collection-select")
-            .outline()
-            .label(current)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (index, name) in collections.iter().enumerate() {
-                    let weak = selector_weak.clone();
-                    let name = name.clone();
-                    menu = menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
-                            sheet.select_collection(Some(index), window, cx);
-                        });
-                    }));
-                }
-                menu
+            .enumerate()
+            .map(|(index, entry)| {
+                ui::PickerOption::new(entry.name.clone())
+                    .selected(self.collection_index == Some(index))
             })
-            .into_any_element();
+            .collect();
+        let selector = self.picker(
+            "preferences-collection-select",
+            current,
+            selector_options,
+            None,
+            cx,
+            |sheet, index, window, cx| sheet.select_collection(Some(index), window, cx),
+        );
 
         let image_label = match self.collection_image_mode {
             None => tr!("preferences.option.inherit_project"),
             Some(ImagePathMode::Relative) => tr!("preferences.option.relative"),
             Some(ImagePathMode::Absolute) => tr!("preferences.option.absolute"),
         };
+        let image_options = vec![
+            ui::PickerOption::new(tr!("preferences.option.inherit_project"))
+                .selected(self.collection_image_mode.is_none()),
+            ui::PickerOption::new(tr!("preferences.option.relative"))
+                .selected(self.collection_image_mode == Some(ImagePathMode::Relative)),
+            ui::PickerOption::new(tr!("preferences.option.absolute"))
+                .selected(self.collection_image_mode == Some(ImagePathMode::Absolute)),
+        ];
+        let image_mode = self.picker(
+            "preferences-collection-image-mode",
+            image_label,
+            image_options,
+            None,
+            cx,
+            |sheet, index, _, cx| {
+                sheet.collection_image_mode = match index {
+                    1 => Some(ImagePathMode::Relative),
+                    2 => Some(ImagePathMode::Absolute),
+                    _ => None,
+                };
+                cx.notify();
+            },
+        );
+
         let extension_label = match self.collection_extension {
             None => tr!("preferences.option.inherit_project"),
             Some(FileExtension::Md) => tr!("preferences.option.markdown"),
             Some(FileExtension::Mdx) => tr!("preferences.option.mdx"),
         };
-
-        let image_weak = weak.clone();
-        let image_mode = Button::new("preferences-collection-image-mode")
-            .outline()
-            .label(image_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (label, mode) in [
-                    (tr!("preferences.option.inherit_project"), None),
-                    (
-                        tr!("preferences.option.relative"),
-                        Some(ImagePathMode::Relative),
-                    ),
-                    (
-                        tr!("preferences.option.absolute"),
-                        Some(ImagePathMode::Absolute),
-                    ),
-                ] {
-                    let weak = image_weak.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
-                            sheet.collection_image_mode = mode;
-                            cx.notify();
-                        });
-                    }));
-                }
-                menu
-            })
-            .into_any_element();
-
-        let extension_weak = weak.clone();
-        let extension = Button::new("preferences-collection-extension")
-            .outline()
-            .label(extension_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (label, value) in [
-                    (tr!("preferences.option.inherit_project"), None),
-                    (tr!("preferences.option.markdown"), Some(FileExtension::Md)),
-                    (tr!("preferences.option.mdx"), Some(FileExtension::Mdx)),
-                ] {
-                    let weak = extension_weak.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
-                            sheet.collection_extension = value;
-                            cx.notify();
-                        });
-                    }));
-                }
-                menu
-            })
-            .into_any_element();
+        let extension_options = vec![
+            ui::PickerOption::new(tr!("preferences.option.inherit_project"))
+                .selected(self.collection_extension.is_none()),
+            ui::PickerOption::new(tr!("preferences.option.markdown"))
+                .selected(self.collection_extension == Some(FileExtension::Md)),
+            ui::PickerOption::new(tr!("preferences.option.mdx"))
+                .selected(self.collection_extension == Some(FileExtension::Mdx)),
+        ];
+        let extension = self.picker(
+            "preferences-collection-extension",
+            extension_label,
+            extension_options,
+            None,
+            cx,
+            |sheet, index, _, cx| {
+                sheet.collection_extension = match index {
+                    1 => Some(FileExtension::Md),
+                    2 => Some(FileExtension::Mdx),
+                    _ => None,
+                };
+                cx.notify();
+            },
+        );
 
         let directories = vec![
             self.field(
                 "preferences-field-collection-content",
                 tr!("preferences.collection.content_directory"),
-                self.control(FieldId::CollectionContent),
+                FieldBody::Text(FieldId::CollectionContent),
                 FieldExtras {
                     field: Some(FieldId::CollectionContent),
                     hint: Some(tr!("preferences.collection.content_directory_hint").into()),
@@ -139,7 +118,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-collection-assets",
                 tr!("preferences.collection.assets_directory"),
-                self.control(FieldId::CollectionAssets),
+                FieldBody::Text(FieldId::CollectionAssets),
                 FieldExtras {
                     field: Some(FieldId::CollectionAssets),
                     hint: Some(tr!("preferences.collection.assets_directory_hint").into()),
@@ -154,7 +133,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-collection-image-mode",
                 tr!("preferences.collection.image_paths"),
-                image_mode,
+                FieldBody::Control(Some(image_mode)),
                 FieldExtras {
                     field: None,
                     hint: Some(tr!("preferences.collection.image_paths_hint").into()),
@@ -165,7 +144,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-collection-extension",
                 tr!("preferences.collection.new_files"),
-                extension,
+                FieldBody::Control(Some(extension)),
                 FieldExtras {
                     field: None,
                     hint: Some(tr!("preferences.collection.new_files_hint").into()),
@@ -179,7 +158,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-collection-title",
                 tr!("preferences.collection.title_field"),
-                self.control(FieldId::CollectionTitle),
+                FieldBody::Text(FieldId::CollectionTitle),
                 FieldExtras {
                     field: Some(FieldId::CollectionTitle),
                     hint: Some(tr!("preferences.collection.mapping_hint").into()),
@@ -194,7 +173,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-collection-date",
                 tr!("preferences.collection.date_field"),
-                self.control(FieldId::CollectionDate),
+                FieldBody::Text(FieldId::CollectionDate),
                 FieldExtras {
                     field: Some(FieldId::CollectionDate),
                     hint: Some(tr!("preferences.collection.mapping_hint").into()),
@@ -209,7 +188,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-collection-description",
                 tr!("preferences.collection.description_field"),
-                self.control(FieldId::CollectionDescription),
+                FieldBody::Text(FieldId::CollectionDescription),
                 FieldExtras {
                     field: Some(FieldId::CollectionDescription),
                     hint: Some(tr!("preferences.collection.mapping_hint").into()),
@@ -224,7 +203,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-collection-draft",
                 tr!("preferences.collection.draft_field"),
-                self.control(FieldId::CollectionDraft),
+                FieldBody::Text(FieldId::CollectionDraft),
                 FieldExtras {
                     field: Some(FieldId::CollectionDraft),
                     hint: Some(tr!("preferences.collection.draft_hint").into()),
@@ -241,7 +220,7 @@ impl PreferencesSheet {
         let url = vec![self.field(
             "preferences-field-collection-url",
             tr!("preferences.collection.url_pattern"),
-            self.control(FieldId::CollectionUrlPattern),
+            FieldBody::Text(FieldId::CollectionUrlPattern),
             FieldExtras {
                 field: Some(FieldId::CollectionUrlPattern),
                 hint: Some(tr!("preferences.collection.url_pattern_hint").into()),
@@ -258,19 +237,17 @@ impl PreferencesSheet {
             .v_flex()
             .w_full()
             .gap_6()
-            .child(
-                div()
-                    .v_flex()
-                    .w_full()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .child(tr!("preferences.collection.collection")),
-                    )
-                    .child(selector),
-            )
+            .child(self.field(
+                "preferences-field-collection-select",
+                tr!("preferences.collection.collection"),
+                FieldBody::Control(Some(selector)),
+                FieldExtras {
+                    field: None,
+                    hint: None,
+                    trailing: None,
+                },
+                cx,
+            ))
             .child(self.section(
                 tr!("preferences.collection.directories"),
                 Some(tr!("preferences.collection.directories_hint").into()),

@@ -31,16 +31,15 @@ use gpui_kit::component::{
     ActiveTheme, Disableable, Selectable, Sizable, StyledExt, WindowExt,
     button::{Button, ButtonVariants},
     input::{InputEvent, InputState, TextareaState},
-    menu::{DropdownMenu, PopupMenuItem},
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, App, AppContext, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, IntoElement, SharedString, Subscription, Task, TestSupportExt, Window,
-    div, prelude::*, px,
+    AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, SharedString, Subscription, Task, TestSupportExt, Window, div, prelude::*, rems,
 };
 
 use crate::theme;
+use crate::ui::{self, NoticeTone};
 
 fn supported_language(language: &str) -> &'static str {
     match language {
@@ -242,6 +241,14 @@ pub(crate) struct FieldExtras {
     pub trailing: Option<AnyElement>,
 }
 
+/// What a field row shows below its label.
+pub(crate) enum FieldBody {
+    /// The sheet's own text control for this field.
+    Text(FieldId),
+    /// A custom control, or nothing when the row is fully inline in `trailing`.
+    Control(Option<AnyElement>),
+}
+
 /// Text controls the sheet keeps alive across pane switches and dialog rebuilds.
 struct Inputs {
     image_upload_endpoint: Entity<InputState>,
@@ -283,6 +290,22 @@ struct Inputs {
     collection_url_pattern: Entity<InputState>,
 }
 
+/// One sheet-level message, rendered as an inline notice above the panes.
+#[derive(Clone, Debug)]
+struct Notice {
+    tone: NoticeTone,
+    message: SharedString,
+}
+
+impl Notice {
+    fn new(tone: NoticeTone, message: impl Into<SharedString>) -> Self {
+        Self {
+            tone,
+            message: message.into(),
+        }
+    }
+}
+
 /// The preferences sheet view.
 pub(crate) struct PreferencesSheet {
     context: Option<PreferencesContext>,
@@ -310,7 +333,7 @@ pub(crate) struct PreferencesSheet {
     collection_extension: Option<FileExtension>,
     inputs: Inputs,
     errors: BTreeMap<FieldId, SharedString>,
-    notice: Option<SharedString>,
+    notice: Option<Notice>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -320,15 +343,26 @@ impl PreferencesSheet {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut subscriptions = Vec::new();
         macro_rules! input {
-            ($placeholder:expr) => {
-                input!($placeholder, false)
-            };
-            ($placeholder:expr, $masked:expr) => {{
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .placeholder($placeholder)
-                        .masked($masked)
-                });
+            ($masked:expr) => {{
+                let input = cx.new(|cx| InputState::new(window, cx).masked($masked));
+                subscriptions.push(cx.subscribe_in(
+                    &input,
+                    window,
+                    |this, _, event: &InputEvent, window, cx| match event {
+                        InputEvent::Change => this.refresh_errors(cx),
+                        // A single-line preference commits like the primary button.
+                        InputEvent::PressEnter {
+                            secondary: false, ..
+                        } => this.apply(window, cx),
+                        _ => {}
+                    },
+                ));
+                input
+            }};
+        }
+        macro_rules! textarea {
+            () => {{
+                let input = cx.new(|cx| TextareaState::new(window, cx));
                 subscriptions.push(cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.refresh_errors(cx);
@@ -337,14 +371,7 @@ impl PreferencesSheet {
                 input
             }};
         }
-        let ide_arguments = cx.new(|cx| TextareaState::new(window, cx));
-        subscriptions.push(
-            cx.subscribe(&ide_arguments, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.refresh_errors(cx);
-                }
-            }),
-        );
+        let ide_arguments = textarea!();
         Self {
             context: None,
             pane: Pane::Appearance,
@@ -370,53 +397,43 @@ impl PreferencesSheet {
             collection_image_mode: None,
             collection_extension: None,
             inputs: Inputs {
-                image_upload_endpoint: input!("https://"),
-                image_upload_bucket: input!("my-images"),
-                image_upload_region: input!("auto / us-east-1"),
-                image_upload_public_url: input!("https://"),
-                image_upload_access_key: input!(""),
-                image_upload_secret_key: input!("", true),
-                ide_executable: input!("hx or code"),
+                image_upload_endpoint: input!(false),
+                image_upload_bucket: input!(false),
+                image_upload_region: input!(false),
+                image_upload_public_url: input!(false),
+                image_upload_access_key: input!(false),
+                image_upload_secret_key: input!(true),
+                ide_executable: input!(false),
                 ide_arguments,
-                preview_browser_executable: input!(tr!(
-                    "preferences.placeholder.browser_executable"
-                )),
-                preview_browser_arguments: {
-                    let input = cx.new(|cx| TextareaState::new(window, cx));
-                    subscriptions.push(cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
-                        if matches!(event, InputEvent::Change) {
-                            this.refresh_errors(cx);
-                        }
-                    }));
-                    input
-                },
-                heading_light: input!("#1f2328"),
-                heading_dark: input!("#e6edf3"),
-                ui_font_family: input!(tr!("preferences.placeholder.ui_font_family")),
-                ui_font_size: input!(format_number(GlobalPreferences::default().ui_font_size)),
-                panel_radius: input!(format_number(GlobalPreferences::default().panel_radius)),
-                prose_font_family: input!("Inter / system sans"),
-                font_size: input!("16"),
-                build_font_family: input!(tr!("preferences.placeholder.build_font_family")),
-                build_font_size: input!("14"),
-                preview_font_family: input!("Inter / system sans"),
-                preview_font_size: input!("16"),
-                line_height: input!("2"),
-                page_width_percent: input!("64"),
-                project_content: input!(tr!("preferences.placeholder.project_content")),
-                project_assets: input!(tr!("preferences.placeholder.project_assets")),
-                project_mdx: input!(tr!("preferences.placeholder.project_mdx")),
-                project_title: input!("title"),
-                project_date: input!("date"),
-                project_description: input!("description"),
-                project_draft: input!("draft"),
-                collection_content: input!(tr!("preferences.placeholder.collection_content")),
-                collection_assets: input!(tr!("preferences.placeholder.collection_assets")),
-                collection_title: input!(tr!("preferences.placeholder.collection_mapping")),
-                collection_date: input!(tr!("preferences.placeholder.collection_mapping")),
-                collection_description: input!(tr!("preferences.placeholder.collection_mapping")),
-                collection_draft: input!(tr!("preferences.placeholder.collection_mapping")),
-                collection_url_pattern: input!("/blog/{slug}/"),
+                preview_browser_executable: input!(false),
+                preview_browser_arguments: textarea!(),
+                heading_light: input!(false),
+                heading_dark: input!(false),
+                ui_font_family: input!(false),
+                ui_font_size: input!(false),
+                panel_radius: input!(false),
+                prose_font_family: input!(false),
+                font_size: input!(false),
+                build_font_family: input!(false),
+                build_font_size: input!(false),
+                preview_font_family: input!(false),
+                preview_font_size: input!(false),
+                line_height: input!(false),
+                page_width_percent: input!(false),
+                project_content: input!(false),
+                project_assets: input!(false),
+                project_mdx: input!(false),
+                project_title: input!(false),
+                project_date: input!(false),
+                project_description: input!(false),
+                project_draft: input!(false),
+                collection_content: input!(false),
+                collection_assets: input!(false),
+                collection_title: input!(false),
+                collection_date: input!(false),
+                collection_description: input!(false),
+                collection_draft: input!(false),
+                collection_url_pattern: input!(false),
             },
             errors: BTreeMap::new(),
             notice: None,
@@ -575,6 +592,99 @@ impl PreferencesSheet {
             cx,
         );
 
+        // Inherited or example values stay visible as placeholders, never as text.
+        // They are installed on every open so a locale change lands without a restart.
+        for (field, placeholder) in [
+            (
+                FieldId::ImageUploadEndpoint,
+                tr!("preferences.placeholder.image_endpoint"),
+            ),
+            (
+                FieldId::ImageUploadBucket,
+                tr!("preferences.placeholder.image_bucket"),
+            ),
+            (
+                FieldId::ImageUploadRegion,
+                tr!("preferences.placeholder.image_region"),
+            ),
+            (
+                FieldId::ImageUploadPublicUrl,
+                tr!("preferences.placeholder.image_public_url"),
+            ),
+            (
+                FieldId::IdeExecutable,
+                tr!("preferences.placeholder.ide_executable"),
+            ),
+            (
+                FieldId::PreviewBrowserExecutable,
+                tr!("preferences.placeholder.browser_executable"),
+            ),
+            (FieldId::HeadingLight, "#1f2328".to_owned()),
+            (FieldId::HeadingDark, "#e6edf3".to_owned()),
+            (
+                FieldId::UiFontFamily,
+                tr!("preferences.placeholder.ui_font_family"),
+            ),
+            (FieldId::UiFontSize, "16".to_owned()),
+            (FieldId::PanelRadius, "24".to_owned()),
+            (
+                FieldId::ProseFontFamily,
+                tr!("preferences.placeholder.prose_font_family"),
+            ),
+            (FieldId::FontSize, "16".to_owned()),
+            (
+                FieldId::BuildFontFamily,
+                tr!("preferences.placeholder.build_font_family"),
+            ),
+            (FieldId::BuildFontSize, "14".to_owned()),
+            (
+                FieldId::PreviewFontFamily,
+                tr!("preferences.placeholder.preview_font_family"),
+            ),
+            (FieldId::PreviewFontSize, "16".to_owned()),
+            (FieldId::LineHeight, "2".to_owned()),
+            (FieldId::PageWidth, "64".to_owned()),
+            (
+                FieldId::ProjectContent,
+                tr!("preferences.placeholder.project_content"),
+            ),
+            (
+                FieldId::ProjectAssets,
+                tr!("preferences.placeholder.project_assets"),
+            ),
+            (
+                FieldId::ProjectMdx,
+                tr!("preferences.placeholder.project_mdx"),
+            ),
+            (
+                FieldId::ProjectTitle,
+                tr!("preferences.placeholder.entry_title"),
+            ),
+            (
+                FieldId::ProjectDate,
+                tr!("preferences.placeholder.entry_date"),
+            ),
+            (
+                FieldId::ProjectDescription,
+                tr!("preferences.placeholder.entry_description"),
+            ),
+            (
+                FieldId::ProjectDraft,
+                tr!("preferences.placeholder.entry_draft"),
+            ),
+            (
+                FieldId::CollectionContent,
+                tr!("preferences.placeholder.collection_content"),
+            ),
+            (
+                FieldId::CollectionAssets,
+                tr!("preferences.placeholder.collection_assets"),
+            ),
+            (FieldId::CollectionUrlPattern, "/blog/{slug}/".to_owned()),
+        ] {
+            self.set_placeholder(field, &placeholder, window, cx);
+        }
+
         let project_preferences = project.clone().unwrap_or_default();
         self.set_text(
             FieldId::ProjectContent,
@@ -623,17 +733,18 @@ impl PreferencesSheet {
         ] {
             self.set_text(field, value.as_deref().unwrap_or_default(), window, cx);
         }
-        self.set_placeholder(FieldId::ProjectTitle, "title", window, cx);
-        self.set_placeholder(FieldId::ProjectDate, "date", window, cx);
-        self.set_placeholder(FieldId::ProjectDescription, "description", window, cx);
-        self.set_placeholder(FieldId::ProjectDraft, "draft", window, cx);
         self.project_image_mode = project_preferences.image_path_mode;
         self.project_extension = project_preferences.default_extension;
         self.project_insert_imports = project_preferences.insert_mdx_imports;
         let first_collection = (!context.collections.is_empty()).then_some(0);
         self.collection_index = first_collection;
-        self.pane = Pane::Appearance;
-        self.notice = context.warning.clone().map(SharedString::from);
+        if !self.pane.available(project.is_some()) {
+            self.pane = Pane::Appearance;
+        }
+        self.notice = context
+            .warning
+            .clone()
+            .map(|warning| Notice::new(NoticeTone::Warning, warning));
         self.context = Some(context);
         self.select_collection(first_collection, window, cx);
         cx.notify();
@@ -709,7 +820,7 @@ impl PreferencesSheet {
                     Ok(()) => sheet.commit_edits(edits, window, cx),
                     Err(message) => {
                         sheet.pane = Pane::Workspace;
-                        sheet.notice = Some(message.into());
+                        sheet.notice = Some(Notice::new(NoticeTone::Danger, message));
                         cx.notify();
                     }
                 }
@@ -1348,6 +1459,48 @@ impl PreferencesSheet {
         }
     }
 
+    fn input_entity(&self, field: FieldId) -> Option<&Entity<InputState>> {
+        let input = match field {
+            FieldId::ImageUploadEndpoint => &self.inputs.image_upload_endpoint,
+            FieldId::ImageUploadBucket => &self.inputs.image_upload_bucket,
+            FieldId::ImageUploadRegion => &self.inputs.image_upload_region,
+            FieldId::ImageUploadPublicUrl => &self.inputs.image_upload_public_url,
+            FieldId::ImageUploadAccessKey => &self.inputs.image_upload_access_key,
+            FieldId::ImageUploadSecretKey => &self.inputs.image_upload_secret_key,
+            FieldId::IdeExecutable => &self.inputs.ide_executable,
+            FieldId::PreviewBrowserExecutable => &self.inputs.preview_browser_executable,
+            FieldId::HeadingLight => &self.inputs.heading_light,
+            FieldId::HeadingDark => &self.inputs.heading_dark,
+            FieldId::UiFontFamily => &self.inputs.ui_font_family,
+            FieldId::UiFontSize => &self.inputs.ui_font_size,
+            FieldId::PanelRadius => &self.inputs.panel_radius,
+            FieldId::ProseFontFamily => &self.inputs.prose_font_family,
+            FieldId::FontSize => &self.inputs.font_size,
+            FieldId::BuildFontFamily => &self.inputs.build_font_family,
+            FieldId::BuildFontSize => &self.inputs.build_font_size,
+            FieldId::PreviewFontFamily => &self.inputs.preview_font_family,
+            FieldId::PreviewFontSize => &self.inputs.preview_font_size,
+            FieldId::LineHeight => &self.inputs.line_height,
+            FieldId::PageWidth => &self.inputs.page_width_percent,
+            FieldId::ProjectContent => &self.inputs.project_content,
+            FieldId::ProjectAssets => &self.inputs.project_assets,
+            FieldId::ProjectMdx => &self.inputs.project_mdx,
+            FieldId::ProjectTitle => &self.inputs.project_title,
+            FieldId::ProjectDate => &self.inputs.project_date,
+            FieldId::ProjectDescription => &self.inputs.project_description,
+            FieldId::ProjectDraft => &self.inputs.project_draft,
+            FieldId::CollectionContent => &self.inputs.collection_content,
+            FieldId::CollectionAssets => &self.inputs.collection_assets,
+            FieldId::CollectionTitle => &self.inputs.collection_title,
+            FieldId::CollectionDate => &self.inputs.collection_date,
+            FieldId::CollectionDescription => &self.inputs.collection_description,
+            FieldId::CollectionDraft => &self.inputs.collection_draft,
+            FieldId::CollectionUrlPattern => &self.inputs.collection_url_pattern,
+            FieldId::IdeArguments | FieldId::PreviewBrowserArguments => return None,
+        };
+        Some(input)
+    }
+
     fn set_placeholder(
         &self,
         field: FieldId,
@@ -1355,36 +1508,10 @@ impl PreferencesSheet {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match field {
-            FieldId::ProjectTitle => self.inputs.project_title.update(cx, |input, cx| {
+        if let Some(input) = self.input_entity(field) {
+            input.update(cx, |input, cx| {
                 input.set_placeholder(placeholder, window, cx)
-            }),
-            FieldId::ProjectDate => self.inputs.project_date.update(cx, |input, cx| {
-                input.set_placeholder(placeholder, window, cx)
-            }),
-            FieldId::ProjectDescription => {
-                self.inputs.project_description.update(cx, |input, cx| {
-                    input.set_placeholder(placeholder, window, cx)
-                })
-            }
-            FieldId::ProjectDraft => self.inputs.project_draft.update(cx, |input, cx| {
-                input.set_placeholder(placeholder, window, cx)
-            }),
-            FieldId::CollectionTitle => self.inputs.collection_title.update(cx, |input, cx| {
-                input.set_placeholder(placeholder, window, cx)
-            }),
-            FieldId::CollectionDate => self.inputs.collection_date.update(cx, |input, cx| {
-                input.set_placeholder(placeholder, window, cx)
-            }),
-            FieldId::CollectionDescription => {
-                self.inputs.collection_description.update(cx, |input, cx| {
-                    input.set_placeholder(placeholder, window, cx)
-                })
-            }
-            FieldId::CollectionDraft => self.inputs.collection_draft.update(cx, |input, cx| {
-                input.set_placeholder(placeholder, window, cx)
-            }),
-            _ => {}
+            });
         }
     }
 
@@ -1590,156 +1717,28 @@ impl Focusable for PreferencesSheet {
 }
 
 impl PreferencesSheet {
-    /// The text control for one field, ready to render.
-    pub(super) fn control(&self, field: FieldId) -> AnyElement {
+    /// The text control for one field, labelled for assistive technology.
+    fn control(&self, field: FieldId, label: impl Into<SharedString>) -> AnyElement {
+        let label = label.into();
         match field {
-            FieldId::ImageUploadAccessKey => {
-                gpui_kit::component::input::Input::new(&self.inputs.image_upload_access_key)
-                    .aria_label(tr!("preferences.upload.access_key"))
-                    .into_any_element()
-            }
-            FieldId::ImageUploadSecretKey => {
-                gpui_kit::component::input::Input::new(&self.inputs.image_upload_secret_key)
-                    .aria_label(tr!("preferences.upload.secret_key"))
-                    .into_any_element()
-            }
-            FieldId::ImageUploadEndpoint => {
-                gpui_kit::component::input::Input::new(&self.inputs.image_upload_endpoint)
-                    .aria_label(tr!("preferences.upload.endpoint"))
-                    .into_any_element()
-            }
-            FieldId::ImageUploadBucket => {
-                gpui_kit::component::input::Input::new(&self.inputs.image_upload_bucket)
-                    .aria_label(tr!("preferences.upload.bucket"))
-                    .into_any_element()
-            }
-            FieldId::ImageUploadRegion => {
-                gpui_kit::component::input::Input::new(&self.inputs.image_upload_region)
-                    .aria_label(tr!("preferences.upload.region"))
-                    .into_any_element()
-            }
-            FieldId::ImageUploadPublicUrl => {
-                gpui_kit::component::input::Input::new(&self.inputs.image_upload_public_url)
-                    .aria_label(tr!("preferences.upload.public_url"))
-                    .into_any_element()
-            }
             FieldId::IdeArguments => {
                 gpui_kit::component::input::Textarea::new(&self.inputs.ide_arguments)
-                    .h(px(72.))
-                    .into_any_element()
-            }
-            FieldId::IdeExecutable => {
-                gpui_kit::component::input::Input::new(&self.inputs.ide_executable)
-                    .into_any_element()
-            }
-            FieldId::PreviewBrowserExecutable => {
-                gpui_kit::component::input::Input::new(&self.inputs.preview_browser_executable)
+                    .h(rems(4.5))
+                    .aria_label(label)
                     .into_any_element()
             }
             FieldId::PreviewBrowserArguments => {
                 gpui_kit::component::input::Textarea::new(&self.inputs.preview_browser_arguments)
-                    .h(px(72.))
+                    .h(rems(4.5))
+                    .aria_label(label)
                     .into_any_element()
             }
-            FieldId::HeadingLight => {
-                gpui_kit::component::input::Input::new(&self.inputs.heading_light)
-                    .into_any_element()
-            }
-            FieldId::HeadingDark => {
-                gpui_kit::component::input::Input::new(&self.inputs.heading_dark).into_any_element()
-            }
-            FieldId::UiFontFamily => {
-                gpui_kit::component::input::Input::new(&self.inputs.ui_font_family)
-                    .into_any_element()
-            }
-            FieldId::UiFontSize => {
-                gpui_kit::component::input::Input::new(&self.inputs.ui_font_size).into_any_element()
-            }
-            FieldId::PanelRadius => {
-                gpui_kit::component::input::Input::new(&self.inputs.panel_radius).into_any_element()
-            }
-            FieldId::ProseFontFamily => {
-                gpui_kit::component::input::Input::new(&self.inputs.prose_font_family)
-                    .into_any_element()
-            }
-            FieldId::FontSize => {
-                gpui_kit::component::input::Input::new(&self.inputs.font_size).into_any_element()
-            }
-            FieldId::BuildFontFamily => {
-                gpui_kit::component::input::Input::new(&self.inputs.build_font_family)
-                    .into_any_element()
-            }
-            FieldId::BuildFontSize => {
-                gpui_kit::component::input::Input::new(&self.inputs.build_font_size)
-                    .into_any_element()
-            }
-            FieldId::PreviewFontFamily => {
-                gpui_kit::component::input::Input::new(&self.inputs.preview_font_family)
-                    .into_any_element()
-            }
-            FieldId::PreviewFontSize => {
-                gpui_kit::component::input::Input::new(&self.inputs.preview_font_size)
-                    .into_any_element()
-            }
-            FieldId::LineHeight => {
-                gpui_kit::component::input::Input::new(&self.inputs.line_height).into_any_element()
-            }
-            FieldId::PageWidth => {
-                gpui_kit::component::input::Input::new(&self.inputs.page_width_percent)
-                    .into_any_element()
-            }
-            FieldId::ProjectContent => {
-                gpui_kit::component::input::Input::new(&self.inputs.project_content)
-                    .into_any_element()
-            }
-            FieldId::ProjectAssets => {
-                gpui_kit::component::input::Input::new(&self.inputs.project_assets)
-                    .into_any_element()
-            }
-            FieldId::ProjectMdx => {
-                gpui_kit::component::input::Input::new(&self.inputs.project_mdx).into_any_element()
-            }
-            FieldId::ProjectTitle => {
-                gpui_kit::component::input::Input::new(&self.inputs.project_title)
-                    .into_any_element()
-            }
-            FieldId::ProjectDate => {
-                gpui_kit::component::input::Input::new(&self.inputs.project_date).into_any_element()
-            }
-            FieldId::ProjectDescription => {
-                gpui_kit::component::input::Input::new(&self.inputs.project_description)
-                    .into_any_element()
-            }
-            FieldId::ProjectDraft => {
-                gpui_kit::component::input::Input::new(&self.inputs.project_draft)
-                    .into_any_element()
-            }
-            FieldId::CollectionContent => {
-                gpui_kit::component::input::Input::new(&self.inputs.collection_content)
-                    .into_any_element()
-            }
-            FieldId::CollectionAssets => {
-                gpui_kit::component::input::Input::new(&self.inputs.collection_assets)
-                    .into_any_element()
-            }
-            FieldId::CollectionTitle => {
-                gpui_kit::component::input::Input::new(&self.inputs.collection_title)
-                    .into_any_element()
-            }
-            FieldId::CollectionDate => {
-                gpui_kit::component::input::Input::new(&self.inputs.collection_date)
-                    .into_any_element()
-            }
-            FieldId::CollectionDescription => {
-                gpui_kit::component::input::Input::new(&self.inputs.collection_description)
-                    .into_any_element()
-            }
-            FieldId::CollectionDraft => {
-                gpui_kit::component::input::Input::new(&self.inputs.collection_draft)
-                    .into_any_element()
-            }
-            FieldId::CollectionUrlPattern => {
-                gpui_kit::component::input::Input::new(&self.inputs.collection_url_pattern)
+            _ => {
+                let input = self
+                    .input_entity(field)
+                    .expect("a text field has an input state");
+                gpui_kit::component::input::Input::new(input)
+                    .aria_label(label)
                     .into_any_element()
             }
         }
@@ -1753,7 +1752,7 @@ impl PreferencesSheet {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         Button::new(id)
-            .xsmall()
+            .small()
             .ghost()
             .label(tr!("preferences.sheet.reset"))
             .on_click(cx.listener(move |this, _, window, cx| this.reset_field(field, window, cx)))
@@ -1765,7 +1764,7 @@ impl PreferencesSheet {
         &self,
         id: &'static str,
         label: impl Into<SharedString>,
-        control: AnyElement,
+        body: FieldBody,
         extras: FieldExtras,
         cx: &App,
     ) -> AnyElement {
@@ -1775,6 +1774,11 @@ impl PreferencesSheet {
             trailing,
         } = extras;
         let error = field.and_then(|field| self.error(field));
+        let label = label.into();
+        let control = match body {
+            FieldBody::Text(field) => Some(self.control(field, label.clone())),
+            FieldBody::Control(control) => control,
+        };
         div()
             .id(id)
             .test_support()
@@ -1793,11 +1797,11 @@ impl PreferencesSheet {
                             .min_w_0()
                             .text_base()
                             .font_weight(gpui_kit::FontWeight::MEDIUM)
-                            .child(label.into()),
+                            .child(label),
                     )
                     .children(trailing),
             )
-            .child(control)
+            .children(control)
             .when_some(hint, |column, hint| {
                 column.child(
                     div()
@@ -1810,6 +1814,30 @@ impl PreferencesSheet {
                 column.child(div().text_sm().text_color(cx.theme().danger).child(error))
             })
             .into_any_element()
+    }
+
+    /// A picker that forwards the chosen option index into the sheet.
+    pub(super) fn picker(
+        &self,
+        id: &'static str,
+        label: impl Into<SharedString>,
+        options: Vec<ui::PickerOption>,
+        max_height: Option<f32>,
+        cx: &mut Context<Self>,
+        select: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let sheet = cx.weak_entity();
+        ui::picker_button_with(
+            id,
+            label,
+            options,
+            false,
+            max_height.map(rems),
+            move |index, window, cx| {
+                let _ = sheet.update(cx, |sheet, cx| select(sheet, index, window, cx));
+            },
+        )
+        .into_any_element()
     }
 
     /// One titled group of related settings.
@@ -1855,66 +1883,115 @@ impl PreferencesSheet {
     }
 }
 
+impl PreferencesSheet {
+    /// Commit controls, rendered by the dialog footer outside the scrolling
+    /// draft so the sheet keeps its context while a save is in flight.
+    pub(crate) fn footer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let apply_disabled = self.has_errors();
+        let saving = self.is_applying_credentials();
+        div()
+            .h_flex()
+            .w_full()
+            .items_center()
+            .gap_4()
+            .px_6()
+            .py_3()
+            .border_t_1()
+            .border_color(cx.theme().window_border)
+            .child(ui::dialog_footer([
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if apply_disabled {
+                        tr!("preferences.sheet.fix_errors")
+                    } else {
+                        tr!("preferences.sheet.apply_note")
+                    })
+                    .into_any_element(),
+                Button::new("preferences-cancel")
+                    .label(tr!("preferences.sheet.cancel"))
+                    .tab_index(1)
+                    .disabled(saving)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.emit(PreferencesEvent::Cancel);
+                        this.cancel(window, cx);
+                        window.close_dialog(cx);
+                    }))
+                    .into_any_element(),
+                Button::new("preferences-apply")
+                    .primary()
+                    .label(tr!("preferences.sheet.apply"))
+                    .loading(saving)
+                    .tab_index(1)
+                    .disabled(apply_disabled || saving)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply(window, cx);
+                    }))
+                    .into_any_element(),
+            ]))
+            .into_any_element()
+    }
+}
+
 impl Render for PreferencesSheet {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_project = self
             .context
             .as_ref()
             .is_some_and(|context| context.project.is_some());
-        if !self.pane.available(has_project) {
-            self.pane = Pane::Appearance;
-        }
-        let mut root = div()
-            .v_flex()
-            .size_full()
-            .min_h_0()
-            .track_focus(&self.focus);
-        if self.is_applying_credentials() {
-            return root
-                .justify_center()
-                .items_center()
-                .gap_3()
-                .child(gpui_kit::component::spinner::Spinner::new())
-                .child(tr!("preferences.upload.saving_credentials"))
-                .into_any_element();
-        }
+        let mut root = div().v_flex().w_full().track_focus(&self.focus);
         if let Some(notice) = self.notice.clone() {
-            root = root.child(
-                div()
-                    .px_6()
-                    .pt_4()
-                    .text_sm()
-                    .text_color(cx.theme().warning)
-                    .child(notice),
-            );
+            root = root.child(div().px_6().pt_4().child(
+                ui::inline_notice("preferences-notice", notice.tone, notice.message).on_close(
+                    cx.listener(|this, _, _, cx| {
+                        this.notice = None;
+                        cx.notify();
+                    }),
+                ),
+            ));
         }
         // The dialog title already names the sheet; the navigation starts
         // directly with the pane list so it cannot appear twice.
-        let navigation_width =
-            px((190. * (f32::from(cx.theme().font_size) / 14.)).clamp(180., 300.));
         let mut navigation_items = Vec::new();
         for pane in Pane::ALL
             .into_iter()
             .filter(|pane| pane.available(has_project))
         {
-            let group = match pane {
-                Pane::Appearance => Some(tr!("preferences.group.general")),
-                Pane::Project => Some(tr!("preferences.group.project")),
-                Pane::Advanced => Some(tr!("preferences.group.advanced")),
-                _ => None,
-            };
-            if let Some(group) = group {
-                navigation_items.push(
+            match pane {
+                Pane::Appearance => navigation_items.push(
                     div()
-                        .px_2()
+                        .px_3()
                         .pt_3()
                         .pb_1()
                         .text_xs()
-                        .font_semibold()
+                        .font_medium()
                         .text_color(cx.theme().muted_foreground)
-                        .child(group)
+                        .child(tr!("preferences.group.general"))
                         .into_any_element(),
-                );
+                ),
+                Pane::Project => navigation_items.push(
+                    div()
+                        .px_3()
+                        .pt_3()
+                        .pb_1()
+                        .text_xs()
+                        .font_medium()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr!("preferences.group.project"))
+                        .into_any_element(),
+                ),
+                Pane::Advanced => navigation_items.push(
+                    div()
+                        .w_full()
+                        .pt_3()
+                        .mb_1()
+                        .border_t_1()
+                        .border_color(cx.theme().border.opacity(0.6))
+                        .into_any_element(),
+                ),
+                _ => {}
             }
             let selected = self.pane == pane;
             navigation_items.push(
@@ -1933,7 +2010,7 @@ impl Render for PreferencesSheet {
         }
         let navigation = div()
             .v_flex()
-            .w(navigation_width)
+            .w(rems(13.5))
             .flex_shrink_0()
             .gap_1()
             .p_4()
@@ -1984,15 +2061,11 @@ impl Render for PreferencesSheet {
             Pane::Collections => self.collection_pane(cx).into_any_element(),
             Pane::Advanced => self.advanced_pane(cx).into_any_element(),
         };
-        let apply_disabled = self.has_errors();
         let pane = self.pane;
-        let motion = cx.theme().motion_tokens();
         let header = div()
-            .h_flex()
+            .v_flex()
             .w_full()
-            .items_start()
-            .justify_between()
-            .gap_4()
+            .gap_1()
             .px_6()
             .pt_5()
             .pb_4()
@@ -2000,59 +2073,16 @@ impl Render for PreferencesSheet {
             .border_color(cx.theme().border.opacity(0.6))
             .child(
                 div()
-                    .v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1()
-                    .child(
-                        div()
-                            .font_family(crate::theme::display_font(cx))
-                            .text_lg()
-                            .font_semibold()
-                            .child(pane.label()),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(pane.description()),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(if apply_disabled {
-                                tr!("preferences.sheet.fix_errors")
-                            } else {
-                                tr!("preferences.sheet.apply_note")
-                            }),
-                    ),
+                    .font_family(crate::theme::display_font(cx))
+                    .text_lg()
+                    .font_semibold()
+                    .child(pane.label()),
             )
             .child(
                 div()
-                    .h_flex()
-                    .flex_shrink_0()
-                    .gap_2()
-                    .child(
-                        Button::new("preferences-cancel")
-                            .label(tr!("preferences.sheet.cancel"))
-                            .tab_index(1)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                cx.emit(PreferencesEvent::Cancel);
-                                this.cancel(window, cx);
-                                window.close_dialog(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("preferences-apply")
-                            .primary()
-                            .label(tr!("preferences.sheet.apply"))
-                            .tab_index(1)
-                            .disabled(apply_disabled)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.apply(window, cx);
-                            })),
-                    ),
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(pane.description()),
             );
         root.child(
             div()
@@ -2072,21 +2102,10 @@ impl Render for PreferencesSheet {
                             div()
                                 .id("preferences-body")
                                 .test_support()
-                                .v_flex()
                                 .flex_1()
                                 .min_h_0()
-                                .gap_4()
-                                .px_6()
-                                .py_5()
                                 .overflow_y_scrollbar()
-                                .child(
-                                    div().w_full().child(body).with_animation(
-                                        pane.element_id(),
-                                        Animation::new(motion.duration_fast)
-                                            .with_easing(gpui_kit::base::animation::ease_out_cubic),
-                                        |body, progress| body.opacity(progress),
-                                    ),
-                                ),
+                                .child(div().v_flex().w_full().px_6().py_5().child(body)),
                         ),
                 ),
         )

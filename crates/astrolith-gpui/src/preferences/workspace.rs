@@ -14,7 +14,6 @@ fn mode_label(mode: WorkspaceMode) -> String {
 
 impl PreferencesSheet {
     pub(super) fn workspace_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let weak = cx.weak_entity();
         let extension_label = match self.global_extension {
             FileExtension::Md => tr!("preferences.option.markdown"),
             FileExtension::Mdx => tr!("preferences.option.mdx"),
@@ -24,82 +23,78 @@ impl PreferencesSheet {
             seconds = self.autosave.seconds()
         );
 
-        let mode_weak = weak.clone();
-        let default_mode = Button::new("preferences-default-mode")
-            .outline()
-            .label(mode_label(self.default_mode))
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for mode in WorkspaceMode::ALL {
-                    let weak = mode_weak.clone();
-                    menu = menu.item(PopupMenuItem::new(mode_label(mode)).on_click(
-                        move |_, _, cx| {
-                            let _ = weak.update(cx, |sheet, cx| {
-                                sheet.default_mode = mode;
-                                cx.notify();
-                            });
-                        },
-                    ));
+        let mode_options = WorkspaceMode::ALL
+            .into_iter()
+            .map(|mode| ui::PickerOption::new(mode_label(mode)).selected(mode == self.default_mode))
+            .collect();
+        let default_mode = self.picker(
+            "preferences-default-mode",
+            mode_label(self.default_mode),
+            mode_options,
+            None,
+            cx,
+            |sheet, index, _, cx| {
+                if let Some(mode) = WorkspaceMode::ALL.get(index) {
+                    sheet.default_mode = *mode;
                 }
-                menu
-            })
-            .into_any_element();
+                cx.notify();
+            },
+        );
 
-        let extension_weak = weak.clone();
-        let extension = Button::new("preferences-default-extension")
-            .outline()
-            .label(extension_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for (label, extension) in [
-                    (tr!("preferences.option.markdown"), FileExtension::Md),
-                    (tr!("preferences.option.mdx"), FileExtension::Mdx),
-                ] {
-                    let weak = extension_weak.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |sheet, cx| {
-                            sheet.global_extension = extension;
-                            cx.notify();
-                        });
-                    }));
-                }
-                menu
-            })
-            .into_any_element();
+        let extension_options = vec![
+            ui::PickerOption::new(tr!("preferences.option.markdown"))
+                .selected(self.global_extension == FileExtension::Md),
+            ui::PickerOption::new(tr!("preferences.option.mdx"))
+                .selected(self.global_extension == FileExtension::Mdx),
+        ];
+        let extension = self.picker(
+            "preferences-default-extension",
+            extension_label,
+            extension_options,
+            None,
+            cx,
+            |sheet, index, _, cx| {
+                sheet.global_extension = if index == 0 {
+                    FileExtension::Md
+                } else {
+                    FileExtension::Mdx
+                };
+                cx.notify();
+            },
+        );
 
-        let autosave_weak = weak.clone();
-        let autosave = Button::new("preferences-autosave")
-            .outline()
-            .label(autosave_label)
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu;
-                for seconds in [1, 2, 5, 10] {
-                    let Some(delay) = AutosaveDelay::from_seconds(seconds) else {
-                        continue;
-                    };
-                    let weak = autosave_weak.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(tr!("preferences.workspace.seconds", seconds = seconds))
-                            .on_click(move |_, _, cx| {
-                                let _ = weak.update(cx, |sheet, cx| {
-                                    sheet.autosave = delay;
-                                    cx.notify();
-                                });
-                            }),
-                    );
+        let delays: Vec<AutosaveDelay> = [1, 2, 5, 10]
+            .into_iter()
+            .filter_map(AutosaveDelay::from_seconds)
+            .collect();
+        let autosave = self.picker(
+            "preferences-autosave",
+            autosave_label,
+            delays
+                .iter()
+                .map(|delay| {
+                    ui::PickerOption::new(tr!(
+                        "preferences.workspace.seconds",
+                        seconds = delay.seconds()
+                    ))
+                    .selected(delay.seconds() == self.autosave.seconds())
+                })
+                .collect(),
+            None,
+            cx,
+            move |sheet, index, _, cx| {
+                if let Some(delay) = delays.get(index) {
+                    sheet.autosave = *delay;
                 }
-                menu
-            })
-            .into_any_element();
+                cx.notify();
+            },
+        );
 
         let modes = vec![
             self.field(
                 "preferences-field-default-mode",
                 tr!("preferences.workspace.default_mode"),
-                default_mode,
+                FieldBody::Control(Some(default_mode)),
                 FieldExtras {
                     field: None,
                     hint: Some(tr!("preferences.workspace.default_mode_hint").into()),
@@ -110,7 +105,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-writing-wysiwyg",
                 tr!("preferences.workspace.writing_wysiwyg"),
-                div().into_any_element(),
+                FieldBody::Control(None),
                 FieldExtras {
                     field: None,
                     hint: Some(tr!("preferences.workspace.writing_wysiwyg_hint").into()),
@@ -145,7 +140,7 @@ impl PreferencesSheet {
                         WorkspaceMode::Build => tr!("preferences.workspace.layout_build"),
                         WorkspaceMode::Preview => tr!("preferences.workspace.layout_preview"),
                     },
-                    div().into_any_element(),
+                    FieldBody::Control(None),
                     FieldExtras {
                         field: None,
                         hint: Some(if pending {
@@ -167,7 +162,7 @@ impl PreferencesSheet {
                     self.field(
                         "preferences-field-project-layout-overrides",
                         tr!("preferences.workspace.project_overrides"),
-                        div().into_any_element(),
+                        FieldBody::Control(None),
                         FieldExtras {
                             field: None,
                             hint: Some(if pending {
@@ -179,7 +174,7 @@ impl PreferencesSheet {
                             }),
                             trailing: Some(
                                 Button::new("preferences-reset-project-layouts")
-                                    .xsmall()
+                                    .small()
                                     .ghost()
                                     .label(if pending {
                                         tr!("preferences.workspace.reset_pending")
@@ -208,7 +203,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-autosave",
                 tr!("preferences.workspace.autosave"),
-                autosave,
+                FieldBody::Control(Some(autosave)),
                 FieldExtras {
                     field: None,
                     hint: Some(tr!("preferences.workspace.autosave_hint").into()),
@@ -219,7 +214,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-default-extension",
                 tr!("preferences.workspace.new_files"),
-                extension,
+                FieldBody::Control(Some(extension)),
                 FieldExtras {
                     field: None,
                     hint: Some(tr!("preferences.workspace.new_files_hint").into()),
@@ -232,7 +227,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-ide-executable",
                 tr!("preferences.workspace.ide_command"),
-                self.control(FieldId::IdeExecutable),
+                FieldBody::Text(FieldId::IdeExecutable),
                 FieldExtras {
                     field: Some(FieldId::IdeExecutable),
                     hint: Some(tr!("preferences.workspace.ide_command_hint").into()),
@@ -243,7 +238,7 @@ impl PreferencesSheet {
             self.field(
                 "preferences-field-ide-arguments",
                 tr!("preferences.workspace.ide_arguments"),
-                self.control(FieldId::IdeArguments),
+                FieldBody::Text(FieldId::IdeArguments),
                 FieldExtras {
                     field: Some(FieldId::IdeArguments),
                     hint: Some(tr!("preferences.workspace.ide_arguments_hint").into()),
@@ -255,7 +250,7 @@ impl PreferencesSheet {
         div()
             .v_flex()
             .w_full()
-            .gap_4()
+            .gap_6()
             .child(self.section(tr!("preferences.workspace.modes"), None, modes, cx))
             .child(self.section(
                 tr!("preferences.workspace.layouts"),
@@ -284,7 +279,7 @@ impl PreferencesSheet {
         let enabled = self.field(
             "preferences-field-image-upload",
             label.clone(),
-            div().into_any_element(),
+            FieldBody::Control(None),
             FieldExtras {
                 field: None,
                 hint: None,
@@ -341,7 +336,7 @@ impl PreferencesSheet {
                     self.field(
                         id,
                         tr!(label),
-                        self.control(field),
+                        FieldBody::Text(field),
                         FieldExtras {
                             field: Some(field),
                             hint: (field == FieldId::ImageUploadSecretKey)
@@ -373,7 +368,7 @@ impl PreferencesSheet {
             WorkspaceMode::Preview => "preferences-reset-layout-preview",
         };
         Button::new(id)
-            .xsmall()
+            .small()
             .ghost()
             .label(if pending {
                 tr!("preferences.workspace.reset_pending")
